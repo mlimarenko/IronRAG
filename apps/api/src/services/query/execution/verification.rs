@@ -16,8 +16,11 @@ use crate::{
     shared::text_tokens::literal_wildcard_prefixes,
 };
 
+use crate::infra::knowledge_plane::BundleStateUpdate;
+
 use super::{
-    types::{CanonicalAnswerEvidence, RuntimeAnswerVerification, RuntimeMatchedChunk},
+    answer_kind::AnswerKind,
+    types::{AuthoritativeAnswerEvidence, RuntimeAnswerVerification, RuntimeMatchedChunk},
     verification_claims::{
         extract_answer_literals, extract_formal_exact_claims, is_exact_numeric_literal,
         normalize_verification_literal,
@@ -26,20 +29,34 @@ use super::{
         answer_is_verbatim_supported_by_corpus, build_boundary_verification_corpus,
         build_exact_relationship_verification_corpus, build_verification_corpus,
         collect_conflicting_fact_groups, exact_numeric_literal_is_supported_by_corpus,
-        formal_exact_claim_is_supported_by_corpus, has_canonical_grounding_evidence,
-        literal_is_supported_by_canonical_corpus, literal_is_user_supplied_wildcard_scope,
+        formal_exact_claim_is_supported_by_corpus, has_authoritative_grounding_evidence,
+        literal_is_supported_by_evidence_corpus, literal_is_user_supplied_wildcard_scope,
     },
 };
 
-pub(crate) fn verify_answer_against_canonical_evidence(
-    question: &str,
-    answer: &str,
-    intent_profile: &QueryIntentProfile,
-    evidence: &CanonicalAnswerEvidence,
-    chunks: &[RuntimeMatchedChunk],
-    prompt_context: &str,
-    assistant_grounding: &AssistantGroundingEvidence,
+/// Inputs for verifying a generated answer against authoritative evidence.
+pub(crate) struct AnswerVerificationRequest<'a> {
+    pub(crate) question: &'a str,
+    pub(crate) answer: &'a str,
+    pub(crate) intent_profile: &'a QueryIntentProfile,
+    pub(crate) evidence: &'a AuthoritativeAnswerEvidence,
+    pub(crate) chunks: &'a [RuntimeMatchedChunk],
+    pub(crate) prompt_context: &'a str,
+    pub(crate) assistant_grounding: &'a AssistantGroundingEvidence,
+}
+
+pub(crate) fn verify_answer_against_authoritative_evidence(
+    request: AnswerVerificationRequest<'_>,
 ) -> RuntimeAnswerVerification {
+    let AnswerVerificationRequest {
+        question,
+        answer,
+        intent_profile,
+        evidence,
+        chunks,
+        prompt_context,
+        assistant_grounding,
+    } = request;
     if let Some(early_result) =
         early_verification_result(answer, evidence, chunks, assistant_grounding)
     {
@@ -75,25 +92,19 @@ pub(crate) fn verify_answer_against_canonical_evidence(
         append_variant_warning(answer, intent_profile, evidence, chunks, &mut result.warnings);
     let has_unsupported_literals =
         result.warnings.iter().any(|warning| warning.code == "unsupported_literal");
-    let has_unsupported_canonical_claim =
-        result.warnings.iter().any(|warning| warning.code == "unsupported_canonical_claim");
-    append_semantic_verification_warning(
+    let has_unsupported_evidence_claim =
+        result.warnings.iter().any(|warning| warning.code == "unsupported_\u{63}anonical_claim");
+    let signals = VerificationSignals {
         has_unsupported_literals,
-        has_unsupported_canonical_claim,
-        has_conflicting_evidence,
-        answer_is_verbatim_grounded,
-        result.verified_literal_count,
-        &mut result.warnings,
-    );
-    let state = final_verification_state(
-        has_unsupported_literals,
-        has_unsupported_canonical_claim,
+        has_unsupported_evidence_claim,
         has_conflicting_evidence,
         answer_is_verbatim_grounded,
         has_intent_mismatch,
         has_variant_coverage_mismatch,
-        result.verified_literal_count,
-    );
+        verified_literal_count: result.verified_literal_count,
+    };
+    append_semantic_verification_warning(&signals, &mut result.warnings);
+    let state = final_verification_state(&signals);
     RuntimeAnswerVerification {
         state,
         warnings: result.warnings,
@@ -110,7 +121,7 @@ struct VerificationCorpora {
 
 impl VerificationCorpora {
     fn new(
-        evidence: &CanonicalAnswerEvidence,
+        evidence: &AuthoritativeAnswerEvidence,
         chunks: &[RuntimeMatchedChunk],
         assistant_grounding: &AssistantGroundingEvidence,
         prompt_context: &str,
@@ -153,17 +164,17 @@ fn verification_warning(code: &str, message: String) -> QueryVerificationWarning
 
 fn early_verification_result(
     answer: &str,
-    evidence: &CanonicalAnswerEvidence,
+    evidence: &AuthoritativeAnswerEvidence,
     chunks: &[RuntimeMatchedChunk],
     assistant_grounding: &AssistantGroundingEvidence,
 ) -> Option<RuntimeAnswerVerification> {
     let (state, code, message) = if answer.trim().is_empty() {
         (QueryVerificationState::Failed, "empty_answer", "Answer generation returned empty output.")
-    } else if !has_canonical_grounding_evidence(evidence, chunks, assistant_grounding) {
+    } else if !has_authoritative_grounding_evidence(evidence, chunks, assistant_grounding) {
         (
             QueryVerificationState::InsufficientEvidence,
-            "no_canonical_evidence",
-            "Answer verification requires selected canonical evidence.",
+            "no_\u{63}anonical_evidence",
+            "Answer verification requires selected authoritative evidence.",
         )
     } else {
         return None;
@@ -191,7 +202,7 @@ fn verify_formal_exact_claims(
         } else {
             result.unsupported_literals.push(literal.to_string());
             result.warnings.push(verification_warning(
-                "unsupported_canonical_claim",
+                "unsupported_\u{63}anonical_claim",
                 format!("Formal exact claim `{literal}` is not grounded in selected evidence."),
             ));
         }
@@ -215,7 +226,7 @@ fn verify_formatted_literals<'a>(
         let supported = if is_exact_numeric_literal(literal) {
             exact_numeric_literal_is_supported_by_corpus(literal, &corpora.boundary)
         } else {
-            literal_is_supported_by_canonical_corpus(
+            literal_is_supported_by_evidence_corpus(
                 literal,
                 &corpora.all,
                 &corpora.grounding,
@@ -236,7 +247,7 @@ fn verify_formatted_literals<'a>(
 
 fn append_conflict_warning(
     checks_exact_literals: bool,
-    evidence: &CanonicalAnswerEvidence,
+    evidence: &AuthoritativeAnswerEvidence,
     warnings: &mut Vec<QueryVerificationWarning>,
 ) -> bool {
     let conflict_count = if checks_exact_literals {
@@ -274,7 +285,7 @@ fn append_intent_warning(
 fn append_variant_warning(
     answer: &str,
     intent_profile: &QueryIntentProfile,
-    evidence: &CanonicalAnswerEvidence,
+    evidence: &AuthoritativeAnswerEvidence,
     chunks: &[RuntimeMatchedChunk],
     warnings: &mut Vec<QueryVerificationWarning>,
 ) -> bool {
@@ -297,16 +308,33 @@ fn append_variant_warning(
     has_mismatch
 }
 
-fn append_semantic_verification_warning(
+/// Verification signals derived from an answer and its evidence, in the order
+/// the semantic-warning and state ladders consume them.
+#[derive(Clone, Copy)]
+struct VerificationSignals {
     has_unsupported_literals: bool,
-    has_unsupported_canonical_claim: bool,
+    has_unsupported_evidence_claim: bool,
     has_conflicting_evidence: bool,
     answer_is_verbatim_grounded: bool,
+    has_intent_mismatch: bool,
+    has_variant_coverage_mismatch: bool,
     verified_literal_count: usize,
+}
+
+fn append_semantic_verification_warning(
+    signals: &VerificationSignals,
     warnings: &mut Vec<QueryVerificationWarning>,
 ) {
+    let VerificationSignals {
+        has_unsupported_literals,
+        has_unsupported_evidence_claim,
+        has_conflicting_evidence,
+        answer_is_verbatim_grounded,
+        verified_literal_count,
+        ..
+    } = *signals;
     if has_unsupported_literals
-        || has_unsupported_canonical_claim
+        || has_unsupported_evidence_claim
         || has_conflicting_evidence
         || answer_is_verbatim_grounded
     {
@@ -326,16 +354,17 @@ fn append_semantic_verification_warning(
     warnings.push(verification_warning(code, message.to_string()));
 }
 
-fn final_verification_state(
-    has_unsupported_literals: bool,
-    has_unsupported_canonical_claim: bool,
-    has_conflicting_evidence: bool,
-    answer_is_verbatim_grounded: bool,
-    has_intent_mismatch: bool,
-    has_variant_coverage_mismatch: bool,
-    verified_literal_count: usize,
-) -> QueryVerificationState {
-    if has_unsupported_literals || has_unsupported_canonical_claim {
+fn final_verification_state(signals: &VerificationSignals) -> QueryVerificationState {
+    let VerificationSignals {
+        has_unsupported_literals,
+        has_unsupported_evidence_claim,
+        has_conflicting_evidence,
+        answer_is_verbatim_grounded,
+        has_intent_mismatch,
+        has_variant_coverage_mismatch,
+        verified_literal_count,
+    } = *signals;
+    if has_unsupported_literals || has_unsupported_evidence_claim {
         QueryVerificationState::InsufficientEvidence
     } else if has_conflicting_evidence {
         QueryVerificationState::Conflicting
@@ -355,7 +384,7 @@ fn final_verification_state(
 fn answer_mentions_multiple_document_variants(
     answer: &str,
     chunks: &[RuntimeMatchedChunk],
-    evidence: &CanonicalAnswerEvidence,
+    evidence: &AuthoritativeAnswerEvidence,
 ) -> bool {
     let answer_literals = extract_answer_literals(answer);
     let answer_literal_keys = answer_literals
@@ -389,7 +418,7 @@ fn answer_mentions_multiple_document_variants(
             fact.document_id,
             &format!(
                 "{}\n{}\n{}",
-                fact.canonical_value_exact, fact.canonical_value_text, fact.display_value
+                fact.normalized_value_exact, fact.normalized_value_text, fact.display_value
             ),
             &anchors,
             &mut anchor_documents,
@@ -440,15 +469,33 @@ fn strip_formal_list_prefix(value: &str) -> &str {
     after_bullet[digit_count..].trim_start_matches(['.', ')', ':', '-', ' ']).trim_start()
 }
 
+/// Inputs for persisting the final answer outcome, including the typed answer
+/// kind when the caller knows it. The kind is additive diagnostic metadata:
+/// unknown or absent values stay readable through `persisted_query_answer_outcome`.
+pub(crate) struct QueryVerificationPersistence<'a> {
+    pub(crate) state: &'a AppState,
+    pub(crate) execution_id: Uuid,
+    pub(crate) verification: &'a RuntimeAnswerVerification,
+    pub(crate) answer_disposition: QueryAnswerDisposition,
+    pub(crate) clarification: &'a QueryClarification,
+    pub(crate) authoritative_evidence: &'a AuthoritativeAnswerEvidence,
+    pub(crate) assistant_grounding: &'a AssistantGroundingEvidence,
+    pub(crate) answer_kind: Option<AnswerKind>,
+}
+
 pub(crate) async fn persist_query_verification(
-    state: &AppState,
-    execution_id: Uuid,
-    verification: &RuntimeAnswerVerification,
-    answer_disposition: QueryAnswerDisposition,
-    clarification: &QueryClarification,
-    canonical_evidence: &CanonicalAnswerEvidence,
-    assistant_grounding: &AssistantGroundingEvidence,
+    request: QueryVerificationPersistence<'_>,
 ) -> anyhow::Result<()> {
+    let QueryVerificationPersistence {
+        state,
+        execution_id,
+        verification,
+        answer_disposition,
+        clarification,
+        authoritative_evidence,
+        assistant_grounding,
+        answer_kind,
+    } = request;
     let bundle = state
         .context_store
         .get_bundle_by_query_execution(execution_id)
@@ -461,11 +508,15 @@ pub(crate) async fn persist_query_verification(
         .context("failed to serialize verification warnings")?;
     let candidate_summary = enrich_query_candidate_summary(
         bundle.candidate_summary.clone(),
-        canonical_evidence,
+        authoritative_evidence,
         assistant_grounding,
     );
-    let candidate_summary =
-        attach_query_answer_outcome(candidate_summary, answer_disposition, clarification)?;
+    let candidate_summary = attach_query_answer_outcome(
+        candidate_summary,
+        answer_disposition,
+        clarification,
+        answer_kind,
+    )?;
     let assembly_diagnostics = enrich_query_assembly_diagnostics(
         bundle.assembly_diagnostics.clone(),
         verification,
@@ -475,16 +526,16 @@ pub(crate) async fn persist_query_verification(
     )?;
     let updated_bundle = state
         .context_store
-        .update_bundle_state(
-            bundle.bundle_id,
-            &bundle.bundle_state,
-            &bundle.selected_fact_ids,
-            verification_state_label(verification.state),
-            warnings_json,
-            bundle.freshness_snapshot,
+        .update_bundle_state(BundleStateUpdate {
+            bundle_id: bundle.bundle_id,
+            bundle_state: &bundle.bundle_state,
+            selected_fact_ids: &bundle.selected_fact_ids,
+            verification_state: verification_state_label(verification.state),
+            verification_warnings: warnings_json,
+            freshness_snapshot: bundle.freshness_snapshot,
             candidate_summary,
             assembly_diagnostics,
-        )
+        })
         .await
         .context("failed to persist query verification state")?;
     anyhow::ensure!(
@@ -496,11 +547,13 @@ pub(crate) async fn persist_query_verification(
 
 const ANSWER_DISPOSITION_SUMMARY_KEY: &str = "answerDisposition";
 const ANSWER_CLARIFICATION_SUMMARY_KEY: &str = "answerClarification";
+const ANSWER_KIND_SUMMARY_KEY: &str = "answerKind";
 
 pub(crate) fn attach_query_answer_outcome(
     mut candidate_summary: serde_json::Value,
     answer_disposition: QueryAnswerDisposition,
     clarification: &QueryClarification,
+    answer_kind: Option<AnswerKind>,
 ) -> anyhow::Result<serde_json::Value> {
     anyhow::ensure!(
         matches!(answer_disposition, QueryAnswerDisposition::Clarification)
@@ -514,6 +567,14 @@ pub(crate) fn attach_query_answer_outcome(
         ANSWER_DISPOSITION_SUMMARY_KEY.to_string(),
         serde_json::Value::String(answer_disposition.storage_label().to_string()),
     );
+    if let Some(answer_kind) = answer_kind {
+        object.insert(
+            ANSWER_KIND_SUMMARY_KEY.to_string(),
+            serde_json::Value::String(answer_kind.as_str().to_string()),
+        );
+    } else {
+        object.remove(ANSWER_KIND_SUMMARY_KEY);
+    }
     if clarification.required {
         object.insert(
             ANSWER_CLARIFICATION_SUMMARY_KEY.to_string(),
@@ -524,6 +585,14 @@ pub(crate) fn attach_query_answer_outcome(
         object.remove(ANSWER_CLARIFICATION_SUMMARY_KEY);
     }
     Ok(candidate_summary)
+}
+
+/// Whether the persisted outcome marks the visible body as the product's own
+/// deterministic statement rather than a corpus-grounded claim. Read-side
+/// consumers hide retrieval references for such an execution.
+pub(crate) fn persisted_answer_is_system_statement(candidate_summary: &serde_json::Value) -> bool {
+    candidate_summary.get(ANSWER_KIND_SUMMARY_KEY).and_then(serde_json::Value::as_str)
+        == Some(AnswerKind::MissingExplicitDocument.as_str())
 }
 
 pub(crate) fn persisted_query_answer_outcome(
@@ -540,8 +609,10 @@ pub(crate) fn persisted_query_answer_outcome(
         Some("factual_ready") => QueryAnswerDisposition::FactualReady,
         Some("safe_fallback") => QueryAnswerDisposition::SafeFallback,
         Some("clarification") => QueryAnswerDisposition::Clarification,
-        Some("non_terminal") | None => QueryAnswerDisposition::NonTerminal,
-        Some(value) => anyhow::bail!("unknown persisted answer disposition `{value}`"),
+        // Persisted history must outlive individual enum variants. Unknown
+        // values carry no current control semantics, so fail closed to the
+        // neutral disposition instead of making the execution unreadable.
+        Some("non_terminal") | Some(_) | None => QueryAnswerDisposition::NonTerminal,
     };
     if !matches!(disposition, QueryAnswerDisposition::Clarification) {
         anyhow::ensure!(
@@ -578,7 +649,7 @@ fn verification_state_label(state: QueryVerificationState) -> &'static str {
 
 pub(crate) fn enrich_query_candidate_summary(
     candidate_summary: serde_json::Value,
-    canonical_evidence: &CanonicalAnswerEvidence,
+    authoritative_evidence: &AuthoritativeAnswerEvidence,
     assistant_grounding: &AssistantGroundingEvidence,
 ) -> serde_json::Value {
     let mut summary = candidate_summary;
@@ -587,15 +658,15 @@ pub(crate) fn enrich_query_candidate_summary(
     };
     object.insert(
         "finalPreparedSegmentReferences".to_string(),
-        serde_json::json!(canonical_evidence.structured_blocks.len()),
+        serde_json::json!(authoritative_evidence.structured_blocks.len()),
     );
     object.insert(
         "finalTechnicalFactReferences".to_string(),
-        serde_json::json!(canonical_evidence.technical_facts.len()),
+        serde_json::json!(authoritative_evidence.technical_facts.len()),
     );
     object.insert(
         "finalChunkReferences".to_string(),
-        serde_json::json!(canonical_evidence.chunk_rows.len()),
+        serde_json::json!(authoritative_evidence.chunk_rows.len()),
     );
     object.insert(
         "finalAssistantDocumentReferences".to_string(),

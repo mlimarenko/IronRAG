@@ -44,6 +44,48 @@ jobs:
             context: apps/web
             file: apps/web/Dockerfile
             gha_scope: ironrag-frontend
+          # The connectors ship on the stack version, from the same release:
+          # one tag moves the backend, the interface and everything that feeds
+          # them together. They used to be five repositories whose images were
+          # published on their own cadence against a pinned copy of the
+          # framework, which is how one of them shipped without the fix its
+          # release notes claimed.
+          - name: bookstack-connector
+            image: pipingspace/ironrag.bookstack
+            context: connectors
+            file: connectors/Dockerfile
+            target: bookstack
+            # The connector images were published for both architectures from
+            # their own repositories; the same tag must not narrow to amd64.
+            platforms: linux/amd64,linux/arm64
+            gha_scope: ironrag-connector-bookstack
+          - name: confluence-connector
+            image: pipingspace/ironrag.confluence
+            context: connectors
+            file: connectors/Dockerfile
+            target: confluence
+            # The connector images were published for both architectures from
+            # their own repositories; the same tag must not narrow to amd64.
+            platforms: linux/amd64,linux/arm64
+            gha_scope: ironrag-connector-confluence
+          - name: gitrepos-connector
+            image: pipingspace/ironrag.gitrepos
+            context: connectors
+            file: connectors/Dockerfile
+            target: gitrepos
+            # The connector images were published for both architectures from
+            # their own repositories; the same tag must not narrow to amd64.
+            platforms: linux/amd64,linux/arm64
+            gha_scope: ironrag-connector-gitrepos
+          - name: youtrack-connector
+            image: pipingspace/ironrag.youtrack
+            context: connectors
+            file: connectors/Dockerfile
+            target: youtrack
+            # The connector images were published for both architectures from
+            # their own repositories; the same tag must not narrow to amd64.
+            platforms: linux/amd64,linux/arm64
+            gha_scope: ironrag-connector-youtrack
 
     steps:
       - name: Check out repository
@@ -72,6 +114,12 @@ jobs:
         with:
           context: ${{ matrix.context }}
           file: ${{ matrix.file }}
+          # Empty for the single-stage backend and frontend images; the
+          # connectors share one Dockerfile and differ only by target.
+          target: ${{ matrix.target }}
+          # Empty means the runner's own platform, which is what the backend and
+          # frontend have always built.
+          platforms: ${{ matrix.platforms }}
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}

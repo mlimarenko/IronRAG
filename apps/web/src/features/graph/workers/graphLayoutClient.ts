@@ -1,56 +1,60 @@
 // Promise-based client for the graph layout worker.
 //
-// A single lazy-instantiated worker is reused across calls; the worker
-// is cheap to keep alive and re-spawning it on every layout request
-// would defeat the point of offloading. Requests are multiplexed via a
-// monotonically-increasing `requestId` so in-flight stale layout
-// requests (e.g. the user toggled layouts twice in a row) are
-// discarded when a newer one lands.
+// A single lazy-instantiated worker is reused across calls. The scene model
+// topology is uploaded once (tracked via WeakMap) and layouts are then
+// requested by id. Responses stream: the force layout posts several
+// intermediate position snapshots before the final one, and stale requests
+// (superseded by a newer layout choice) are dropped on arrival.
 
 import type {
   GraphLayoutRequest,
-  GraphLayoutRequestNode,
-  GraphLayoutRequestEdge,
   GraphLayoutResponse,
-  GraphLayoutErrorResponse,
+  GraphLayoutTopologyMessage,
 } from './graphLayout.worker'
 import type { GraphLayoutType } from '@/features/graph/model/config'
+import type { GraphSceneModel } from '@/features/graph/render/sceneModel'
 
 // `?worker` is a Vite-specific suffix that produces a module worker
-// constructor bound to the referenced file. The underlying worker is
-// built as a standalone chunk, so `graphology` and the layouts module
-// are bundled into the worker script instead of into the main app
-// bundle.
+// constructor bound to the referenced file, bundled as its own chunk.
 import GraphLayoutWorkerCtor from './graphLayout.worker?worker'
 
-type PendingResolver = {
-  resolve: (value: GraphLayoutResponse) => void
+export interface LayoutStream {
+  /** Resolves after the final position snapshot (or rejects on error). */
+  done: Promise<void>
+  /** Stop delivering snapshots for this request. */
+  cancel(): void
+}
+
+interface PendingRequest {
+  onPositions: (positions: Float32Array, final: boolean) => void
+  resolve: () => void
   reject: (reason: unknown) => void
 }
 
 let sharedWorker: Worker | null = null
 let nextRequestId = 1
 let nextTopologyId = 1
-let topologyIds = new WeakMap<object, number>()
-const pending = new Map<number, PendingResolver>()
+let uploadedTopologyIds = new WeakMap<GraphSceneModel, number>()
+const pending = new Map<number, PendingRequest>()
 
 function ensureWorker(): Worker {
   if (sharedWorker) return sharedWorker
   const worker = new GraphLayoutWorkerCtor()
-  worker.addEventListener(
-    'message',
-    (event: MessageEvent<GraphLayoutResponse | GraphLayoutErrorResponse>) => {
-      const data = event.data
-      const entry = pending.get(data.requestId)
-      if (!entry) return
+  worker.addEventListener('message', (event: MessageEvent<GraphLayoutResponse>) => {
+    const data = event.data
+    const entry = pending.get(data.requestId)
+    if (!entry) return
+    if (data.type === 'error') {
       pending.delete(data.requestId)
-      if (data.type === 'error') {
-        entry.reject(new Error(data.message))
-      } else {
-        entry.resolve(data)
-      }
-    },
-  )
+      entry.reject(new Error(data.message))
+      return
+    }
+    entry.onPositions(data.positions, data.final)
+    if (data.final) {
+      pending.delete(data.requestId)
+      entry.resolve()
+    }
+  })
   worker.addEventListener('error', (event) => {
     // Blow away every outstanding request — the worker is in an
     // indeterminate state after an unhandled error.
@@ -60,44 +64,82 @@ function ensureWorker(): Worker {
     }
     pending.clear()
     sharedWorker = null
-    topologyIds = new WeakMap<object, number>()
+    uploadedTopologyIds = new WeakMap()
   })
   sharedWorker = worker
   return worker
 }
 
-export function computeGraphLayoutOffThread(params: {
-  nodes: GraphLayoutRequestNode[]
-  edges: GraphLayoutRequestEdge[]
+function ensureTopologyUploaded(worker: Worker, model: GraphSceneModel): number {
+  const uploaded = uploadedTopologyIds.get(model)
+  if (uploaded != null) return uploaded
+  const topologyId = nextTopologyId
+  nextTopologyId += 1
+  uploadedTopologyIds.set(model, topologyId)
+  const message: GraphLayoutTopologyMessage = {
+    type: 'topology',
+    topologyId,
+    count: model.count,
+    labels: model.labels,
+    types: model.types,
+    sizes: model.sizes,
+    neighborOffsets: model.neighborOffsets,
+    neighborIndices: model.neighborIndices,
+    edgeEndpoints: model.edgeEndpoints,
+    edgeWeights: model.edgeWeights,
+    seedPositions: model.seedPositions,
+  }
+  // Arrays are structured-cloned (NOT transferred): the renderer keeps using
+  // the same buffers on the main thread.
+  worker.postMessage(message)
+  return topologyId
+}
+
+/**
+ * Request a layout for the scene model. `onPositions` fires once for
+ * geometric layouts and multiple times for the force simulation (snapshots
+ * with `final: false`, then the settled result with `final: true`).
+ */
+export function streamGraphLayout(params: {
+  model: GraphSceneModel
   layout: GraphLayoutType
-  cacheKey?: object
-}): Promise<GraphLayoutResponse> {
+  onPositions: (positions: Float32Array, final: boolean) => void
+}): LayoutStream {
   const worker = ensureWorker()
+  const topologyId = ensureTopologyUploaded(worker, params.model)
   const requestId = nextRequestId
   nextRequestId += 1
-  let topologyId: number | undefined
-  let includeTopology = true
-  if (params.cacheKey) {
-    const cachedId = topologyIds.get(params.cacheKey)
-    if (cachedId != null) {
-      topologyId = cachedId
-      includeTopology = false
-    } else {
-      topologyId = nextTopologyId
-      nextTopologyId += 1
-      topologyIds.set(params.cacheKey, topologyId)
-    }
-  }
+
+  let cancelled = false
+  const done = new Promise<void>((resolve, reject) => {
+    pending.set(requestId, {
+      onPositions: (positions, final) => {
+        if (!cancelled) params.onPositions(positions, final)
+      },
+      resolve,
+      reject,
+    })
+  })
   const message: GraphLayoutRequest = {
     type: 'compute',
     requestId,
     topologyId,
     layout: params.layout,
-    nodes: includeTopology ? params.nodes : undefined,
-    edges: includeTopology ? params.edges : undefined,
   }
-  return new Promise<GraphLayoutResponse>((resolve, reject) => {
-    pending.set(requestId, { resolve, reject })
-    worker.postMessage(message)
-  })
+  worker.postMessage(message)
+
+  return {
+    done,
+    cancel() {
+      cancelled = true
+      // Tell the worker too: without this a superseded force run keeps
+      // simulating to its full iteration budget in the background.
+      worker.postMessage({ type: 'cancel', requestId } satisfies GraphLayoutRequest)
+      const entry = pending.get(requestId)
+      if (entry) {
+        pending.delete(requestId)
+        entry.resolve()
+      }
+    },
+  }
 }

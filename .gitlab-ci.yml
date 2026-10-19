@@ -1,0 +1,317 @@
+spec:
+  inputs:
+    release:
+      description: Запустить ручные действия публикации после успешных проверок.
+      type: boolean
+      default: false
+    release-bump:
+      description: Изменение SemVer для preview и последующей reservation.
+      type: string
+      options: [patch, minor, major]
+      default: patch
+---
+
+default:
+  tags: [ci-medium]
+variables:
+  CI_TOOLS_IMAGE: $CI_REGISTRY/$CI_PROJECT_ROOT_NAMESPACE/ci/devopsimage:latest
+include:
+- <<: &catalog {project: $COMPONENTS_CATALOG_PROJECT}
+  file: /runtime.yml
+- <<: *catalog
+  file: /policies/pipeline.yml
+  inputs:
+    pipeline-policy: protected-default
+    mr-sourcechecks-enabled: true
+    default-push-auto-cancel: interruptible
+- <<: *catalog
+  file: /jobs/base.yml
+  inputs:
+    job-prefix: ironrag
+    runner-tags: [ci-small]
+- <<: *catalog
+  file: /jobs/release/version.yml
+  inputs:
+    job-name: version
+    release-strategy: protected-default
+    source-policy: protected-default
+    rules-policy: protected
+    needs-enabled: true
+    needs: []
+    mode: auto
+    release-bump: $[[ inputs.release-bump ]]
+    tag-prefix: v
+    initial-version: 0.1.0
+    runner-tags: [ci-small]
+- <<: *catalog
+  file: /jobs/containers/build.yml
+  inputs:
+    job-name: image:backend:build
+    artifact-key: backend
+    dotenv-prefix: IRONRAG_BACKEND_IMAGE
+    repository: backend
+    dockerfile: apps/api/Dockerfile
+    target: runtime
+    reuse-built-artifact: &cohort-image-reuse true
+    <<: &image-build
+      version-build-arg-name: APP_VERSION
+      version-job: version
+      stage: package
+      dag-needs-enabled: true
+      version-contract-required: true
+      version-job-optional: false
+      version-json-path: .ci-components/version.json
+      use-ci-registry-credentials: true
+      cache-mode: registry
+      runner-tags: [ci-medium]
+    rules-policy: protected-default-push
+- <<: *catalog
+  file: /jobs/containers/build.yml
+  inputs:
+    job-name: image:frontend:build
+    artifact-key: frontend
+    dotenv-prefix: IRONRAG_FRONTEND_IMAGE
+    repository: frontend
+    context: apps/web
+    dockerfile: apps/web/Dockerfile
+    reuse-built-artifact: *cohort-image-reuse
+    <<: *image-build
+    rules-policy: protected-default-push
+- <<: *catalog
+  file: /jobs/containers/build.yml
+  inputs:
+    context: connectors
+    dockerfile: connectors/Dockerfile
+    <<: *image-build
+    job-name: image:connectors:confluence:build
+    artifact-key: connector-confluence
+    dotenv-prefix: IRONRAG_CONNECTOR_CONFLUENCE_IMAGE
+    repository: connectors/confluence
+    target: confluence
+    reuse-built-artifact: *cohort-image-reuse
+    rules-policy: protected-default-push
+- <<: *catalog
+  file: /jobs/containers/build.yml
+  inputs:
+    context: connectors
+    dockerfile: connectors/Dockerfile
+    <<: *image-build
+    job-name: image:connectors:youtrack:build
+    artifact-key: connector-youtrack
+    dotenv-prefix: IRONRAG_CONNECTOR_YOUTRACK_IMAGE
+    repository: connectors/youtrack
+    target: youtrack
+    reuse-built-artifact: *cohort-image-reuse
+    rules-policy: protected-default-push
+- <<: *catalog
+  file: /jobs/containers/build.yml
+  inputs:
+    context: connectors
+    dockerfile: connectors/Dockerfile
+    <<: *image-build
+    job-name: image:connectors:bookstack:build
+    artifact-key: connector-bookstack
+    dotenv-prefix: IRONRAG_CONNECTOR_BOOKSTACK_IMAGE
+    repository: connectors/bookstack
+    target: bookstack
+    reuse-built-artifact: *cohort-image-reuse
+    rules-policy: protected-default-push
+- <<: *catalog
+  file: /jobs/security/trivy.yml
+  inputs:
+    job-prefix: trivy
+    image-contracts: 'backend|backend|runtime||image:backend:build'
+    image-stage: package
+    image-ignorefile: 'backend:apps/api/docker/backend-vulnerability-allowlist.yaml'
+    image-batch-secret-enabled: true
+    version-json-path: .ci-components/version.json
+    use-ci-registry-credentials: true
+    image-rules-policy: protected-default-push
+    sbom-rules-policy: protected-default-push
+    runner-tags: [ci-small]
+- <<: *catalog
+  file: /jobs/security/trivy.yml
+  inputs:
+    job-prefix: trivy-bookstack
+    image-contracts: 'connector-bookstack|connectors/bookstack|bookstack||image:connectors:bookstack:build'
+    image-stage: package
+    image-ignorefile: 'connector-bookstack:connectors/bookstack-vulnerability-allowlist.yaml'
+    image-batch-secret-enabled: true
+    version-json-path: .ci-components/version.json
+    use-ci-registry-credentials: true
+    image-rules-policy: protected-default-push
+    sbom-rules-policy: protected-default-push
+    runner-tags: [ci-small]
+- <<: *catalog
+  file: /jobs/containers/promote.yml
+  inputs:
+    batch-enabled: true
+    source-policy: protected-default
+    job-name: .release:promote:source
+    enabled: true
+    use-ci-registry-credentials: true
+    image-contracts: &image-contracts >-
+      backend|backend|runtime||image:backend:build
+      frontend|frontend|||image:frontend:build
+      connector-confluence|connectors/confluence|confluence||image:connectors:confluence:build
+      connector-youtrack|connectors/youtrack|youtrack||image:connectors:youtrack:build
+    image-batch-needs: []
+    version-job: release
+    release-source: reserved-artifact
+    rules-policy: protected-default-push
+    promote-needs: &image-build-needs
+    - {job: image:backend:build, artifacts: true}
+    - {job: image:frontend:build, artifacts: true}
+    - {job: image:connectors:confluence:build, artifacts: true}
+    - {job: image:connectors:youtrack:build, artifacts: true}
+    runner-tags: [ci-small]
+- <<: *catalog
+  file: /jobs/release/bundle.yml
+  inputs:
+    release-source: reserved-artifact
+    rules-policy: never
+    version-job: release
+    image-needs: *image-build-needs
+    image-contracts: *image-contracts
+    runner-tags: [ci-small]
+- <<: *catalog
+  file: /jobs/release/gitlab.yml
+  inputs:
+    job-name: .release:publish:source
+    release-source: reserved-artifact
+    enabled: true
+    source-policy: protected-default
+    rules-policy: protected-default-push
+    needs-enabled: true
+    needs:
+    - {job: release:bundle, artifacts: false}
+    - {job: release:promote, artifacts: false}
+    runner-tags: [ci-small]
+- <<: *catalog
+  file: /jobs/release/tag.yml
+  inputs:
+    release-bump: $[[ inputs.release-bump ]]
+    job-name: release
+    enabled: true
+    version-job: version
+    preview-lock: true
+    rules-policy: protected-default-push-manual
+    release-strategy: protected-default
+    source-policy: protected-default
+    token-variable: GIT_ACCESS_TOKEN
+    tag-prefix: v
+    initial-version: 0.1.0
+    runner-tags: [ci-small]
+- <<: *catalog
+  file: /jobs/deploy/gitops.yml
+  inputs:
+    release-source: reserved-artifact
+    gitops-project-path: infrastructure/argocd
+    gitops-branch: develop
+    push-token-variable: IRONRAG_ARGOCD_PUSH_TOKEN
+    source-branch: develop
+    source-policy: protected-default
+    stage: deploy
+    rules-policy: protected-default-push
+    assert-script: scripts/ci/assert_argocd_automation.py
+    assert-args: --application-name ironrag --region-root argocd/piping-eu/apps
+    apply-script: scripts/ci/apply_argocd_release.py
+    apply-args: --image backend=$CI_REGISTRY/$CI_PROJECT_PATH/backend --image frontend=$CI_REGISTRY/$CI_PROJECT_PATH/frontend --image connector-confluence=$CI_REGISTRY/$CI_PROJECT_PATH/connectors/confluence --image connector-youtrack=$CI_REGISTRY/$CI_PROJECT_PATH/connectors/youtrack --build-job backend=image:backend:build --build-job frontend=image:frontend:build --build-job connector-confluence=image:connectors:confluence:build --build-job connector-youtrack=image:connectors:youtrack:build --values argocd/_shared/apps/ironrag/values/piping-eu.yaml --values-digest api=backend --values-digest worker=backend --values-digest web=frontend --kustomization argocd/_shared/apps/ironrag/base/kustomization.yaml --kustomize-key connector-confluence --kustomize-key connector-youtrack --application argocd/piping-eu/apps/services/ironrag.yaml --application-repo-url $CI_SERVER_URL/$CI_PROJECT_PATH.git
+    project-name: ironrag
+    resource-group: ironrag-deploy
+    job-name: deploy:gitops
+    runner-tags: [ci-small]
+release:bundle:
+  rules:
+  - when: never
+deploy:gitops:
+  before_script:
+  - !reference [.ci-components-log, before_script]
+  - python3 scripts/ops/check_schema_rollout_fence.py
+  rules:
+  - if: &release-publication-gate $CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH && $CI_COMMIT_REF_PROTECTED == "true" && $CI_COMMIT_TAG == null && "$[[ inputs.release ]]" == "true"
+    when: on_success
+  - when: never
+  needs:
+  - {job: release, artifacts: true}
+  - {job: release:promote, artifacts: true}
+  allow_failure: false
+release:
+  before_script:
+  - !reference [.ci-components-log, before_script]
+  - python3 scripts/ops/check_schema_rollout_fence.py
+  rules:
+  - if: *release-publication-gate
+    when: manual
+    allow_failure: false
+  - when: never
+  needs:
+  - {job: version, artifacts: true}
+  - {job: image:backend:build, artifacts: false}
+  - {job: image:frontend:build, artifacts: false}
+  - {job: image:connectors:confluence:build, artifacts: false}
+  - {job: image:connectors:youtrack:build, artifacts: false}
+  - {job: validate:migration-guard, artifacts: false}
+  - {job: validate:ops-selftest, artifacts: false}
+  - {job: security:images, artifacts: false}
+  - {job: security:bookstack, artifacts: false}
+  allow_failure: false
+
+release:promote:
+  extends: .release:promote:source
+  rules:
+  - if: *release-publication-gate
+    when: on_success
+  - when: never
+  environment:
+    name: ci/gitlab-release
+    action: prepare
+  before_script:
+  - !reference [.ci-components-log, before_script]
+  - python3 scripts/ops/check_schema_rollout_fence.py
+  - !reference [release:bundle, script]
+  script:
+  - !reference [.release:promote:source, script]
+  - cleanup
+  - !reference [.release:publish:source, script]
+  allow_failure: false
+  artifacts:
+    when: always
+    expire_in: 30 days
+    paths:
+    - .ci/promotions/
+    - .ci/release/
+    reports:
+      dotenv: .ci/release/release.env
+
+validate:migration-guard:
+  extends: .ironrag:image-base
+  stage: verify
+  rules:
+  - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+  - if: $CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH && $CI_COMMIT_REF_PROTECTED == "true" && $CI_COMMIT_TAG == null
+  - when: never
+  script:
+  - make migration-check
+
+validate:ops-selftest:
+  extends: .ironrag:image-base
+  stage: verify
+  rules:
+  - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+  - if: $CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH && $CI_COMMIT_REF_PROTECTED == "true" && $CI_COMMIT_TAG == null
+  - when: never
+  script:
+  - make ops-selftest
+
+security:images:
+  extends: .trivy:images
+  needs:
+  - {job: version, artifacts: true}
+  - {job: image:backend:build, artifacts: true}
+
+security:bookstack:
+  extends: .trivy-bookstack:images
+  needs:
+  - {job: version, artifacts: true}
+  - {job: image:connectors:bookstack:build, artifacts: true}

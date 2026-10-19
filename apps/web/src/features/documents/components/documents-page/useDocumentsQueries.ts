@@ -4,21 +4,26 @@ import type { TFunction } from 'i18next'
 import { toast } from 'sonner'
 
 import {
-  documentsApi,
   queries,
+  documentListQuery,
+  type DocumentColumnFilters,
   type DocumentListPageResponse,
-  type DocumentListStatusFilter,
 } from '@/shared/api'
-import type { DocumentItem, Library, Workspace } from '@/shared/types'
+import type { ListContentDocumentsData } from '@/shared/api/generated'
+import type { DocumentItem, Library, Locale, Workspace } from '@/shared/types'
 import { mapListItem } from '@/features/documents/model/documentAdapter'
+import {
+  deriveDocumentSearch,
+  type DocumentSearchDerivation,
+} from '@/features/documents/model/documentsSearch'
 
 import {
   extractWebIngestPolicy,
   getErrorMessage,
-  getFilteredTotal,
   LIST_POLL_INTERVAL_MS,
   parseCost,
   splitSortValue,
+  type DocumentsListFilter,
   type DocumentsStatusBucket,
   type PageSizeOption,
   type SortValue,
@@ -26,21 +31,34 @@ import {
 } from './documentsPageState'
 import {
   buildPaginationState,
+  isInvalidCursorError,
   useCursorStack,
   useDebouncedSearch,
   useListPollGrace,
 } from './documentsQueryState'
+import { useDocumentFacets } from './useDocumentFacets'
 import { useInspectorQueries } from './useInspectorQueries'
+
+type DocumentListQuery = NonNullable<ListContentDocumentsData['query']>
+
+/// Re-reads a cost summary only while the backend reports it reconciling. Long
+/// enough to be gentle on the API, short enough that the cell stops saying
+/// "updating" shortly after the worker repairs the generation.
+const COST_RECONCILE_POLL_INTERVAL_MS = 10_000
 
 type UseDocumentsQueriesInput = {
   activeLibrary: Library | null
   activeWorkspace: Workspace | null
+  locale: Locale
   pageSize: PageSizeOption
   searchQuery: string
   selectedDocumentId: string | null
   sortValue: SortValue
-  statusBackendFilter: DocumentListStatusFilter[]
+  listFilter: DocumentsListFilter
   statusBucket: DocumentsStatusBucket
+  columnFilters: DocumentColumnFilters | undefined
+  filtersKey: string
+  snapshotAt: string | null
   t: TFunction
   updateSearchParamState: UpdateSearchParamState
 }
@@ -56,15 +74,61 @@ function isListContentDocumentsQueryKey(queryKey: readonly unknown[]): boolean {
   )
 }
 
+export interface DocumentListQueryInput {
+  cursor: string | null
+  pageSize: number
+  sortValue: SortValue
+  derivation: DocumentSearchDerivation
+  columnFilters: DocumentColumnFilters | undefined
+  listFilter: DocumentsListFilter
+  snapshotAt: string | null
+}
+
+/**
+ * The exact query object the list transport is called with. One pure builder so
+ * a test can assert the request shape — including that a cost header change
+ * arrives as `sortBy: 'cost'` on every page, not as a page-scoped reorder — and
+ * so the hook cannot drift from what it claims to send.
+ */
+export function buildDocumentListQuery({
+  cursor,
+  pageSize,
+  sortValue,
+  derivation,
+  columnFilters,
+  listFilter,
+  snapshotAt,
+}: DocumentListQueryInput): DocumentListQuery {
+  const { sortBy, sortOrder } = splitSortValue(sortValue)
+  return documentListQuery({
+    limit: pageSize,
+    sortBy,
+    sortOrder,
+    includeTotal: true,
+    ...(cursor ? { cursor } : {}),
+    ...(derivation.search ? { search: derivation.search } : {}),
+    searchStatus: derivation.searchStatus,
+    ...(derivation.normalizedSearch ? { normalizedSearch: derivation.normalizedSearch } : {}),
+    ...(derivation.searchRanges ? { searchRanges: derivation.searchRanges } : {}),
+    ...(columnFilters ? { columnFilters } : {}),
+    ...(snapshotAt ? { snapshotAt } : {}),
+    ...listFilter,
+  })
+}
+
 export function useDocumentsQueries({
   activeLibrary,
   activeWorkspace,
+  locale,
   pageSize,
   searchQuery,
   selectedDocumentId,
   sortValue,
-  statusBackendFilter,
+  listFilter,
   statusBucket,
+  columnFilters,
+  filtersKey,
+  snapshotAt,
   t,
   updateSearchParamState,
 }: UseDocumentsQueriesInput) {
@@ -75,7 +139,9 @@ export function useDocumentsQueries({
   const { cursorStack, setCursorStack } = useCursorStack({
     activeLibraryId,
     debouncedSearch,
+    filtersKey,
     pageSize,
+    snapshotAt,
     sortValue,
     statusBucket,
   })
@@ -85,40 +151,65 @@ export function useDocumentsQueries({
   const aggregatesQueryRefetchRef = useRef<(() => Promise<unknown>) | null>(null)
   const activeCursor = cursorStack[cursorStack.length - 1] ?? null
   const { sortBy, sortOrder } = splitSortValue(sortValue)
-  const listQueryParameters = useMemo(
-    () => ({
-      ...(activeLibraryId ? { libraryId: activeLibraryId } : {}),
-      limit: pageSize,
-      ...(activeCursor ? { cursor: activeCursor } : {}),
-      ...(debouncedSearch ? { search: debouncedSearch } : {}),
-      sortBy,
-      sortOrder,
-      ...(statusBackendFilter.length > 0 ? { status: statusBackendFilter.join(',') } : {}),
-    }),
-    [
-      activeCursor,
-      activeLibraryId,
-      debouncedSearch,
-      pageSize,
-      sortBy,
-      sortOrder,
-      statusBackendFilter,
-    ],
+  // One derivation owns the literal search, the derived-status buckets whose
+  // localized label matches it and the Intl-normalized spelling. No caller
+  // re-derives them, so list and facet requests always agree.
+  const derivation = useMemo(
+    () => deriveDocumentSearch(debouncedSearch, locale, t),
+    [debouncedSearch, locale, t],
   )
+
+  /**
+   * Adopt the server snapshot once and keep it for the whole cursor chain. A
+   * duration facet selected later therefore counts against the same instant as
+   * the page it opens; a manual refresh or a scope change starts a new clock.
+   */
+  const adoptSnapshot = useCallback(
+    (snapshot: string | null) => {
+      if (!snapshot || searchQuery !== debouncedSearch) return
+      if (snapshotAt === null) {
+        updateSearchParamState({ snapshotAt: snapshot })
+      }
+    },
+    [debouncedSearch, searchQuery, snapshotAt, updateSearchParamState],
+  )
+
+  const listQueryParameters = useMemo(
+    () =>
+      buildDocumentListQuery({
+        cursor: activeCursor,
+        pageSize,
+        sortValue,
+        derivation,
+        columnFilters,
+        listFilter,
+        snapshotAt,
+      }),
+    [activeCursor, columnFilters, derivation, listFilter, pageSize, snapshotAt, sortValue],
+  )
+  // Deliberately without the bucket filter: `totalCount` and `statusCounts`
+  // are the per-bucket chip numbers, so they have to be the whole library
+  // within the current grid filters and derived search. The exclusive bucket
+  // (status OR indexing) is self-excluded: these are counts for switching the
+  // bucket, not an aggregate of the current indexing subset.
   const aggregateQueryParameters = useMemo(
-    () => ({
-      ...(activeLibraryId ? { libraryId: activeLibraryId } : {}),
-      limit: 1,
-      ...(debouncedSearch ? { search: debouncedSearch } : {}),
-      sortBy,
-      sortOrder,
-      includeTotal: true,
-      ...(statusBackendFilter.length > 0 ? { status: statusBackendFilter.join(',') } : {}),
-    }),
-    [activeLibraryId, debouncedSearch, sortBy, sortOrder, statusBackendFilter],
+    () =>
+      buildDocumentListQuery({
+        cursor: null,
+        pageSize: 1,
+        derivation,
+        columnFilters,
+        snapshotAt,
+        sortValue,
+        listFilter: {},
+      }),
+    [columnFilters, derivation, snapshotAt, sortValue],
   )
   const listQuery = useQuery({
-    ...queries.listContentDocumentsOptions({ query: listQueryParameters }),
+    ...queries.listContentDocumentsOptions({
+      path: { libraryId: activeLibraryId ?? '' },
+      query: listQueryParameters,
+    }),
     enabled: !!activeLibraryId,
     placeholderData: keepPreviousData,
     staleTime: 0,
@@ -126,14 +217,44 @@ export function useDocumentsQueries({
       const hasInFlight = (q.state.data?.items ?? []).some(
         (doc) => doc.status === 'queued' || doc.status === 'processing',
       )
-      return hasInFlight || shouldPoll ? LIST_POLL_INTERVAL_MS : false
+      if (hasInFlight || shouldPoll) return LIST_POLL_INTERVAL_MS
+      return q.state.data?.costRollupFreshness === 'reconciling'
+        ? COST_RECONCILE_POLL_INTERVAL_MS
+        : false
     },
     refetchIntervalInBackground: false,
   })
+  useEffect(() => {
+    if (!isInvalidCursorError(listQuery.error, activeCursor)) return
+    setCursorStack([null])
+  }, [activeCursor, listQuery.error, setCursorStack])
+  // A cost-dependent read (cost sort, or a cost column filter) that meets a
+  // reconciling rollup returns an explicit pending page with no continuation.
+  // Drop the cost cursor stack so the very next page is a first page; the
+  // pinned snapshot clock in the URL is untouched, so duration semantics keep
+  // their instant. The summary poll (10s, reconciling only) then brings the
+  // page back when the rollup turns current.
+  // The library rollup is reconciling: a cost-dependent list read returns an
+  // explicit pending page, and every cost cell is withheld. Distinct from an
+  // empty match — the grid must not claim "no documents match" for that.
+  const costReconciling = listQuery.data?.costRollupFreshness === 'reconciling'
+  const scopePending = listQuery.data?.scopePending === true && !listQuery.isPlaceholderData
+  useEffect(() => {
+    if (!scopePending) return
+    if (cursorStack.length > 1) setCursorStack([null])
+  }, [scopePending, cursorStack.length, setCursorStack])
+  useEffect(() => {
+    if (!listQuery.isPlaceholderData) adoptSnapshot(listQuery.data?.snapshotAt ?? null)
+  }, [adoptSnapshot, listQuery.data?.snapshotAt, listQuery.isPlaceholderData, listQueryParameters])
   const aggregatesQuery = useQuery({
-    ...queries.listContentDocumentsOptions({ query: aggregateQueryParameters }),
+    ...queries.listContentDocumentsOptions({
+      path: { libraryId: activeLibraryId ?? '' },
+      query: aggregateQueryParameters,
+    }),
     enabled: !!activeLibraryId,
     staleTime: 5_000,
+    refetchInterval: (q) =>
+      q.state.data?.costRollupFreshness === 'reconciling' ? COST_RECONCILE_POLL_INTERVAL_MS : false,
   })
   useEffect(() => {
     listQueryRefetchRef.current = listQuery.refetch
@@ -141,9 +262,35 @@ export function useDocumentsQueries({
   }, [aggregatesQuery.refetch, listQuery.refetch])
 
   const loadFirstPage = useCallback(async () => {
+    // A manual refresh may start a new clock; the pin exists to keep an
+    // in-progress filtered chain stable, not to freeze a stale instant.
+    updateSearchParamState({ snapshotAt: null })
     setCursorStack([null])
     await Promise.all([listQueryRefetchRef.current?.(), aggregatesQueryRefetchRef.current?.()])
-  }, [setCursorStack])
+  }, [setCursorStack, updateSearchParamState])
+
+  const facetScope = useMemo(
+    () => ({
+      columnFilters,
+      search: derivation.search,
+      searchStatus: derivation.searchStatus,
+      normalizedSearch: derivation.normalizedSearch,
+      searchRanges: derivation.searchRanges,
+      status: listFilter.status,
+      indexing: listFilter.indexing,
+      ids: undefined,
+      snapshotAt,
+    }),
+    [columnFilters, derivation, listFilter.indexing, listFilter.status, snapshotAt],
+  )
+  const { serverFacets } = useDocumentFacets({
+    libraryId: activeLibraryId,
+    enabled: !!activeLibraryId,
+    locale,
+    onSnapshot: adoptSnapshot,
+    scope: facetScope,
+    t,
+  })
 
   const libraryPolicyQuery = useQuery({
     ...queries.getCatalogLibraryOptions({
@@ -158,22 +305,29 @@ export function useDocumentsQueries({
   )
   const libraryCostQuery = useQuery({
     ...queries.getLibraryCostSummaryOptions({
-      query: { libraryId: activeLibraryId ?? '' },
+      path: { libraryId: activeLibraryId ?? '' },
     }),
     enabled: !!activeLibraryId,
     staleTime: 30_000,
+    // Poll only while the owning rollup reports itself reconciling; a current
+    // summary is left to its normal 30s staleness and an unmounted page stops
+    // the interval automatically.
+    refetchInterval: (q) =>
+      q.state.data?.costRollupFreshness === 'reconciling' ? COST_RECONCILE_POLL_INTERVAL_MS : false,
   })
   const workspaceCostQuery = useQuery({
     ...queries.getWorkspaceCostSummaryOptions({
-      query: { workspaceId: activeWorkspace?.id ?? '' },
+      path: { workspaceId: activeWorkspace?.id ?? '' },
     }),
     enabled: !!activeWorkspace?.id,
     staleTime: 30_000,
+    refetchInterval: (q) =>
+      q.state.data?.costRollupFreshness === 'reconciling' ? COST_RECONCILE_POLL_INTERVAL_MS : false,
   })
   const webRunsQuery = useQuery({
-    queryKey: ['webRuns', activeLibraryId, activeLibrary],
-    queryFn: () =>
-      activeLibrary ? documentsApi.listWebRuns(activeLibrary.id) : Promise.resolve([]),
+    ...queries.listContentWebIngestRunsOptions({
+      query: { libraryId: activeLibraryId ?? '', limit: 50 },
+    }),
     enabled: !!activeLibraryId,
     staleTime: 0,
   })
@@ -183,7 +337,10 @@ export function useDocumentsQueries({
   }, [refetchWebRuns])
 
   const items = useMemo(
-    () => (listQuery.data?.items ?? []).map((raw) => mapListItem(raw, t)),
+    () =>
+      (listQuery.data?.items ?? []).map((raw) =>
+        mapListItem(raw, t, listQuery.data?.costRollupFreshness),
+      ),
     [listQuery.data, t],
   )
 
@@ -191,7 +348,7 @@ export function useDocumentsQueries({
   // the currently loaded list page (e.g. the Graph view's "open document"
   // action on a document buried thousands of rows deep), resolve that one
   // document through the *same* list endpoint — filtered by id — so it runs
-  // through the canonical `mapListItem` derivation. This is the single
+  // through the shared `mapListItem` derivation. This is the single
   // source of truth for a `DocumentItem`: no parallel detail→item mapper
   // that would have to re-derive the server-side `status`/`readiness`
   // buckets client-side.
@@ -200,10 +357,11 @@ export function useDocumentsQueries({
   const needsSelectedFallback = !!activeLibraryId && !!selectedDocumentId && !isSelectedOnPage
   const selectedFallbackQuery = useQuery({
     ...queries.listContentDocumentsOptions({
+      path: { libraryId: activeLibraryId ?? '' },
       query: {
-        ...(activeLibraryId ? { libraryId: activeLibraryId } : {}),
         ids: selectedDocumentId ?? '',
         limit: 1,
+        ...(snapshotAt ? { snapshotAt } : {}),
       },
     }),
     enabled: needsSelectedFallback,
@@ -214,7 +372,7 @@ export function useDocumentsQueries({
     const raw = (selectedFallbackQuery.data?.items ?? []).find(
       (item) => item.id === selectedDocumentId,
     )
-    return raw ? mapListItem(raw, t) : null
+    return raw ? mapListItem(raw, t, selectedFallbackQuery.data?.costRollupFreshness) : null
   }, [selectedDocumentId, selectedFallbackQuery.data, t])
 
   const selectedDoc = useMemo(() => {
@@ -286,7 +444,7 @@ export function useDocumentsQueries({
 
   const statusCounts = aggregatesQuery.data?.statusCounts ?? null
   const totalCount = aggregatesQuery.data?.totalCount ?? null
-  const filteredTotal = getFilteredTotal(statusBucket, statusCounts, totalCount)
+  const filteredTotal = listQuery.data?.totalCount ?? null
   const isLoading = listQuery.isLoading && !!activeLibraryId
   const pagination = buildPaginationState({
     cursorStack,
@@ -299,6 +457,9 @@ export function useDocumentsQueries({
   })
 
   return {
+    snapshotAt: listQuery.data?.snapshotAt ?? snapshotAt,
+    costReconciling,
+    isScopePending: searchQuery !== debouncedSearch || listQuery.isPlaceholderData || scopePending,
     activateListPollGrace,
     aggregatesQuery,
     clearSelectedDoc,
@@ -310,15 +471,21 @@ export function useDocumentsQueries({
     inspectorLifecycle: inspector.inspectorLifecycle,
     isLoading,
     items,
-    libraryCost: parseCost(libraryCostQuery.data?.totalCost) ?? 0,
+    libraryCostSummary: libraryCostQuery.data ?? null,
+    libraryCost: parseCost(libraryCostQuery.data?.totalCost),
+    libraryCostCoverage: libraryCostQuery.data?.costCoverage ?? null,
+    libraryCostFreshness: libraryCostQuery.data?.costRollupFreshness ?? null,
+    libraryUnpricedCalls: libraryCostQuery.data?.unpricedProviderCallCount ?? null,
     libraryPolicyQuery,
     loadedWebIngestPolicy,
     loadError: listQuery.error ? errorMessage(listQuery.error, t('documents.failedToLoad')) : null,
     loadFirstPage,
     pagination,
     refreshWebRuns,
+    searchDerivation: derivation,
     selectDoc,
     selectedDoc,
+    serverFacets,
     sortBy,
     sortOrder,
     statusCounts,
@@ -326,6 +493,10 @@ export function useDocumentsQueries({
     updateDocumentHintLocally,
     webRuns: webRunsQuery.data ?? [],
     webRunsRefreshing: webRunsQuery.isFetching,
-    workspaceCost: parseCost(workspaceCostQuery.data?.totalCost) ?? 0,
+    workspaceCostSummary: workspaceCostQuery.data ?? null,
+    workspaceCost: parseCost(workspaceCostQuery.data?.totalCost),
+    workspaceCostCoverage: workspaceCostQuery.data?.costCoverage ?? null,
+    workspaceCostFreshness: workspaceCostQuery.data?.costRollupFreshness ?? null,
+    workspaceUnpricedCalls: workspaceCostQuery.data?.unpricedProviderCallCount ?? null,
   }
 }

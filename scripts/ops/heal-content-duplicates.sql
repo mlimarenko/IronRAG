@@ -2,7 +2,7 @@
 -- in the SAME library. A document with a readable head wins over one without;
 -- remaining ties are resolved by oldest document first.
 --
--- The canonical `content_document` tombstone and the retrieval-facing
+-- The authoritative `content_document` tombstone and the retrieval-facing
 -- `knowledge_document` tombstone are written in one transaction. Duplicate
 -- groups also retain their already-deleted members so a run can repair active
 -- knowledge residue left by an older version of this script. Every library
@@ -27,7 +27,7 @@
 -- maintenance window for large catalogs.
 --
 -- Idempotency:
---   * only non-surviving live documents receive a new canonical tombstone;
+--   * only non-surviving live documents receive a new authoritative tombstone;
 --   * already-deleted duplicate members may only repair their own knowledge
 --     tombstone;
 --   * generations are derived only from rows that were visible before their
@@ -83,12 +83,12 @@ duplicate_groups as materialized (
         (
             document.document_state <> 'deleted'
             and document.deleted_at is null
-        ) as canonical_is_live,
+        ) as source_is_live,
         (
             document.document_state = 'active'
             and document.deleted_at is null
             and head.readable_revision_id is not null
-        ) as canonical_was_visible,
+        ) as source_was_visible,
         row_number() over (
             partition by document.library_id, latest.checksum
             order by
@@ -113,12 +113,12 @@ selected_duplicates as materialized (
     select
         duplicate.library_id,
         duplicate.document_id,
-        duplicate.canonical_is_live,
-        duplicate.canonical_was_visible
+        duplicate.source_is_live,
+        duplicate.source_was_visible
     from duplicate_groups as duplicate
     where duplicate.group_size > 1
       and (
-          not duplicate.canonical_is_live
+          not duplicate.source_is_live
           or duplicate.rank_within_group > 1
       )
 ),
@@ -139,8 +139,8 @@ selected_tombstones as materialized (
         document.id as document_id,
         document.library_id,
         coalesce(document.deleted_at, statement_timestamp()) as deleted_at,
-        duplicate.canonical_is_live,
-        duplicate.canonical_was_visible
+        duplicate.source_is_live,
+        duplicate.source_was_visible
     from selected_duplicates as duplicate
     join locked_libraries as locked
       on locked.id = duplicate.library_id
@@ -165,13 +165,13 @@ tombstoned_content as (
         document.library_id,
         document.deleted_at
 ),
-canonical_answer_changes as materialized (
+source_answer_changes as materialized (
     select distinct tombstone.library_id
     from tombstoned_content as tombstone
     join selected_tombstones as target
       on target.document_id = tombstone.document_id
      and target.library_id = tombstone.library_id
-    where target.canonical_was_visible
+    where target.source_was_visible
 ),
 knowledge_targets as materialized (
     select
@@ -215,7 +215,7 @@ knowledge_answer_changes as materialized (
 ),
 changed_libraries as materialized (
     select library_id
-    from canonical_answer_changes
+    from source_answer_changes
     union
     select library_id
     from knowledge_answer_changes

@@ -12,7 +12,8 @@ import platform
 import re
 import sys
 import time
-from dataclasses import dataclass
+import urllib.parse
+from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping, Sequence
@@ -20,33 +21,52 @@ from typing import Any, Mapping, Sequence
 import requests
 
 
+REPOSITORY_ROOT = Path(__file__).resolve().parents[4]
+if str(REPOSITORY_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPOSITORY_ROOT))
+
+from apps.api.benchmarks.lifecycle_state import (  # noqa: E402
+    SCHEMA_VERSION as DATA_STATE_SCHEMA_VERSION,
+    build_data_state_identity as build_collector_data_state_identity,
+    canonical_turn_payload,
+    load_collector_document,
+    validate_data_state_identity as validate_collector_data_state_identity,
+)
+from apps.api.benchmarks.tls_pinning import pinned_requests_session  # noqa: E402
+
+
 DEFAULT_POLL_INTERVAL_SECONDS = 5.0
-DEFAULT_WAIT_TIMEOUT_SECONDS = 900.0
+DEFAULT_WAIT_TIMEOUT_SECONDS = 3_600.0
 DEFAULT_QUERY_TOP_K = 8
 RANK_METRIC_CUTOFFS = (1, 3, 5, 10)
 RANK_METRIC_SEARCH_LIMIT = max(RANK_METRIC_CUTOFFS)
 RANK_RELEVANCE_FILE_NAME = "rank_relevance.json"
 RANK_TREND_FILE_NAME = "rank_metrics_trend.jsonl"
 ANSWER_LATENCY_PERCENTILES = (50, 95, 99)
-BENCHMARK_INTEGRITY_SCHEMA_VERSION = 3
-HOST_SNAPSHOT_SCHEMA_VERSION = 1
+BENCHMARK_INTEGRITY_SCHEMA_VERSION = 1
+HOST_SNAPSHOT_SCHEMA_VERSION = 2
 ENVIRONMENT_IDENTITY_SCHEMA_VERSION = 1
 CACHE_POLICIES = ("cold", "warm", "mixed")
 CASE_ORDER_POLICY = "sha256_round_suite_case_v1"
 ARTIFACT_DIGEST_PATTERN = re.compile(r"^(?:sha256:)?[0-9a-f]{64}$")
+MAX_LINUX_COUNTER_VALUE = (1 << 64) - 1
 DEFAULT_MIN_HOST_AVAILABLE_MEMORY_PERCENT = 10.0
-DEFAULT_MAX_HOST_SWAP_USED_PERCENT = 10.0
+# 4,096 pages/s is 16 MiB/s with common 4 KiB Linux pages. Sustaining thousands
+# of swap faults or writebacks each second can perturb a latency measurement,
+# while isolated idle cold-page reads are orders of magnitude below this rate.
+DEFAULT_MAX_HOST_SWAP_IO_PAGES_PER_SECOND = 4_096.0
+HOST_SWAP_ACTIVITY_SAMPLE_SECONDS = 2.0
 DEFAULT_MAX_HOST_CPU_PSI_SOME_AVG10 = 20.0
 DEFAULT_MAX_HOST_MEMORY_PSI_SOME_AVG10 = 1.0
 DEFAULT_MAX_HOST_MEMORY_PSI_FULL_AVG10 = 0.5
 DEFAULT_MAX_HOST_IO_PSI_SOME_AVG10 = 5.0
 DEFAULT_MAX_HOST_IO_PSI_FULL_AVG10 = 1.0
 DEFAULT_SUITE_MATRIX = [
-    "api_baseline_suite.json",
-    "workflow_strict_suite.json",
-    "layout_noise_suite.json",
-    "graph_multihop_suite.json",
-    "multiformat_surface_suite.json",
+    "golden_api_baseline_suite.json",
+    "golden_workflow_strict_suite.json",
+    "golden_layout_noise_suite.json",
+    "golden_graph_multihop_suite.json",
+    "golden_upload_surface_suite.json",
 ]
 
 
@@ -58,7 +78,7 @@ def lower_text(value: str | None) -> str:
     return (value or "").casefold()
 
 
-def canonical_match_text(value: str | None) -> str:
+def normalize_match_text(value: str | None) -> str:
     normalized = lower_text(value)
     normalized = re.sub(r"[\u2010-\u2015\u2212]+", " ", normalized)
     normalized = re.sub(r"\s+", " ", normalized)
@@ -66,13 +86,39 @@ def canonical_match_text(value: str | None) -> str:
 
 
 def contains_all(haystack: str | None, needles: list[str]) -> bool:
-    normalized = canonical_match_text(haystack)
-    return all(canonical_match_text(needle) in normalized for needle in needles)
+    normalized = normalize_match_text(haystack)
+    return all(normalize_match_text(needle) in normalized for needle in needles)
 
 
 def contains_any(haystack: str | None, needles: list[str]) -> bool:
-    normalized = canonical_match_text(haystack)
-    return any(canonical_match_text(needle) in normalized for needle in needles)
+    normalized = normalize_match_text(haystack)
+    return any(normalize_match_text(needle) in normalized for needle in needles)
+
+
+def contains_any_whole_word(haystack: str | None, needles: list[str]) -> bool:
+    """Substring containment, but a needle may not match inside a longer word.
+
+    Forbidden-term checks read as "the answer must not talk about X". Plain
+    containment turns that into "the answer must not contain these letters",
+    so `REST` fires on `restricted` and fails an answer that never mentions
+    REST at all. Word edges are only required where the needle itself starts
+    or ends with a word character, so needles carrying punctuation (`/health`,
+    `X-RateLimit`) keep matching as before.
+    """
+    normalized = normalize_match_text(haystack)
+    for needle in needles:
+        term = normalize_match_text(needle)
+        if not term:
+            continue
+        prefix = r"\b" if term[0].isalnum() or term[0] == "_" else ""
+        suffix = r"\b" if term[-1].isalnum() or term[-1] == "_" else ""
+        if re.search(f"{prefix}{re.escape(term)}{suffix}", normalized):
+            return True
+    return False
+
+
+def matches_any_regex(haystack: str | None, patterns: list[str]) -> bool:
+    return any(re.search(pattern, haystack or "", re.IGNORECASE) for pattern in patterns)
 
 
 def first_answer_sentence(answer: str | None) -> str:
@@ -99,12 +145,17 @@ def references_contain_all_labels(references: list[dict[str, Any]], labels: list
 def relation_references_contain_all_text(
     references: list[dict[str, Any]], expected_text: list[str]
 ) -> bool:
+    if any(
+        not isinstance(reference, dict) or "normalized_assertion" in reference
+        for reference in references
+    ):
+        raise ValueError("relation reference requires canonical normalizedAssertion")
     if not expected_text:
         return True
     reference_text = "\n".join(
         "\n".join(
             str(reference.get(field) or "")
-            for field in ("predicate", "normalizedAssertion", "normalized_assertion")
+            for field in ("predicate", "normalizedAssertion")
         )
         for reference in references
     )
@@ -124,6 +175,11 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         "--base-url",
         default=os.environ.get("IRONRAG_BENCHMARK_BASE_URL"),
         help="IronRAG API base URL including /v1.",
+    )
+    parser.add_argument(
+        "--tls-certificate-sha256",
+        default=os.environ.get("IRONRAG_BENCHMARK_TLS_CERTIFICATE_SHA256"),
+        help="Independently trusted SHA-256 of the API TLS peer certificate.",
     )
     parser.add_argument(
         "--suite",
@@ -147,7 +203,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         "--wait-timeout-seconds",
         type=float,
         default=DEFAULT_WAIT_TIMEOUT_SECONDS,
-        help="Maximum time to wait for readiness / quiet pipeline.",
+        help="Maximum time without readiness progress before aborting.",
     )
     parser.add_argument(
         "--poll-interval-seconds",
@@ -181,6 +237,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--canonicalize-reused-library",
+        dest="normalize_reused_library",
         action="store_true",
         help="Wait until a reused library becomes quiet and query-ready before benchmarking.",
     )
@@ -195,9 +252,12 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         help="Human-readable baseline/candidate label recorded in the artifact.",
     )
     parser.add_argument(
-        "--runtime-artifact-digest",
-        default=os.environ.get("IRONRAG_BENCHMARK_RUNTIME_ARTIFACT_DIGEST"),
-        help="Required immutable image or build SHA-256 digest recorded for auditability.",
+        "--data-state-file",
+        type=Path,
+        help=(
+            "Optional JSON inventory identity for a same-build data-lifecycle "
+            "comparison; its evidence digest and physical state are embedded"
+        ),
     )
     parser.add_argument(
         "--cache-policy",
@@ -210,6 +270,10 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         default=os.environ.get("IRONRAG_BENCHMARK_ROUND_ID", "round-1"),
         help="Paired alternating round identifier recorded in the artifact.",
     )
+    parser.add_argument("--experiment-id")
+    parser.add_argument("--artifact-role", choices=("baseline", "candidate"))
+    parser.add_argument("--pair-id")
+    parser.add_argument("--sequence-position", choices=("A", "B"))
     parser.add_argument(
         "--max-host-load-per-cpu",
         type=float,
@@ -223,10 +287,10 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         help="Minimum MemAvailable/MemTotal percentage for release evidence.",
     )
     parser.add_argument(
-        "--max-host-swap-used-percent",
+        "--max-host-swap-io-pages-per-second",
         type=float,
-        default=DEFAULT_MAX_HOST_SWAP_USED_PERCENT,
-        help="Maximum used swap percentage for release evidence.",
+        default=DEFAULT_MAX_HOST_SWAP_IO_PAGES_PER_SECOND,
+        help="Maximum combined swap-in/out pages per second for release evidence.",
     )
     parser.add_argument(
         "--max-host-cpu-psi-some-avg10",
@@ -287,9 +351,11 @@ class BenchmarkCase:
     allowed_verification_states: list[str]
     relevant_documents: list[str]
     relevant_chunks: list[str]
+    answer_forbidden_regex_any: list[str] = field(default_factory=list)
+    answer_required_regex_any: list[str] = field(default_factory=list)
 
 
-def canonical_json_sha256(payload: Any) -> str:
+def stable_json_sha256(payload: Any) -> str:
     encoded = json.dumps(
         payload,
         ensure_ascii=False,
@@ -298,6 +364,18 @@ def canonical_json_sha256(payload: Any) -> str:
         allow_nan=False,
     ).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
+
+
+def build_data_state_identity(payload: Mapping[str, Any]) -> dict[str, Any]:
+    return build_collector_data_state_identity(payload)
+
+
+def validate_data_state_identity(identity: Mapping[str, Any]) -> list[str]:
+    return validate_collector_data_state_identity(identity)
+
+
+def load_data_state_identity(path: Path) -> dict[str, Any]:
+    return load_collector_document(path)[1]
 
 
 def _finite_number(value: Any, *, minimum: float = 0.0) -> float | None:
@@ -334,6 +412,23 @@ def _read_linux_pressure(resource: str) -> dict[str, dict[str, float | int]]:
     return pressure
 
 
+def _read_linux_vmstat_swap_counters() -> dict[str, int | None]:
+    counters: dict[str, int | None] = {"pswpin": None, "pswpout": None}
+    try:
+        lines = Path("/proc/vmstat").read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return counters
+    for line in lines:
+        key, separator, raw_value = line.partition(" ")
+        if not separator or key not in counters:
+            continue
+        try:
+            counters[key] = int(raw_value.strip())
+        except ValueError:
+            counters[key] = None
+    return counters
+
+
 def capture_host_snapshot() -> dict[str, Any]:
     cpu_count = os.cpu_count() or 1
     try:
@@ -349,6 +444,7 @@ def capture_host_snapshot() -> dict[str, Any]:
                 memory[f"{key}KiB"] = int(first_token)
     except (OSError, ValueError, IndexError):
         memory = {}
+    swap_counters = _read_linux_vmstat_swap_counters()
     return {
         "schemaVersion": HOST_SNAPSHOT_SCHEMA_VERSION,
         "capturedAt": utc_now_iso(),
@@ -365,14 +461,21 @@ def capture_host_snapshot() -> dict[str, Any]:
             for resource in ("cpu", "memory", "io")
         },
         **memory,
+        **swap_counters,
     }
+
+
+def capture_host_activity_sample() -> tuple[dict[str, Any], dict[str, Any]]:
+    start = capture_host_snapshot()
+    time.sleep(HOST_SWAP_ACTIVITY_SAMPLE_SECONDS)
+    return start, capture_host_snapshot()
 
 
 def build_host_eligibility_policy(
     *,
     max_load_per_cpu: float = 1.25,
     min_available_memory_percent: float = DEFAULT_MIN_HOST_AVAILABLE_MEMORY_PERCENT,
-    max_swap_used_percent: float = DEFAULT_MAX_HOST_SWAP_USED_PERCENT,
+    max_swap_io_pages_per_second: float = DEFAULT_MAX_HOST_SWAP_IO_PAGES_PER_SECOND,
     max_cpu_psi_some_avg10: float = DEFAULT_MAX_HOST_CPU_PSI_SOME_AVG10,
     max_memory_psi_some_avg10: float = DEFAULT_MAX_HOST_MEMORY_PSI_SOME_AVG10,
     max_memory_psi_full_avg10: float = DEFAULT_MAX_HOST_MEMORY_PSI_FULL_AVG10,
@@ -382,7 +485,7 @@ def build_host_eligibility_policy(
     return {
         "maxLoad1mPerCpu": max_load_per_cpu,
         "minAvailableMemoryPercent": min_available_memory_percent,
-        "maxSwapUsedPercent": max_swap_used_percent,
+        "maxSwapIoPagesPerSecond": max_swap_io_pages_per_second,
         "maxPsiSomeAvg10": {
             "cpu": max_cpu_psi_some_avg10,
             "memory": max_memory_psi_some_avg10,
@@ -400,11 +503,13 @@ def validate_host_eligibility_policy(policy: Mapping[str, Any]) -> list[str]:
     for key in (
         "maxLoad1mPerCpu",
         "minAvailableMemoryPercent",
-        "maxSwapUsedPercent",
+        "maxSwapIoPagesPerSecond",
     ):
         value = _finite_number(policy.get(key))
-        if value is None or (key == "maxLoad1mPerCpu" and value <= 0.0) or (
-            key != "maxLoad1mPerCpu" and value > 100.0
+        if (
+            value is None
+            or (key == "maxLoad1mPerCpu" and value <= 0.0)
+            or (key == "minAvailableMemoryPercent" and value > 100.0)
         ):
             invalid.append(key)
     for category, resources in (
@@ -423,7 +528,7 @@ def validate_host_eligibility_policy(policy: Mapping[str, Any]) -> list[str]:
 
 
 def validate_release_host_eligibility_policy(policy: Mapping[str, Any]) -> list[str]:
-    """Reject policy overrides that weaken the canonical release thresholds."""
+    """Reject policy overrides that weaken the authoritative release thresholds."""
     invalid = validate_host_eligibility_policy(policy)
     if invalid:
         return invalid
@@ -434,10 +539,10 @@ def validate_release_host_eligibility_policy(policy: Mapping[str, Any]) -> list[
         release_policy["minAvailableMemoryPercent"]
     ):
         invalid.append("minAvailableMemoryPercent:weakened")
-    if float(policy["maxSwapUsedPercent"]) > float(
-        release_policy["maxSwapUsedPercent"]
+    if float(policy["maxSwapIoPagesPerSecond"]) > float(
+        release_policy["maxSwapIoPagesPerSecond"]
     ):
-        invalid.append("maxSwapUsedPercent:weakened")
+        invalid.append("maxSwapIoPagesPerSecond:weakened")
     for category in ("maxPsiSomeAvg10", "maxPsiFullAvg10"):
         release_thresholds = release_policy[category]
         thresholds = policy[category]
@@ -487,28 +592,57 @@ def _evaluate_memory(
     )
 
 
-def _evaluate_swap(
+def _nonnegative_int(value: Any) -> int | None:
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, int)
+        or value < 0
+        or value > MAX_LINUX_COUNTER_VALUE
+    ):
+        return None
+    return value
+
+
+def _evaluate_swap_activity(
+    start_snapshot: Mapping[str, Any],
     snapshot: Mapping[str, Any],
     policy: Mapping[str, Any],
     computed: dict[str, float],
 ) -> list[str]:
-    swap_total = _finite_number(snapshot.get("SwapTotalKiB"))
-    swap_free = _finite_number(snapshot.get("SwapFreeKiB"))
-    max_swap = _finite_number(policy.get("maxSwapUsedPercent"))
+    start_monotonic_ns = _nonnegative_int(start_snapshot.get("capturedMonotonicNs"))
+    end_monotonic_ns = _nonnegative_int(snapshot.get("capturedMonotonicNs"))
+    start_pswpin = _nonnegative_int(start_snapshot.get("pswpin"))
+    end_pswpin = _nonnegative_int(snapshot.get("pswpin"))
+    start_pswpout = _nonnegative_int(start_snapshot.get("pswpout"))
+    end_pswpout = _nonnegative_int(snapshot.get("pswpout"))
+    max_swap_io = _finite_number(policy.get("maxSwapIoPagesPerSecond"))
     if (
-        swap_total is None
-        or swap_free is None
-        or swap_free > swap_total
-        or max_swap is None
+        start_monotonic_ns is None
+        or end_monotonic_ns is None
+        or end_monotonic_ns <= start_monotonic_ns
+        or start_pswpin is None
+        or end_pswpin is None
+        or end_pswpin < start_pswpin
+        or start_pswpout is None
+        or end_pswpout is None
+        or end_pswpout < start_pswpout
+        or max_swap_io is None
     ):
-        return ["swap.invalid"]
-    computed["swapUsedPercent"] = round(
-        0.0
-        if swap_total <= 0.0
-        else (swap_total - swap_free) / swap_total * 100.0,
-        6,
+        return ["swapIo.invalid"]
+    elapsed_seconds = (end_monotonic_ns - start_monotonic_ns) / 1_000_000_000
+    swap_in_pages_per_second = (end_pswpin - start_pswpin) / elapsed_seconds
+    swap_out_pages_per_second = (end_pswpout - start_pswpout) / elapsed_seconds
+    swap_io_pages_per_second = (
+        swap_in_pages_per_second + swap_out_pages_per_second
     )
-    return ["swapUsedPercent"] if computed["swapUsedPercent"] > max_swap else []
+    computed["swapInPagesPerSecond"] = round(swap_in_pages_per_second, 6)
+    computed["swapOutPagesPerSecond"] = round(swap_out_pages_per_second, 6)
+    computed["swapIoPagesPerSecond"] = round(swap_io_pages_per_second, 6)
+    return (
+        ["swapIoPagesPerSecond"]
+        if swap_io_pages_per_second > max_swap_io
+        else []
+    )
 
 
 def _evaluate_pressure_metric(
@@ -571,15 +705,21 @@ def _evaluate_pressure(
 def evaluate_host_snapshot(
     snapshot: Mapping[str, Any],
     policy: Mapping[str, Any],
+    *,
+    swap_activity_start: Mapping[str, Any],
 ) -> dict[str, Any]:
     """Recompute host eligibility exclusively from raw snapshot measurements."""
     violations = [f"invalidPolicy:{item}" for item in validate_host_eligibility_policy(policy)]
     computed: dict[str, float] = {}
+    if swap_activity_start.get("schemaVersion") != HOST_SNAPSHOT_SCHEMA_VERSION:
+        violations.append("swapActivityStart.schemaVersion")
     if snapshot.get("schemaVersion") != HOST_SNAPSHOT_SCHEMA_VERSION:
         violations.append("snapshot.schemaVersion")
     violations.extend(_evaluate_load(snapshot, policy, computed))
     violations.extend(_evaluate_memory(snapshot, policy, computed))
-    violations.extend(_evaluate_swap(snapshot, policy, computed))
+    violations.extend(
+        _evaluate_swap_activity(swap_activity_start, snapshot, policy, computed)
+    )
     violations.extend(_evaluate_pressure(snapshot, policy, computed))
     return {
         "passed": not violations,
@@ -619,20 +759,21 @@ def _sequence_snapshot_values(
 
 
 def _strictly_increasing(values: Mapping[str, Any]) -> bool:
-    return (
-        len(values) == 3
-        and values["pre"] < values["mid"] < values["post"]
+    phase_order = ("preStart", "pre", "mid", "post")
+    return len(values) == len(phase_order) and all(
+        values[earlier] < values[later]
+        for earlier, later in zip(phase_order, phase_order[1:])
     )
 
 
 def evaluate_host_snapshot_sequence(
     snapshots: Mapping[str, Mapping[str, Any]],
 ) -> dict[str, Any]:
-    """Require independently captured, chronologically ordered pre/mid/post samples."""
+    """Require chronologically ordered preflight-start/pre/mid/post snapshots."""
     violations: list[str] = []
     timestamps: dict[str, datetime] = {}
     monotonic_values: dict[str, int] = {}
-    for phase in ("pre", "mid", "post"):
+    for phase in ("preStart", "pre", "mid", "post"):
         snapshot = snapshots.get(phase)
         timestamp, monotonic_value, phase_violations = _sequence_snapshot_values(
             phase,
@@ -643,9 +784,9 @@ def evaluate_host_snapshot_sequence(
             timestamps[phase] = timestamp
         if monotonic_value is not None:
             monotonic_values[phase] = monotonic_value
-    if len(timestamps) == 3 and not _strictly_increasing(timestamps):
+    if len(timestamps) == 4 and not _strictly_increasing(timestamps):
         violations.append("capturedAt:notStrictlyIncreasing")
-    if len(monotonic_values) == 3 and not _strictly_increasing(monotonic_values):
+    if len(monotonic_values) == 4 and not _strictly_increasing(monotonic_values):
         violations.append("capturedMonotonicNs:notStrictlyIncreasing")
     return {"passed": not violations, "violations": violations}
 
@@ -745,7 +886,7 @@ def build_environment_identity(
         if cgroup_memory_max is not None
         else _read_cgroup_memory_limit(),
     }
-    return {**definition, "fingerprintSha256": canonical_json_sha256(definition)}
+    return {**definition, "fingerprintSha256": stable_json_sha256(definition)}
 
 
 def _validate_identity_strings(identity: Mapping[str, Any]) -> list[str]:
@@ -777,7 +918,7 @@ def _validate_identity_fingerprint(identity: Mapping[str, Any]) -> list[str]:
     }
     return (
         ["fingerprintSha256:stale"]
-        if canonical_json_sha256(definition) != fingerprint
+        if stable_json_sha256(definition) != fingerprint
         else []
     )
 
@@ -871,8 +1012,10 @@ def case_definition_payload(case: BenchmarkCase) -> dict[str, Any]:
         "searchRequiredAll": case.search_required_all,
         "answerRequiredAll": case.answer_required_all,
         "answerRequiredAny": case.answer_required_any,
+        "answerRequiredRegexAny": case.answer_required_regex_any,
         "answerOpeningRequiredAny": case.answer_opening_required_any,
         "answerForbiddenAny": case.answer_forbidden_any,
+        "answerForbiddenRegexAny": case.answer_forbidden_regex_any,
         "minChunkReferenceCount": case.min_chunk_reference_count,
         "minPreparedSegmentReferenceCount": case.min_prepared_segment_reference_count,
         "minTechnicalFactReferenceCount": case.min_technical_fact_reference_count,
@@ -894,7 +1037,7 @@ def case_definition_payload(case: BenchmarkCase) -> dict[str, Any]:
 
 
 def case_definition_sha256(case: BenchmarkCase) -> str:
-    return canonical_json_sha256(
+    return stable_json_sha256(
         {
             "schemaVersion": BENCHMARK_INTEGRITY_SCHEMA_VERSION,
             "case": case_definition_payload(case),
@@ -946,7 +1089,7 @@ def build_suite_integrity(
         )
     return {
         "schemaVersion": BENCHMARK_INTEGRITY_SCHEMA_VERSION,
-        "suiteDefinitionSha256": canonical_json_sha256(suite_definition),
+        "suiteDefinitionSha256": stable_json_sha256(suite_definition),
         "corpusSha256": local_corpus_sha256,
         "serverCorpusSha256": server_corpus_sha256,
         "corpusVerification": "server_source_bytes",
@@ -958,7 +1101,7 @@ def build_matrix_integrity(
     *,
     query_top_k: int,
     skip_upload: bool,
-    canonicalize_reused_library: bool,
+    normalize_reused_library: bool,
     cache_policy: str = "cold",
     round_id: str = "round-1",
 ) -> dict[str, Any]:
@@ -970,7 +1113,7 @@ def build_matrix_integrity(
         "caseOrderPolicy": CASE_ORDER_POLICY,
         "queryTopK": query_top_k,
         "skipUpload": skip_upload,
-        "canonicalizeReusedLibrary": canonicalize_reused_library,
+        "canonicalizeReusedLibrary": normalize_reused_library,
         "cachePolicy": cache_policy,
         "roundId": round_id,
         "answerBeforeRankProbe": True,
@@ -998,22 +1141,44 @@ def build_matrix_integrity(
         "caseOrderPolicy": CASE_ORDER_POLICY,
         "queryTopK": query_top_k,
         "skipUpload": skip_upload,
-        "canonicalizeReusedLibrary": canonicalize_reused_library,
+        "canonicalizeReusedLibrary": normalize_reused_library,
         "cachePolicy": cache_policy,
         "roundId": round_id,
         "answerBeforeRankProbe": True,
-        "matrixDefinitionSha256": canonical_json_sha256(definition),
+        "matrixDefinitionSha256": stable_json_sha256(definition),
     }
 
 
 class BenchmarkClient:
-    def __init__(self, base_url: str, session_cookie: str) -> None:
+    def __init__(
+        self, base_url: str, session_cookie: str, trusted_certificate_sha256: str
+    ) -> None:
+        parsed_base_url = urllib.parse.urlsplit(base_url.strip())
+        if (
+            parsed_base_url.scheme != "https"
+            or not parsed_base_url.hostname
+            or parsed_base_url.username is not None
+            or parsed_base_url.password is not None
+            or parsed_base_url.query
+            or parsed_base_url.fragment
+            or parsed_base_url.path.rstrip("/") != "/v1"
+        ):
+            raise ValueError("benchmark base URL must be a canonical HTTPS /v1 endpoint")
         self.base_url = base_url.rstrip("/")
         self.session_cookie = session_cookie
+        self.trusted_certificate_sha256 = trusted_certificate_sha256
         self.http = self._new_session()
 
+    @staticmethod
+    def _require_2xx(response: requests.Response) -> None:
+        if not 200 <= response.status_code < 300:
+            raise requests.HTTPError(
+                f"unexpected benchmark API HTTP status {response.status_code}",
+                response=response,
+            )
+
     def _new_session(self) -> requests.Session:
-        http = requests.Session()
+        http = pinned_requests_session(self.trusted_certificate_sha256)
         http.cookies.set("ironrag_ui_session", self.session_cookie, path="/")
         return http
 
@@ -1021,11 +1186,12 @@ class BenchmarkClient:
         self.http = self._new_session()
 
     def get_json(self, path: str, **kwargs: Any) -> Any:
+        kwargs.setdefault("allow_redirects", False)
         last_error: requests.ConnectionError | None = None
         for attempt in range(3):
             try:
                 response = self.http.get(f"{self.base_url}{path}", timeout=120, **kwargs)
-                response.raise_for_status()
+                self._require_2xx(response)
                 return response.json()
             except requests.ConnectionError as error:
                 last_error = error
@@ -1041,17 +1207,18 @@ class BenchmarkClient:
             timeout=120,
             allow_redirects=False,
         )
-        response.raise_for_status()
+        self._require_2xx(response)
         return response.content
 
     def post_json(self, path: str, payload: dict[str, Any], **kwargs: Any) -> Any:
+        kwargs.setdefault("allow_redirects", False)
         response = self.http.post(
             f"{self.base_url}{path}",
             json=payload,
             timeout=300,
             **kwargs,
         )
-        response.raise_for_status()
+        self._require_2xx(response)
         return response.json()
 
     def post_multipart(self, path: str, fields: dict[str, str], file_path: Path) -> Any:
@@ -1063,8 +1230,9 @@ class BenchmarkClient:
                 data=fields,
                 files=files,
                 timeout=300,
+                allow_redirects=False,
             )
-        response.raise_for_status()
+        self._require_2xx(response)
         return response.json()
 
 
@@ -1143,6 +1311,8 @@ def load_suite(path: Path) -> tuple[list[Path], list[BenchmarkCase], dict[str, A
                     "relevantChunks",
                     relevance.get("relevantChunks", []),
                 ),
+                answer_forbidden_regex_any=item.get("answerForbiddenRegexAny", []),
+                answer_required_regex_any=item.get("answerRequiredRegexAny", []),
             )
         )
     return documents, cases, payload
@@ -1172,8 +1342,8 @@ def upload_documents(
     for document_path in document_paths:
         uploads.append(
             client.post_multipart(
-                "/content/documents/upload",
-                {"library_id": library_id},
+                f"/content/libraries/{library_id}/documents",
+                {"external_key": document_path.name},
                 document_path,
             )
         )
@@ -1207,8 +1377,9 @@ def fetch_topology_counts(client: BenchmarkClient, library_id: str) -> dict[str,
         f"{client.base_url}/knowledge/libraries/{library_id}/graph",
         headers={"Accept": "application/x-ndjson"},
         timeout=120,
+        allow_redirects=False,
     )
-    response.raise_for_status()
+    client._require_2xx(response)
 
     documents = 0
     entities = 0
@@ -1238,6 +1409,27 @@ def fetch_topology_counts(client: BenchmarkClient, library_id: str) -> dict[str,
     }
 
 
+def pipeline_is_idle(point: dict[str, Any]) -> bool:
+    """No work queued and nothing running: ingestion has nothing left to do."""
+    return point["queueDepth"] == 0 and point["runningAttempts"] == 0
+
+
+def pipeline_made_progress(point: dict[str, Any], previous: dict[str, Any] | None) -> bool:
+    """Did anything move between two polls?
+
+    Progress is either a document becoming readable or the queue getting
+    shorter. It is what extends the deadline, so a slow-but-moving ingest is
+    waited out while a wedged one still times out. Written inline this was the
+    only rule in the wait loop nothing could reach.
+    """
+    if previous is None:
+        return False
+    return (
+        point["readableDocumentCount"] > previous["readableDocumentCount"]
+        or point["queueDepth"] < previous["queueDepth"]
+    )
+
+
 def wait_for_library_state(
     client: BenchmarkClient,
     library_id: str,
@@ -1248,6 +1440,8 @@ def wait_for_library_state(
     timeline: list[dict[str, Any]] = []
     started = time.monotonic()
     readable_elapsed: float | None = None
+    deadline_elapsed = wait_timeout_seconds
+    previous_point: dict[str, Any] | None = None
 
     while True:
         point = snapshot_library_state(client, library_id, started)
@@ -1256,36 +1450,40 @@ def wait_for_library_state(
         if readable_elapsed is None and point["readableDocumentCount"] >= minimum_readable_count:
             readable_elapsed = point["elapsedSeconds"]
 
-        if readable_elapsed is not None and point["queueDepth"] == 0 and point["runningAttempts"] == 0:
-            return timeline, readable_elapsed, point["elapsedSeconds"]
+        if pipeline_is_idle(point):
+            quiet_elapsed = (
+                point["elapsedSeconds"]
+                if point["readableDocumentCount"] >= minimum_readable_count
+                else None
+            )
+            return timeline, readable_elapsed, quiet_elapsed
 
-        if point["elapsedSeconds"] >= wait_timeout_seconds:
+        if pipeline_made_progress(point, previous_point):
+            deadline_elapsed = point["elapsedSeconds"] + wait_timeout_seconds
+
+        if point["elapsedSeconds"] >= deadline_elapsed:
             return timeline, readable_elapsed, None
 
+        previous_point = point
         time.sleep(poll_interval_seconds)
 
 
-def create_query_session(client: BenchmarkClient, workspace_id: str, library_id: str) -> dict[str, Any]:
+def create_query_session(client: BenchmarkClient, library_id: str) -> dict[str, Any]:
     return client.post_json(
-        "/query/sessions",
+        f"/query/libraries/{library_id}/sessions",
         {
-            "workspaceId": workspace_id,
-            "libraryId": library_id,
             "title": f"Benchmark {utc_now_iso()}",
         },
     )
 
 
 def stable_key(value: str | None) -> str:
-    return canonical_match_text(Path(value).stem if value else "")
+    return normalize_match_text(Path(value).stem if value else "")
 
 
 def document_stable_keys(document: dict[str, Any]) -> list[str]:
     candidates = [
-        document.get("file_name"),
         document.get("fileName"),
-        document.get("title"),
-        document.get("external_key"),
         document.get("externalKey"),
     ]
     keys: list[str] = []
@@ -1319,13 +1517,9 @@ def _primary_documents_by_name(
 ) -> dict[str, dict[str, Any]]:
     actual_by_name: dict[str, dict[str, Any]] = {}
     for document in knowledge_documents:
-        if (
-            document.get("deleted_at") is not None
-            or document.get("readable_revision_id") is None
-            or document.get("document_role", "primary") != "primary"
-        ):
+        if document.get("documentState") != "active" or document.get("status") != "ready":
             continue
-        file_name = document.get("file_name")
+        file_name = document.get("fileName")
         if not isinstance(file_name, str) or not file_name:
             raise RuntimeError("readable benchmark document is missing file_name")
         if file_name in actual_by_name:
@@ -1356,7 +1550,7 @@ def _verify_document_bytes(
     path: Path,
     document: Mapping[str, Any],
 ) -> bytes:
-    document_id = document.get("document_id")
+    document_id = document.get("id")
     if not isinstance(document_id, str) or not document_id:
         raise RuntimeError(f"benchmark document {file_name} is missing document_id")
     server_bytes = client.get_bytes(f"/content/documents/{document_id}/source")
@@ -1372,7 +1566,17 @@ def verify_server_corpus_bytes(
 ) -> dict[Path, bytes]:
     """Prove that a benchmark library contains exactly the expected primary sources."""
     expected_by_name = _expected_documents_by_name(document_paths)
-    knowledge_documents = client.get_json(f"/knowledge/libraries/{library_id}/documents")
+    knowledge_documents: list[dict[str, Any]] = []
+    cursor: str | None = None
+    while True:
+        path = f"/content/libraries/{library_id}/documents?limit=100"
+        if cursor:
+            path = f"{path}&cursor={cursor}"
+        content_listing = client.get_json(path)
+        knowledge_documents.extend(content_listing.get("items", []))
+        cursor = content_listing.get("nextCursor")
+        if not cursor:
+            break
     actual_by_name = _primary_documents_by_name(knowledge_documents)
     _ensure_matching_document_inventory(expected_by_name, actual_by_name)
     return {
@@ -1419,11 +1623,11 @@ def compute_marker_rank_metrics(
     relevant_markers: list[str],
     cutoffs: tuple[int, ...] = RANK_METRIC_CUTOFFS,
 ) -> dict[str, Any] | None:
-    markers = [canonical_match_text(marker) for marker in relevant_markers if marker.strip()]
+    markers = [normalize_match_text(marker) for marker in relevant_markers if marker.strip()]
     if not markers:
         return None
     first_rank = None
-    normalized_ranked = [canonical_match_text(item) for item in ranked_texts]
+    normalized_ranked = [normalize_match_text(item) for item in ranked_texts]
     for index, text in enumerate(normalized_ranked):
         if any(marker in text for marker in markers):
             first_rank = index + 1
@@ -1441,63 +1645,131 @@ def compute_marker_rank_metrics(
     return metrics
 
 
+def canonical_hit_document(hit: dict[str, Any]) -> tuple[str, str | None, str]:
+    """The document of one search hit, refusing snake_case wire aliases.
+
+    An alias reaching the benchmark means the API changed shape underneath it,
+    so the measurement would silently compare two different contracts.
+    """
+    if not isinstance(hit, dict):
+        raise ValueError("search document hit must be an object")
+    document = hit.get("document")
+    if not isinstance(document, dict):
+        raise ValueError("search hit requires canonical document")
+    document_id = document.get("documentId")
+    if "document_id" in document or not isinstance(document_id, str) or not document_id:
+        raise ValueError("search document requires canonical documentId")
+    if "file_name" in document or "external_key" in document:
+        raise ValueError("search document contains a noncanonical wire alias")
+    file_name = document.get("fileName")
+    external_key = document.get("externalKey")
+    if file_name is not None and not isinstance(file_name, str):
+        raise ValueError("search document fileName is invalid")
+    if not isinstance(external_key, str) or not external_key:
+        raise ValueError("search document requires canonical externalKey")
+    return document_id, file_name, external_key
+
+
+def canonical_chunk_hit(chunk: Any) -> tuple[str, str]:
+    """The identifier and content of one lexical chunk hit."""
+    if not isinstance(chunk, dict):
+        raise ValueError("search chunk hit must be an object")
+    if any(alias in chunk for alias in ("chunk_id", "content_text", "normalized_text")):
+        raise ValueError("search chunk contains a noncanonical wire alias")
+    chunk_id = chunk.get("chunkId")
+    content = chunk.get("contentText")
+    normalized = chunk.get("normalizedText")
+    if not isinstance(chunk_id, str) or not chunk_id:
+        raise ValueError("search chunk requires canonical chunkId")
+    if not isinstance(content, str) or not isinstance(normalized, str):
+        raise ValueError("search chunk requires canonical contentText and normalizedText")
+    return chunk_id, content
+
+
+def canonical_vector_chunk_id(chunk: Any) -> str:
+    """The identifier of one vector chunk hit."""
+    if not isinstance(chunk, dict) or "chunk_id" in chunk:
+        raise ValueError("vector chunk contains a noncanonical wire alias")
+    chunk_id = chunk.get("chunkId")
+    if not isinstance(chunk_id, str) or not chunk_id:
+        raise ValueError("vector chunk requires canonical chunkId")
+    return chunk_id
+
+
+def hit_list(hit: dict[str, Any], field: str, message: str) -> list[Any]:
+    """One list-valued field of a search hit."""
+    values = hit.get(field)
+    if not isinstance(values, list):
+        raise ValueError(message)
+    return values
+
+
+def summarized_chunk_hits(
+    hit: dict[str, Any], document_id: str
+) -> tuple[list[dict[str, Any]], list[str]]:
+    """The lexical chunk summaries of one hit, and the texts they carry."""
+    summaries: list[dict[str, Any]] = []
+    texts: list[str] = []
+    for chunk in hit_list(hit, "chunkHits", "search hit requires canonical chunkHits"):
+        chunk_id, content = canonical_chunk_hit(chunk)
+        texts.append(content)
+        summaries.append(
+            {
+                "chunkId": chunk_id,
+                "documentId": document_id,
+                "score": chunk.get("score") or chunk.get("lexicalScore"),
+                "contentPreview": content[:600],
+            }
+        )
+    return summaries, texts
+
+
+def summarized_vector_chunk_hits(
+    hit: dict[str, Any], document_id: str
+) -> list[dict[str, Any]]:
+    """The vector chunk summaries of one hit."""
+    return [
+        {
+            "chunkId": canonical_vector_chunk_id(chunk),
+            "documentId": document_id,
+            "score": chunk.get("score"),
+        }
+        for chunk in hit_list(
+            hit, "vectorChunkHits", "search hit requires canonical vectorChunkHits"
+        )
+    ]
+
+
 def summarize_search_hits(
     search_payload: dict[str, Any],
 ) -> tuple[list[dict[str, Any]], str, list[str], list[str]]:
     summaries: list[dict[str, Any]] = []
     chunk_texts: list[str] = []
     ranked_document_keys: list[str] = []
-    ranked_chunk_texts: list[str] = []
 
-    for hit in search_payload.get("documentHits", []):
-        document = hit.get("document", {})
-        document_id = document.get("document_id") or document.get("documentId")
-        file_name = document.get("file_name") or document.get("fileName")
-        title = document.get("title") or file_name
-        document_key = primary_document_stable_key(document)
+    document_hits = search_payload.get("documentHits")
+    if not isinstance(document_hits, list):
+        raise ValueError("search response requires canonical documentHits")
+    for hit in document_hits:
+        document_id, file_name, external_key = canonical_hit_document(hit)
+        document_key = primary_document_stable_key(hit["document"])
         if document_key:
             ranked_document_keys.append(document_key)
-        chunk_summaries = []
-        for chunk in hit.get("chunkHits", []):
-            content = (
-                chunk.get("content_text")
-                or chunk.get("contentText")
-                or chunk.get("normalized_text")
-                or chunk.get("normalizedText")
-                or ""
-            )
-            chunk_texts.append(content)
-            ranked_chunk_texts.append(content)
-            chunk_summaries.append(
-                {
-                    "chunkId": chunk.get("chunk_id") or chunk.get("chunkId"),
-                    "documentId": document_id,
-                    "score": chunk.get("score") or chunk.get("lexicalScore"),
-                    "contentPreview": content[:600],
-                }
-            )
-        vector_chunk_summaries = []
-        for chunk in hit.get("vectorChunkHits", []):
-            vector_chunk_summaries.append(
-                {
-                    "chunkId": chunk.get("chunk_id") or chunk.get("chunkId"),
-                    "documentId": document_id,
-                    "score": chunk.get("score"),
-                }
-            )
+        chunk_summaries, texts = summarized_chunk_hits(hit, document_id)
+        chunk_texts.extend(texts)
         summaries.append(
             {
                 "documentId": document_id,
                 "fileName": file_name,
-                "title": title,
+                "title": file_name or external_key,
                 "stableKey": document_key,
                 "score": hit.get("score"),
                 "chunkHits": chunk_summaries,
-                "vectorChunkHits": vector_chunk_summaries,
+                "vectorChunkHits": summarized_vector_chunk_hits(hit, document_id),
             }
         )
 
-    return summaries, "\n".join(chunk_texts), ranked_document_keys, ranked_chunk_texts
+    return summaries, "\n".join(chunk_texts), ranked_document_keys, list(chunk_texts)
 
 
 def case_metadata(case: BenchmarkCase) -> dict[str, Any]:
@@ -1521,6 +1793,7 @@ def case_metadata(case: BenchmarkCase) -> dict[str, Any]:
 
 def run_case(
     client: BenchmarkClient,
+    workspace_id: str,
     library_id: str,
     session_id: str,
     case: BenchmarkCase,
@@ -1535,17 +1808,34 @@ def run_case(
         {"contentText": case.question, "topK": query_top_k, "includeDebug": True},
     )
     answer_latency_ms = round((time.monotonic() - answer_started) * 1000.0, 1)
-    response_turn = turn_payload.get("responseTurn", {})
-    execution = turn_payload.get("execution", {})
-    answer_text = response_turn.get("contentText") or response_turn.get("content_text") or ""
-    execution_id = execution.get("id") or execution.get("executionId")
+    canonical_turn = canonical_turn_payload(
+        turn_payload,
+        expected_question=case.question,
+        expected_library_id=library_id,
+        expected_workspace_id=workspace_id,
+    )
+    execution = turn_payload["execution"]
+    answer_text = canonical_turn["answerText"]
+    execution_id = canonical_turn["executionId"]
     execution_detail = client.get_json(f"/query/executions/{execution_id}")
+    canonical_detail = canonical_turn_payload(
+        execution_detail,
+        expected_question=case.question,
+        expected_library_id=library_id,
+        expected_workspace_id=workspace_id,
+    )
+    if (
+        canonical_detail["executionId"] != execution_id
+        or execution_detail["execution"] != turn_payload["execution"]
+        or execution_detail["responseTurn"] != turn_payload["responseTurn"]
+    ):
+        raise ValueError("execution detail belongs to another turn")
 
     search_started = time.monotonic()
-    search_payload = client.get_json(
-        f"/knowledge/libraries/{library_id}/search/documents",
-        params={
-            "query": case.search_query,
+    search_payload = client.post_json(
+        f"/knowledge/libraries/{library_id}/search",
+        {
+            "text": case.search_query,
             "limit": max(RANK_METRIC_SEARCH_LIMIT, query_top_k),
             "chunkHitLimitPerDocument": RANK_METRIC_SEARCH_LIMIT,
             "evidenceSampleLimit": 0,
@@ -1581,6 +1871,10 @@ def run_case(
 
     answer_has_required = contains_all(answer_text, case.answer_required_all) and (
         True if not case.answer_required_any else contains_any(answer_text, case.answer_required_any)
+    ) and (
+        True
+        if not case.answer_required_regex_any
+        else matches_any_regex(answer_text, case.answer_required_regex_any)
     )
     answer_opening = first_answer_sentence(answer_text)
     answer_opening_has_required = (
@@ -1588,7 +1882,10 @@ def run_case(
         if not case.answer_opening_required_any
         else contains_any(answer_opening, case.answer_opening_required_any)
     )
-    answer_has_forbidden = contains_any(answer_text, case.answer_forbidden_any)
+    answer_has_forbidden = contains_any_whole_word(
+        answer_text,
+        case.answer_forbidden_any,
+    ) or matches_any_regex(answer_text, case.answer_forbidden_regex_any)
 
     chunk_reference_count = len(execution_detail.get("chunkReferences", []))
     prepared_segment_reference_count = len(execution_detail.get("preparedSegmentReferences", []))
@@ -1675,6 +1972,17 @@ def run_case(
 
     return {
         **case_metadata(case),
+        "casePolicy": asdict(case),
+        "rawEvaluationEvidence": {
+            "turnPayload": turn_payload,
+            "executionDetail": execution_detail,
+            "searchPayload": {
+                "workspaceId": workspace_id,
+                "libraryId": library_id,
+                "queryText": case.search_query,
+                "responsePayload": search_payload,
+            },
+        },
         "topSearchDocumentTitle": top_document_title,
         "topSearchDocumentOk": top_document_ok,
         "retrievalContainsRequired": retrieval_contains_required,
@@ -1700,7 +2008,7 @@ def run_case(
         "answer": answer_text,
         "executionId": execution_id,
         "querySessionId": session_id,
-        "executionState": execution.get("executionState") or execution.get("execution_state"),
+        "executionState": execution["lifecycleState"],
         "chunkReferenceCount": chunk_reference_count,
         "preparedSegmentReferenceCount": prepared_segment_reference_count,
         "technicalFactReferenceCount": technical_fact_reference_count,
@@ -1708,6 +2016,56 @@ def run_case(
         "relationReferenceCount": relation_reference_count,
         "entityReferences": entity_references,
         "relationReferences": relation_references,
+    }
+
+
+def failed_case_result(case: BenchmarkCase, error: Exception) -> dict[str, Any]:
+    """Authoritative record for a case whose execution failed outright.
+
+    A transient server error on one case must not discard the whole
+    multi-suite run; the case is recorded as failed with an explicit
+    ``case_execution_error`` check so strict mode still fails loudly.
+    """
+    return {
+        "caseId": case.case_id,
+        "casePolicy": asdict(case),
+        "rawEvaluationEvidence": None,
+        "question": case.question,
+        "searchQuery": case.search_query,
+        "caseExecutionError": f"{type(error).__name__}: {error}",
+        "topSearchDocumentTitle": None,
+        "topSearchDocumentOk": False,
+        "retrievalContainsRequired": False,
+        "answerHasRequired": False,
+        "answerOpening": None,
+        "answerOpeningHasRequired": False,
+        "answerHasForbidden": False,
+        "answerPass": False,
+        "graphUsagePass": False,
+        "entityReferenceLabelsPass": False,
+        "relationReferenceTextPass": False,
+        "structuredEvidencePass": False,
+        "verificationState": None,
+        "verificationWarnings": [],
+        "verificationPass": False,
+        "strictCasePass": False,
+        "failedChecks": ["case_execution_error"],
+        "searchResultCount": 0,
+        "searchLatencyMs": None,
+        "searchResults": [],
+        "rankMetrics": {},
+        "answerLatencyMs": None,
+        "answer": None,
+        "executionId": None,
+        "querySessionId": None,
+        "executionState": None,
+        "chunkReferenceCount": 0,
+        "preparedSegmentReferenceCount": 0,
+        "technicalFactReferenceCount": 0,
+        "entityReferenceCount": 0,
+        "relationReferenceCount": 0,
+        "entityReferences": [],
+        "relationReferences": [],
     }
 
 
@@ -1898,19 +2256,29 @@ def build_measurement_protocol(
     round_id: str,
     environment_identity: dict[str, Any],
     host_policy: dict[str, Any],
+    host_preflight_start: dict[str, Any],
     host_preflight: dict[str, Any],
     host_midflight: dict[str, Any],
     host_postflight: dict[str, Any],
     busy_host_override: bool,
 ) -> dict[str, Any]:
     snapshots = {
+        "preStart": host_preflight_start,
         "pre": host_preflight,
         "mid": host_midflight,
         "post": host_postflight,
     }
     evaluations = {
-        phase: evaluate_host_snapshot(snapshot, host_policy)
-        for phase, snapshot in snapshots.items()
+        phase: evaluate_host_snapshot(
+            snapshots[end_phase],
+            host_policy,
+            swap_activity_start=snapshots[start_phase],
+        )
+        for phase, start_phase, end_phase in (
+            ("pre", "preStart", "pre"),
+            ("mid", "pre", "mid"),
+            ("post", "mid", "post"),
+        )
     }
     sequence_evaluation = evaluate_host_snapshot_sequence(snapshots)
     release_evidence_eligible = (
@@ -1928,6 +2296,7 @@ def build_measurement_protocol(
         "answerBeforeRankProbe": True,
         "environmentIdentity": environment_identity,
         "hostEligibilityPolicy": host_policy,
+        "hostPreflightStart": host_preflight_start,
         "hostPreflight": host_preflight,
         "hostMidflight": host_midflight,
         "hostPostflight": host_postflight,
@@ -1940,11 +2309,33 @@ def build_measurement_protocol(
 
 def main() -> int:
     args = parse_args()
+    experiment_fields = (
+        args.experiment_id,
+        args.artifact_role,
+        args.pair_id,
+        args.sequence_position,
+    )
+    if any(experiment_fields) and not all(
+        isinstance(value, str) and value.strip() for value in experiment_fields
+    ):
+        print(
+            "--experiment-id, --artifact-role, --pair-id, and --sequence-position "
+            "must be supplied together.",
+            file=sys.stderr,
+        )
+        return 2
     if not args.base_url:
         print(
             "IronRAG base URL is required via --base-url or IRONRAG_BENCHMARK_BASE_URL.",
             file=sys.stderr,
         )
+        return 2
+    if (
+        not isinstance(args.tls_certificate_sha256, str)
+        or not re.fullmatch(r"[0-9a-f]{64}", args.tls_certificate_sha256)
+        or args.tls_certificate_sha256 == "0" * 64
+    ):
+        print("A non-zero lowercase API TLS certificate SHA-256 is required.", file=sys.stderr)
         return 2
     if not args.workspace_id:
         print(
@@ -1957,14 +2348,19 @@ def main() -> int:
     except ValueError as error:
         print(str(error), file=sys.stderr)
         return 2
-    if not valid_artifact_digest(args.runtime_artifact_digest):
-        print(
-            "IRONRAG_BENCHMARK_RUNTIME_ARTIFACT_DIGEST must be a non-empty "
-            "immutable SHA-256 digest.",
-            file=sys.stderr,
-        )
-        return 2
-    runtime_artifact_digest = args.runtime_artifact_digest.strip()
+    data_state_identity = None
+    if args.data_state_file is not None:
+        try:
+            data_state_identity = load_data_state_identity(args.data_state_file)
+        except (OSError, ValueError) as error:
+            print(f"invalid --data-state-file: {error}", file=sys.stderr)
+            return 2
+        if not args.library_id:
+            print("--data-state-file requires an existing --library-id.", file=sys.stderr)
+            return 2
+        if data_state_identity.get("libraryId") != args.library_id:
+            print("--data-state-file libraryId does not match --library-id.", file=sys.stderr)
+            return 2
     if not isinstance(args.round_id, str) or not args.round_id.strip():
         print("--round-id must be non-empty.", file=sys.stderr)
         return 2
@@ -1982,7 +2378,7 @@ def main() -> int:
     if args.skip_upload and not args.library_id:
         print("--skip-upload requires --library-id.", file=sys.stderr)
         return 2
-    if args.skip_upload and not args.canonicalize_reused_library:
+    if args.skip_upload and not args.normalize_reused_library:
         print(
             "--skip-upload requires --canonicalize-reused-library so latency is "
             "measured against a quiet corpus.",
@@ -1995,7 +2391,7 @@ def main() -> int:
     host_policy = build_host_eligibility_policy(
         max_load_per_cpu=args.max_host_load_per_cpu,
         min_available_memory_percent=args.min_host_available_memory_percent,
-        max_swap_used_percent=args.max_host_swap_used_percent,
+        max_swap_io_pages_per_second=args.max_host_swap_io_pages_per_second,
         max_cpu_psi_some_avg10=args.max_host_cpu_psi_some_avg10,
         max_memory_psi_some_avg10=args.max_host_memory_psi_some_avg10,
         max_memory_psi_full_avg10=args.max_host_memory_psi_full_avg10,
@@ -2019,14 +2415,19 @@ def main() -> int:
         )
         return 2
 
-    host_preflight = capture_host_snapshot()
-    host_preflight_evaluation = evaluate_host_snapshot(host_preflight, host_policy)
+    host_preflight_start, host_preflight = capture_host_activity_sample()
+    host_preflight_evaluation = evaluate_host_snapshot(
+        host_preflight,
+        host_policy,
+        swap_activity_start=host_preflight_start,
+    )
     if not host_preflight_evaluation["passed"] and not args.allow_busy_host:
         print(
             json.dumps(
                 {
                     "error": "benchmark_host_is_busy",
                     "hostEligibilityPolicy": host_policy,
+                    "hostPreflightStart": host_preflight_start,
                     "host": host_preflight,
                     "evaluation": host_preflight_evaluation,
                     "hint": (
@@ -2068,7 +2469,7 @@ def main() -> int:
         return 2
 
     environment_identity = build_environment_identity(host_preflight)
-    client = BenchmarkClient(args.base_url, session_cookie)
+    client = BenchmarkClient(args.base_url, session_cookie, args.tls_certificate_sha256)
     runtime_version = client.get_json("/version")
     if not isinstance(runtime_version, dict) or any(
         not isinstance(runtime_version.get(key), str)
@@ -2080,9 +2481,33 @@ def main() -> int:
             file=sys.stderr,
         )
         return 2
+    if not all(
+        valid_artifact_digest(runtime_version.get(key))
+        for key in (
+            "binarySha256", "resolvedConfigSha256", "runtimeResourcesSha256",
+            "redisEndpointSha256", "redisServiceSha256", "databaseTlsLeafSha256",
+            "redisTlsLeafSha256",
+        )
+    ):
+        print("IronRAG /version response is missing runtime attestation digests.", file=sys.stderr)
+        return 2
+    if stable_json_sha256(runtime_version.get("runtimeResources")) != runtime_version.get(
+        "runtimeResourcesSha256"
+    ):
+        print("IronRAG /version runtime resource attestation is stale.", file=sys.stderr)
+        return 2
+    if data_state_identity is not None:
+        runtime_deployment_id = runtime_version.get("deploymentId")
+        state_deployment_id = data_state_identity["databaseIdentity"]["deploymentId"]
+        if runtime_deployment_id != state_deployment_id:
+            print(
+                "IronRAG runtime deploymentId does not match the collected database state.",
+                file=sys.stderr,
+            )
+            return 2
     runtime_identity = {
         "label": args.runtime_label or runtime_version.get("version") or "unlabelled",
-        "artifactDigest": runtime_artifact_digest,
+        "artifactDigest": runtime_version["binarySha256"],
         "versionEndpoint": runtime_version,
     }
     created_library = None
@@ -2137,15 +2562,16 @@ def main() -> int:
 
     library_summary = fetch_library_summary(client, library_id)
     topology_counts = fetch_topology_counts(client, library_id)
-    host_midflight = capture_host_snapshot()
 
     if args.upload_only:
+        host_midflight = capture_host_snapshot()
         host_postflight = capture_host_snapshot()
         measurement_protocol = build_measurement_protocol(
             cache_policy=args.cache_policy,
             round_id=args.round_id,
             environment_identity=environment_identity,
             host_policy=host_policy,
+            host_preflight_start=host_preflight_start,
             host_preflight=host_preflight,
             host_midflight=host_midflight,
             host_postflight=host_postflight,
@@ -2169,6 +2595,8 @@ def main() -> int:
             "runtimeIdentity": runtime_identity,
             "measurementProtocol": measurement_protocol,
         }
+        if data_state_identity is not None:
+            payload["dataStateIdentity"] = data_state_identity
         if args.output:
             write_json(Path(args.output).resolve(), payload)
         if args.output_dir:
@@ -2190,11 +2618,26 @@ def main() -> int:
             str(payload.get("suiteId") or suite_path.stem),
         )
         for case in ordered_cases:
-            session = create_query_session(client, args.workspace_id, library_id)
+            session = create_query_session(client, library_id)
             query_session_ids.append(session["id"])
-            case_results.append(
-                run_case(client, library_id, session["id"], case, args.query_top_k)
-            )
+            try:
+                case_results.append(
+                    run_case(
+                        client,
+                        args.workspace_id,
+                        library_id,
+                        session["id"],
+                        case,
+                        args.query_top_k,
+                    )
+                )
+            except requests.RequestException as error:
+                print(
+                    f"case {case.case_id} failed to execute: "
+                    f"{type(error).__name__}: {error}",
+                    file=sys.stderr,
+                )
+                case_results.append(failed_case_result(case, error))
             completed_case_count += 1
             if host_midflight is None and completed_case_count >= midpoint_case_count:
                 host_midflight = capture_host_snapshot()
@@ -2239,6 +2682,7 @@ def main() -> int:
         round_id=args.round_id,
         environment_identity=environment_identity,
         host_policy=host_policy,
+        host_preflight_start=host_preflight_start,
         host_preflight=host_preflight,
         host_midflight=host_midflight,
         host_postflight=host_postflight,
@@ -2247,6 +2691,11 @@ def main() -> int:
     release_evidence_eligible = measurement_protocol["releaseEvidenceEligible"]
     matrix_result = {
         "generatedAt": utc_now_iso(),
+        "experimentId": args.experiment_id,
+        "artifactRole": args.artifact_role,
+        "pairId": args.pair_id,
+        "roundId": args.round_id,
+        "sequencePosition": args.sequence_position,
         "suiteMatrix": [str(path) for path in suite_paths],
         "workspaceId": args.workspace_id,
         "library": created_library or {"id": library_id},
@@ -2254,7 +2703,7 @@ def main() -> int:
             suite_results,
             query_top_k=args.query_top_k,
             skip_upload=args.skip_upload,
-            canonicalize_reused_library=args.canonicalize_reused_library,
+            normalize_reused_library=args.normalize_reused_library,
             cache_policy=args.cache_policy,
             round_id=args.round_id,
         ),
@@ -2281,6 +2730,8 @@ def main() -> int:
         "summary": build_matrix_summary(suite_results),
         "suites": suite_results,
     }
+    if data_state_identity is not None:
+        matrix_result["dataStateIdentity"] = data_state_identity
 
     if args.output:
         write_json(Path(args.output), matrix_result)

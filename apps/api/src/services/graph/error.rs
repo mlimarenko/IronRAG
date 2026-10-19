@@ -1,3 +1,4 @@
+use crate::shared::provider_failure::ProviderFailureKind;
 use thiserror::Error;
 use uuid::Uuid;
 
@@ -17,6 +18,8 @@ pub enum GraphServiceError {
     NotFound { message: String },
     #[error("graph state conflict: {message}")]
     StateConflict { message: String },
+    #[error("graph revision {revision_id} is no longer the active readable head")]
+    RevisionSuperseded { revision_id: Uuid },
     #[error("graph write contention: {message}")]
     WriteContention { message: String },
     #[error("graph persistence integrity failure: {message}")]
@@ -68,6 +71,7 @@ impl GraphServiceError {
             Self::LibraryNotFound { .. } => "GraphServiceError::LibraryNotFound",
             Self::NotFound { .. } => "GraphServiceError::NotFound",
             Self::StateConflict { .. } => "GraphServiceError::StateConflict",
+            Self::RevisionSuperseded { .. } => "GraphServiceError::RevisionSuperseded",
             Self::WriteContention { .. } => "GraphServiceError::WriteContention",
             Self::PersistenceIntegrity { .. } => "GraphServiceError::PersistenceIntegrity",
             Self::ProviderUnavailable { .. } => "GraphServiceError::ProviderUnavailable",
@@ -84,8 +88,10 @@ impl From<IngestServiceError> for GraphServiceError {
             IngestServiceError::LibraryNotFound { library_id } => {
                 Self::LibraryNotFound { library_id }
             }
-            IngestServiceError::ProviderUnavailable { message } => {
-                Self::ProviderUnavailable { message }
+            IngestServiceError::Provider(failure)
+                if failure.kind() == ProviderFailureKind::Unavailable =>
+            {
+                Self::ProviderUnavailable { message: failure.message().to_string() }
             }
             IngestServiceError::BindingNotConfigured { message }
             | IngestServiceError::StateConflict { message } => Self::StateConflict { message },
@@ -127,8 +133,8 @@ impl From<QueryServiceError> for GraphServiceError {
             QueryServiceError::BindingNotConfigured { message }
             | QueryServiceError::StateConflict { message }
             | QueryServiceError::CacheUnavailable { message } => Self::StateConflict { message },
-            QueryServiceError::ProviderUnavailable { message } => {
-                Self::ProviderUnavailable { message }
+            QueryServiceError::Provider(failure) => {
+                Self::ProviderUnavailable { message: failure.message().to_string() }
             }
             QueryServiceError::Cancelled => Self::Cancelled,
             QueryServiceError::DeadlineExceeded => Self::Cancelled,

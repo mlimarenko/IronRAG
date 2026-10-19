@@ -5,7 +5,7 @@ mod answer;
 mod answer_kind;
 mod answer_pipeline;
 mod associative_graph_retrieval;
-mod canonical_answer_context;
+mod authoritative_answer_context;
 mod chunk_support;
 mod command_shape;
 mod consolidation;
@@ -27,19 +27,22 @@ mod preflight;
 mod preflight_context;
 pub(crate) mod question_intent;
 mod rerank;
-mod retrieval_plan;
+pub(crate) mod retrieval_plan;
 #[cfg(test)]
 mod retrieval_plan_tests;
 mod retrieve;
 mod semantic_rerank;
 mod source_context;
 mod source_excerpt;
+mod source_focus_selection;
 mod source_profile;
 mod structured_query_pipeline;
 mod table_retrieval;
 mod table_row_answer;
+mod table_row_identity;
 mod table_summary_answer;
 mod technical_answer;
+mod technical_answer_identity;
 mod technical_literal_context;
 mod technical_literal_extractors;
 mod technical_literal_focus;
@@ -71,22 +74,26 @@ use crate::domains::query::{
 pub(crate) use answer::build_answer_prompt;
 pub(crate) use answer::{
     build_deterministic_grounded_answer, build_exact_version_change_summary_answer,
-    build_missing_explicit_document_answer, build_ordered_source_slice_answer,
-    render_canonical_chunk_section, render_canonical_technical_fact_section,
-    render_prepared_segment_section, render_targeted_evidence_chunk_section,
+    build_ordered_source_slice_answer, render_authoritative_technical_fact_section,
+    render_prepared_segment_section, render_primary_chunk_section,
+    render_targeted_evidence_chunk_section,
 };
+pub(crate) use answer_kind::AnswerKind;
+#[cfg(test)]
+pub(crate) use answer_pipeline::apply_enumeration_coverage_warning;
 pub(crate) use answer_pipeline::{
-    generate_answer_query, literal_revision_targets, prepare_answer_query,
+    AnswerQueryRequest, PrepareAnswerQueryRequest, generate_answer_query, literal_revision_targets,
+    prepare_answer_query,
 };
 #[cfg(test)]
-pub(crate) use canonical_answer_context::{
+pub(crate) use authoritative_answer_context::{
     apply_runtime_chunk_overlays, merge_runtime_context_chunks,
-    selected_fact_ids_for_canonical_evidence,
+    selected_fact_ids_for_authoritative_evidence,
 };
-pub(crate) use canonical_answer_context::{
-    build_canonical_answer_context, focus_token_overlap_count, load_canonical_answer_chunks,
-    load_canonical_answer_evidence, load_direct_targeted_table_answer,
-    query_ir_document_focus_tokens,
+pub(crate) use authoritative_answer_context::{
+    build_authoritative_answer_context, focus_token_overlap_count,
+    load_authoritative_answer_evidence, load_direct_targeted_table_answer,
+    load_primary_answer_chunks, query_ir_document_focus_tokens,
 };
 pub(crate) use chunk_support::{focused_excerpt_for, map_chunk_hit};
 pub(crate) use consolidation::{focused_document_consolidation, prune_non_topical_document_tail};
@@ -101,10 +108,10 @@ pub(crate) use context::{
 #[cfg(test)]
 pub(crate) use document_target::document_focus_marker_hits;
 pub(crate) use document_target::{
-    concise_document_subject_label, explicit_document_reference_literal_is_present,
-    explicit_document_reference_literals, explicit_target_document_ids_from_values,
-    focused_answer_document_id, normalized_document_target_candidates,
-    question_requests_multi_document_scope, resolve_scoped_target_document_ids,
+    concise_document_subject_label, explicit_document_reference_literals,
+    explicit_target_document_ids_from_values, focused_answer_document_id,
+    normalized_document_target_candidates, question_requests_multi_document_scope,
+    resolve_scoped_target_document_ids,
 };
 #[cfg(test)]
 pub(crate) use endpoint_chunk_answer::{
@@ -117,11 +124,11 @@ pub(crate) use graph_retrieval::{
     associative_edges_for_entities, graph_target_entity_coverage_score,
     query_relevant_graph_evidence_target_hits,
 };
-use preflight::prepare_canonical_answer_preflight;
+use preflight::prepare_answer_preflight;
 #[cfg(test)]
 use preflight::{
-    build_canonical_preflight_answer, build_preflight_answer_chunks,
-    build_preflight_canonical_evidence, build_preflight_graph_evidence_context_lines,
+    build_evidence_preflight_answer, build_preflight_answer_chunks,
+    build_preflight_authoritative_evidence, build_preflight_graph_evidence_context_lines,
 };
 #[cfg(test)]
 pub(crate) use rerank::apply_rerank_outcome;
@@ -132,16 +139,17 @@ pub(crate) use retrieve::{
     truncate_bundle,
 };
 pub(crate) use retrieve::{
-    canonical_document_revision_id, load_document_index, merge_chunks,
-    retain_canonical_document_head_chunks, score_desc_chunks, score_value,
+    current_document_revision_id, load_document_index, merge_chunks,
+    retain_current_document_head_chunks, score_desc_chunks, score_value,
 };
 #[cfg(test)]
 pub(crate) use source_context::source_slice_context_top_k;
 pub(crate) use source_context::{
-    SOURCE_UNIT_CHUNK_KIND, augment_structured_source_context, source_anchor_window,
-    source_slice_requested_count,
+    SOURCE_UNIT_CHUNK_KIND, StructuredSourceContextAugmentRequest,
+    augment_structured_source_context, source_anchor_window, source_slice_requested_count,
 };
 pub(crate) use structured_query_pipeline::{
+    CompiledIrPlanRefresh, ResolvedRetrievalReplanRequest, StructuredQueryAssemblyRequest,
     finalize_structured_query, plan_structured_query, refresh_query_plan_for_compiled_ir,
     replan_for_resolved_retrieval_query, rerank_structured_query, retrieve_structured_query,
 };
@@ -150,7 +158,7 @@ pub(crate) use table_retrieval::is_table_analytics_chunk;
 pub(crate) use table_retrieval::{
     load_initial_table_rows_for_documents, load_table_rows_for_documents,
     load_table_section_sibling_chunks, load_table_summary_chunks_for_documents,
-    merge_canonical_table_aggregation_chunks, query_ir_requests_table_section_siblings,
+    merge_table_aggregation_chunks, query_ir_requests_table_section_siblings,
     requested_initial_table_row_count,
 };
 #[cfg(test)]
@@ -171,7 +179,7 @@ use technical_literals::technical_literal_focus_keyword_segments;
 #[cfg(test)]
 use technical_literals::technical_literal_focus_keywords;
 pub(crate) use types::{
-    AnswerGenerationStage, AnswerVerificationStage, CanonicalAnswerEvidence,
+    AnswerGenerationStage, AnswerVerificationStage, AuthoritativeAnswerEvidence,
     PreparedAnswerQueryResult, QueryChunkReferenceSnapshot, QueryGraphIndex, RetrievalBundle,
     RuntimeAnswerQueryFailure, RuntimeAnswerQueryResult, RuntimeAnswerVerification,
     RuntimeChunkScoreKind, RuntimeMatchedChunk, RuntimeMatchedEntity, RuntimeMatchedRelationship,
@@ -183,20 +191,26 @@ pub(crate) use types::{
     RuntimeStructuredQueryDiagnostics, RuntimeStructuredQueryReferenceCounts, sample_chunk_row,
     sample_structured_block_row, sample_technical_fact_row,
 };
+pub(crate) use verification::{
+    AnswerVerificationRequest, QueryVerificationPersistence, persist_query_verification,
+    persisted_answer_is_system_statement, persisted_query_answer_outcome,
+    verify_answer_against_authoritative_evidence,
+};
 #[cfg(test)]
 pub(crate) use verification::{
     attach_query_answer_outcome, enrich_query_assembly_diagnostics, enrich_query_candidate_summary,
 };
-pub(crate) use verification::{
-    persist_query_verification, persisted_query_answer_outcome,
-    verify_answer_against_canonical_evidence,
-};
 pub(crate) use verification_policy::{AnswerVisibilityKind, finalize_answer_visibility};
 
 /// HyDE passage generation timeout. Increase for slow LLM providers.
-const HYDE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+const HYDE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
 /// HyDE generation temperature. Lower = more factual, higher = more creative.
 const HYDE_TEMPERATURE: f64 = 0.3;
+/// HyDE output-token budget. Reasoning models spend this budget on hidden
+/// reasoning tokens before emitting visible text; a passage-sized cap (200)
+/// leaves them zero visible output and the call returns an empty passage.
+/// The budget must therefore cover reasoning plus the 2-3 sentence passage.
+const HYDE_MAX_OUTPUT_TOKENS: i32 = 1000;
 /// Maximum structured blocks included per answer assembly pass.
 const MAX_ANSWER_BLOCKS: usize = 16;
 /// Maximum chunks selected per document in balanced chunk selection.

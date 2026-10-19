@@ -6,7 +6,7 @@ export interface UploadCandidate {
 export function normalizeUploadName(value: string): string {
   return value
     .trim()
-    .replace(/\\/g, '/')
+    .replaceAll('\\', '/')
     .split('/')
     .map((segment) => segment.trim())
     .filter((segment) => segment.length > 0)

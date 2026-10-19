@@ -98,7 +98,7 @@ pub(crate) enum RuntimeChunkScoreKind {
 pub(crate) struct RuntimeMatchedChunk {
     pub chunk_id: Uuid,
     pub document_id: Uuid,
-    /// Canonical revision the chunk was fetched from. Needed by the
+    /// Current revision the chunk was fetched from. Needed by the
     /// focused-document consolidation stage so it can group chunks by
     /// the revision they actually came from (not just by `document_id`,
     /// which could in principle span revisions during index swap).
@@ -195,7 +195,7 @@ pub(crate) struct RuntimeStructuredQueryResult {
     pub(crate) retrieved_documents: Vec<RuntimeRetrievedDocumentBrief>,
     /// Distinct document titles represented by the final ranked chunk
     /// bundle. Unlike `retrieved_documents`, this list does not depend
-    /// on preview loading and is the canonical title source for routing
+    /// on preview loading and is the authoritative title source for routing
     /// decisions that only need to know which documents shaped context.
     pub(crate) retrieved_context_document_titles: Vec<String>,
     /// Final ranked chunks that survived consolidation + truncation and
@@ -215,7 +215,7 @@ pub(crate) struct RuntimeStructuredQueryResult {
     pub(crate) ordered_source_units: Vec<RuntimeMatchedChunk>,
     /// Runtime graph evidence rows that did not necessarily hydrate to
     /// `knowledge_chunk` rows. They are already selected and ranked by the
-    /// retrieval graph-evidence lane, so canonical answer assembly can render
+    /// retrieval graph-evidence lane, so authoritative answer assembly can render
     /// them without parsing the old bounded context string.
     pub(crate) graph_evidence_context_lines: Vec<String>,
     /// Final ranked graph entities that shaped the answer context. These feed
@@ -253,8 +253,8 @@ pub(crate) struct RuntimeAnswerQueryFailure {
 #[derive(Debug, Clone)]
 pub(crate) struct AnswerGenerationStage {
     pub(crate) intent_profile: QueryIntentProfile,
-    pub(crate) canonical_answer_chunks: Vec<RuntimeMatchedChunk>,
-    pub(crate) canonical_evidence: CanonicalAnswerEvidence,
+    pub(crate) primary_answer_chunks: Vec<RuntimeMatchedChunk>,
+    pub(crate) authoritative_evidence: AuthoritativeAnswerEvidence,
     pub(crate) assistant_grounding: AssistantGroundingEvidence,
     pub(crate) answer: String,
     pub(crate) usage_json: serde_json::Value,
@@ -264,7 +264,7 @@ pub(crate) struct AnswerGenerationStage {
     /// including library summary lines and document metadata that aren't
     /// part of the chunk corpus.
     pub(crate) prompt_context: String,
-    /// Canonical IR produced by `QueryCompilerService`. Drives the
+    /// Compiled IR produced by `QueryCompilerService`. Drives the
     /// verifier's strictness policy via `QueryIR::verification_level`
     /// instead of blanket suppression on every unsupported literal.
     pub(crate) query_ir: crate::domains::query_ir::QueryIR,
@@ -284,7 +284,7 @@ pub(crate) struct RuntimeAnswerVerification {
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct CanonicalAnswerEvidence {
+pub(crate) struct AuthoritativeAnswerEvidence {
     pub(crate) bundle: Option<crate::infra::knowledge_rows::KnowledgeContextBundleRow>,
     pub(crate) chunk_rows: Vec<KnowledgeChunkRow>,
     pub(crate) structured_blocks: Vec<KnowledgeStructuredBlockRow>,
@@ -304,15 +304,15 @@ pub(crate) struct SemanticRerankExecutionContext {
 pub(crate) struct PreparedAnswerQueryResult {
     pub(crate) structured: RuntimeStructuredQueryResult,
     pub(crate) answer_context: String,
-    /// Canonical typed representation of the user's question produced by
+    /// Compiled typed representation of the user's question produced by
     /// `QueryCompilerService`. Downstream stages (verification, ranking,
     /// answer generation) should read routing signals from this instead
     /// of re-classifying the raw question with keyword lists.
     pub(crate) query_ir: crate::domains::query_ir::QueryIR,
     /// Fine-grained timed sub-operations (DB queries, retrieval lanes, …)
-    /// captured while preparing this query, for the debug inspector. The
-    /// caller stashes these by execution_id so the snapshot writer can attach
-    /// them to this execution's snapshot.
+    /// captured while preparing this query, for the debug inspector. The answer
+    /// stage reads these by reference when it builds this execution's snapshot,
+    /// so every write of that row carries them.
     pub(crate) retrieval_spans: Vec<crate::services::query::turn_spans::TurnSpan>,
 }
 
@@ -517,7 +517,6 @@ pub(crate) fn sample_chunk_row(
 
         window_text: None,
 
-        raptor_level: None,
         occurred_at: None,
         occurred_until: None,
     }
@@ -567,9 +566,9 @@ pub(crate) fn sample_technical_fact_row(
         document_id,
         revision_id,
         fact_kind: "endpoint_path".to_string(),
-        canonical_value_text: "/health".to_string(),
-        canonical_value_exact: "/health".to_string(),
-        canonical_value_json: serde_json::json!("/health"),
+        normalized_value_text: "/health".to_string(),
+        normalized_value_exact: "/health".to_string(),
+        normalized_value_json: serde_json::json!("/health"),
         display_value: "/health".to_string(),
         qualifiers_json: serde_json::json!({}),
         support_block_ids: Vec::new(),

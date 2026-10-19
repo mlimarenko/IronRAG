@@ -449,7 +449,7 @@ pub(crate) fn build_technical_fact_references(
                 fact_id: fact.fact_id,
                 revision_id: fact.revision_id,
                 fact_kind: fact.fact_kind.parse().ok()?,
-                canonical_value: fact.canonical_value_text.clone(),
+                normalized_value: fact.normalized_value_text.clone(),
                 display_value: fact.display_value.clone(),
                 rank: reference.rank,
                 score: reference.score,
@@ -496,6 +496,12 @@ pub(crate) fn map_chunk_references(
             chunk_id: reference.chunk_id,
             rank: reference.rank,
             score: reference.score,
+            // Filled in at display time from the chunk rows themselves; the
+            // stored reference is only an id, a rank and a score.
+            document_id: None,
+            document_title: None,
+            section_path: Vec::new(),
+            excerpt: None,
         })
         .collect()
 }
@@ -702,8 +708,8 @@ pub(crate) fn map_execution_runtime_summary(
         failure_code: row.failure_code.clone(),
         failure_summary_redacted: runtime_failure_summary_for_view(row, runtime_policy_rows),
         policy_summary: map_runtime_policy_summary(runtime_policy_rows),
-        accepted_at: row.started_at,
-        completed_at: row.completed_at,
+        accepted_at: row.runtime_accepted_at,
+        completed_at: row.runtime_completed_at,
     }
 }
 

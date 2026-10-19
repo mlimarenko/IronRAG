@@ -14,7 +14,7 @@
 //!    structural source (`/download/attachments/<page-id>/...` in the external
 //!    key, document hint, or source uri) are matched to the same-library
 //!    document that exposes that page id as its own structural identity.
-//! 3. **Role finalization.** Every child's role is set from the canonical
+//! 3. **Role finalization.** Every child's role is set from the authoritative
 //!    media-class classifier via
 //!    [`crate::domains::content::derive_document_role`]: a raster-image child
 //!    becomes `attached_context`; any other child stays an `attachment` peer.
@@ -145,7 +145,7 @@ pub async fn backfill_document_parents(
 }
 
 /// `page-id -> parent_document_id` over non-attachment documents, deterministic
-/// (lowest document id wins a collision; any parent suffices per the canonical
+/// (lowest document id wins a collision; any parent suffices under the parent-selection rule
 /// first-resolved rule).
 async fn build_parent_page_index(
     pool: &sqlx::PgPool,
@@ -181,7 +181,9 @@ async fn build_external_key_index(
     let rows = sqlx::query_as::<_, (Uuid, String)>(
         "select id, external_key
          from content_document
-         where library_id = $1 and document_state <> 'deleted'",
+         where library_id = $1
+           and document_state <> 'deleted'
+           and deleted_at is null",
     )
     .bind(library_id)
     .fetch_all(pool)
@@ -219,6 +221,7 @@ async fn load_child_candidates(
          left join content_revision r on r.id = coalesce(h.readable_revision_id, h.active_revision_id)
          where d.library_id = $1
            and d.document_state <> 'deleted'
+           and d.deleted_at is null
            and (
                 d.parent_external_key is not null
                 or d.external_key like '%/download/attachments/%'
@@ -247,6 +250,7 @@ async fn load_parent_candidates(
          left join content_revision r on r.id = coalesce(h.readable_revision_id, h.active_revision_id)
          where d.library_id = $1
            and d.document_state <> 'deleted'
+           and d.deleted_at is null
            and (r.document_hint is null or r.document_hint not like '%/download/attachments/%')
            and d.external_key not like '%/download/attachments/%'",
     )
@@ -302,7 +306,7 @@ async fn update_child_parentage(
     // query path: the document index is hydrated from `knowledge_document`, so a
     // content-plane-only update would leave every document `primary` at query
     // time. No-op when the document has not been promoted yet (the promote path
-    // stamps the role from the same canonical derivation).
+    // stamps the role from the same shared derivation).
     let knowledge_update = sqlx::query(
         "update knowledge_document
          set parent_document_id = $2,
@@ -360,7 +364,7 @@ fn resolve_child_parent(
 }
 
 /// The attachment page id encoded in any of the child's structural sources, via
-/// the canonical [`attachment_parent_page_id`] parser.
+/// the shared [`attachment_parent_page_id`] parser.
 fn child_attachment_page_id(child: &ChildCandidateRow) -> Option<String> {
     structural_source_values(&child.external_key, &child.document_hint, &child.source_uri)
         .into_iter()
@@ -499,7 +503,7 @@ mod tests {
             revision_is_raster_image(Some(row.external_key.as_str()), row.mime_type.as_deref());
         let target_role = derive_document_role(resolved_id.is_some(), is_raster_image).to_string();
 
-        // Re-resolving an already-attached child reproduces the same canonical
+        // Re-resolving an already-attached child reproduces the same shared
         // parent + role, so a re-run writes the same values (idempotent). The
         // apply itself is unconditional now (it must always mirror onto
         // knowledge_document), so idempotency is a property of the resolution,

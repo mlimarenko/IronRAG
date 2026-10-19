@@ -1,5 +1,6 @@
 import type {
   AiBindingPurpose,
+  AssistantVerificationState,
   DocumentReadiness as GeneratedDocumentReadiness,
   DocumentStatus as GeneratedDocumentStatus,
   GraphStatus as GeneratedGraphStatus,
@@ -40,8 +41,8 @@ export interface Library {
  * values the list API will ever emit; the UI stays 1:1 with the server
  * so nothing has to re-derive buckets client-side.
  */
-export type DocumentStatus = GeneratedDocumentStatus
-export type DocumentReadiness = GeneratedDocumentReadiness
+type DocumentStatus = GeneratedDocumentStatus
+type DocumentReadiness = GeneratedDocumentReadiness
 type SourceAccessKind = 'stored_document' | 'external_url'
 
 export interface SourceAccess {
@@ -51,12 +52,17 @@ export interface SourceAccess {
 
 export interface DocumentItem {
   id: string
-  fileName: string
-  fileType: string
-  fileSize: number
+  documentState: string
+  fileName: string | null
+  fileType: string | null
+  fileSize: number | null
   uploadedAt: string
   completedAt?: string | undefined
-  cost: number | null
+  cost: string | null
+  /// Set when the owning library rollup was reconciling at read time: a null
+  /// cost then means "not known yet", and the grid names that state instead of
+  /// rendering a bare dash that reads as "no cost".
+  costRollupFreshness?: 'current' | 'reconciling' | undefined
   status: DocumentStatus
   readiness: DocumentReadiness
   stage?: string | undefined
@@ -96,7 +102,7 @@ export interface GraphNode {
   type: GraphNodeType
   subType?: string
   summary?: string
-  canonicalSummary?: string
+  documentSummary?: string
   properties: Record<string, string>
   edgeCount: number
   convergenceStatus?: string
@@ -130,8 +136,6 @@ export interface AssistantSession {
   turnCount: number
 }
 
-type AssistantStage = 'planning' | 'grounding' | 'response'
-
 type AssistantAgentActivityEventType =
   | 'started'
   | 'model_request'
@@ -161,28 +165,17 @@ export interface AssistantMessage {
   role: 'user' | 'assistant'
   content: string
   timestamp: string
+  /** Latest processing time measured and reported by the server. */
+  elapsedMs?: number
   /**
-   * Server-authoritative wall-clock for the turn, in milliseconds. Measured
-   * end-to-end on the API host (`execution.completedAt − execution.startedAt`)
-   * so it never folds in client↔server clock skew the way subtracting the
-   * optimistic browser-stamped user timestamp from the server answer timestamp
-   * would. Absent on messages hydrated from history (reload path), where the
-   * server-vs-server timestamp delta is used instead.
+   * Server-authoritative runtime wall-clock in milliseconds
+   * (`runtimeSummary.completedAt − runtimeSummary.acceptedAt`). Absent until the
+   * runtime has a valid terminal timestamp pair.
    */
   durationMs?: number
   executionId?: string | null
-  attachments?: FileAttachment[]
-  stage?: AssistantStage
-  isStreaming?: boolean
   evidence?: EvidenceBundle
   activityEvents?: AssistantAgentActivityEvent[]
-}
-
-interface FileAttachment {
-  id: string
-  name: string
-  size: number
-  type: string
 }
 
 export interface EvidenceBundle {
@@ -249,8 +242,7 @@ interface RelationReference {
   weight: number
 }
 
-export type VerificationState =
-  'passed' | 'partially_supported' | 'conflicting' | 'insufficient_evidence' | 'failed' | 'not_run'
+export type VerificationState = AssistantVerificationState
 
 interface RuntimeSummary {
   totalSegments: number
@@ -258,19 +250,11 @@ interface RuntimeSummary {
   totalEntities: number
   totalRelations: number
   stages: RuntimeStageSummary[]
-  policyInterventions: PolicyIntervention[]
 }
 
 interface RuntimeStageSummary {
   stage: string
   durationMs: number
-  itemCount: number
-}
-
-interface PolicyIntervention {
-  kind: 'rejected' | 'terminated' | 'blocked'
-  reason: string
-  timestamp: string
 }
 
 // Admin types
@@ -362,8 +346,27 @@ export interface AIProvider {
   capabilities: AIProviderCapabilities
   runtime: AIProviderRuntime
   uiHints: AIProviderUiHints
+  /** Purposes no seeded model covers, each with why and which kind of gap it is. */
+  purposeGaps: AIProviderPurposeGap[]
   modelCount: number
   credentialCount: number
+}
+
+export type { AiBindingPurpose }
+
+/**
+ * Either the provider is incapable, or it can serve the purpose and the model
+ * is the operator's to choose. The two need opposite words on screen: one is a
+ * dead end, the other is a prompt to pick from the provider's live listing.
+ */
+type AIProviderPurposeGapKind = 'provider_cannot' | 'operator_supplies'
+
+interface AIProviderPurposeGap {
+  purpose: string
+  kind: AIProviderPurposeGapKind
+  /** Stable code to translate; `reason` is the server's English fallback. */
+  code: string
+  reason: string
 }
 
 export interface AIAccount {
@@ -389,14 +392,19 @@ export interface AIModelOption {
   id: string
   providerCatalogId: string
   modelName: string
-  capabilityKind: string
-  modalityKind: string
   allowedBindingPurposes: AiBindingPurpose[]
   lifecycleState?: 'active' | 'deprecated' | 'preview' | 'disabled'
   contextWindow?: number
   maxOutputTokens?: number
   availabilityState: AIModelAvailabilityState
   availableAccountIds: string[]
+  /**
+   * True for rows this build seeded, whose purpose list is a curated statement
+   * of what the model can do. A row an operator added carries no such claim —
+   * its purposes are simply the ones bound so far, and adding another is a
+   * normal edit rather than a contradiction.
+   */
+  seeded: boolean
 }
 
 export type AIBindingState = 'active' | 'invalid' | 'disabled'
@@ -415,23 +423,6 @@ export interface AIBinding {
   maxOutputTokens?: number
   extraParams?: Record<string, unknown>
   state: AIBindingState
-}
-
-export interface PricingRule {
-  id: string
-  modelCatalogId: string
-  workspaceId?: string
-  provider: string
-  model: string
-  billingUnit: string
-  unitPrice: number
-  currency: string
-  effectiveFrom: string
-  effectiveTo?: string
-  priceVariant?: string
-  inputTokenMin?: number
-  inputTokenMax?: number
-  sourceOrigin: string
 }
 
 export interface OperationsSnapshot {
@@ -482,9 +473,8 @@ export interface AuditEvent {
 
 export interface AuditEventPage {
   items: AuditEvent[]
+  nextCursor: string | null
   total: number
-  limit: number
-  offset: number
 }
 
 interface LocaleOption {
@@ -499,3 +489,9 @@ export const AVAILABLE_LOCALES = [
 ] as const satisfies ReadonlyArray<LocaleOption>
 
 export type Locale = (typeof AVAILABLE_LOCALES)[number]['code']
+
+// UI-local presentation enums (not API DTOs): device theme preference and the
+// four visual states a screen surface can render.
+export type Theme = 'light' | 'dark' | 'system'
+export type Role = User['role']
+export type DemoScenario = 'ready' | 'loading' | 'error' | 'empty'

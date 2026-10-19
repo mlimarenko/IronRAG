@@ -22,42 +22,28 @@ stage runs on every user turn and answer quality is what they perceive.
 
 The configuration contract remains exactly five required profiles:
 `extract_graph`, `embed_chunk`, `query_compile`, `query_answer`, and `agent`.
-The multimodal `extract_text` profile is optional regardless of which profiles
-run locally.
+The multimodal `extract_text` profile and the `query_rerank` profile for
+provider-backed semantic rerank are optional regardless of which profiles run
+locally.
 
 ## Provider registration
 
-The Ollama provider catalog row ships with the IronRAG bootstrap and
-defaults to `http://localhost:11434/v1` with no API key. You only need
-to create an AI account pointing at a reachable Ollama host (from inside
-the backend container that probably means `host.docker.internal:11434`)
-and the model catalog auto-syncs the OpenAI-compatible model list
-(`GET /v1/models` against the account base URL) into IronRAG's catalog.
+The Ollama provider catalog row ships with the IronRAG bootstrap. Its base URL
+is required and may point at a private network; an API key is not required.
+Create an AI account with the URL reachable from the backend container, then
+use its OpenAI-compatible `/v1/models` endpoint for model discovery.
 
-```bash
-curl -sS -X POST http://localhost:19000/v1/ai/accounts \
-  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
-  -d '{
-    "scopeKind": "workspace",
-    "workspaceId": "<your-workspace-uuid>",
-    "providerCatalogId": "00000000-0000-0000-0000-000000000104",
-    "label": "Ollama (local)",
-    "baseUrl": "http://host.docker.internal:11434/v1"
-  }'
-```
-
-The `providerCatalogId` is the fixed Ollama row and is stable across
-deployments. After the account is saved, IronRAG queries Ollama's
-model list and registers every model with `capability_kind=chat` and
-`capability_kind=embedding`. A multimodal model used for document
-understanding must explicitly allow the optional canonical
-`extract_text` binding purpose; there is no separate document-analysis
-binding alias.
+The bootstrap catalog has the stable embedding entries `nomic-embed-text`
+(768 dimensions) and `mxbai-embed-large` (1024 dimensions). Chat models are
+operator-supplied because Ollama serves the models pulled on that host. Do not
+depend on a fixed provider-catalog UUID: the catalog source defines no such
+deployment-independent identifier. A multimodal model for document
+understanding must be configured for the optional `extract_text` binding; there
+is no separate document-analysis binding alias.
 
 ## Example profile set (12 GB VRAM, single GPU)
 
-Benchmarked WARM on RTX 5070 (12 GB) against a representative
-extract-graph prompt over a Rust source chunk:
+Example profile set:
 
 | Purpose       | Model                  | Latency | Quality                                | VRAM |
 |---------------|------------------------|---------|----------------------------------------|------|
@@ -66,7 +52,7 @@ extract-graph prompt over a Rust source chunk:
 | `extract_text` | `qwen3-vl:4b`         | n/a     | multimodal chat (kept for PDF OCR)     | 3.3 GB |
 | `query_answer` | cloud model           | —       | unchanged                              | 0    |
 
-Models we benchmarked and rejected:
+Models with known limitations:
 
 - **`qwen3:4b` / `qwen3:8b`** — emit ~800 tokens of `<thinking>…</thinking>`
   preamble before any structured output. Ollama does not currently
@@ -90,8 +76,8 @@ then optional visual analysis through Document Understanding. Each stage warm-lo
 chunk and serves the rest of the batch from VRAM.
 
 If you see a stage stall for ~5–10 s every 5 minutes that is the model
-reload. Bump `OLLAMA_KEEP_ALIVE` in `/data/docker/ollama/docker-compose.yml`
-to suppress it under steady load.
+reload. Set `OLLAMA_KEEP_ALIVE` in the Ollama deployment configuration to
+suppress it under steady load.
 
 ## Context window and idle timeout
 
@@ -174,34 +160,9 @@ vector-plane rebuild completed
 | Document Understanding times out on small images | `qwen3-vl:4b` ships with `num_ctx=4096`; some PDF page images encode to longer prompts | Set `num_ctx: 8192` in the `extract_text` binding's `extraParametersJson`. |
 | Backend health says OK at port 19000 but every `/v1/*` returns 404 | Frontend nginx is still pointing at a stale backend Docker IP after a `--force-recreate backend` | Recreate the frontend too — backend and frontend must be recreated together. |
 
-## Quick benchmark recipe
-
-Use the embedded `/api/generate` to time a model on a representative
-prompt before binding it:
-
-```python
-import json, time, urllib.request
-prompt = open("your-representative-chunk.md").read()
-body = json.dumps({
-    "model": "llama3.1:8b",
-    "prompt": prompt,
-    "stream": False,
-    "options": {"temperature": 0, "num_predict": 500, "num_ctx": 8192},
-}).encode()
-t0 = time.time()
-r = urllib.request.urlopen(urllib.request.Request(
-    "http://localhost:11434/api/generate", data=body,
-    headers={"Content-Type": "application/json"}), timeout=180)
-d = json.loads(r.read())
-print(f"wall={time.time()-t0:.1f}s  tokens={d['eval_count']}  tok/s={d['eval_count']/(d['eval_duration']/1e9):.0f}")
-```
-
-Always benchmark WARM (second run): the first call pays the model-load
-tax that the production worker amortizes across the batch.
-
 ## Recommended Ollama runtime tuning
 
-In `/data/docker/ollama/docker-compose.yml`:
+In the Ollama deployment configuration:
 
 ```yaml
 environment:
@@ -218,13 +179,3 @@ simultaneously when there is headroom. On a 12 GB card with the profile set
 above this is borderline — `qwen3-embedding:0.6b` (1 GB) plus
 `llama3.1:8b` (5.5 GB) fits if no other process is competing, but a
 parallel multimodal extraction call will evict one of them.
-
-## See also
-
-- `apps/api/src/bin/ironrag_maintenance.rs` — the rebuild CLI source.
-- `apps/api/src/services/query/search.rs:470` —
-  `rebuild_vector_plane_for_library`, the rebuild flow
-  including the precondition check.
-- `apps/api/src/services/query/vector_dimensions.rs` — the dimension
-  validation that fails-loud when a binding produces vectors that do
-  not match the index.

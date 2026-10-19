@@ -526,7 +526,7 @@ mod tests {
     }
 
     #[test]
-    fn related_prefix_token_match_accepts_longer_canonical_label_prefix() {
+    fn related_prefix_token_match_accepts_longer_normalized_label_prefix() {
         assert!(related_prefix_token_match("acmew", "acmealpha"));
     }
 
@@ -652,7 +652,7 @@ mod tests {
     }
 
     #[test]
-    fn related_overlap_allows_repeated_same_prefix_canonical_token() {
+    fn related_overlap_allows_repeated_same_prefix_normalized_token() {
         let candidates = build_related_token_candidates(
             ["Acmealpha Gateway", "Acmealpha Integration", "Beta Gateway"],
             3,

@@ -1,4 +1,5 @@
 {{- if eq .Values.dependencies.postgres.mode "bundled" }}
+{{- if not .Values.dependencies.postgres.persistence.existingClaim }}
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
@@ -15,6 +16,7 @@ spec:
   storageClassName: {{ . }}
   {{- end }}
 ---
+{{- end }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -38,19 +40,31 @@ spec:
       labels:
         {{- include "ironrag.selectorLabels" . | nindent 8 }}
         app.kubernetes.io/component: postgres
+      annotations:
+        {{- include "ironrag.bundledDependencyPodAnnotations" . | nindent 8 }}
     spec:
       automountServiceAccountToken: false
       securityContext:
         runAsNonRoot: true
         runAsUser: 999
         runAsGroup: 999
-        fsGroup: 999
+        # PostgreSQL validates PGDATA permissions itself. An fsGroup makes
+        # kubelet recursively chmod a pre-existing physical cluster and can
+        # turn its required 0700 directory into a rejected group-writable one.
         seccompProfile:
           type: RuntimeDefault
       containers:
         - name: postgres
-          image: "{{ .Values.dependencies.postgres.image.repository }}:{{ .Values.dependencies.postgres.image.tag }}"
+          image: "{{ include "ironrag.image" (dict "image" .Values.dependencies.postgres.image) }}"
           imagePullPolicy: {{ .Values.dependencies.postgres.image.pullPolicy }}
+          args:
+            - postgres
+            - -c
+            - {{ printf "max_connections=%v" .Values.dependencies.postgres.maxConnections | quote }}
+            - -c
+            - {{ printf "shared_buffers=%s" .Values.dependencies.postgres.sharedBuffers | quote }}
+            - -c
+            - {{ printf "work_mem=%s" .Values.dependencies.postgres.workMem | quote }}
           securityContext:
             runAsNonRoot: true
             runAsUser: 999
@@ -110,7 +124,7 @@ spec:
       volumes:
         - name: data
           persistentVolumeClaim:
-            claimName: {{ include "ironrag.fullname" . }}-postgres
+            claimName: {{ include "ironrag.postgresClaimName" . }}
         - name: socket
           emptyDir: {}
         - name: dshm

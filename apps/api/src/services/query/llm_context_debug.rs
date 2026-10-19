@@ -7,7 +7,7 @@
 //! fidelity revision over the same evidence. This module lets the
 //! operator inspect those exact wire payloads after the fact.
 //!
-//! Storage is canonical Postgres state keyed by `execution_id`, so
+//! Storage is authoritative Postgres state keyed by `execution_id`, so
 //! completed turns, cached answer replays, and backend restarts all
 //! expose the same provider payload to the UI.
 
@@ -34,21 +34,18 @@ pub struct LlmIterationDebug {
     /// Wall-clock the model spent on this iteration — request sent to
     /// response received ("model think time"). `None` on records written
     /// before timing capture existed.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub duration_ms: Option<u64>,
     /// Runtime execution IDs spawned by tool calls in this iteration.
     /// Populated on tool-use turns when a tool such as
     /// `grounded_answer` creates its own query execution and debug
     /// snapshot. Empty on iterations whose tools do not spawn child
     /// query executions and on single-shot grounded-answer turns.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub child_runtime_execution_ids: Vec<Uuid>,
     /// Query-execution IDs of the child executions spawned by this
     /// iteration's tool calls. These are the IDs the execution-detail /
     /// llm-context endpoints accept, so the debug inspector can drill
     /// into a child `grounded_answer` execution. (The runtime IDs above
     /// key a different table and are not directly fetchable.)
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub child_query_execution_ids: Vec<Uuid>,
 }
 
@@ -62,15 +59,12 @@ pub struct ResponseToolCallDebug {
     pub arguments_json: String,
     /// Raw arguments emitted by the model when server-side defaults or
     /// guards changed the executable payload.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub requested_arguments_json: Option<String>,
     pub result_text: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub result_json: Option<serde_json::Value>,
     pub is_error: bool,
     /// Wall-clock the tool ran ("tool wait time" the model blocked on).
     /// `None` on records written before timing capture existed.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub duration_ms: Option<u64>,
 }
 
@@ -84,6 +78,12 @@ pub struct AgentLoopMetadata {
     pub deadline_ms: u64,
     pub stopped_reason: AgentStopReason,
     pub tool_call_count: usize,
+    #[serde(default)]
+    pub provider_429_count: u64,
+    #[serde(default)]
+    pub provider_retry_count: u64,
+    #[serde(default)]
+    pub degraded_completion_count: u64,
 }
 
 /// Reason the tool-use loop stopped iterating.
@@ -101,6 +101,10 @@ pub enum AgentStopReason {
     NoProgress,
     ToolError,
     ProviderError,
+    /// A value written by a newer or retired binary. Historical diagnostics
+    /// remain readable without assigning the value live control semantics.
+    #[serde(other)]
+    Unknown,
 }
 
 /// Full debug snapshot for one assistant turn — one execution_id.
@@ -115,22 +119,19 @@ pub struct LlmContextSnapshot {
     pub total_iterations: usize,
     pub final_answer: Option<String>,
     pub captured_at: chrono::DateTime<chrono::Utc>,
-    /// Canonical `QueryIR` produced by `QueryCompilerService` before the
+    /// Compiled `QueryIR` produced by `QueryCompilerService` before the
     /// answer stage ran. Surfaced to the debug panel as a JSON tree so
     /// operators see act / scope / target_types / literal_constraints /
     /// confidence that actually drove routing and verification. `None`
     /// on records written by older code paths.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub query_ir: Option<serde_json::Value>,
     /// Tool-use loop metadata. `None` for single-shot grounded-answer turns;
     /// `Some` when tool-use execution drove this turn.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_loop: Option<AgentLoopMetadata>,
     /// Fine-grained timed sub-operations recorded during this execution
     /// (individual DB queries, retrieval lanes, …) so the inspector can
     /// surface where time went and operators can catch heavy sections. Empty
     /// on records written before span capture existed.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub spans: Vec<crate::services::query::turn_spans::TurnSpan>,
 }
 
@@ -153,19 +154,13 @@ pub async fn upsert_snapshot(
     postgres: &PgPool,
     snapshot: &LlmContextSnapshot,
 ) -> Result<(), sqlx::Error> {
-    let mut snapshot_json = serde_json::to_value(snapshot).map_err(|error| {
+    // The row is replaced whole, so the caller owns every field it carries —
+    // including `spans`. Answer paths build the snapshot from
+    // `AnswerSnapshotContext`, which reads the retrieval spans by reference and
+    // therefore repeats them on every write of the same execution's row.
+    let snapshot_json = serde_json::to_value(snapshot).map_err(|error| {
         sqlx::Error::Protocol(format!("failed to serialize LLM context snapshot: {error}"))
     })?;
-    // Attach the fine-grained timed spans stashed for this execution (DB
-    // queries, retrieval lanes) unless the snapshot already carries them.
-    if snapshot.spans.is_empty() {
-        let spans = crate::services::query::turn_spans::take_execution_spans(snapshot.execution_id);
-        if !spans.is_empty()
-            && let Ok(spans_value) = serde_json::to_value(&spans)
-        {
-            snapshot_json["spans"] = spans_value;
-        }
-    }
     sqlx::query(
         "insert into query_llm_context_snapshot (
             execution_id, snapshot_json, captured_at
@@ -258,6 +253,9 @@ mod tests {
             deadline_ms: 30_000,
             stopped_reason: AgentStopReason::FinalAnswer,
             tool_call_count: 3,
+            provider_429_count: 4,
+            provider_retry_count: 4,
+            degraded_completion_count: 0,
         });
         let json = serde_json::to_string(&snap).expect("serialize");
         let restored: LlmContextSnapshot = serde_json::from_str(&json).expect("deserialize");
@@ -266,6 +264,9 @@ mod tests {
         assert_eq!(meta.deadline_ms, 30_000);
         assert_eq!(meta.stopped_reason, AgentStopReason::FinalAnswer);
         assert_eq!(meta.tool_call_count, 3);
+        assert_eq!(meta.provider_429_count, 4);
+        assert_eq!(meta.provider_retry_count, 4);
+        assert_eq!(meta.degraded_completion_count, 0);
     }
 
     #[test]
@@ -277,16 +278,50 @@ mod tests {
     }
 
     #[test]
-    fn child_runtime_execution_ids_default_empty() {
-        // JSON without childRuntimeExecutionIds must deserialize cleanly.
+    fn persisted_snapshot_tolerates_retired_usage_and_stop_reason_values() {
+        let mut snapshot = fake_snapshot(Uuid::now_v7());
+        let mut iteration = fake_iteration(1);
+        iteration.usage = serde_json::json!({
+            "deterministic": true,
+            "answer_kind": "ordered_source_slice_identity_fallback",
+        });
+        snapshot.iterations.push(iteration);
+        snapshot.total_iterations = 1;
+        snapshot.agent_loop = Some(AgentLoopMetadata {
+            iteration_cap: 4,
+            deadline_ms: 30_000,
+            stopped_reason: AgentStopReason::ToolError,
+            tool_call_count: 1,
+            provider_429_count: 0,
+            provider_retry_count: 0,
+            degraded_completion_count: 0,
+        });
+        let mut stored = serde_json::to_value(snapshot).expect("serialize stored snapshot");
+        stored["agentLoop"]["stoppedReason"] = serde_json::json!("retired_tool_failure_reason");
+
+        let restored: LlmContextSnapshot =
+            serde_json::from_value(stored).expect("load historical snapshot");
+
+        assert_eq!(
+            restored.iterations[0].usage["answer_kind"],
+            "ordered_source_slice_identity_fallback",
+        );
+        assert_eq!(
+            restored.agent_loop.expect("agent loop metadata").stopped_reason,
+            AgentStopReason::Unknown,
+        );
+    }
+
+    #[test]
+    fn snapshot_requires_all_v1_fields_on_deserialization() {
         let json = r#"{
             "executionId": "018f8e4b-0000-7000-8000-000000000001",
             "libraryId":   "018f8e4b-0000-7000-8000-000000000002",
             "question":    "test",
             "iterations":  [{
                 "iteration": 1,
-                "providerKind": "openai",
-                "modelName": "gpt-4",
+                "providerKind": "provider",
+                "modelName": "model",
                 "requestMessages": [],
                 "responseText": null,
                 "responseToolCalls": [],
@@ -296,8 +331,7 @@ mod tests {
             "finalAnswer": null,
             "capturedAt": "2026-05-10T00:00:00Z"
         }"#;
-        let snap: LlmContextSnapshot = serde_json::from_str(json).expect("deserialize");
-        assert_eq!(snap.iterations[0].child_runtime_execution_ids.len(), 0);
-        assert!(snap.agent_loop.is_none());
+
+        assert!(serde_json::from_str::<LlmContextSnapshot>(json).is_err());
     }
 }

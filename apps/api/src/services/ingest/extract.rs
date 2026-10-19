@@ -26,7 +26,7 @@ pub struct MaterializeChunkResultCommand {
 
 #[derive(Debug, Clone)]
 pub struct NewNodeCandidate {
-    pub canonical_key: String,
+    pub identity_key: String,
     pub node_kind: String,
     pub display_label: String,
     pub summary: Option<String>,
@@ -34,12 +34,12 @@ pub struct NewNodeCandidate {
 
 #[derive(Debug, Clone)]
 pub struct NewEdgeCandidate {
-    pub canonical_key: String,
+    pub identity_key: String,
     pub edge_kind: String,
     pub from_display_label: String,
-    pub from_canonical_key: String,
+    pub from_identity_key: String,
     pub to_display_label: String,
-    pub to_canonical_key: String,
+    pub to_identity_key: String,
     pub summary: Option<String>,
 }
 
@@ -106,13 +106,15 @@ impl ExtractService {
         } else {
             extract_repository::create_extract_chunk_result(
                 &state.persistence.postgres,
-                command.chunk_id,
-                command.attempt_id,
-                &command.extract_state,
-                command.provider_call_id,
-                None,
-                command.finished_at,
-                command.failure_code.as_deref(),
+                extract_repository::NewExtractChunkResult {
+                    chunk_id: command.chunk_id,
+                    attempt_id: command.attempt_id,
+                    extract_state: &command.extract_state,
+                    provider_call_id: command.provider_call_id,
+                    started_at: None,
+                    finished_at: command.finished_at,
+                    failure_code: command.failure_code.as_deref(),
+                },
             )
             .await
             .map_err(|e| ApiError::internal_with_log(e, "internal"))?
@@ -124,7 +126,7 @@ impl ExtractService {
         let node_candidates = prepared_nodes
             .iter()
             .map(|candidate| extract_repository::NewExtractNodeCandidate {
-                canonical_key: &candidate.canonical_key,
+                identity_key: &candidate.identity_key,
                 node_kind: &candidate.node_kind,
                 display_label: &candidate.display_label,
                 summary: candidate.summary.as_deref(),
@@ -133,10 +135,10 @@ impl ExtractService {
         let edge_candidates = prepared_edges
             .iter()
             .map(|candidate| extract_repository::NewExtractEdgeCandidate {
-                canonical_key: &candidate.canonical_key,
+                identity_key: &candidate.identity_key,
                 edge_kind: &candidate.edge_kind,
-                from_canonical_key: &candidate.from_canonical_key,
-                to_canonical_key: &candidate.to_canonical_key,
+                from_identity_key: &candidate.from_identity_key,
+                to_identity_key: &candidate.to_identity_key,
                 summary: candidate.summary.as_deref(),
             })
             .collect::<Vec<_>>();
@@ -151,7 +153,7 @@ impl ExtractService {
                 chunk_result_id = %chunk_result.id,
                 chunk_id = %command.chunk_id,
                 ?error,
-                "failed to replace canonical extract node candidates"
+                "failed to replace normalized extract node candidates"
             );
             ApiError::Internal
         })?;
@@ -166,7 +168,7 @@ impl ExtractService {
                 chunk_result_id = %chunk_result.id,
                 chunk_id = %command.chunk_id,
                 ?error,
-                "failed to replace canonical extract edge candidates"
+                "failed to replace normalized extract edge candidates"
             );
             ApiError::Internal
         })?;
@@ -211,13 +213,13 @@ impl ExtractService {
             .map(|row| ExtractNodeCandidate {
                 id: row.id,
                 chunk_result_id: row.chunk_result_id,
-                canonical_key: row.canonical_key,
+                identity_key: row.identity_key,
                 node_kind: row.node_kind,
                 display_label: row.display_label,
                 summary: row.summary,
             })
             .collect::<Vec<_>>();
-        mapped.sort_by(|a, b| a.canonical_key.cmp(&b.canonical_key).then_with(|| a.id.cmp(&b.id)));
+        mapped.sort_by(|a, b| a.identity_key.cmp(&b.identity_key).then_with(|| a.id.cmp(&b.id)));
         Ok(mapped)
     }
 
@@ -244,14 +246,14 @@ impl ExtractService {
             .map(|row| ExtractEdgeCandidate {
                 id: row.id,
                 chunk_result_id: row.chunk_result_id,
-                canonical_key: row.canonical_key,
+                identity_key: row.identity_key,
                 edge_kind: row.edge_kind,
-                from_canonical_key: row.from_canonical_key,
-                to_canonical_key: row.to_canonical_key,
+                from_identity_key: row.from_identity_key,
+                to_identity_key: row.to_identity_key,
                 summary: row.summary,
             })
             .collect::<Vec<_>>();
-        mapped.sort_by(|a, b| a.canonical_key.cmp(&b.canonical_key).then_with(|| a.id.cmp(&b.id)));
+        mapped.sort_by(|a, b| a.identity_key.cmp(&b.identity_key).then_with(|| a.id.cmp(&b.id)));
         Ok(mapped)
     }
 
@@ -321,7 +323,7 @@ fn map_text_state_to_extract_state(text_state: &str) -> Result<&'static str, Api
         "failed" => Ok("failed"),
         unsupported => Err(ApiError::internal_with_log(
             unsupported,
-            "knowledge revision has a non-canonical text state",
+            "knowledge revision has a unsupported text state",
         )),
     }
 }
@@ -355,7 +357,7 @@ const fn map_resume_cursor_row(
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct PreparedMaterializedNodeCandidate {
-    canonical_key: String,
+    identity_key: String,
     node_kind: String,
     display_label: String,
     summary: Option<String>,
@@ -363,13 +365,27 @@ struct PreparedMaterializedNodeCandidate {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct PreparedMaterializedEdgeCandidate {
-    canonical_key: String,
+    identity_key: String,
     edge_kind: String,
     from_display_label: String,
-    from_canonical_key: String,
+    from_identity_key: String,
     to_display_label: String,
-    to_canonical_key: String,
+    to_identity_key: String,
     summary: Option<String>,
+}
+
+/// Exact slug parse for ingest materialization.
+///
+/// The shared graph parser trims padding, but a materialized candidate's kind
+/// arrives from our own typed pipeline: a padded value there is corrupt, not a
+/// variant to normalize, so it stays dropped exactly as before the
+/// consolidation.
+#[must_use]
+fn parse_materialized_node_kind(node_kind: &str) -> Option<RuntimeNodeType> {
+    if node_kind != node_kind.trim() {
+        return None;
+    }
+    crate::services::graph::identity::runtime_node_type_from_slug(node_kind)
 }
 
 fn prepare_materialized_node_candidates(
@@ -381,7 +397,7 @@ fn prepare_materialized_node_candidates(
         if display_label.is_empty() {
             continue;
         }
-        let Some(node_type) = parse_materialized_node_type(&candidate.node_kind) else {
+        let Some(node_type) = parse_materialized_node_kind(&candidate.node_kind) else {
             continue;
         };
         entity_key_index.insert(display_label, node_type);
@@ -393,12 +409,12 @@ fn prepare_materialized_node_candidates(
             if display_label.is_empty() {
                 return None;
             }
-            let _node_type = parse_materialized_node_type(&candidate.node_kind)?;
-            let canonical_key = entity_key_index.canonical_node_key_for_label(display_label);
+            let _node_type = parse_materialized_node_kind(&candidate.node_kind)?;
+            let identity_key = entity_key_index.node_identity_key_for_label(display_label);
             let node_type =
-                crate::services::graph::identity::runtime_node_type_from_key(&canonical_key);
+                crate::services::graph::identity::runtime_node_type_from_key(&identity_key);
             Some(PreparedMaterializedNodeCandidate {
-                canonical_key,
+                identity_key,
                 node_kind: crate::services::graph::identity::runtime_node_type_slug(&node_type)
                     .to_string(),
                 display_label: display_label.to_string(),
@@ -419,7 +435,7 @@ fn prepare_materialized_edge_candidates(
 ) -> Vec<PreparedMaterializedEdgeCandidate> {
     let mut entity_key_index = crate::services::graph::identity::GraphLabelNodeTypeIndex::new();
     for candidate in node_candidates {
-        if let Some(node_type) = parse_materialized_node_type(&candidate.node_kind) {
+        if let Some(node_type) = parse_materialized_node_kind(&candidate.node_kind) {
             entity_key_index.insert(&candidate.display_label, node_type);
         }
     }
@@ -437,20 +453,20 @@ fn prepare_materialized_edge_candidates(
             if from_display_label.is_empty() || to_display_label.is_empty() {
                 return None;
             }
-            let from_canonical_key =
-                entity_key_index.canonical_node_key_for_label(from_display_label);
-            let to_canonical_key = entity_key_index.canonical_node_key_for_label(to_display_label);
+            let from_identity_key =
+                entity_key_index.node_identity_key_for_label(from_display_label);
+            let to_identity_key = entity_key_index.node_identity_key_for_label(to_display_label);
             Some(PreparedMaterializedEdgeCandidate {
-                canonical_key: crate::services::graph::identity::canonical_edge_key(
-                    &from_canonical_key,
+                identity_key: crate::services::graph::identity::graph_edge_identity_key(
+                    &from_identity_key,
                     &relation_type,
-                    &to_canonical_key,
+                    &to_identity_key,
                 ),
                 edge_kind: relation_type,
                 from_display_label: from_display_label.to_string(),
-                from_canonical_key,
+                from_identity_key,
                 to_display_label: to_display_label.to_string(),
-                to_canonical_key,
+                to_identity_key,
                 summary: candidate
                     .summary
                     .as_deref()
@@ -462,29 +478,12 @@ fn prepare_materialized_edge_candidates(
         .collect()
 }
 
-fn parse_materialized_node_type(node_kind: &str) -> Option<RuntimeNodeType> {
-    match node_kind {
-        "document" => Some(RuntimeNodeType::Document),
-        "person" => Some(RuntimeNodeType::Person),
-        "organization" => Some(RuntimeNodeType::Organization),
-        "location" => Some(RuntimeNodeType::Location),
-        "event" => Some(RuntimeNodeType::Event),
-        "artifact" => Some(RuntimeNodeType::Artifact),
-        "natural" => Some(RuntimeNodeType::Natural),
-        "process" => Some(RuntimeNodeType::Process),
-        "concept" => Some(RuntimeNodeType::Concept),
-        "attribute" => Some(RuntimeNodeType::Attribute),
-        "entity" => Some(RuntimeNodeType::Entity),
-        _ => None,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn text_projection_states_map_only_from_the_canonical_vocabulary() {
+    fn text_projection_states_map_only_from_the_supported_vocabulary() {
         for (projection, extract) in [
             ("accepted", "accepted"),
             ("extracting_text", "processing"),
@@ -503,7 +502,7 @@ mod tests {
     }
 
     #[test]
-    fn parse_materialized_node_type_accepts_exact_protocol_literals() {
+    fn materialized_node_type_slug_accepts_exact_protocol_literals() {
         for (literal, expected) in [
             ("document", RuntimeNodeType::Document),
             ("person", RuntimeNodeType::Person),
@@ -517,21 +516,21 @@ mod tests {
             ("attribute", RuntimeNodeType::Attribute),
             ("entity", RuntimeNodeType::Entity),
         ] {
-            assert_eq!(parse_materialized_node_type(literal), Some(expected), "{literal}");
+            assert_eq!(parse_materialized_node_kind(literal), Some(expected), "{literal}");
         }
     }
 
     #[test]
-    fn parse_materialized_node_type_rejects_legacy_aliases_and_normalized_variants() {
-        for invalid in ["topic", "technology", "metric", " Entity ", "ENTITY", ""] {
-            assert_eq!(parse_materialized_node_type(invalid), None, "{invalid:?}");
+    fn materialized_node_type_slug_rejects_legacy_aliases_and_unknown_values() {
+        for invalid in ["topic", "technology", "metric", " Entity ", "person ", "ENTITY", ""] {
+            assert_eq!(parse_materialized_node_kind(invalid), None, "{invalid:?}");
         }
     }
 
     #[test]
     fn prepare_materialized_node_candidates_drops_unknown_node_types() {
         let candidates = vec![NewNodeCandidate {
-            canonical_key: String::new(),
+            identity_key: String::new(),
             node_kind: "topic".to_string(),
             display_label: "Synthetic Node".to_string(),
             summary: None,
@@ -541,9 +540,9 @@ mod tests {
     }
 
     #[test]
-    fn prepare_materialized_node_candidates_recanonicalizes_unicode_labels() {
+    fn prepare_materialized_node_candidates_normalizes_unicode_labels() {
         let candidates = vec![NewNodeCandidate {
-            canonical_key: String::new(),
+            identity_key: String::new(),
             node_kind: "entity".to_string(),
             display_label: "Acme Print House".to_string(),
             summary: None,
@@ -552,7 +551,7 @@ mod tests {
         let prepared = prepare_materialized_node_candidates(&candidates);
 
         assert_eq!(prepared.len(), 1);
-        assert_eq!(prepared[0].canonical_key, "entity:acme_print_house");
+        assert_eq!(prepared[0].identity_key, "entity:acme_print_house");
         assert_eq!(prepared[0].node_kind, "entity");
         assert_eq!(prepared[0].display_label, "Acme Print House");
     }
@@ -561,13 +560,13 @@ mod tests {
     fn prepare_materialized_edge_candidates_accepts_structural_relation_types() {
         let nodes = prepare_materialized_node_candidates(&[
             NewNodeCandidate {
-                canonical_key: String::new(),
+                identity_key: String::new(),
                 node_kind: "entity".to_string(),
                 display_label: "Acme Print House".to_string(),
                 summary: None,
             },
             NewNodeCandidate {
-                canonical_key: String::new(),
+                identity_key: String::new(),
                 node_kind: "concept".to_string(),
                 display_label: "Register".to_string(),
                 summary: None,
@@ -575,30 +574,30 @@ mod tests {
         ]);
         let edges = vec![
             NewEdgeCandidate {
-                canonical_key: String::new(),
+                identity_key: String::new(),
                 edge_kind: "opaque_predicate_7".to_string(),
                 from_display_label: "Acme Print House".to_string(),
-                from_canonical_key: String::new(),
+                from_identity_key: String::new(),
                 to_display_label: "Register".to_string(),
-                to_canonical_key: String::new(),
+                to_identity_key: String::new(),
                 summary: None,
             },
             NewEdgeCandidate {
-                canonical_key: String::new(),
+                identity_key: String::new(),
                 edge_kind: "   ".to_string(),
                 from_display_label: "Acme Print House".to_string(),
-                from_canonical_key: String::new(),
+                from_identity_key: String::new(),
                 to_display_label: "Register".to_string(),
-                to_canonical_key: String::new(),
+                to_identity_key: String::new(),
                 summary: None,
             },
             NewEdgeCandidate {
-                canonical_key: String::new(),
+                identity_key: String::new(),
                 edge_kind: "Invalid_Predicate".to_string(),
                 from_display_label: "Acme Print House".to_string(),
-                from_canonical_key: String::new(),
+                from_identity_key: String::new(),
                 to_display_label: "Register".to_string(),
-                to_canonical_key: String::new(),
+                to_identity_key: String::new(),
                 summary: None,
             },
         ];
@@ -607,25 +606,25 @@ mod tests {
 
         assert_eq!(prepared.len(), 1);
         assert_eq!(
-            prepared[0].canonical_key,
+            prepared[0].identity_key,
             "entity:acme_print_house--opaque_predicate_7--concept:register"
         );
         assert_eq!(prepared[0].edge_kind, "opaque_predicate_7");
-        assert_eq!(prepared[0].from_canonical_key, "entity:acme_print_house");
-        assert_eq!(prepared[0].to_canonical_key, "concept:register");
+        assert_eq!(prepared[0].from_identity_key, "entity:acme_print_house");
+        assert_eq!(prepared[0].to_identity_key, "concept:register");
     }
 
     #[test]
     fn prepare_materialized_node_candidates_prefers_entity_for_ambiguous_labels() {
         let prepared = prepare_materialized_node_candidates(&[
             NewNodeCandidate {
-                canonical_key: String::new(),
+                identity_key: String::new(),
                 node_kind: "concept".to_string(),
                 display_label: "Register".to_string(),
                 summary: None,
             },
             NewNodeCandidate {
-                canonical_key: String::new(),
+                identity_key: String::new(),
                 node_kind: "entity".to_string(),
                 display_label: "Register".to_string(),
                 summary: None,
@@ -633,7 +632,7 @@ mod tests {
         ]);
 
         assert_eq!(prepared.len(), 2);
-        assert!(prepared.iter().all(|candidate| candidate.canonical_key == "entity:register"));
+        assert!(prepared.iter().all(|candidate| candidate.identity_key == "entity:register"));
         assert!(prepared.iter().all(|candidate| candidate.node_kind == "entity"));
     }
 }

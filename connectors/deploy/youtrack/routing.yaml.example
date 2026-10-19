@@ -1,0 +1,130 @@
+# IronRAG routing schema (all supported structural keys are documented here).
+# Unknown structural keys are rejected; keys inside `match` are intentionally
+# open-ended adapter fact names, so use the exact names listed below. A rejected
+# reload keeps the previously valid routing snapshot active.
+#
+# Top-level keys:
+#   default  optional mapping or null; no default. Used when no rule matches.
+#            Both YouTrack kinds are REQUIRED projections, so an intentional
+#            no-match with no default removes every exact-key copy even when
+#            on_missing=ignore. Catalog/config resolution failures are not an
+#            absence decision and preserve the last valid routing snapshot.
+#   rules    optional list; default []. Rules are evaluated in file order and
+#            the first matching rule wins.
+#   policies optional mapping; default {}. Keys are source item kinds. This
+#            connector emits two kinds: "article" (wiki pages) and "issue"
+#            (tasks). They are independent top-level collections, not
+#            parent/child -- an issue never belongs to an article. Any other
+#            kind name is rejected: at start-up the connector refuses to run,
+#            and on hot reload the previous valid file stays active.
+#
+# There are no other keys. Source scope -- project filters, the tag gate and
+# the custom-field allowlist -- is environment configuration in .env; this
+# file decides where an item goes and which per-kind policy it gets,
+# including whether its comments are synced.
+
+default:
+  # Required string. This is the canonical IronRAG catalog reference shown as
+  # <workspace-slug>/<library-slug> (the same form used by IronRAG MCP tools).
+  # Use the workspace and library slugs visible in IronRAG. Exactly one "/" is
+  # required; UUIDs and separate workspace keys are not supported.
+  library: default/youtrack-knowledge-base
+
+rules:
+  # "project" is the same match fact on both kinds, so one rule routes an
+  # article and an issue from the same YouTrack project to the same library.
+  # This is the grouping this connector ships with: one library per project,
+  # tasks and articles side by side.
+  - description: "Route everything from IRG to its own library"
+    # Required non-empty mapping of adapter fact names to expected YAML values.
+    # Criteria in one match are ANDed. A missing/null fact does not match.
+    # Scalar facts use exact, type-sensitive equality. For a collection fact
+    # (for example "tag" or "custom_field:Assignee"), the expected scalar
+    # must be a member.
+    match:
+      project: IRG
+    # Required mapping with exactly the required "library" string described above.
+    target:
+      library: ide/irg
+
+  - description: "Route everything from OPS to its own library"
+    match:
+      project: OPS
+    target:
+      library: ide/ops
+
+  - description: "Route IronRAG-area issues carrying a review tag"
+    match:
+      kind: issue
+      tag: needs-review
+      # The key is quoted and preserves the exact YouTrack field name. The
+      # same "Product / Area" spelling must appear in YOUTRACK_CUSTOM_FIELDS.
+      "custom_field:Product / Area": IronRAG
+    target:
+      library: ide/review-queue
+
+# Available YouTrack match facts. Every scalar is a string or null when
+# YouTrack omits/hides it; every listed collection is a list, possibly empty.
+#
+# Common to both kinds:
+#   kind                 "article" or "issue" -- use this to write a rule
+#                        that applies to only one of the two
+#   project_id           project database ID, for example "0-7"
+#   project              project short name; alias of project_short_name
+#   project_short_name   project short name, for example "IRG"
+#   project_name         project display name
+#   tag                  sorted list of tag-name strings; may be empty
+#   reporter_login       reporter login
+#
+# "article" only:
+#   article_id                 database ID, for example "226-0"
+#   article_id_readable        readable article ID, for example "DOCS-A-1"
+#   parent_article_id          parent database ID; null for a root article
+#   parent_article_id_readable parent readable ID; null for a root article
+#
+# "issue" only:
+#   issue_id                       database ID, for example "3-0"
+#   issue_id_readable              readable issue ID, for example "IRG-83"
+#   custom_field:<verbatim name>   one fact for each non-null field admitted by
+#                                  YOUTRACK_CUSTOM_FIELDS. The key preserves
+#                                  spaces, punctuation and case exactly: there
+#                                  are no type/state/priority/assignee aliases,
+#                                  slugification or case folding. Quote the YAML
+#                                  key as shown above. A scalar is a string; a
+#                                  multi-value field is a sorted string list, so
+#                                  one expected scalar uses membership matching.
+
+# Per-kind overrides. Both kind keys are meaningful for this connector. The
+# policies mapping and each kind mapping may be omitted. An individual action
+# may be omitted or null; either inherits the corresponding DEFAULT_POLICY_*
+# environment value. Framework defaults are shown below. No additional policy
+# action values are accepted.
+#
+# include_comments is decided per kind and independently; it has no
+# environment counterpart. true (the default) embeds that kind's comments in
+# the parent document and lets a comment edit advance the parent revision.
+# false never requests that kind's comment endpoint, drops comment-owned
+# attachment descriptors from the projection and, for issues, removes
+# commentsCount from the change token and completeness gate. The value is a
+# strict YAML boolean (true | false), not a quoted string. It hot-reloads with
+# this file: changing it rematerializes every issue, and every article that
+# has comments or comment-owned attachments, on the next sweep.
+policies:
+  article:
+    on_new: create                # create | skip; default create
+    on_changed: replace           # replace | skip; default replace
+    on_missing: delete            # delete | ignore; default delete
+    on_duplicate_content: skip    # skip | fail; default skip
+    include_comments: true        # true | false; default true
+  issue:
+    on_new: create                # create | skip; default create
+    on_changed: replace           # replace | skip; default replace
+    on_missing: delete            # delete | ignore; default delete
+    include_comments: true        # true | false; default true
+    # Two issues can legitimately render to identical markdown bytes (for
+    # example two near-empty stub tasks in the same project). `skip` never
+    # adopts the conflicting document ID, so one issue would remain
+    # unmaterialized and retry on a later sweep.
+    # Until IronRAG's content-dedup understands per-source item identity
+    # (IRG-81), this connector fails loudly instead of accepting that gap.
+    on_duplicate_content: fail    # skip | fail; default skip

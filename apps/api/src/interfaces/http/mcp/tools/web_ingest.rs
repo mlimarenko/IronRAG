@@ -7,7 +7,7 @@ use crate::mcp_types::{
 
 use super::super::{
     McpToolDescriptor, McpToolResult,
-    audit::{build_mcp_web_ingest_subjects, record_canonical_mcp_audit},
+    audit::{self, build_mcp_web_ingest_subjects, record_mcp_audit},
     ok_tool_result, parse_tool_args, tool_error_result,
 };
 use super::ToolCallContext;
@@ -211,21 +211,26 @@ async fn submit_web_run(context: ToolCallContext<'_>, arguments: &Value) -> McpT
         .await
         {
             Ok(payload) => {
-                let canonical_subjects =
+                let normalized_subjects =
                     build_mcp_web_ingest_subjects(context.state, std::slice::from_ref(&payload))
                         .await;
-                record_canonical_mcp_audit(
+                record_mcp_audit(
                     context.state,
                     context.auth,
                     context.request_id,
-                    "agent.memory.web_ingest.submit",
-                    "succeeded",
-                    Some(format!("accepted web ingest run {}", payload.run_id)),
-                    Some(format!(
-                        "principal {} accepted web ingest run {} in library {}",
-                        context.auth.principal_id, payload.run_id, payload.library_id
-                    )),
-                    canonical_subjects,
+                    audit::McpAuditEvent {
+                        action_kind: "agent.memory.web_ingest.submit",
+                        result_kind: "succeeded",
+                        redacted_message: Some(format!(
+                            "accepted web ingest run {}",
+                            payload.run_id
+                        )),
+                        internal_message: Some(format!(
+                            "principal {} accepted web ingest run {} in library {}",
+                            context.auth.principal_id, payload.run_id, payload.library_id
+                        )),
+                        subjects: normalized_subjects,
+                    },
                 )
                 .await;
                 ok_tool_result("Web ingest run accepted.", json!(payload))
@@ -280,21 +285,26 @@ async fn cancel_web_run(context: ToolCallContext<'_>, arguments: &Value) -> McpT
         .await
         {
             Ok(payload) => {
-                let canonical_subjects =
+                let normalized_subjects =
                     build_mcp_web_ingest_subjects(context.state, std::slice::from_ref(&payload))
                         .await;
-                record_canonical_mcp_audit(
+                record_mcp_audit(
                     context.state,
                     context.auth,
                     context.request_id,
-                    "agent.memory.web_ingest.cancel",
-                    "succeeded",
-                    Some(format!("accepted cancel request for web ingest run {}", payload.run_id)),
-                    Some(format!(
-                        "principal {} accepted cancel request for web ingest run {}",
-                        context.auth.principal_id, payload.run_id
-                    )),
-                    canonical_subjects,
+                    audit::McpAuditEvent {
+                        action_kind: "agent.memory.web_ingest.cancel",
+                        result_kind: "succeeded",
+                        redacted_message: Some(format!(
+                            "accepted cancel request for web ingest run {}",
+                            payload.run_id
+                        )),
+                        internal_message: Some(format!(
+                            "principal {} accepted cancel request for web ingest run {}",
+                            context.auth.principal_id, payload.run_id
+                        )),
+                        subjects: normalized_subjects,
+                    },
                 )
                 .await;
                 ok_tool_result("Web ingest run cancellation accepted.", json!(payload))

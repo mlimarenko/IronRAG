@@ -48,26 +48,30 @@ pub struct ListAuditEventSubjectFilter {
 
 #[derive(Debug, Clone)]
 pub struct ListAuditEventsQuery {
-    pub actor_principal_id: Option<Uuid>,
     pub workspace_id: Option<Uuid>,
     pub library_id: Option<Uuid>,
     pub subject_filter: ListAuditEventSubjectFilter,
-    pub surface_kind: Option<String>,
-    pub result_kind: Option<String>,
+    pub filters: audit_repository::AuditEventMultiFilters,
     pub search: Option<String>,
+    /// Which metadata the whole-table search may match for this caller.
+    pub internal: bool,
+    /// Derived enum/interval hints whose displayed spelling matched the term.
+    pub search_hints: audit_repository::AuditSearchHints,
+    pub sort: audit_repository::AuditSort,
     pub limit: i64,
-    /// Keyset cursor `(created_at, id)` of the last row on the previous
-    /// page. `None` starts from the top.
-    pub cursor: Option<(chrono::DateTime<chrono::Utc>, Uuid)>,
+    /// Keyset cursor of the last row on the previous page. `None` starts from
+    /// the top of the requested ordering.
+    pub cursor: Option<audit_repository::AuditListCursorValue>,
 }
 
 #[derive(Debug, Clone)]
 pub struct AuditEventPage<T> {
     pub items: Vec<T>,
     pub total: i64,
-    /// `(created_at, id)` of the last row on this page, present only when
-    /// more rows exist beyond it.
-    pub next_cursor: Option<(chrono::DateTime<chrono::Utc>, Uuid)>,
+    /// The last row's sort value and id, present only when more rows exist
+    /// beyond this page. Callers encode this into an opaque continuation
+    /// token.
+    pub next_cursor: Option<audit_repository::AuditListCursorValue>,
 }
 
 #[derive(Debug, Clone)]
@@ -137,7 +141,7 @@ impl AuditService {
         Ok(map_internal_event(event))
     }
 
-    /// Persists the canonical assistant/query execution audit event.
+    /// Persists the assistant/query execution audit event.
     ///
     /// # Errors
     ///
@@ -148,7 +152,7 @@ impl AuditService {
         command: AppendQueryExecutionAuditCommand,
     ) -> Result<(), ApiError> {
         let async_operation = state
-            .canonical_services
+            .application_services
             .ops
             .get_latest_async_operation_by_subject(
                 state,
@@ -311,6 +315,22 @@ impl AuditService {
             total: page.total,
             next_cursor: page.next_cursor,
         })
+    }
+
+    /// The facet values of one audit column over the whole scoped set, with
+    /// the column's own selection already excluded by the caller.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ApiError::Internal`] when the audit repository query fails.
+    pub async fn list_event_facets(
+        &self,
+        state: &AppState,
+        query: &audit_repository::AuditFacetQuery,
+    ) -> Result<Vec<audit_repository::AuditFacetRow>, ApiError> {
+        audit_repository::list_audit_event_facets(&state.persistence.postgres, query)
+            .await
+            .map_err(|e| ApiError::internal_with_log(e, "internal"))
     }
 
     /// Loads assistant-call summaries keyed by `query_execution_id`.
@@ -546,15 +566,16 @@ const fn map_subject_filter(
 
 fn map_list_query(query: &ListAuditEventsQuery) -> audit_repository::ListAuditEventsQuery {
     audit_repository::ListAuditEventsQuery {
-        actor_principal_id: query.actor_principal_id,
         workspace_id: query.workspace_id,
         library_id: query.library_id,
         subject_filter: map_subject_filter(&query.subject_filter),
-        surface_kind: query.surface_kind.clone(),
-        result_kind: query.result_kind.clone(),
+        filters: query.filters.clone(),
         search: query.search.clone(),
+        internal: query.internal,
+        search_hints: query.search_hints.clone(),
+        sort: query.sort,
         limit: query.limit,
-        cursor: query.cursor,
+        cursor: query.cursor.clone(),
     }
 }
 

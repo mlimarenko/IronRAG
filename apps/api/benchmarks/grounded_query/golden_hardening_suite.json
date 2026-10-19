@@ -1,0 +1,666 @@
+{
+  "suiteId": "golden_hardening",
+  "description": "Hard-class golden cases: numeric facts with units, compound literals, cross-document hops, config comments, structured records, Russian corpus, near-twin distractors, wide-table cells, and deep declaration reach. Every expectation string exists verbatim in its fixture; numeric phrasings use regex tolerant to inline markdown.",
+  "strictBlocking": true,
+  "documents": [
+    "corpus/docs/aurora_capacity_plan.md",
+    "corpus/docs/gateway_endpoints_matrix.md",
+    "corpus/docs/release_train_stages.md",
+    "corpus/docs/release_train_owners.md",
+    "corpus/fixtures/beacon_gateway.yaml",
+    "corpus/fixtures/telemetry_ring_records.jsonl",
+    "corpus/docs/orbita_runbook_ru.md",
+    "corpus/docs/relay_twin_standard.md",
+    "corpus/docs/relay_twin_extended.md",
+    "corpus/docs/ledger_quota_table.md",
+    "corpus/code/lattice_pipeline_utils.py",
+    "corpus/documents/aurora_capacity_summary.pdf",
+    "corpus/fixtures/aurora_ring_diagram.png"
+  ],
+  "cases": [
+    {
+      "id": "aurora_application_tier_scaling",
+      "question": "How many nodes can the Aurora application tier scale between?",
+      "searchQuery": "Aurora application tier scaling nodes",
+      "expectedDocumentsContains": [
+        "aurora_capacity_plan"
+      ],
+      "searchRequiredAll": [
+        "Aurora"
+      ],
+      "answerRequiredAll": [
+        "application"
+      ],
+      "answerRequiredAny": [],
+      "answerRequiredRegexAny": [
+        "between\\s*[*_`]*3[*_`]*\\s*and\\s*[*_`]*12\\b",
+        "\\b3\\s*[\\u2010-\\u2015-]\\s*12\\b",
+        "\\b12\\b[*_`]*\\s*nodes?\\b"
+      ],
+      "answerForbiddenAny": [],
+      "minChunkReferenceCount": 1,
+      "allowedVerificationStates": [
+        "verified",
+        "partially_supported"
+      ]
+    },
+    {
+      "id": "aurora_quorum_fixed_size",
+      "question": "How many nodes does the Aurora quorum tier run, and may the autoscaler resize it?",
+      "searchQuery": "Aurora quorum tier fixed nodes autoscaler",
+      "expectedDocumentsContains": [
+        "aurora_capacity_plan"
+      ],
+      "searchRequiredAll": [
+        "quorum"
+      ],
+      "answerRequiredAll": [
+        "quorum"
+      ],
+      "answerRequiredAny": [],
+      "answerRequiredRegexAny": [
+        "fixed\\s+at\\s+[*_`]*5\\b",
+        "\\b5\\b[*_`]*\\s*nodes?\\b"
+      ],
+      "answerForbiddenAny": [],
+      "minChunkReferenceCount": 1,
+      "allowedVerificationStates": [
+        "verified",
+        "partially_supported"
+      ]
+    },
+    {
+      "id": "aurora_latency_budgets",
+      "question": "What is the end-to-end latency budget for synchronous requests on Aurora, and what is the stricter internal budget of the quorum commit path?",
+      "searchQuery": "Aurora latency budget synchronous quorum commit",
+      "expectedDocumentsContains": [
+        "aurora_capacity_plan"
+      ],
+      "searchRequiredAll": [
+        "budget"
+      ],
+      "answerRequiredAll": [
+        "latency"
+      ],
+      "answerRequiredAny": [],
+      "answerRequiredRegexAny": [
+        "\\b250\\s*[*_`]*ms\\b"
+      ],
+      "answerForbiddenAny": [],
+      "minChunkReferenceCount": 1,
+      "allowedVerificationStates": [
+        "verified",
+        "partially_supported"
+      ]
+    },
+    {
+      "id": "aurora_power_draw_limit",
+      "question": "What peak power draw does a full Aurora ring have?",
+      "searchQuery": "Aurora ring peak power draw",
+      "expectedDocumentsContains": [
+        "aurora_capacity_plan"
+      ],
+      "searchRequiredAll": [
+        "power"
+      ],
+      "answerRequiredAll": [
+        "42"
+      ],
+      "answerRequiredAny": [],
+      "answerRequiredRegexAny": [
+        "\\b42\\s*[*_`]*k\\s?W\\b"
+      ],
+      "answerForbiddenAny": [],
+      "minChunkReferenceCount": 1,
+      "allowedVerificationStates": [
+        "verified",
+        "partially_supported"
+      ]
+    },
+    {
+      "id": "gateway_public_endpoint",
+      "question": "Which endpoint serves the Beacon gateway public API, and which listener is reachable from outside the perimeter?",
+      "searchQuery": "Beacon gateway public API endpoint listener",
+      "expectedDocumentsContains": [
+        "gateway_endpoints_matrix"
+      ],
+      "searchRequiredAll": [
+        "edge-1.internal"
+      ],
+      "answerRequiredAll": [
+        "edge-1.internal:8443"
+      ],
+      "answerRequiredAny": [],
+      "answerForbiddenAny": [],
+      "minChunkReferenceCount": 1,
+      "allowedVerificationStates": [
+        "verified",
+        "partially_supported"
+      ]
+    },
+    {
+      "id": "gateway_replication_cidr",
+      "question": "Which endpoint carries the Beacon replication feed and from which address block does it accept connections?",
+      "searchQuery": "replication feed endpoint address block",
+      "expectedDocumentsContains": [
+        "gateway_endpoints_matrix"
+      ],
+      "searchRequiredAll": [
+        "replication"
+      ],
+      "answerRequiredAll": [
+        "relay-2.internal:7601",
+        "10.32.0.0/19"
+      ],
+      "answerRequiredAny": [],
+      "answerForbiddenAny": [],
+      "minChunkReferenceCount": 1,
+      "allowedVerificationStates": [
+        "verified",
+        "partially_supported"
+      ]
+    },
+    {
+      "id": "gateway_client_semver_range",
+      "question": "Which semver range must beacon-client library versions satisfy to connect to the gateway?",
+      "searchQuery": "beacon-client semver range compatibility",
+      "expectedDocumentsContains": [
+        "gateway_endpoints_matrix"
+      ],
+      "searchRequiredAll": [
+        "semver"
+      ],
+      "answerRequiredAll": [
+        "2.4.1",
+        "3.0.0"
+      ],
+      "answerRequiredAny": [],
+      "answerRequiredRegexAny": [
+        ">=\\s*[*_`]*2\\.4\\.1[*_`]*\\s*,?\\s*<\\s*[*_`]*3\\.0\\.0",
+        "2\\.4\\.1[^0-9]{1,24}3\\.0\\.0"
+      ],
+      "answerForbiddenAny": [],
+      "minChunkReferenceCount": 1,
+      "allowedVerificationStates": [
+        "verified",
+        "partially_supported"
+      ]
+    },
+    {
+      "id": "train_canary_owner_and_predecessor",
+      "question": "Which team owns the canary-slice stage of the Orbita release train, and which stage must succeed immediately before it?",
+      "searchQuery": "canary-slice stage owner preceding stage",
+      "expectedDocumentsContains": [
+        "release_train_stages",
+        "release_train_owners"
+      ],
+      "searchRequiredAll": [
+        "canary-slice"
+      ],
+      "answerRequiredAll": [
+        "Traffic Stewards",
+        "sealed-rehearsal"
+      ],
+      "answerRequiredAny": [],
+      "answerForbiddenAny": [],
+      "minChunkReferenceCount": 2,
+      "allowedVerificationStates": [
+        "verified",
+        "partially_supported"
+      ]
+    },
+    {
+      "id": "train_four_percent_stage_owner",
+      "question": "Which team owns the release train stage that routes 4 percent of live traffic to the candidate build?",
+      "searchQuery": "stage routes 4 percent live traffic owning team",
+      "expectedDocumentsContains": [
+        "release_train_stages",
+        "release_train_owners"
+      ],
+      "searchRequiredAll": [
+        "4 percent"
+      ],
+      "answerRequiredAll": [
+        "Traffic Stewards"
+      ],
+      "answerRequiredAny": [
+        "canary-slice"
+      ],
+      "answerForbiddenAny": [],
+      "minChunkReferenceCount": 2,
+      "allowedVerificationStates": [
+        "verified",
+        "partially_supported"
+      ]
+    },
+    {
+      "id": "train_ledger_close_owner_window",
+      "question": "Which team owns the ledger-close stage and what is its escalation window?",
+      "searchQuery": "ledger-close owning team escalation window",
+      "expectedDocumentsContains": [
+        "release_train_owners"
+      ],
+      "searchRequiredAll": [
+        "ledger-close"
+      ],
+      "answerRequiredAll": [
+        "Release Registrars"
+      ],
+      "answerRequiredAny": [],
+      "answerRequiredRegexAny": [
+        "\\b24\\s*[*_`]*hours?\\b"
+      ],
+      "answerForbiddenAny": [],
+      "minChunkReferenceCount": 1,
+      "allowedVerificationStates": [
+        "verified",
+        "partially_supported"
+      ]
+    },
+    {
+      "id": "beacon_config_listen_port",
+      "question": "On which port does the Beacon gateway listener actually listen according to its runtime configuration?",
+      "searchQuery": "beacon gateway listen_port configuration",
+      "expectedDocumentsContains": [
+        "beacon_gateway"
+      ],
+      "searchRequiredAll": [
+        "listen_port"
+      ],
+      "answerRequiredAll": [
+        "8443"
+      ],
+      "answerRequiredAny": [],
+      "answerForbiddenAny": [],
+      "minChunkReferenceCount": 1,
+      "allowedVerificationStates": [
+        "verified",
+        "partially_supported"
+      ]
+    },
+    {
+      "id": "beacon_config_pool_size",
+      "question": "What is the configured upstream pool_size of the Beacon gateway?",
+      "searchQuery": "beacon gateway upstream pool_size",
+      "expectedDocumentsContains": [
+        "beacon_gateway"
+      ],
+      "searchRequiredAll": [
+        "pool_size"
+      ],
+      "answerRequiredAll": [
+        "32"
+      ],
+      "answerRequiredAny": [],
+      "answerRequiredRegexAny": [
+        "pool[_\\s-]?size[^0-9]{0,24}[*_`]*32\\b"
+      ],
+      "answerForbiddenAny": [],
+      "minChunkReferenceCount": 1,
+      "allowedVerificationStates": [
+        "verified",
+        "partially_supported"
+      ]
+    },
+    {
+      "id": "telemetry_lattice_scheduler_budget",
+      "question": "What latency budget do the lattice-scheduler telemetry records carry?",
+      "searchQuery": "lattice-scheduler latency budget record",
+      "expectedDocumentsContains": [
+        "telemetry_ring_records"
+      ],
+      "searchRequiredAll": [
+        "lattice-scheduler"
+      ],
+      "answerRequiredAll": [
+        "lattice-scheduler"
+      ],
+      "answerRequiredAny": [],
+      "answerRequiredRegexAny": [
+        "\\b75\\s*[*_`]*ms\\b"
+      ],
+      "answerForbiddenAny": [],
+      "minChunkReferenceCount": 1,
+      "allowedVerificationStates": [
+        "verified",
+        "partially_supported"
+      ]
+    },
+    {
+      "id": "telemetry_forty_ms_service",
+      "question": "Which service in the telemetry ring records has a 40 ms latency budget?",
+      "searchQuery": "telemetry records 40 ms latency budget service",
+      "expectedDocumentsContains": [
+        "telemetry_ring_records"
+      ],
+      "searchRequiredAll": [
+        "latency_budget_ms"
+      ],
+      "answerRequiredAll": [
+        "quorum-store"
+      ],
+      "answerRequiredAny": [],
+      "answerForbiddenAny": [],
+      "minChunkReferenceCount": 1,
+      "allowedVerificationStates": [
+        "verified",
+        "partially_supported"
+      ]
+    },
+    {
+      "id": "orbita_ru_confirmation_deadline",
+      "question": "Сколько времени даётся оркестратору на подтверждение остановки при перезапуске службы Orbita?",
+      "searchQuery": "Orbita перезапуск подтверждение остановки оркестратор",
+      "expectedDocumentsContains": [
+        "orbita_runbook_ru"
+      ],
+      "searchRequiredAll": [
+        "оркестратор"
+      ],
+      "answerRequiredAll": [
+        "90"
+      ],
+      "answerRequiredAny": [],
+      "answerRequiredRegexAny": [
+        "90\\s*[*_`]*секунд"
+      ],
+      "answerForbiddenAny": [],
+      "minChunkReferenceCount": 1,
+      "allowedVerificationStates": [
+        "verified",
+        "partially_supported"
+      ]
+    },
+    {
+      "id": "orbita_crosslang_forbidden_stage",
+      "question": "During which release train stage is restarting the Orbita service forbidden without a signed exception?",
+      "searchQuery": "Orbita restart forbidden stage signed exception",
+      "expectedDocumentsContains": [
+        "orbita_runbook_ru"
+      ],
+      "searchRequiredAll": [
+        "перезапуск"
+      ],
+      "answerRequiredAll": [
+        "canary-slice"
+      ],
+      "answerRequiredAny": [
+        "Traffic Stewards"
+      ],
+      "answerForbiddenAny": [],
+      "minChunkReferenceCount": 1,
+      "allowedVerificationStates": [
+        "verified",
+        "partially_supported"
+      ]
+    },
+    {
+      "id": "relay_standard_failover_deadline",
+      "question": "What is the failover deadline of relay profile RLY-STD-204?",
+      "searchQuery": "RLY-STD-204 failover deadline",
+      "expectedDocumentsContains": [
+        "relay_twin_standard"
+      ],
+      "searchRequiredAll": [
+        "RLY-STD-204"
+      ],
+      "answerRequiredAll": [
+        "RLY-STD-204"
+      ],
+      "answerRequiredAny": [],
+      "answerRequiredRegexAny": [
+        "\\b800\\s*[*_`]*ms\\b"
+      ],
+      "answerForbiddenAny": [],
+      "minChunkReferenceCount": 1,
+      "allowedVerificationStates": [
+        "verified",
+        "partially_supported"
+      ]
+    },
+    {
+      "id": "relay_extended_failover_deadline",
+      "question": "What is the failover deadline of relay profile RLY-EXT-517?",
+      "searchQuery": "RLY-EXT-517 failover deadline",
+      "expectedDocumentsContains": [
+        "relay_twin_extended"
+      ],
+      "searchRequiredAll": [
+        "RLY-EXT-517"
+      ],
+      "answerRequiredAll": [
+        "RLY-EXT-517"
+      ],
+      "answerRequiredAny": [],
+      "answerRequiredRegexAny": [
+        "\\b200\\s*[*_`]*ms\\b"
+      ],
+      "answerForbiddenAny": [],
+      "minChunkReferenceCount": 1,
+      "allowedVerificationStates": [
+        "verified",
+        "partially_supported"
+      ]
+    },
+    {
+      "id": "relay_latency_sensitive_choice",
+      "question": "Which relay profile should rings with latency-sensitive tenants use, and what is its frame window?",
+      "searchQuery": "latency-sensitive tenants relay profile frame window",
+      "expectedDocumentsContains": [
+        "relay_twin_extended"
+      ],
+      "searchRequiredAll": [
+        "latency-sensitive"
+      ],
+      "answerRequiredAll": [
+        "RLY-EXT-517"
+      ],
+      "answerRequiredAny": [],
+      "answerRequiredRegexAny": [
+        "\\b16\\b[*_`]*\\s*frames?\\b",
+        "frame\\s+window[^0-9]{0,24}[*_`]*16\\b"
+      ],
+      "answerForbiddenAny": [],
+      "minChunkReferenceCount": 1,
+      "allowedVerificationStates": [
+        "verified",
+        "partially_supported"
+      ]
+    },
+    {
+      "id": "ledger_lp040_queries_per_day",
+      "question": "How many queries per day does the LP-040 plan allow?",
+      "searchQuery": "LP-040 plan queries per day quota",
+      "expectedDocumentsContains": [
+        "ledger_quota_table"
+      ],
+      "searchRequiredAll": [
+        "LP-040"
+      ],
+      "answerRequiredAll": [
+        "LP-040",
+        "2200"
+      ],
+      "answerRequiredAny": [],
+      "answerForbiddenAny": [],
+      "minChunkReferenceCount": 1,
+      "allowedVerificationStates": [
+        "verified",
+        "partially_supported"
+      ]
+    },
+    {
+      "id": "ledger_export_raise_plans",
+      "question": "Which ledger plans may request a temporary export size raise, and how often?",
+      "searchQuery": "plans temporary export size raise",
+      "expectedDocumentsContains": [
+        "ledger_quota_table"
+      ],
+      "searchRequiredAll": [
+        "export"
+      ],
+      "answerRequiredAll": [
+        "LP-070",
+        "LP-080"
+      ],
+      "answerRequiredAny": [
+        "once per billing month"
+      ],
+      "answerForbiddenAny": [],
+      "minChunkReferenceCount": 1,
+      "allowedVerificationStates": [
+        "verified",
+        "partially_supported"
+      ]
+    },
+    {
+      "id": "ledger_lp030_spool_retention",
+      "question": "What spool retention does the LP-030 plan include?",
+      "searchQuery": "LP-030 plan spool retention",
+      "expectedDocumentsContains": [
+        "ledger_quota_table"
+      ],
+      "searchRequiredAll": [
+        "LP-030"
+      ],
+      "answerRequiredAll": [
+        "LP-030"
+      ],
+      "answerRequiredAny": [],
+      "answerRequiredRegexAny": [
+        "\\b24\\s*[*_`]*hours?\\b"
+      ],
+      "answerForbiddenAny": [],
+      "minChunkReferenceCount": 1,
+      "allowedVerificationStates": [
+        "verified",
+        "partially_supported"
+      ]
+    },
+    {
+      "id": "lattice_deep_utilities_enumeration",
+      "question": "Which pipeline-specific utilities does lattice_pipeline_utils declare below its plumbing section?",
+      "searchQuery": "lattice pipeline deep utilities declared",
+      "expectedDocumentsContains": [
+        "lattice_pipeline_utils"
+      ],
+      "searchRequiredAll": [
+        "lattice"
+      ],
+      "answerRequiredAll": [
+        "parse_manifest_lattice"
+      ],
+      "answerRequiredAny": [
+        "coalesce_shard_windows",
+        "emit_replay_ledger",
+        "resolve_window_disputes",
+        "LatticeScheduler",
+        "schedule_ring_replay"
+      ],
+      "answerForbiddenAny": [],
+      "minChunkReferenceCount": 1,
+      "allowedVerificationStates": [
+        "verified",
+        "partially_supported"
+      ]
+    },
+    {
+      "id": "lattice_overlap_behavior",
+      "question": "What does coalesce_shard_windows do when two shard windows overlap?",
+      "searchQuery": "coalesce_shard_windows overlapping windows behavior",
+      "expectedDocumentsContains": [
+        "lattice_pipeline_utils"
+      ],
+      "searchRequiredAll": [
+        "coalesce_shard_windows"
+      ],
+      "answerRequiredAll": [
+        "coalesce_shard_windows"
+      ],
+      "answerRequiredAny": [
+        "WindowOverlapError",
+        "hard error",
+        "overlap"
+      ],
+      "answerForbiddenAny": [],
+      "minChunkReferenceCount": 1,
+      "allowedVerificationStates": [
+        "verified",
+        "partially_supported"
+      ]
+    },
+    {
+      "id": "lattice_scheduler_no_split",
+      "question": "Which class assigns spool segment windows to replay workers, and what does it never split across workers?",
+      "searchQuery": "class assigns spool segments replay workers never splits",
+      "expectedDocumentsContains": [
+        "lattice_pipeline_utils"
+      ],
+      "searchRequiredAll": [
+        "LatticeScheduler"
+      ],
+      "answerRequiredAll": [
+        "LatticeScheduler"
+      ],
+      "answerRequiredAny": [
+        "window",
+        "windows"
+      ],
+      "answerForbiddenAny": [],
+      "minChunkReferenceCount": 1,
+      "allowedVerificationStates": [
+        "verified",
+        "partially_supported"
+      ]
+    },
+    {
+      "id": "aurora_pdf_spool_retention",
+      "question": "What does the signed Aurora capacity extract state about spool retention and per-node spool capacity?",
+      "searchQuery": "signed capacity extract spool retention NVMe",
+      "expectedDocumentsContains": [
+        "aurora_capacity_summary"
+      ],
+      "searchRequiredAll": [
+        "signed"
+      ],
+      "answerRequiredAll": [
+        "36"
+      ],
+      "answerRequiredAny": [],
+      "answerRequiredRegexAny": [
+        "\\b36\\s*[*_`]*hours?\\b",
+        "2\\.4\\s*[*_`]*TB"
+      ],
+      "answerForbiddenAny": [],
+      "minChunkReferenceCount": 1,
+      "allowedVerificationStates": [
+        "verified",
+        "partially_supported"
+      ]
+    },
+    {
+      "id": "aurora_diagram_commit_budget",
+      "question": "What quorum commit budget does the Aurora ring topology diagram show?",
+      "searchQuery": "Aurora ring topology diagram quorum commit budget",
+      "expectedDocumentsContains": [
+        "aurora_ring_diagram"
+      ],
+      "searchRequiredAll": [
+        "Aurora Ring Topology"
+      ],
+      "answerRequiredAll": [
+        "40"
+      ],
+      "answerRequiredAny": [],
+      "answerRequiredRegexAny": [
+        "\\b40\\s*[*_`]*ms\\b"
+      ],
+      "answerForbiddenAny": [],
+      "minChunkReferenceCount": 1,
+      "allowedVerificationStates": [
+        "verified",
+        "partially_supported"
+      ]
+    }
+  ]
+}

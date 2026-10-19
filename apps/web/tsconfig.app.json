@@ -3,7 +3,7 @@
     "allowImportingTsExtensions": true,
     "isolatedModules": true,
     "jsx": "react-jsx",
-    "lib": ["ES2020", "DOM", "DOM.Iterable"],
+    "lib": ["ES2023", "DOM", "DOM.Iterable"],
     "module": "ESNext",
     "moduleDetection": "force",
     "moduleResolution": "bundler",
@@ -17,7 +17,7 @@
     "paths": { "@/*": ["./src/*"] },
     "skipLibCheck": true,
     "strict": true,
-    "target": "ES2020",
+    "target": "ES2023",
     "types": ["vitest/globals"],
     "useDefineForClassFields": true
   },

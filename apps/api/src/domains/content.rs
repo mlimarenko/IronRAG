@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -22,6 +22,7 @@ pub struct ContentDocument {
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct ContentDocumentHead {
     pub document_id: Uuid,
+    pub visibility_intent_id: Option<Uuid>,
     pub active_revision_id: Option<Uuid>,
     pub readable_revision_id: Option<Uuid>,
     pub latest_mutation_id: Option<Uuid>,
@@ -146,6 +147,55 @@ pub fn revision_text_state_is_readable(text_state: &str) -> bool {
     text_state == "text_readable"
 }
 
+/// The single explicit retention window for the historical knowledge
+/// projection: the current readable revision plus up to `N - 1` previous
+/// readable revisions are retained, `N` revisions in total, for bounded
+/// parent/artifact expansion and saved-citation-visible history. Every consumer
+/// reads this constant; no second retention value may exist.
+pub const HISTORICAL_PROJECTION_RETENTION_REVISIONS: usize = 8;
+
+/// One stored revision candidate offered to
+/// [`historical_projection_retained_revision_ids`].
+#[derive(Debug, Clone, Copy)]
+pub struct HistoricalProjectionRevision<'a> {
+    pub revision_id: Uuid,
+    pub document_id: Uuid,
+    pub text_state: &'a str,
+}
+
+/// Selects the revision ids the historical projection retains for a document:
+/// the current revision first, then the previous readable revisions in the
+/// order given, never repeating a revision and capping the result at `limit`.
+#[must_use]
+pub fn historical_projection_retained_revision_ids(
+    document_id: Uuid,
+    current_revision_id: Uuid,
+    revisions: &[HistoricalProjectionRevision<'_>],
+    limit: usize,
+) -> Vec<Uuid> {
+    if limit == 0 {
+        return Vec::new();
+    }
+    let mut revision_ids = Vec::new();
+    let mut seen = BTreeSet::new();
+    if seen.insert(current_revision_id) {
+        revision_ids.push(current_revision_id);
+    }
+    for revision in revisions {
+        if revision_ids.len() >= limit {
+            break;
+        }
+        if revision.document_id != document_id
+            || !revision_text_state_is_readable(revision.text_state)
+            || !seen.insert(revision.revision_id)
+        {
+            continue;
+        }
+        revision_ids.push(revision.revision_id);
+    }
+    revision_ids
+}
+
 /// A document that carries its own evidence and competes as a peer in
 /// retrieval. The default for every newly admitted document.
 pub const DOCUMENT_ROLE_PRIMARY: &str = "primary";
@@ -178,7 +228,7 @@ pub fn effective_document_id(
     if role_is_attached_context(role) { parent_document_id.unwrap_or(own_id) } else { own_id }
 }
 
-/// Canonical, language-/extension-agnostic mapping from structural inputs to
+/// Shared, language-/extension-agnostic mapping from structural inputs to
 /// the typed `content_document.document_role`. The single source of truth for
 /// role derivation: every admission, promote, and backfill site routes through
 /// this function so the decision is identical everywhere.
@@ -198,11 +248,11 @@ pub const fn derive_document_role(has_parent: bool, is_raster_image: bool) -> &'
 }
 
 /// Whether a revision's media class is a raster image, derived from the one
-/// canonical structural classifier
+/// shared structural classifier
 /// ([`crate::shared::extraction::file_extract::detect_declared_upload_file_kind`]).
 /// Callers pass the persisted declared inputs (`file_name`/`external_key` for
 /// the extension and the revision `mime_type`); no byte sniffing, no ad-hoc
-/// MIME or extension matching outside the canonical classifier.
+/// MIME or extension matching outside the shared classifier.
 #[must_use]
 pub fn revision_is_raster_image(file_name: Option<&str>, mime_type: Option<&str>) -> bool {
     matches!(
@@ -217,7 +267,7 @@ pub fn revision_is_raster_image(file_name: Option<&str>, mime_type: Option<&str>
 /// attachment-style structural source value (external key, file name,
 /// source uri, or document hint) shaped like `.../download/attachments/<id>/...`.
 ///
-/// This is the canonical parser shared between the document-parentage
+/// This parser is shared between the document-parentage
 /// backfill/resolver and the query-time artifact-sibling heuristic — one
 /// implementation so both sides agree on what a structural attachment parent
 /// is. It matches a structural URL segment only; it never parses natural
@@ -260,7 +310,7 @@ pub const STRUCTURAL_NUMERIC_ID_MIN_DIGITS: usize = 4;
 /// characters immediately before and after it are not ASCII digits, so
 /// `pageId=125239329`, `confluence:page:20808691`, and `/pages/27531786/Title`
 /// all yield their identity id while embedded fragments of longer numbers do
-/// not partially match. This is the canonical parent-identity extractor used by
+/// not partially match. This parent-identity extractor is used by
 /// the document-parentage resolver to build the page-id -> parent index; it is
 /// language-agnostic and reads only numeric structure.
 #[must_use]
@@ -290,7 +340,8 @@ pub struct WebPageProvenance {
     pub run_id: Option<Uuid>,
     pub candidate_id: Option<Uuid>,
     pub source_uri: Option<String>,
-    pub canonical_url: Option<String>,
+    #[serde(rename = "\u{63}anonicalUrl")]
+    pub preferred_url: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
@@ -349,7 +400,7 @@ pub struct LibraryKnowledgeCoverage {
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct ContentDocumentSummary {
     pub document: ContentDocument,
-    pub file_name: String,
+    pub file_name: Option<String>,
     pub head: Option<ContentDocumentHead>,
     pub active_revision: Option<ContentRevision>,
     pub source_access: Option<ContentSourceAccess>,
@@ -364,13 +415,15 @@ pub struct ContentDocumentSummary {
 mod tests {
     use super::{
         DOCUMENT_ROLE_ATTACHED_CONTEXT, DOCUMENT_ROLE_ATTACHMENT, DOCUMENT_ROLE_PRIMARY,
+        HISTORICAL_PROJECTION_RETENTION_REVISIONS, HistoricalProjectionRevision,
         attachment_parent_page_id, derive_document_role, effective_document_id,
-        leading_structural_source_id, revision_is_raster_image, revision_text_state_is_readable,
-        role_is_attached_context, source_page_id, structural_source_numeric_ids,
+        historical_projection_retained_revision_ids, leading_structural_source_id,
+        revision_is_raster_image, revision_text_state_is_readable, role_is_attached_context,
+        source_page_id, structural_source_numeric_ids,
     };
 
     #[test]
-    fn revision_text_state_is_readable_accepts_only_the_canonical_state() {
+    fn revision_text_state_is_readable_accepts_only_the_readable_state() {
         assert!(revision_text_state_is_readable("text_readable"));
         assert!(!revision_text_state_is_readable("readable"));
         assert!(!revision_text_state_is_readable("ready"));
@@ -380,7 +433,7 @@ mod tests {
     }
 
     #[test]
-    fn derive_document_role_maps_structural_inputs_to_canonical_roles() {
+    fn derive_document_role_maps_structural_inputs_to_defined_roles() {
         // No parent is always a primary document, regardless of media class.
         assert_eq!(derive_document_role(false, false), DOCUMENT_ROLE_PRIMARY);
         assert_eq!(derive_document_role(false, true), DOCUMENT_ROLE_PRIMARY);
@@ -414,7 +467,7 @@ mod tests {
     }
 
     #[test]
-    fn revision_is_raster_image_follows_canonical_classifier() {
+    fn revision_is_raster_image_follows_shared_classifier() {
         assert!(revision_is_raster_image(Some("diagram.png"), Some("image/png")));
         assert!(revision_is_raster_image(None, Some("image/jpeg")));
         assert!(revision_is_raster_image(Some("photo.gif"), None));
@@ -482,5 +535,171 @@ mod tests {
         assert_eq!(leading_structural_source_id("alpha/rest"), None);
         // A single character is too short.
         assert_eq!(leading_structural_source_id("9/rest"), None);
+    }
+
+    fn projection_revision<'a>(
+        document_id: uuid::Uuid,
+        revision_id: uuid::Uuid,
+        text_state: &'a str,
+    ) -> HistoricalProjectionRevision<'a> {
+        HistoricalProjectionRevision { document_id, revision_id, text_state }
+    }
+
+    fn readable_projection_revisions(
+        document_id: uuid::Uuid,
+        count: usize,
+    ) -> (Vec<uuid::Uuid>, Vec<HistoricalProjectionRevision<'static>>) {
+        let revision_ids = (0..count).map(|_| uuid::Uuid::now_v7()).collect::<Vec<_>>();
+        let revisions = revision_ids
+            .iter()
+            .map(|revision_id| projection_revision(document_id, *revision_id, "text_readable"))
+            .collect();
+        (revision_ids, revisions)
+    }
+
+    #[test]
+    fn retention_window_keeps_current_revision_first() {
+        let document_id = uuid::Uuid::now_v7();
+        let current_revision_id = uuid::Uuid::now_v7();
+        let earlier_revision_id = uuid::Uuid::now_v7();
+        let revisions = [
+            projection_revision(document_id, current_revision_id, "text_readable"),
+            projection_revision(document_id, earlier_revision_id, "text_readable"),
+        ];
+
+        let retained = historical_projection_retained_revision_ids(
+            document_id,
+            current_revision_id,
+            &revisions,
+            HISTORICAL_PROJECTION_RETENTION_REVISIONS,
+        );
+
+        assert_eq!(retained.first().copied(), Some(current_revision_id));
+        assert_eq!(retained, vec![current_revision_id, earlier_revision_id]);
+    }
+
+    #[test]
+    fn retention_window_is_empty_for_limit_zero() {
+        let document_id = uuid::Uuid::now_v7();
+        let current_revision_id = uuid::Uuid::now_v7();
+        let (_, revisions) = readable_projection_revisions(document_id, 3);
+
+        let retained = historical_projection_retained_revision_ids(
+            document_id,
+            current_revision_id,
+            &revisions,
+            0,
+        );
+
+        assert!(retained.is_empty());
+    }
+
+    #[test]
+    fn retention_window_includes_exactly_eight_readable_revisions() {
+        let document_id = uuid::Uuid::now_v7();
+        let current_revision_id = uuid::Uuid::now_v7();
+        let (earlier_revision_ids, revisions) = readable_projection_revisions(
+            document_id,
+            HISTORICAL_PROJECTION_RETENTION_REVISIONS - 1,
+        );
+
+        let retained = historical_projection_retained_revision_ids(
+            document_id,
+            current_revision_id,
+            &revisions,
+            HISTORICAL_PROJECTION_RETENTION_REVISIONS,
+        );
+
+        assert_eq!(retained.len(), 8);
+        let mut expected = vec![current_revision_id];
+        expected.extend(earlier_revision_ids);
+        assert_eq!(retained, expected);
+    }
+
+    #[test]
+    fn retention_window_caps_at_eight_with_nine_readable_revisions() {
+        let document_id = uuid::Uuid::now_v7();
+        let current_revision_id = uuid::Uuid::now_v7();
+        let (earlier_revision_ids, revisions) = readable_projection_revisions(document_id, 9);
+
+        let retained = historical_projection_retained_revision_ids(
+            document_id,
+            current_revision_id,
+            &revisions,
+            HISTORICAL_PROJECTION_RETENTION_REVISIONS,
+        );
+
+        assert_eq!(retained.len(), 8);
+        let mut expected = vec![current_revision_id];
+        expected.extend(earlier_revision_ids.iter().take(7).copied());
+        assert_eq!(retained, expected);
+    }
+
+    #[test]
+    fn retention_window_skips_an_unreadable_revision_between_readable_ones() {
+        let document_id = uuid::Uuid::now_v7();
+        let current_revision_id = uuid::Uuid::now_v7();
+        let readable_before = uuid::Uuid::now_v7();
+        let unreadable = uuid::Uuid::now_v7();
+        let readable_after = uuid::Uuid::now_v7();
+        let revisions = [
+            projection_revision(document_id, readable_before, "text_readable"),
+            projection_revision(document_id, unreadable, "processing"),
+            projection_revision(document_id, readable_after, "text_readable"),
+        ];
+
+        let retained = historical_projection_retained_revision_ids(
+            document_id,
+            current_revision_id,
+            &revisions,
+            HISTORICAL_PROJECTION_RETENTION_REVISIONS,
+        );
+
+        assert_eq!(retained, vec![current_revision_id, readable_before, readable_after]);
+        assert!(!retained.contains(&unreadable));
+    }
+
+    #[test]
+    fn retention_window_ignores_another_documents_revisions() {
+        let document_id = uuid::Uuid::now_v7();
+        let other_document_id = uuid::Uuid::now_v7();
+        let current_revision_id = uuid::Uuid::now_v7();
+        let own_revision_id = uuid::Uuid::now_v7();
+        let other_revision_id = uuid::Uuid::now_v7();
+        let revisions = [
+            projection_revision(other_document_id, other_revision_id, "text_readable"),
+            projection_revision(document_id, own_revision_id, "text_readable"),
+        ];
+
+        let retained = historical_projection_retained_revision_ids(
+            document_id,
+            current_revision_id,
+            &revisions,
+            HISTORICAL_PROJECTION_RETENTION_REVISIONS,
+        );
+
+        assert_eq!(retained, vec![current_revision_id, own_revision_id]);
+        assert!(!retained.contains(&other_revision_id));
+    }
+
+    #[test]
+    fn retention_window_retains_the_current_revision_even_when_unreadable() {
+        let document_id = uuid::Uuid::now_v7();
+        let current_revision_id = uuid::Uuid::now_v7();
+        let revisions = [projection_revision(document_id, current_revision_id, "processing")];
+
+        let retained = historical_projection_retained_revision_ids(
+            document_id,
+            current_revision_id,
+            &revisions,
+            HISTORICAL_PROJECTION_RETENTION_REVISIONS,
+        );
+
+        assert_eq!(retained, vec![current_revision_id]);
+    }
+
+    #[test]
+    fn historical_projection_retention_window_has_one_value() {
+        assert_eq!(HISTORICAL_PROJECTION_RETENTION_REVISIONS, 8);
     }
 }

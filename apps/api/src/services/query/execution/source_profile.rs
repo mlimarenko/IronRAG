@@ -41,7 +41,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn record_stream_profile_requires_canonical_sequence_marker() {
+    fn record_stream_profile_requires_supported_sequence_marker() {
         assert!(is_record_stream_source_profile_text(
             "[source_profile source_format=record_jsonl sequence_kind=record_stream unit_count=3]"
         ));

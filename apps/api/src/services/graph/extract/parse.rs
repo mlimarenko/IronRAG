@@ -192,7 +192,7 @@ pub(crate) fn graph_extraction_candidate_set_contains_encoding_damage(
     })
 }
 
-pub(crate) fn canonical_graph_extraction_normalized_json(
+pub(crate) fn normalized_graph_extraction_json(
     candidate_set: GraphExtractionCandidateSet,
 ) -> serde_json::Value {
     let repaired = repair_graph_extraction_candidate_set(candidate_set);
@@ -201,7 +201,7 @@ pub(crate) fn canonical_graph_extraction_normalized_json(
     let repaired = repair_graph_extraction_normalized_json(value);
     if json_contains_repairable_utf8_latin1_mojibake(&repaired) {
         tracing::error!(
-            "graph extraction normalized output still contains encoding damage after canonical repair"
+            "graph extraction normalized output still contains encoding damage after normalization repair"
         );
         return serde_json::json!({ "entities": [], "relations": [] });
     }
@@ -324,7 +324,7 @@ fn parse_entity_candidate(value: &serde_json::Value) -> Option<GraphEntityCandid
     if label.is_empty() || contains_control_or_mojibake(&label) {
         return None;
     }
-    let node_type = parse_canonical_node_type(value.get("node_type")?.as_str()?.trim())?;
+    let node_type = parse_node_type_from_identity_key(value.get("node_type")?.as_str()?.trim())?;
     let aliases = value
         .get("aliases")
         .and_then(serde_json::Value::as_array)
@@ -389,7 +389,7 @@ fn validated_relation_candidate_type(relation_type: &str) -> Option<String> {
     (!normalized.is_empty()).then_some(normalized)
 }
 
-fn parse_canonical_node_type(raw: &str) -> Option<RuntimeNodeType> {
+fn parse_node_type_from_identity_key(raw: &str) -> Option<RuntimeNodeType> {
     match raw {
         "person" => Some(RuntimeNodeType::Person),
         "organization" => Some(RuntimeNodeType::Organization),

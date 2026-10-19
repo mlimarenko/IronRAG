@@ -55,24 +55,24 @@ impl GraphLabelNodeTypeIndex {
     }
 
     #[must_use]
-    pub(crate) fn canonical_node_type_for_label(&self, label: &str) -> RuntimeNodeType {
+    pub(crate) fn node_type_for_identity_label(&self, label: &str) -> RuntimeNodeType {
         let identity = normalize_graph_identity_component(label);
         self.node_types_by_identity.get(&identity).copied().unwrap_or(RuntimeNodeType::Entity)
     }
 
     #[must_use]
-    pub(crate) fn canonical_node_key_for_label(&self, label: &str) -> String {
-        canonical_node_key(self.canonical_node_type_for_label(label), label)
+    pub(crate) fn node_identity_key_for_label(&self, label: &str) -> String {
+        graph_node_identity_key(self.node_type_for_identity_label(label), label)
     }
 }
 
 #[must_use]
-pub(crate) fn canonical_node_key(node_type: RuntimeNodeType, label: &str) -> String {
+pub(crate) fn graph_node_identity_key(node_type: RuntimeNodeType, label: &str) -> String {
     format!("{}:{}", runtime_node_type_slug(&node_type), normalize_graph_identity_component(label))
 }
 
 #[must_use]
-pub(crate) fn canonical_edge_key(
+pub(crate) fn graph_edge_identity_key(
     from_node_key: &str,
     relation_type: &str,
     to_node_key: &str,
@@ -124,9 +124,69 @@ pub(crate) const fn runtime_node_type_slug(node_type: &RuntimeNodeType) -> &'sta
     }
 }
 
+/// Parses one `RuntimeNodeType` slug (the wire and storage form), returning
+/// `None` for an unknown or blank slug. Callers that must reject a type use
+/// this instead of defaulting to `Entity`.
 #[must_use]
-pub(crate) fn runtime_node_type_from_key(canonical_node_key: &str) -> RuntimeNodeType {
-    canonical_node_key
+pub(crate) fn runtime_node_type_from_slug(slug: &str) -> Option<RuntimeNodeType> {
+    match slug.trim() {
+        "document" => Some(RuntimeNodeType::Document),
+        "person" => Some(RuntimeNodeType::Person),
+        "organization" => Some(RuntimeNodeType::Organization),
+        "location" => Some(RuntimeNodeType::Location),
+        "event" => Some(RuntimeNodeType::Event),
+        "artifact" => Some(RuntimeNodeType::Artifact),
+        "natural" => Some(RuntimeNodeType::Natural),
+        "process" => Some(RuntimeNodeType::Process),
+        "concept" => Some(RuntimeNodeType::Concept),
+        "attribute" => Some(RuntimeNodeType::Attribute),
+        "entity" => Some(RuntimeNodeType::Entity),
+        _ => None,
+    }
+}
+
+#[must_use]
+pub(crate) fn parse_graph_node_identity_key(
+    graph_node_identity_key: &str,
+) -> Option<(RuntimeNodeType, &str)> {
+    let (node_type, identity) = graph_node_identity_key.split_once(':')?;
+    if identity.is_empty()
+        || identity.contains(':')
+        || normalize_graph_identity_component(identity) != identity
+    {
+        return None;
+    }
+    let node_type = match node_type {
+        "document" => RuntimeNodeType::Document,
+        "person" => RuntimeNodeType::Person,
+        "organization" => RuntimeNodeType::Organization,
+        "location" => RuntimeNodeType::Location,
+        "event" => RuntimeNodeType::Event,
+        "artifact" => RuntimeNodeType::Artifact,
+        "natural" => RuntimeNodeType::Natural,
+        "process" => RuntimeNodeType::Process,
+        "concept" => RuntimeNodeType::Concept,
+        "attribute" => RuntimeNodeType::Attribute,
+        "entity" => RuntimeNodeType::Entity,
+        _ => return None,
+    };
+    Some((node_type, identity))
+}
+
+#[must_use]
+pub(crate) fn graph_node_identity_key_matches(
+    node_type: RuntimeNodeType,
+    label: &str,
+    identity_key: &str,
+) -> bool {
+    parse_graph_node_identity_key(identity_key).is_some_and(|(key_type, _)| {
+        key_type == node_type && graph_node_identity_key(node_type, label) == identity_key
+    })
+}
+
+#[must_use]
+pub(crate) fn runtime_node_type_from_key(graph_node_identity_key: &str) -> RuntimeNodeType {
+    graph_node_identity_key
         .split_once(':')
         .map(|(node_type, _)| node_type)
         .and_then(|node_type| match node_type {
@@ -198,17 +258,17 @@ mod tests {
     use super::*;
 
     #[test]
-    fn canonical_node_key_preserves_non_ascii_identity() {
+    fn graph_node_identity_key_preserves_non_ascii_identity() {
         assert_eq!(
-            canonical_node_key(RuntimeNodeType::Entity, "Acme Imprenta Düsseldorf"),
+            graph_node_identity_key(RuntimeNodeType::Entity, "Acme Imprenta Düsseldorf"),
             "entity:acme_imprenta_düsseldorf"
         );
     }
 
     #[test]
-    fn canonical_node_key_normalizes_mixed_script_labels() {
+    fn graph_node_identity_key_normalizes_mixed_script_labels() {
         assert_eq!(
-            canonical_node_key(RuntimeNodeType::Entity, "GraphRAG περί Retail 2.0"),
+            graph_node_identity_key(RuntimeNodeType::Entity, "GraphRAG περί Retail 2.0"),
             "entity:graphrag_περί_retail_2_0"
         );
     }
@@ -278,7 +338,7 @@ mod tests {
         index.insert("Register", RuntimeNodeType::Concept);
         index.insert("Register", RuntimeNodeType::Entity);
 
-        assert_eq!(index.canonical_node_key_for_label("Register"), "entity:register");
+        assert_eq!(index.node_identity_key_for_label("Register"), "entity:register");
     }
 
     #[test]
@@ -287,7 +347,7 @@ mod tests {
         index.insert_aliases("Acme POS", &["Register".to_string()], RuntimeNodeType::Concept);
         index.insert("Register", RuntimeNodeType::Entity);
 
-        assert_eq!(index.canonical_node_key_for_label("Register"), "entity:register");
+        assert_eq!(index.node_identity_key_for_label("Register"), "entity:register");
     }
 
     #[test]
@@ -302,9 +362,39 @@ mod tests {
     }
 
     #[test]
-    fn runtime_node_type_from_key_uses_canonical_prefix() {
+    fn runtime_node_type_from_key_uses_identity_prefix() {
         assert_eq!(runtime_node_type_from_key("concept:supply"), RuntimeNodeType::Concept);
         assert_eq!(runtime_node_type_from_key("entity:register"), RuntimeNodeType::Entity);
         assert_eq!(runtime_node_type_from_key("unknown:foo"), RuntimeNodeType::Entity);
+    }
+
+    #[test]
+    fn graph_node_identity_key_parser_rejects_unknown_or_malformed_keys() {
+        assert_eq!(
+            parse_graph_node_identity_key("concept:supply_chain"),
+            Some((RuntimeNodeType::Concept, "supply_chain"))
+        );
+        for key in ["unknown:foo", "entity:", "entity:Foo", "entity:foo:bar", "entity:foo__bar"] {
+            assert_eq!(parse_graph_node_identity_key(key), None, "{key}");
+        }
+    }
+
+    #[test]
+    fn persisted_normalization_key_must_exactly_match_candidate_type_and_label() {
+        assert!(graph_node_identity_key_matches(
+            RuntimeNodeType::Organization,
+            "Example Group",
+            "organization:example_group"
+        ));
+        assert!(!graph_node_identity_key_matches(
+            RuntimeNodeType::Organization,
+            "Example Group",
+            "entity:example_group"
+        ));
+        assert!(!graph_node_identity_key_matches(
+            RuntimeNodeType::Organization,
+            "Example Group",
+            "organization:example_group_v2"
+        ));
     }
 }

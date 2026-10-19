@@ -254,7 +254,7 @@ fn planned_top_k(question: &str, top_k: Option<usize>) -> usize {
 }
 
 /// Extracts keywords from a question preserving original case.
-/// This is lexical extraction only; semantic routing belongs to canonical QueryIR.
+/// This is lexical extraction only; semantic routing belongs to compiled QueryIR.
 #[must_use]
 pub(crate) fn extract_keywords_preserving_case(question: &str) -> Vec<String> {
     let mut seen = BTreeSet::new();
@@ -664,7 +664,7 @@ mod tests {
     }
 
     #[test]
-    fn canonical_query_ir_controls_intent_and_keyword_lanes() {
+    fn compiled_query_ir_controls_intent_and_keyword_lanes() {
         let query_ir = QueryIR {
             act: QueryAct::RetrieveValue,
             scope: QueryScope::MultiDocument,

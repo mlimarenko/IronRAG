@@ -1,7 +1,12 @@
 use chrono::{DateTime, Utc};
 use serde_json::Value;
-use sqlx::{FromRow, PgPool};
+use sqlx::{Executor, FromRow, PgPool, Postgres, Transaction};
 use uuid::Uuid;
+
+use crate::infra::{
+    knowledge_plane::{IngestAttemptMutationOutcome, IngestRevisionWriteAuthority},
+    repositories::catalog_repository,
+};
 
 #[derive(Debug, Clone, FromRow)]
 pub struct ContentRevisionIngestUnitRow {
@@ -38,8 +43,7 @@ pub struct ContentRevisionIngestUnitPageProgress {
 }
 
 #[derive(Debug, Clone)]
-pub struct UpsertContentRevisionIngestUnitCompleted {
-    pub revision_id: Uuid,
+pub struct ContentRevisionIngestUnitCompletedArtifact {
     pub stage_name: String,
     pub unit_ordinal: i32,
     pub unit_kind: String,
@@ -55,15 +59,58 @@ pub struct UpsertContentRevisionIngestUnitCompleted {
     pub model_name: Option<String>,
     pub content_checksum: Option<String>,
     pub details_json: Value,
-    pub attempt_id: Option<Uuid>,
     pub elapsed_ms: Option<i64>,
     pub started_at: Option<DateTime<Utc>>,
 }
 
-pub async fn upsert_content_revision_ingest_unit_completed(
-    postgres: &PgPool,
-    input: &UpsertContentRevisionIngestUnitCompleted,
-) -> Result<ContentRevisionIngestUnitRow, sqlx::Error> {
+async fn lock_ingest_unit_write_authority(
+    transaction: &mut Transaction<'_, Postgres>,
+    authority: IngestRevisionWriteAuthority,
+) -> Result<bool, sqlx::Error> {
+    if !catalog_repository::lock_library_for_lifecycle_event_with_executor(
+        &mut **transaction,
+        authority.workspace_id,
+        authority.library_id,
+    )
+    .await?
+    {
+        return Ok(false);
+    }
+    if !super::lock_latest_leased_revision_attempt(
+        transaction,
+        authority.library_id,
+        authority.attempt_id,
+        authority.revision_id,
+    )
+    .await?
+    {
+        return Ok(false);
+    }
+    let revision_locked = sqlx::query_scalar::<_, Uuid>(
+        "select id
+         from content_revision
+         where id = $1
+           and workspace_id = $2
+           and library_id = $3
+         for share",
+    )
+    .bind(authority.revision_id)
+    .bind(authority.workspace_id)
+    .bind(authority.library_id)
+    .fetch_optional(&mut **transaction)
+    .await?;
+    Ok(revision_locked.is_some())
+}
+
+async fn upsert_content_revision_ingest_unit_completed_with_executor<'e, E>(
+    executor: E,
+    revision_id: Uuid,
+    attempt_id: Option<Uuid>,
+    input: &ContentRevisionIngestUnitCompletedArtifact,
+) -> Result<ContentRevisionIngestUnitRow, sqlx::Error>
+where
+    E: Executor<'e, Database = Postgres>,
+{
     sqlx::query_as::<_, ContentRevisionIngestUnitRow>(
         "insert into content_revision_ingest_unit (
             revision_id,
@@ -162,7 +209,7 @@ pub async fn upsert_content_revision_ingest_unit_completed(
             completed_at,
             updated_at",
     )
-    .bind(input.revision_id)
+    .bind(revision_id)
     .bind(&input.stage_name)
     .bind(input.unit_ordinal)
     .bind(&input.unit_kind)
@@ -178,18 +225,43 @@ pub async fn upsert_content_revision_ingest_unit_completed(
     .bind(&input.model_name)
     .bind(&input.content_checksum)
     .bind(&input.details_json)
-    .bind(input.attempt_id)
+    .bind(attempt_id)
     .bind(input.elapsed_ms)
     .bind(input.started_at)
-    .fetch_one(postgres)
+    .fetch_one(executor)
     .await
 }
 
-pub async fn list_content_revision_ingest_units(
+pub async fn upsert_content_revision_ingest_unit_completed_fenced(
     postgres: &PgPool,
+    authority: IngestRevisionWriteAuthority,
+    input: &ContentRevisionIngestUnitCompletedArtifact,
+) -> Result<IngestAttemptMutationOutcome<ContentRevisionIngestUnitRow>, sqlx::Error> {
+    let mut transaction = postgres.begin().await?;
+    if !lock_ingest_unit_write_authority(&mut transaction, authority).await? {
+        transaction.rollback().await?;
+        return Ok(IngestAttemptMutationOutcome::AuthorityLost);
+    }
+    let row = upsert_content_revision_ingest_unit_completed_with_executor(
+        &mut *transaction,
+        authority.revision_id,
+        Some(authority.attempt_id),
+        input,
+    )
+    .await?;
+    transaction.commit().await?;
+    Ok(IngestAttemptMutationOutcome::Applied(row))
+}
+
+async fn list_content_revision_ingest_units_with_executor<'e, E>(
+    executor: E,
     revision_id: Uuid,
     stage_name: &str,
-) -> Result<Vec<ContentRevisionIngestUnitRow>, sqlx::Error> {
+    attempt_id: Option<Uuid>,
+) -> Result<Vec<ContentRevisionIngestUnitRow>, sqlx::Error>
+where
+    E: Executor<'e, Database = Postgres>,
+{
     sqlx::query_as::<_, ContentRevisionIngestUnitRow>(
         "select
             revision_id,
@@ -219,43 +291,115 @@ pub async fn list_content_revision_ingest_units(
          from content_revision_ingest_unit
          where revision_id = $1
            and stage_name = $2
+           and ($3::uuid is null or attempt_id = $3)
          order by unit_ordinal asc",
     )
     .bind(revision_id)
     .bind(stage_name)
-    .fetch_all(postgres)
+    .bind(attempt_id)
+    .fetch_all(executor)
     .await
 }
 
-pub async fn sum_completed_content_revision_ingest_unit_pages(
+/// Unconditional operator/test read across attempts. Production reads must use
+/// the fenced variant, which returns only units owned by the current attempt.
+pub async fn list_content_revision_ingest_units_unfenced(
     postgres: &PgPool,
     revision_id: Uuid,
     stage_name: &str,
-) -> Result<i64, sqlx::Error> {
+) -> Result<Vec<ContentRevisionIngestUnitRow>, sqlx::Error> {
+    list_content_revision_ingest_units_with_executor(postgres, revision_id, stage_name, None).await
+}
+
+pub async fn list_content_revision_ingest_units_fenced(
+    postgres: &PgPool,
+    authority: IngestRevisionWriteAuthority,
+    stage_name: &str,
+) -> Result<IngestAttemptMutationOutcome<Vec<ContentRevisionIngestUnitRow>>, sqlx::Error> {
+    let mut transaction = postgres.begin().await?;
+    if !lock_ingest_unit_write_authority(&mut transaction, authority).await? {
+        transaction.rollback().await?;
+        return Ok(IngestAttemptMutationOutcome::AuthorityLost);
+    }
+    let rows = list_content_revision_ingest_units_with_executor(
+        &mut *transaction,
+        authority.revision_id,
+        stage_name,
+        Some(authority.attempt_id),
+    )
+    .await?;
+    transaction.commit().await?;
+    Ok(IngestAttemptMutationOutcome::Applied(rows))
+}
+
+async fn sum_completed_content_revision_ingest_unit_pages_with_executor<'e, E>(
+    executor: E,
+    revision_id: Uuid,
+    stage_name: &str,
+    attempt_id: Option<Uuid>,
+) -> Result<i64, sqlx::Error>
+where
+    E: Executor<'e, Database = Postgres>,
+{
     sqlx::query_scalar::<_, i64>(
         "select coalesce(sum(greatest(range_end - range_start + 1, 0)), 0)::bigint
          from content_revision_ingest_unit
          where revision_id = $1
            and stage_name = $2
            and unit_kind = 'pdf_page_range'
-           and unit_state = 'completed'",
+           and unit_state = 'completed'
+           and content_text is not null
+           and content_checksum =
+               'sha256:' || encode(digest(content_text, 'sha256'), 'hex')
+           and ($3::uuid is null or attempt_id = $3)",
     )
     .bind(revision_id)
     .bind(stage_name)
-    .fetch_one(postgres)
+    .bind(attempt_id)
+    .fetch_one(executor)
     .await
 }
 
-pub async fn get_content_revision_ingest_unit_page_progress(
+pub async fn sum_completed_content_revision_ingest_unit_pages_fenced(
     postgres: &PgPool,
+    authority: IngestRevisionWriteAuthority,
+    stage_name: &str,
+) -> Result<IngestAttemptMutationOutcome<i64>, sqlx::Error> {
+    let mut transaction = postgres.begin().await?;
+    if !lock_ingest_unit_write_authority(&mut transaction, authority).await? {
+        transaction.rollback().await?;
+        return Ok(IngestAttemptMutationOutcome::AuthorityLost);
+    }
+    let completed_pages = sum_completed_content_revision_ingest_unit_pages_with_executor(
+        &mut *transaction,
+        authority.revision_id,
+        stage_name,
+        Some(authority.attempt_id),
+    )
+    .await?;
+    transaction.commit().await?;
+    Ok(IngestAttemptMutationOutcome::Applied(completed_pages))
+}
+
+async fn get_content_revision_ingest_unit_page_progress_with_executor<'e, E>(
+    executor: E,
     revision_id: Uuid,
     stage_name: &str,
-) -> Result<ContentRevisionIngestUnitPageProgress, sqlx::Error> {
+    attempt_id: Option<Uuid>,
+) -> Result<ContentRevisionIngestUnitPageProgress, sqlx::Error>
+where
+    E: Executor<'e, Database = Postgres>,
+{
     sqlx::query_as::<_, ContentRevisionIngestUnitPageProgress>(
         "select
             coalesce(
                 sum(greatest(range_end - range_start + 1, 0))
-                    filter (where unit_state = 'completed'),
+                    filter (
+                        where unit_state = 'completed'
+                          and content_text is not null
+                          and content_checksum =
+                              'sha256:' || encode(digest(content_text, 'sha256'), 'hex')
+                    ),
                 0
             )::bigint as completed_page_count,
             max(
@@ -268,10 +412,33 @@ pub async fn get_content_revision_ingest_unit_page_progress(
          from content_revision_ingest_unit
          where revision_id = $1
            and stage_name = $2
-           and unit_kind = 'pdf_page_range'",
+           and unit_kind = 'pdf_page_range'
+           and ($3::uuid is null or attempt_id = $3)",
     )
     .bind(revision_id)
     .bind(stage_name)
-    .fetch_one(postgres)
+    .bind(attempt_id)
+    .fetch_one(executor)
     .await
+}
+
+pub async fn get_content_revision_ingest_unit_page_progress_fenced(
+    postgres: &PgPool,
+    authority: IngestRevisionWriteAuthority,
+    stage_name: &str,
+) -> Result<IngestAttemptMutationOutcome<ContentRevisionIngestUnitPageProgress>, sqlx::Error> {
+    let mut transaction = postgres.begin().await?;
+    if !lock_ingest_unit_write_authority(&mut transaction, authority).await? {
+        transaction.rollback().await?;
+        return Ok(IngestAttemptMutationOutcome::AuthorityLost);
+    }
+    let progress = get_content_revision_ingest_unit_page_progress_with_executor(
+        &mut *transaction,
+        authority.revision_id,
+        stage_name,
+        Some(authority.attempt_id),
+    )
+    .await?;
+    transaction.commit().await?;
+    Ok(IngestAttemptMutationOutcome::Applied(progress))
 }

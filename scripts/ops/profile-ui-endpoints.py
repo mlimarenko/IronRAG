@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Canonical UI perf probe.
+Authoritative UI perf probe.
 
 Reads the curated list of read-only UI endpoints, hits each one against a
 running IronRAG instance on a reference library, then pulls the Prometheus
@@ -47,6 +47,7 @@ from datetime import datetime, timezone
 
 PROBE_PASSWORD_ENV = "IRONRAG_PROBE_PASSWORD"  # pragma: allowlist secret
 DOCUMENTS_PATH = "/v1/content/documents"
+DEFAULT_ADMIN_LIBRARY_PAGE_LIMIT = 50
 
 # --- Probe target definition ----------------------------------------------
 #
@@ -70,13 +71,13 @@ PROBES: list[Probe] = [
     # App bootstrap
     Probe(
         "session.resolve",
-        "/v1/iam/session/resolve",
-        "/v1/iam/session/resolve",
+        "/v1/iam/context",
+        "/v1/iam/context",
     ),
     Probe(
         "version.update",
-        "/v1/version/update",
-        "/v1/version/update",
+        "/v1/version/latest",
+        "/v1/version/latest",
     ),
     # Dashboard
     Probe(
@@ -180,14 +181,14 @@ PROBES: list[Probe] = [
     # Assistant
     Probe(
         "query.sessions.list",
-        "/v1/query/sessions",
-        "/v1/query/sessions?libraryId={library_id}",
+        "/v1/query/libraries/{library_id}/sessions",
+        "/v1/query/libraries/{library_id}/sessions",
     ),
     # Admin
     Probe(
-        "admin.surface",
-        "/v1/admin/surface",
-        "/v1/admin/surface",
+        "admin.libraries",
+        "/v1/admin/libraries",
+        f"/v1/admin/libraries?limit={DEFAULT_ADMIN_LIBRARY_PAGE_LIMIT}",
     ),
     Probe(
         "catalog.workspaces.list",
@@ -205,9 +206,9 @@ PROBES: list[Probe] = [
         "/v1/ai/providers",
     ),
     Probe(
-        "ai.prices.list",
-        "/v1/ai/prices",
-        "/v1/ai/prices",
+        "ai.models.list",
+        "/v1/ai/models",
+        "/v1/ai/models",
     ),
     Probe(
         "audit.events.list",
@@ -241,7 +242,7 @@ class CurlClient:
             "-X", "POST",
             "-H", "Content-Type: application/json",
             "--data-binary", "@-",
-            f"{self.base_url}/v1/iam/session/login",
+            f"{self.base_url}/v1/iam/sessions",
         ]
         proc = subprocess.run(args, input=body.encode(), capture_output=True, check=False)
         if proc.returncode != 0 or b"sessionId" not in proc.stdout:

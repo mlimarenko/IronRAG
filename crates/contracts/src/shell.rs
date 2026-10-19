@@ -87,18 +87,6 @@ pub struct ShellViewer {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
-/// Scope and locale selected by the viewer in the application shell.
-pub struct ShellScopeSelection {
-    /// Selected workspace, or none when no workspace is active.
-    pub active_workspace_id: Option<Uuid>,
-    /// Selected library, constrained to the active workspace.
-    pub active_library_id: Option<Uuid>,
-    /// Locale used for client-visible shell content.
-    pub locale: UiLocale,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
-#[serde(rename_all = "camelCase")]
 /// Initial authenticated state needed to render the application shell.
 pub struct ShellBootstrap {
     /// Authenticated viewer and effective coarse role.
@@ -109,8 +97,13 @@ pub struct ShellBootstrap {
     pub workspaces: Vec<WorkspaceSummary>,
     /// Workspace selected for the initial view.
     pub active_workspace_id: Option<Uuid>,
-    /// Libraries visible within the active workspace.
+    /// A bounded sample of the active workspace's libraries, with the pinned
+    /// active library first. This is deliberately NOT the complete set — use
+    /// `library_total_count` for the size and the catalog library search for
+    /// anything beyond what the shell renders immediately.
     pub libraries: Vec<LibrarySummary>,
+    /// Total number of libraries visible within the active workspace.
+    pub library_total_count: u64,
     /// Library selected for the initial view.
     pub active_library_id: Option<Uuid>,
     /// Membership records used to explain workspace access.

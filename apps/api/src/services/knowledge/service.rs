@@ -11,13 +11,61 @@ use crate::{
             StructuredDocumentRevision, TypedTechnicalFact,
         },
     },
-    infra::repositories,
+    infra::{
+        knowledge_plane::{
+            IngestAttemptMutationOutcome, IngestRevisionExtractArtifact,
+            IngestRevisionWriteAuthority,
+        },
+        repositories,
+    },
     interfaces::http::router_support::ApiError,
     services::query::vector_dimensions::invalidate_library_embedding_profile_inventory,
     shared::extraction::technical_facts::{
         TechnicalFactKind, TechnicalFactQualifier, TechnicalFactValue,
     },
 };
+
+/// Extract-state projection result: the persisted text state plus the
+/// optional readability timestamp. Named so the projection does not carry a
+/// long nested `Result` type in its signature.
+type RevisionTextStateChange = (&'static str, Option<chrono::DateTime<chrono::Utc>>);
+
+/// Cohesive text-content payload for a revision text-state update.
+#[derive(Debug, Clone)]
+pub struct RevisionTextContent<'a> {
+    pub text_state: &'a str,
+    pub normalized_text: Option<&'a str>,
+    pub text_checksum: Option<&'a str>,
+    pub text_readable_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+/// Cohesive extract payload for an ingest-fenced revision extract update.
+#[derive(Debug, Clone)]
+pub struct IngestRevisionExtractContent<'a> {
+    pub extract_state: &'a str,
+    pub normalized_text: Option<&'a str>,
+    pub text_checksum: Option<&'a str>,
+    pub image_checksum: Option<&'a str>,
+}
+
+fn revision_text_state_from_extract_state(
+    extract_state: &str,
+    normalized_text: Option<&str>,
+) -> Result<RevisionTextStateChange, ApiError> {
+    let text_state = match extract_state {
+        "accepted" => "accepted",
+        "processing" => "extracting_text",
+        "ready" => "text_readable",
+        "failed" => "failed",
+        unsupported => {
+            return Err(ApiError::BadRequest(format!("unsupported extract state: {unsupported}")));
+        }
+    };
+    let text_readable_at = (extract_state == "ready")
+        .then_some(chrono::Utc::now())
+        .filter(|_| normalized_text.is_some_and(|text| !text.trim().is_empty()));
+    Ok((text_state, text_readable_at))
+}
 
 #[derive(Debug, Clone)]
 pub struct CreateKnowledgeDocumentCommand {
@@ -86,7 +134,7 @@ pub struct CreateKnowledgeChunkCommand {
     pub quality_score: Option<f32>,
     pub window_text: Option<String>,
     /// Earliest record timestamp aggregated into this chunk (JSONL ingest
-    /// only; None for non-temporal sources). Sourced from the canonical
+    /// only; None for non-temporal sources). Sourced from the authoritative
     /// `record_jsonl::extract_chunk_temporal_bounds` helper at ingest time.
     pub occurred_at: Option<chrono::DateTime<chrono::Utc>>,
     /// Latest record timestamp aggregated into this chunk. Equals
@@ -188,21 +236,21 @@ impl KnowledgeService {
         command: PromoteKnowledgeDocumentCommand,
     ) -> Result<KnowledgeDocument, ApiError> {
         // The command is only a wake-up hint. The repository transaction locks
-        // and reads the canonical head, so a delayed request cannot carry stale
+        // and reads the current document head, so a delayed request cannot carry stale
         // state capable of regressing the projection.
-        match repositories::content_repository::materialize_knowledge_document_from_canonical_head(
+        match repositories::content_knowledge_projection_repository::materialize_knowledge_document_from_readable_head(
             &state.persistence.postgres,
             command.document_id,
         )
         .await
         .map_err(|e| ApiError::internal_with_log(e, "internal"))?
         {
-            repositories::content_repository::MaterializeKnowledgeDocumentOutcome::Materialized => {}
-            repositories::content_repository::MaterializeKnowledgeDocumentOutcome::DocumentNotFound => {
+            repositories::content_knowledge_projection_repository::MaterializeKnowledgeDocumentOutcome::Materialized => {}
+            repositories::content_knowledge_projection_repository::MaterializeKnowledgeDocumentOutcome::DocumentNotFound => {
                 return Err(ApiError::resource_not_found("document", command.document_id));
             }
-            repositories::content_repository::MaterializeKnowledgeDocumentOutcome::DocumentHeadNotFound
-            | repositories::content_repository::MaterializeKnowledgeDocumentOutcome::RevisionNotFound => {
+            repositories::content_knowledge_projection_repository::MaterializeKnowledgeDocumentOutcome::DocumentHeadNotFound
+            | repositories::content_knowledge_projection_repository::MaterializeKnowledgeDocumentOutcome::RevisionNotFound => {
                 return Err(ApiError::service_unavailable(
                     "document projection is converging; retry the promotion shortly",
                     "document_projection_converging",
@@ -222,10 +270,7 @@ impl KnowledgeService {
         &self,
         state: &AppState,
         revision_id: Uuid,
-        text_state: &str,
-        normalized_text: Option<&str>,
-        text_checksum: Option<&str>,
-        text_readable_at: Option<chrono::DateTime<chrono::Utc>>,
+        content: RevisionTextContent<'_>,
     ) -> Result<KnowledgeRevision, ApiError> {
         let current = state
             .document_store
@@ -237,10 +282,10 @@ impl KnowledgeService {
             .document_store
             .update_revision_text_content(
                 revision_id,
-                normalized_text.or(current.normalized_text.as_deref()),
-                text_checksum.or(current.text_checksum.as_deref()),
-                text_state,
-                text_readable_at.or(current.text_readable_at),
+                content.normalized_text.or(current.normalized_text.as_deref()),
+                content.text_checksum.or(current.text_checksum.as_deref()),
+                content.text_state,
+                content.text_readable_at.or(current.text_readable_at),
             )
             .await
             .map_err(|e| ApiError::internal_with_log(e, "internal"))?
@@ -256,29 +301,55 @@ impl KnowledgeService {
         normalized_text: Option<&str>,
         text_checksum: Option<&str>,
     ) -> Result<KnowledgeRevision, ApiError> {
-        let text_state = match extract_state {
-            "accepted" => "accepted",
-            "processing" => "extracting_text",
-            "ready" => "text_readable",
-            "failed" => "failed",
-            unsupported => {
-                return Err(ApiError::BadRequest(format!(
-                    "unsupported extract state: {unsupported}"
-                )));
-            }
-        };
-        let text_readable_at = (extract_state == "ready")
-            .then_some(chrono::Utc::now())
-            .filter(|_| normalized_text.is_some_and(|text| !text.trim().is_empty()));
+        let (text_state, text_readable_at) =
+            revision_text_state_from_extract_state(extract_state, normalized_text)?;
         self.set_revision_text_state(
             state,
             revision_id,
-            text_state,
-            normalized_text,
-            text_checksum,
-            text_readable_at,
+            RevisionTextContent { text_state, normalized_text, text_checksum, text_readable_at },
         )
         .await
+    }
+
+    pub async fn set_ingest_revision_extract_state(
+        &self,
+        state: &AppState,
+        authority: IngestRevisionWriteAuthority,
+        content: IngestRevisionExtractContent<'_>,
+    ) -> Result<IngestAttemptMutationOutcome<KnowledgeRevision>, ApiError> {
+        let (text_state, text_readable_at) =
+            revision_text_state_from_extract_state(content.extract_state, content.normalized_text)?;
+        let artifact = if content.extract_state == "ready" {
+            IngestRevisionExtractArtifact::Replace {
+                normalized_text: content.normalized_text.ok_or_else(|| {
+                    ApiError::BadRequest(
+                        "ready extract state requires normalized text replacement".to_string(),
+                    )
+                })?,
+                text_checksum: content.text_checksum.ok_or_else(|| {
+                    ApiError::BadRequest(
+                        "ready extract state requires text checksum replacement".to_string(),
+                    )
+                })?,
+                text_readable_at,
+                image_checksum: content.image_checksum,
+            }
+        } else {
+            IngestRevisionExtractArtifact::StateOnly
+        };
+        state
+            .document_store
+            .update_revision_extract_artifact_fenced(authority, text_state, artifact)
+            .await
+            .map_err(|e| ApiError::internal_with_log(e, "internal"))
+            .map(|outcome| match outcome {
+                IngestAttemptMutationOutcome::Applied(row) => {
+                    IngestAttemptMutationOutcome::Applied(map_revision_row(row))
+                }
+                IngestAttemptMutationOutcome::AuthorityLost => {
+                    IngestAttemptMutationOutcome::AuthorityLost
+                }
+            })
     }
 
     pub async fn set_revision_storage_ref(
@@ -325,7 +396,6 @@ impl KnowledgeService {
                 vector_generation: command.vector_generation,
                 quality_score: command.quality_score,
                 window_text: command.window_text.clone(),
-                raptor_level: None,
                 occurred_at: command.occurred_at,
                 occurred_until: command.occurred_until,
             })
@@ -372,7 +442,6 @@ impl KnowledgeService {
                 vector_generation: command.vector_generation,
                 quality_score: command.quality_score,
                 window_text: command.window_text.clone(),
-                raptor_level: None,
                 occurred_at: command.occurred_at,
                 occurred_until: command.occurred_until,
             })
@@ -496,7 +565,7 @@ impl KnowledgeService {
             .map_err(|e| ApiError::internal_with_log(e, "internal"))?
             .ok_or_else(|| ApiError::resource_not_found("knowledge_revision", revision_id))?;
         let _vector_guard = state
-            .canonical_services
+            .application_services
             .search
             .vector_plane_write_guard(state, revision.library_id)
             .await
@@ -565,21 +634,18 @@ impl KnowledgeService {
         })
     }
 
-    /// Canonical library summary. Reads per-library document counts
-    /// from `aggregate_library_document_metrics` — the same function
-    /// that feeds `/ops/libraries/{id}/dashboard` and `/ops/libraries/{id}`,
-    /// so `documentCountsByReadiness` here can never disagree with
-    /// the dashboard's `document_metrics` / `overview` fields. Graph
-    /// snapshot is still fetched separately to drive the graph-surface
-    /// fields on the response.
+    /// Authoritative library summary. Document metrics, graph topology, and
+    /// typed-fact coverage are loaded from one repeatable-read repository
+    /// snapshot so a concurrent graph publication cannot produce a mixed
+    /// response.
     pub async fn get_library_summary(
         &self,
         state: &AppState,
         library_id: Uuid,
     ) -> Result<KnowledgeLibrarySummary, ApiError> {
-        let (metrics, generations, graph_snapshot) = tokio::try_join!(
+        let (dashboard_snapshot, generations) = tokio::try_join!(
             async {
-                repositories::content_repository::aggregate_library_document_metrics(
+                repositories::content_document_list_repository::load_library_dashboard_snapshot(
                     &state.persistence.postgres,
                     library_id,
                 )
@@ -587,61 +653,77 @@ impl KnowledgeService {
                 .map_err(|e| ApiError::internal_with_log(e, "internal"))
             },
             self.list_library_generations(state, library_id),
-            async {
-                repositories::get_runtime_graph_snapshot(&state.persistence.postgres, library_id)
-                    .await
-                    .map_err(|e| ApiError::internal_with_log(e, "internal"))
-            },
         )?;
 
-        let latest_generation = generations.into_iter().next();
-
-        // Graph-ready / graph-sparse come straight from the canonical
-        // metrics row. `aggregate_library_document_metrics` already
-        // clamped `graph_ready` to `ready` (so the published invariant
-        // `graph_ready + graph_sparse == ready` holds on the wire even
-        // during a rebuild, where `runtime_graph_node` may transiently
-        // contain more document nodes than the active readable set).
-        let graph_ready_document_count = metrics.graph_ready;
-        let graph_sparse_document_count = metrics.graph_sparse;
-
-        let mut document_counts_by_readiness = std::collections::BTreeMap::<String, i64>::new();
-        if metrics.failed > 0 {
-            document_counts_by_readiness.insert("failed".to_string(), metrics.failed);
-        }
-        let processing_total = metrics.processing + metrics.queued;
-        if processing_total > 0 {
-            document_counts_by_readiness.insert("processing".to_string(), processing_total);
-        }
-        if graph_ready_document_count > 0 {
-            document_counts_by_readiness
-                .insert("graph_ready".to_string(), graph_ready_document_count);
-        }
-        if graph_sparse_document_count > 0 {
-            document_counts_by_readiness
-                .insert("graph_sparse".to_string(), graph_sparse_document_count);
-        }
-
-        Ok(KnowledgeLibrarySummary {
+        Ok(build_library_summary_from_dashboard_snapshot(
             library_id,
+            &dashboard_snapshot,
+            generations.into_iter().next(),
+        ))
+    }
+}
+
+pub(crate) fn build_library_summary_from_dashboard_snapshot(
+    library_id: Uuid,
+    dashboard_snapshot: &repositories::content_document_list_repository::LibraryDashboardSnapshot,
+    latest_generation: Option<KnowledgeLibraryGeneration>,
+) -> KnowledgeLibrarySummary {
+    let metrics = &dashboard_snapshot.metrics;
+    let graph_ready_document_count = metrics.graph_ready;
+    let graph_sparse_document_count = metrics.graph_sparse;
+
+    let mut document_counts_by_readiness = std::collections::BTreeMap::<String, i64>::new();
+    if metrics.failed > 0 {
+        document_counts_by_readiness.insert("failed".to_string(), metrics.failed);
+    }
+    let processing_total = metrics.processing + metrics.queued;
+    if processing_total > 0 {
+        document_counts_by_readiness.insert("processing".to_string(), processing_total);
+    }
+    if graph_ready_document_count > 0 {
+        document_counts_by_readiness.insert("graph_ready".to_string(), graph_ready_document_count);
+    }
+    if graph_sparse_document_count > 0 {
+        document_counts_by_readiness
+            .insert("graph_sparse".to_string(), graph_sparse_document_count);
+    }
+
+    build_library_summary(
+        library_id,
+        LibrarySummaryInputs {
             document_counts_by_readiness,
-            node_count: graph_snapshot
-                .as_ref()
-                .map_or(0, |snapshot| i64::from(snapshot.node_count)),
-            edge_count: graph_snapshot
-                .as_ref()
-                .map_or(0, |snapshot| i64::from(snapshot.edge_count)),
             graph_ready_document_count,
             graph_sparse_document_count,
-            // typed_fact count is a refinement that lives in structured
-            // revision rows; without enumerating documents we
-            // cannot derive it cheaply. Report 0 rather than N round-trips —
-            // clients that need the exact figure should hit the dedicated
-            // library coverage endpoint.
-            typed_fact_document_count: 0,
-            updated_at: chrono::Utc::now(),
+            typed_fact_document_count: dashboard_snapshot.typed_fact_document_count,
+            graph_snapshot: dashboard_snapshot.graph_snapshot.as_ref(),
             latest_generation,
-        })
+        },
+    )
+}
+
+struct LibrarySummaryInputs<'a> {
+    document_counts_by_readiness: std::collections::BTreeMap<String, i64>,
+    graph_ready_document_count: i64,
+    graph_sparse_document_count: i64,
+    typed_fact_document_count: i64,
+    graph_snapshot: Option<&'a repositories::RuntimeGraphSnapshotRow>,
+    latest_generation: Option<KnowledgeLibraryGeneration>,
+}
+
+fn build_library_summary(
+    library_id: Uuid,
+    inputs: LibrarySummaryInputs<'_>,
+) -> KnowledgeLibrarySummary {
+    KnowledgeLibrarySummary {
+        library_id,
+        document_counts_by_readiness: inputs.document_counts_by_readiness,
+        node_count: inputs.graph_snapshot.map_or(0, |snapshot| i64::from(snapshot.node_count)),
+        edge_count: inputs.graph_snapshot.map_or(0, |snapshot| i64::from(snapshot.edge_count)),
+        graph_ready_document_count: inputs.graph_ready_document_count,
+        graph_sparse_document_count: inputs.graph_sparse_document_count,
+        typed_fact_document_count: inputs.typed_fact_document_count,
+        updated_at: chrono::Utc::now(),
+        latest_generation: inputs.latest_generation,
     }
 }
 
@@ -651,13 +733,13 @@ impl KnowledgeService {
         state: &AppState,
         library_id: Uuid,
     ) -> Result<Vec<crate::infra::knowledge_rows::KnowledgeLibraryGenerationRow>, ApiError> {
-        // Canonical one-shot aggregate — the previous implementation
+        // Shared one-shot aggregate — the previous implementation
         // iterated every document + fetched its revision list one document at a
         // time, producing thousands of sequential knowledge-store round-trips
         // on large libraries and dominating dashboard latency. The aggregate
         // returns the three readable revision numbers and a `latest_created_at`
         // field in one store call.
-        let library = state.canonical_services.catalog.get_library(state, library_id).await?;
+        let library = state.application_services.catalog.get_library(state, library_id).await?;
         let signals = aggregate_library_generation_signals_cached(state, library_id).await?;
 
         if !signals.has_ready_text && !signals.has_ready_vector && !signals.has_ready_graph {
@@ -800,7 +882,7 @@ fn map_typed_technical_fact_row(
         .fact_kind
         .parse::<TechnicalFactKind>()
         .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
-    let canonical_value = serde_json::from_value::<TechnicalFactValue>(row.canonical_value_json)
+    let normalized_value = serde_json::from_value::<TechnicalFactValue>(row.normalized_value_json)
         .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
     let qualifiers = serde_json::from_value::<Vec<TechnicalFactQualifier>>(row.qualifiers_json)
         .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
@@ -811,7 +893,7 @@ fn map_typed_technical_fact_row(
         workspace_id: row.workspace_id,
         library_id: row.library_id,
         fact_kind,
-        canonical_value,
+        normalized_value,
         display_value: row.display_value,
         qualifiers,
         support_block_ids: row.support_block_ids,
@@ -912,4 +994,47 @@ async fn aggregate_library_generation_signals_cached(
     }
 
     Ok(signals)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn extract_state_maps_text_readiness_only_when_ready_text_is_nonblank() {
+        for (extract_state, text, expected_state, readable) in [
+            ("accepted", Some("text"), "accepted", false),
+            ("processing", Some("text"), "extracting_text", false),
+            ("failed", Some("text"), "failed", false),
+            ("ready", None, "text_readable", false),
+            ("ready", Some(" \n\t"), "text_readable", false),
+            ("ready", Some("text"), "text_readable", true),
+        ] {
+            let (state, readable_at) =
+                revision_text_state_from_extract_state(extract_state, text).expect("known state");
+            assert_eq!(state, expected_state, "{extract_state}");
+            assert_eq!(readable_at.is_some(), readable, "{extract_state}: {text:?}");
+        }
+        assert!(matches!(
+            revision_text_state_from_extract_state("unknown", Some("text")),
+            Err(ApiError::BadRequest(message)) if message == "unsupported extract state: unknown",
+        ));
+    }
+
+    #[test]
+    fn library_summary_reports_measured_typed_fact_document_count() {
+        let summary = build_library_summary(
+            Uuid::nil(),
+            LibrarySummaryInputs {
+                document_counts_by_readiness: std::collections::BTreeMap::new(),
+                graph_ready_document_count: 0,
+                graph_sparse_document_count: 0,
+                typed_fact_document_count: 3,
+                graph_snapshot: None,
+                latest_generation: None,
+            },
+        );
+
+        assert_eq!(summary.typed_fact_document_count, 3);
+    }
 }

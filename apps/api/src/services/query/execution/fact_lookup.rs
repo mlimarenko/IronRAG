@@ -7,7 +7,7 @@ use crate::{
     shared::extraction::technical_facts::TechnicalFactKind,
 };
 
-use super::{CanonicalAnswerEvidence, RuntimeMatchedChunk};
+use super::{AuthoritativeAnswerEvidence, RuntimeMatchedChunk};
 
 pub(super) struct TechnicalFactMatch<'a> {
     pub(super) fact: &'a KnowledgeTechnicalFactRow,
@@ -22,8 +22,8 @@ pub(super) fn build_document_labels(chunks: &[RuntimeMatchedChunk]) -> HashMap<U
     document_labels
 }
 
-pub(super) fn best_matching_fact<'a, Predicate, Score>(
-    evidence: &'a CanonicalAnswerEvidence,
+pub(super) fn best_matching_fact<'a, Predicate, Score, Rank>(
+    evidence: &'a AuthoritativeAnswerEvidence,
     document_labels: &'a HashMap<Uuid, String>,
     kind: TechnicalFactKind,
     predicate: Predicate,
@@ -31,7 +31,8 @@ pub(super) fn best_matching_fact<'a, Predicate, Score>(
 ) -> Option<TechnicalFactMatch<'a>>
 where
     Predicate: Fn(&KnowledgeTechnicalFactRow) -> bool,
-    Score: Fn(&KnowledgeTechnicalFactRow, Option<&str>) -> usize,
+    Score: Fn(&KnowledgeTechnicalFactRow, Option<&str>) -> Rank,
+    Rank: Ord,
 {
     evidence
         .technical_facts

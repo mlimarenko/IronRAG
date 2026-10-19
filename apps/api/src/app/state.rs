@@ -1,4 +1,4 @@
-use std::{sync::Arc, time::Duration};
+use std::sync::Arc;
 use zeroize::Zeroize as _;
 
 use crate::{
@@ -8,22 +8,21 @@ use crate::{
         tasks::register_task_catalog,
     },
     app::config::{
-        McpHttpOriginPolicy, RuntimeHookBehavior, Settings, UiBootstrapAdmin, UiBootstrapAiSetup,
+        INGEST_GRAPH_EXTRACT_WAITING_FACTOR, McpHttpOriginPolicy, OidcSettings,
+        RuntimeHookBehavior, Settings, UiBootstrapAdmin, UiBootstrapAiSetup,
+        resolve_ingestion_graph_extract_parallelism,
     },
     domains::agent_runtime::{RuntimeDecisionTargetKind, RuntimeTaskKind},
     infra::{
         knowledge_plane::{ContextStoreRef, DocumentStoreRef, GraphStoreRef, SearchStoreRef},
-        persistence::Persistence,
+        persistence::{self, Persistence},
         postgres::{
             pg_context_store::PgContextStore, pg_document_store::PgDocumentStore,
             pg_graph_store::PgGraphStore, pg_search_store::PgSearchStore,
         },
     },
-    integrations::concurrency_gateway::ConcurrencyLimitedGateway,
     integrations::llm::{LlmGateway, UnifiedGateway},
-    integrations::provider_budget::{
-        ProviderBudgetConfig, ProviderBudgetRegistry, ProviderBudgetRegistryOptions,
-    },
+    integrations::provider_budget::ProviderBudgetRegistry,
     services::{
         ai_catalog_service::AiCatalogService,
         catalog_service::CatalogService,
@@ -68,8 +67,11 @@ pub struct UiRuntimeSettings {
 #[derive(Clone)]
 pub struct UiSessionCookieConfig {
     pub name: &'static str,
-    pub ttl_hours: u64,
     pub secure: bool,
+    /// The one place the browser-session idle window and absolute cap are
+    /// carried; every issue/validate site reads the policy from here rather
+    /// than re-deriving a deadline of its own.
+    pub lifetime: crate::domains::iam::SessionLifetimePolicy,
 }
 
 #[derive(Clone)]
@@ -101,7 +103,13 @@ pub struct SemanticRerankRuntimeSettings {
     pub total_text_chars: usize,
 }
 
-pub(crate) const SEMANTIC_RERANK_HARD_MAX_TIMEOUT_MS: u64 = 3_000;
+pub(crate) const SEMANTIC_RERANK_HARD_MAX_TIMEOUT_MS: u64 = 5_000;
+/// Turn-facing wait budget for the optional semantic rerank. The provider
+/// decision budget above may be larger because `shadow` runs off the answer
+/// path, but an `active` provider call is never started when it cannot fit
+/// this budget, and the answer turn never waits longer than it. The
+/// deterministic lexical order is the fail-safe on either side of the gate.
+pub(crate) const SEMANTIC_RERANK_TURN_WAIT_MS: u64 = 1_000;
 pub(crate) const SEMANTIC_RERANK_HARD_MAX_CANDIDATES: usize = 32;
 pub(crate) const SEMANTIC_RERANK_HARD_MAX_CANDIDATE_TEXT_CHARS: usize = 2_400;
 pub(crate) const SEMANTIC_RERANK_HARD_MAX_TOTAL_TEXT_CHARS: usize = 32_000;
@@ -219,7 +227,7 @@ pub struct BulkIngestHardeningServices {
 }
 
 #[derive(Clone, Default)]
-pub struct CanonicalServices {
+pub struct ApplicationServices {
     pub catalog: CatalogService,
     pub iam: IamService,
     pub ai_catalog: AiCatalogService,
@@ -252,6 +260,13 @@ pub struct AppState {
     pub persistence: Persistence,
     pub agent_runtime: AgentRuntime,
     pub llm_gateway: Arc<dyn LlmGateway>,
+    /// The provider concurrency/rate registry shared with [`Self::llm_gateway`].
+    ///
+    /// IRG-187's TypeSafe SystemOne decision call is not a chat call and cannot
+    /// travel through the gateway, but it targets the same physical provider
+    /// endpoint; it takes its outbound permit from this same registry so the
+    /// endpoint is protected by one limiter instead of two independent ones.
+    pub provider_budget: Arc<ProviderBudgetRegistry>,
     pub content_storage: ContentStorageService,
     pub deployment_diagnostics: DeploymentDiagnosticsService,
     pub worker_runtime: WorkerRuntimeState,
@@ -262,6 +277,14 @@ pub struct AppState {
     /// after the plaintext settings fields have been scrubbed.
     pub bootstrap_admin_configured: bool,
     pub ui_bootstrap_admin: Option<UiBootstrapAdmin>,
+    /// Complete validated OIDC configuration. Cloned request state shares this
+    /// immutable allocation, so the client secret has one owner and is
+    /// zeroized only when the final application-state clone drops it.
+    pub(crate) oidc: Option<Arc<OidcSettings>>,
+    /// Admission guard for browser OIDC login starts. Cloned request state
+    /// shares both the local in-flight budget and the issuer-scoped Redis
+    /// bucket client rather than accidentally resetting either per request.
+    pub(crate) oidc_login_admission: crate::services::iam::oidc::OidcLoginAdmission,
     /// Explicit embedding/test override. Production constructors leave this
     /// empty and bootstrap provider credentials are resolved only inside the
     /// operation that consumes them.
@@ -279,11 +302,18 @@ pub struct AppState {
     pub web_ingest_runtime: WebIngestRuntimeSettings,
     pub bulk_ingest_hardening_services: BulkIngestHardeningServices,
     pub mcp_memory: McpMemorySettings,
-    pub canonical_services: CanonicalServices,
+    pub application_services: ApplicationServices,
     pub release_monitor: ReleaseMonitorService,
     pub pipeline_hardening: PipelineHardeningSettings,
     pub resolve_settle_blockers: ResolveSettleBlockersSettings,
     pub resolve_settle_blockers_services: ResolveSettleBlockersServices,
+    /// Bounded outermost retrieval-turn admission. Nested grounded-answer
+    /// calls reuse the parent permit so the agent loop cannot deadlock.
+    pub(crate) query_turn_admission: crate::services::query::turn_admission::QueryTurnAdmission,
+    /// Rate limiting for the public login endpoint: per-login and per-source
+    /// leaky buckets plus a shared cap on concurrent Argon2id verifications,
+    /// checked before any database lookup or password hash (IRG-80).
+    pub(crate) login_rate_limiter: crate::services::iam::login_rate_limit::LoginRateLimiter,
     /// Per-library cache of admitted runtime graph projections keyed
     /// by `(library_id, projection_version)`. The projection is
     /// loaded lazily on first use and reused for every subsequent
@@ -304,20 +334,58 @@ impl AppState {
     ) -> anyhow::Result<Self> {
         let credential_cipher = take_credential_cipher(&mut settings)?;
         let bootstrap_secrets = take_bootstrap_secrets(&mut settings);
+        let oidc_settings = take_oidc_settings(&mut settings)?;
         Self::from_prepared_dependencies(
             settings,
             persistence,
             credential_cipher,
             bootstrap_secrets,
+            oidc_settings,
         )
     }
 
+    /// Points browser SSO at an identity provider the settings loader would
+    /// refuse: the in-process mock answers on a plain-HTTP loopback origin,
+    /// which `IRONRAG_OIDC_ISSUER_URL` validation rejects by design.
+    #[cfg(feature = "test-support")]
+    pub fn with_oidc_settings_for_tests(mut self, oidc_settings: OidcSettings) -> Self {
+        self.oidc = Some(Arc::new(oidc_settings));
+        self
+    }
+
     fn from_prepared_dependencies(
-        settings: Settings,
+        mut settings: Settings,
         persistence: Persistence,
         credential_cipher: CredentialCipher,
         bootstrap_secrets: BootstrapSecrets,
+        oidc_settings: Option<Arc<OidcSettings>>,
     ) -> anyhow::Result<Self> {
+        let oidc_login_admission =
+            crate::services::iam::oidc::OidcLoginAdmission::new(persistence.redis.clone());
+        let graph_extract_parallel_jobs = settings
+            .ingestion_max_parallel_jobs_global
+            .min(persistence::worker_process_db_job_limit(&settings))
+            .max(1);
+        let graph_extract_parallelism_per_doc = resolve_ingestion_graph_extract_parallelism(
+            settings.ingestion_graph_extract_parallelism_per_doc,
+            graph_extract_parallel_jobs,
+            settings.provider_concurrency_max_outbound,
+            settings.provider_concurrency_query_reserved,
+        )
+        .map_err(anyhow::Error::msg)?;
+        let provider_ingest_lane_capacity = settings
+            .provider_concurrency_max_outbound
+            .checked_sub(settings.provider_concurrency_query_reserved)
+            .filter(|_| settings.provider_concurrency_max_outbound > 0);
+        tracing::info!(
+            configured_parallelism_per_doc = settings.ingestion_graph_extract_parallelism_per_doc,
+            effective_parallelism_per_doc = graph_extract_parallelism_per_doc,
+            parallel_jobs = graph_extract_parallel_jobs,
+            ?provider_ingest_lane_capacity,
+            waiting_factor = INGEST_GRAPH_EXTRACT_WAITING_FACTOR,
+            "ingest graph extraction parallelism resolved",
+        );
+        settings.ingestion_graph_extract_parallelism_per_doc = graph_extract_parallelism_per_doc;
         let public_origin_settings = settings.public_origin_settings();
         let mcp_http_origin_policy =
             settings.mcp_http_origin_policy().map_err(anyhow::Error::msg)?;
@@ -331,8 +399,11 @@ impl AppState {
         };
         let ui_session_cookie = UiSessionCookieConfig {
             name: UI_SESSION_COOKIE_NAME,
-            ttl_hours: settings.ui_session_ttl_hours,
             secure: public_origin_settings.session_cookie_secure,
+            lifetime: crate::domains::iam::SessionLifetimePolicy {
+                idle_ttl_hours: settings.ui_session_idle_ttl_hours,
+                absolute_ttl_hours: settings.ui_session_absolute_ttl_hours,
+            },
         };
         let graph_runtime = GraphRuntimeSettings { backend_name: "postgres".to_string() };
         let document_store: DocumentStoreRef =
@@ -412,7 +483,7 @@ impl AppState {
             settings.release_check_repository.clone(),
             settings.release_check_interval_hours,
         );
-        let canonical_services = CanonicalServices {
+        let application_services = ApplicationServices {
             catalog: CatalogService::new(),
             iam: IamService::new(),
             ai_catalog: AiCatalogService::new(),
@@ -486,28 +557,28 @@ impl AppState {
             )),
             agent_runtime.hooks(),
         );
-        let provider_budget_config = ProviderBudgetConfig {
-            max_outbound: settings.provider_concurrency_max_outbound,
-            query_reserved: settings.provider_concurrency_query_reserved,
-        };
-        let provider_budget_registry = Arc::new(ProviderBudgetRegistry::uniform(
-            provider_budget_config,
-            ProviderBudgetRegistryOptions {
-                acquire_timeout: Duration::from_millis(
-                    settings.provider_concurrency_acquire_timeout_ms,
-                ),
-                max_entries: settings.provider_concurrency_registry_max_entries,
-                idle_ttl: Duration::from_secs(
-                    settings.provider_concurrency_registry_idle_ttl_seconds,
-                ),
-            },
-        )?);
         let provider_gateway = UnifiedGateway::from_settings(&settings)?;
-        let llm_gateway: Arc<dyn LlmGateway> =
-            Arc::new(ConcurrencyLimitedGateway::new(provider_gateway, provider_budget_registry));
+        let provider_budget = provider_gateway.provider_budget();
+        let llm_gateway: Arc<dyn LlmGateway> = Arc::new(provider_gateway);
+        let query_turn_admission = crate::services::query::turn_admission::QueryTurnAdmission::new(
+            crate::services::query::turn_admission::QueryTurnAdmissionConfig::from_settings(
+                settings.query_turn_max_concurrent,
+                settings.query_turn_admission_queue,
+                settings.query_turn_admission_timeout_ms,
+            )
+            .map_err(anyhow::Error::msg)?,
+        );
+        let login_rate_limiter = crate::services::iam::login_rate_limit::LoginRateLimiter::new(
+            crate::services::iam::login_rate_limit::LoginRateLimiterConfig::from_settings(
+                &settings,
+            )
+            .map_err(anyhow::Error::msg)?,
+        )
+        .map_err(anyhow::Error::msg)?;
         Ok(Self {
             agent_runtime,
             llm_gateway,
+            provider_budget,
             content_storage,
             deployment_diagnostics,
             worker_runtime,
@@ -518,6 +589,8 @@ impl AppState {
             mcp_http_origin_policy,
             bootstrap_admin_configured: bootstrap_secrets.admin_configured,
             ui_bootstrap_admin: bootstrap_secrets.startup_admin,
+            oidc: oidc_settings,
+            oidc_login_admission,
             ui_bootstrap_ai_setup: None,
             ui_session_cookie,
             graph_runtime,
@@ -532,11 +605,13 @@ impl AppState {
             web_ingest_runtime,
             bulk_ingest_hardening_services,
             mcp_memory,
-            canonical_services,
+            application_services,
             release_monitor,
             pipeline_hardening,
             resolve_settle_blockers,
             resolve_settle_blockers_services,
+            query_turn_admission,
+            login_rate_limiter,
             runtime_graph_projection_cache:
                 crate::services::knowledge::runtime_read::RuntimeGraphProjectionCache::default(),
         })
@@ -549,12 +624,14 @@ impl AppState {
     pub async fn new(mut settings: Settings) -> anyhow::Result<Self> {
         let credential_cipher = take_credential_cipher(&mut settings)?;
         let bootstrap_secrets = take_bootstrap_secrets(&mut settings);
+        let oidc_settings = take_oidc_settings(&mut settings)?;
         let persistence = Persistence::connect(&settings).await?;
         Self::from_prepared_dependencies(
             settings,
             persistence,
             credential_cipher,
             bootstrap_secrets,
+            oidc_settings,
         )
     }
 
@@ -570,12 +647,14 @@ impl AppState {
     pub async fn new_from_retained_settings(settings: &mut Settings) -> anyhow::Result<Self> {
         let credential_cipher = take_credential_cipher(settings)?;
         let bootstrap_secrets = take_bootstrap_secrets(settings);
+        let oidc_settings = take_oidc_settings(settings)?;
         let persistence = Persistence::connect(settings).await?;
         Self::from_prepared_dependencies(
             settings.clone(),
             persistence,
             credential_cipher,
             bootstrap_secrets,
+            oidc_settings,
         )
     }
 }
@@ -591,6 +670,13 @@ fn take_bootstrap_secrets(settings: &mut Settings) -> BootstrapSecrets {
     let startup_admin = (settings.service_role == "startup").then_some(resolved_admin).flatten();
     settings.discard_ui_bootstrap_admin_secrets();
     BootstrapSecrets { admin_configured, startup_admin }
+}
+
+fn take_oidc_settings(settings: &mut Settings) -> anyhow::Result<Option<Arc<OidcSettings>>> {
+    let oidc_settings =
+        settings.resolved_oidc_settings().map_err(anyhow::Error::msg)?.map(Arc::new);
+    settings.discard_oidc_client_secret();
+    Ok(oidc_settings)
 }
 
 fn take_credential_cipher(settings: &mut Settings) -> anyhow::Result<CredentialCipher> {
@@ -718,8 +804,10 @@ mod credential_cipher_tests {
         let mut api_settings = Settings::from_env().expect("default settings should load");
         api_settings.service_role = "api".to_string();
         api_settings.ui_bootstrap_admin_login = Some("owner".to_string());
+        api_settings.ui_bootstrap_admin_email = Some("owner@example.test".to_string());
         api_settings.ui_bootstrap_admin_password = Some("api-password-regression".to_string());
-        api_settings.ui_bootstrap_admin_api_token = Some("api-token-regression".to_string());
+        api_settings.ui_bootstrap_admin_api_token =
+            Some("inrg_0123456789abcdef0123456789abcdef".to_string());
 
         let api_secrets = take_bootstrap_secrets(&mut api_settings);
         assert!(api_secrets.admin_configured);
@@ -730,6 +818,7 @@ mod credential_cipher_tests {
         let mut startup_settings = Settings::from_env().expect("default settings should load");
         startup_settings.service_role = "startup".to_string();
         startup_settings.ui_bootstrap_admin_login = Some("owner".to_string());
+        startup_settings.ui_bootstrap_admin_email = Some("owner@example.test".to_string());
         startup_settings.ui_bootstrap_admin_password =
             Some("startup-password-regression".to_string());
 
@@ -737,5 +826,48 @@ mod credential_cipher_tests {
         assert!(startup_secrets.admin_configured);
         assert!(startup_secrets.startup_admin.is_some());
         assert!(startup_settings.ui_bootstrap_admin_password.is_none());
+    }
+}
+
+#[cfg(test)]
+mod oidc_runtime_settings_tests {
+    use base64::{Engine as _, engine::general_purpose::STANDARD};
+
+    use super::*;
+
+    #[tokio::test]
+    async fn cloned_app_state_shares_the_oidc_runtime_settings_allocation() {
+        let mut settings = Settings::from_env().expect("default settings should load");
+        settings.discard_credential_master_key();
+        settings.credential_master_key = Some(STANDARD.encode([71_u8; 32]));
+        settings.credential_master_key_id = None;
+        settings.credential_previous_master_keys = None;
+        settings.service_role = "api".to_string();
+        settings.ui_bootstrap_admin_login = None;
+        settings.ui_bootstrap_admin_email = None;
+        settings.ui_bootstrap_admin_name = None;
+        settings.ui_bootstrap_admin_password = None;
+        settings.ui_bootstrap_admin_api_token = None;
+        settings.frontend_origin = "https://graph.example.test".to_string();
+        settings.oidc_issuer_url = Some("https://auth.example.test/realms/ironrag".to_string());
+        settings.oidc_client_id = Some("ironrag-test-client".to_string());
+        settings.oidc_client_secret = Some("test-only-oidc-client-secret".to_string());
+        settings.oidc_redirect_url =
+            Some("https://graph.example.test/v1/iam/oidc/callback".to_string());
+        settings.oidc_required_group = Some("ironrag-users".to_string());
+        settings.oidc_bootstrap_admin_subject = None;
+
+        let postgres = sqlx::PgPool::connect_lazy("postgres://127.0.0.1/ironrag")
+            .expect("test-only lazy Postgres pool should parse");
+        let redis =
+            redis::Client::open("redis://127.0.0.1/").expect("test-only Redis client should parse");
+        let state = AppState::from_dependencies(settings, Persistence::for_tests(postgres, redis))
+            .expect("OIDC state should prepare without connecting dependencies");
+        let cloned_state = state.clone();
+
+        let original_oidc = state.oidc.as_ref().expect("OIDC should be enabled");
+        let cloned_oidc = cloned_state.oidc.as_ref().expect("OIDC should be enabled");
+        assert!(Arc::ptr_eq(original_oidc, cloned_oidc));
+        assert_eq!(Arc::strong_count(original_oidc), 2);
     }
 }

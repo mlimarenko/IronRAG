@@ -14,6 +14,7 @@ import {
 } from '@/shared/api'
 import type { WebIngestUrlFilter } from '@/shared/api/generated'
 import type { Library } from '@/shared/types'
+import { getApiProblem } from '@/shared/api/runtime'
 
 import {
   buildWebIngestUrlFilter,
@@ -27,6 +28,18 @@ import {
 import type { WebIngestPolicyDraft, WebIngestPolicySnapshot } from './documentsPageState'
 
 const DEFAULT_WEB_INGEST_MAX_PAGES = '100'
+
+function webIngestFailureMessage(error: unknown, t: TFunction): string | null {
+  const problem = getApiProblem(error)
+  if (problem?.status === 409) {
+    const explanation =
+      typeof problem.body.detail === 'string' && problem.body.detail.trim()
+        ? problem.body.detail.trim()
+        : t('documents.webIngestConflict')
+    return `${explanation} ${t('documents.webIngestConflictResolution')}`
+  }
+  return problem?.status === 503 ? t('documents.webIngestUnavailable') : null
+}
 
 type WebIngestControllerInput = {
   activeLibrary: Library | null
@@ -288,7 +301,9 @@ export function useWebIngestController({
       await loadFirstPage()
     } catch (err) {
       if (!policyRollbackToastShown) {
-        toast.error(errorMessage(err, t('documents.webIngestFailed')))
+        toast.error(
+          webIngestFailureMessage(err, t) ?? errorMessage(err, t('documents.webIngestFailed')),
+        )
       }
     } finally {
       setWebIngestLoading(false)
@@ -333,6 +348,7 @@ export function useWebIngestController({
       crawlAllowPatternsText,
       crawlBlockPatternsText,
       crawlMode,
+      errorMessage,
       materializationAllowPatternsText,
       materializationBlockPatternsText,
       maxDepth,
@@ -367,6 +383,7 @@ export function useWebIngestController({
       crawlAllowPatternsText,
       crawlBlockPatternsText,
       crawlMode,
+      errorMessage,
       materializationAllowPatternsText,
       materializationBlockPatternsText,
       maxDepth,

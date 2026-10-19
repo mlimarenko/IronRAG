@@ -1,9 +1,12 @@
+pub(super) use super::provider_access::{
+    is_provider_credential_validation_error, validate_provider_access,
+};
 use super::*;
 use crate::{
     domains::provider_profiles::{
         ProviderAuthScheme, ProviderBaseUrlMode, ProviderModelDiscoveryMode,
     },
-    integrations::{llm::ChatRequest, retry::ProviderCallError},
+    integrations::retry::ProviderCallError,
     shared::{
         outbound_http::{PublicHttpUrlError, read_response_bytes_with_limit},
         provider_base_url::{is_private_provider_url, provider_base_url_candidates},
@@ -14,44 +17,9 @@ use crate::{
     },
 };
 use reqwest::{Method, Url};
-use serde_json::{Value, json};
+use rust_decimal::Decimal;
+use serde_json::Value;
 use std::sync::{Arc, OnceLock};
-
-const TEXT_CHAT_BINDING_PURPOSES: [AiBindingPurpose; 3] =
-    [AiBindingPurpose::ExtractGraph, AiBindingPurpose::QueryCompile, AiBindingPurpose::QueryAnswer];
-const TEXT_TOOL_CHAT_BINDING_PURPOSES: [AiBindingPurpose; 4] = [
-    AiBindingPurpose::ExtractGraph,
-    AiBindingPurpose::QueryCompile,
-    AiBindingPurpose::QueryAnswer,
-    AiBindingPurpose::Agent,
-];
-const MULTIMODAL_CHAT_BINDING_PURPOSES: [AiBindingPurpose; 4] = [
-    AiBindingPurpose::ExtractText,
-    AiBindingPurpose::ExtractGraph,
-    AiBindingPurpose::QueryCompile,
-    AiBindingPurpose::QueryAnswer,
-];
-const MULTIMODAL_TOOL_CHAT_BINDING_PURPOSES: [AiBindingPurpose; 5] = [
-    AiBindingPurpose::ExtractText,
-    AiBindingPurpose::ExtractGraph,
-    AiBindingPurpose::QueryCompile,
-    AiBindingPurpose::QueryAnswer,
-    AiBindingPurpose::Agent,
-];
-const EMBEDDING_BINDING_PURPOSES: [AiBindingPurpose; 1] = [AiBindingPurpose::EmbedChunk];
-
-#[derive(Clone, Copy)]
-pub(super) struct DiscoveredModelSignature {
-    pub(super) capability_kind: &'static str,
-    pub(super) modality_kind: &'static str,
-    pub(super) allowed_binding_purposes: &'static [AiBindingPurpose],
-}
-
-#[derive(Clone)]
-pub(super) struct DiscoveredProviderModel {
-    pub(super) model_name: String,
-    pub(super) signature: DiscoveredModelSignature,
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum ProviderCredentialValidationFailureKind {
@@ -96,7 +64,7 @@ pub(super) fn provider_credential_validation_error(
     ApiError::service_unavailable(message, failure_kind.api_error_kind())
 }
 
-fn provider_credential_validation_failure_kind(
+pub(super) fn provider_credential_validation_failure_kind(
     error: &ApiError,
 ) -> Option<ProviderCredentialValidationFailureKind> {
     match error {
@@ -114,7 +82,9 @@ pub(super) fn chat_round_trip_validation_failure_kind(
         return ChatRoundTripValidationFailureKind::Internal;
     };
     match error {
-        ProviderCallError::Transport { .. } | ProviderCallError::ResponseBody { .. } => {
+        ProviderCallError::Transport { .. }
+        | ProviderCallError::ResponseBody { .. }
+        | ProviderCallError::Timeout { .. } => {
             ChatRoundTripValidationFailureKind::ProviderUnavailable
         }
         ProviderCallError::ResponsePolicy {
@@ -135,7 +105,8 @@ pub(super) fn chat_round_trip_validation_failure_kind(
         {
             ChatRoundTripValidationFailureKind::ProviderUnavailable
         }
-        ProviderCallError::ResponsePolicy { .. }
+        ProviderCallError::Admission { .. }
+        | ProviderCallError::ResponsePolicy { .. }
         | ProviderCallError::ResponseJson { .. }
         | ProviderCallError::Json { .. }
         | ProviderCallError::HttpStatus { .. }
@@ -156,7 +127,7 @@ pub(super) fn normalize_provider_base_url_input(
             provider.provider_kind
         )));
     }
-    canonicalize_provider_base_url(provider, &candidate).map(Some)
+    normalize_provider_base_url(provider, &candidate).map(Some)
 }
 
 pub(super) fn provider_credential_base_url_for_create(
@@ -193,7 +164,7 @@ pub(super) fn provider_credential_base_url_for_update(
 
 /// Prevents a caller that can edit account metadata but cannot read its secret
 /// from moving that hidden secret to a different provider origin. Reusing a
-/// key on the same canonical authority is safe; changing scheme, host, or port
+/// key on the same current authority is safe; changing scheme, host, or port
 /// requires the caller to submit a replacement key explicitly.
 pub(super) fn validate_provider_base_url_key_reuse(
     provider: &ProviderCatalogEntry,
@@ -224,13 +195,15 @@ fn effective_provider_origin(
         .or_else(|| normalize_optional(provider.default_base_url.as_deref()));
     candidate
         .map(|value| {
-            let canonical = canonicalize_provider_base_url(provider, &value)?;
-            Url::parse(&canonical).map(|url| url.origin().ascii_serialization()).map_err(|_| {
-                ApiError::BadRequest(format!(
-                    "baseUrl must be a valid absolute URL for provider {}",
-                    provider.provider_kind
-                ))
-            })
+            let normalized_base_url = normalize_provider_base_url(provider, &value)?;
+            Url::parse(&normalized_base_url).map(|url| url.origin().ascii_serialization()).map_err(
+                |_| {
+                    ApiError::BadRequest(format!(
+                        "baseUrl must be a valid absolute URL for provider {}",
+                        provider.provider_kind
+                    ))
+                },
+            )
         })
         .transpose()
 }
@@ -253,7 +226,7 @@ pub(super) fn resolve_provider_base_url(
         ProviderBaseUrlMode::Fixed | ProviderBaseUrlMode::Required => provider
             .default_base_url
             .as_deref()
-            .map(|candidate| canonicalize_provider_base_url(provider, candidate))
+            .map(|candidate| normalize_provider_base_url(provider, candidate))
             .transpose()
             .and_then(|base_url| {
                 base_url.ok_or_else(|| {
@@ -267,12 +240,12 @@ pub(super) fn resolve_provider_base_url(
         ProviderBaseUrlMode::Optional => Ok(provider
             .default_base_url
             .as_deref()
-            .map(|candidate| canonicalize_provider_base_url(provider, candidate))
+            .map(|candidate| normalize_provider_base_url(provider, candidate))
             .transpose()?),
     }
 }
 
-pub(super) fn canonicalize_provider_base_url(
+pub(super) fn normalize_provider_base_url(
     provider: &ProviderCatalogEntry,
     value: &str,
 ) -> Result<String, ApiError> {
@@ -345,97 +318,11 @@ fn trim_provider_base_url_suffixes(provider: &ProviderCatalogEntry, url: &mut Ur
     url.set_path(&format!("/{}", path_segments.join("/")));
 }
 
-const fn text_chat_signature(tools_supported: bool) -> DiscoveredModelSignature {
-    DiscoveredModelSignature {
-        capability_kind: "chat",
-        modality_kind: "text",
-        allowed_binding_purposes: if tools_supported {
-            &TEXT_TOOL_CHAT_BINDING_PURPOSES
-        } else {
-            &TEXT_CHAT_BINDING_PURPOSES
-        },
-    }
-}
-
-const fn multimodal_chat_signature(tools_supported: bool) -> DiscoveredModelSignature {
-    DiscoveredModelSignature {
-        capability_kind: "chat",
-        modality_kind: "multimodal",
-        allowed_binding_purposes: if tools_supported {
-            &MULTIMODAL_TOOL_CHAT_BINDING_PURPOSES
-        } else {
-            &MULTIMODAL_CHAT_BINDING_PURPOSES
-        },
-    }
-}
-
-const fn embedding_signature() -> DiscoveredModelSignature {
-    DiscoveredModelSignature {
-        capability_kind: "embedding",
-        modality_kind: "text",
-        allowed_binding_purposes: &EMBEDDING_BINDING_PURPOSES,
-    }
-}
-
-pub(super) fn discovered_provider_model_signature_for_capability(
-    provider: &ProviderCatalogEntry,
-    capability_kind: &str,
-) -> Result<Option<DiscoveredModelSignature>, ApiError> {
-    let capability_kind = capability_kind.trim();
-    match capability_kind {
-        "chat" if provider.capabilities.chat.is_supported() => {
-            Ok(Some(text_chat_signature(provider.capabilities.tools.is_supported())))
-        }
-        "embedding" if provider.capabilities.embeddings.is_supported() => {
-            Ok(Some(embedding_signature()))
-        }
-        "vision"
-            if provider.capabilities.chat.is_supported()
-                && provider.capabilities.vision.is_supported() =>
-        {
-            Ok(Some(multimodal_chat_signature(provider.capabilities.tools.is_supported())))
-        }
-        "chat" | "embedding" | "vision" => Ok(None),
-        other => Err(ApiError::BadRequest(format!(
-            "provider {} declares unsupported model discovery capability kind `{other}`",
-            provider.provider_kind
-        ))),
-    }
-}
-
-pub(super) async fn ensure_discovered_provider_model_catalog_entry(
-    state: &AppState,
-    provider: &ProviderCatalogEntry,
-    model_name: &str,
-    signature: DiscoveredModelSignature,
-) -> Result<(), ApiError> {
-    let metadata_json = json!({
-        "defaultRoles": signature
-            .allowed_binding_purposes
-            .iter()
-            .map(|purpose| purpose.as_str())
-            .collect::<Vec<_>>(),
-        "seedSource": "provider_discovery",
-    });
-    ai_repository::upsert_model_catalog(
-        &state.persistence.postgres,
-        provider.id,
-        model_name,
-        signature.capability_kind,
-        signature.modality_kind,
-        metadata_json,
-    )
-    .await
-    .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
-    Ok(())
-}
-
-pub(super) async fn sync_provider_model_catalog(
-    state: &AppState,
+pub(super) async fn fetch_available_provider_models(
     provider: &ProviderCatalogEntry,
     api_key: Option<&str>,
     base_url: Option<&str>,
-) -> Result<Vec<String>, ApiError> {
+) -> Result<Vec<DiscoveredProviderModel>, ApiError> {
     if provider.model_discovery.mode == ProviderModelDiscoveryMode::Unsupported {
         return Err(ApiError::BadRequest(format!(
             "provider {} does not support model discovery",
@@ -445,22 +332,7 @@ pub(super) async fn sync_provider_model_catalog(
     let Some(base_url) = runtime_provider_base_url(provider, base_url)? else {
         return Ok(Vec::new());
     };
-    let discovered_models = fetch_provider_models(provider, api_key, &base_url).await?;
-    for model in &discovered_models {
-        ensure_discovered_provider_model_catalog_entry(
-            state,
-            provider,
-            &model.model_name,
-            model.signature,
-        )
-        .await?;
-    }
-    Ok(discovered_models
-        .into_iter()
-        .map(|model| model.model_name)
-        .collect::<std::collections::BTreeSet<_>>()
-        .into_iter()
-        .collect())
+    fetch_provider_models(provider, api_key, &base_url).await
 }
 
 pub(super) async fn fetch_provider_model_names(
@@ -468,97 +340,29 @@ pub(super) async fn fetch_provider_model_names(
     api_key: Option<&str>,
     base_url: &str,
 ) -> Result<Vec<String>, ApiError> {
-    let paths =
-        provider.model_discovery.paths.iter().map(|path| path.path.as_str()).collect::<Vec<_>>();
-    fetch_provider_model_names_from_paths(provider, api_key, base_url, paths).await
+    Ok(fetch_provider_models(provider, api_key, base_url)
+        .await?
+        .into_iter()
+        .map(|model| model.model_name)
+        .collect())
 }
 
-pub(super) async fn fetch_provider_models(
+async fn fetch_provider_models(
     provider: &ProviderCatalogEntry,
     api_key: Option<&str>,
     base_url: &str,
 ) -> Result<Vec<DiscoveredProviderModel>, ApiError> {
-    let transport = provider_validation_transport()?;
-
-    let mut discovery_paths = provider
-        .model_discovery
-        .paths
-        .iter()
-        .map(|path| (path.capability_kind.trim(), path.path.trim()))
-        .filter(|(_, path)| !path.is_empty())
-        .collect::<Vec<_>>();
-    discovery_paths.sort_unstable();
-    discovery_paths.dedup();
-    if discovery_paths.is_empty() {
-        return Err(ApiError::BadRequest(format!(
-            "provider {} does not define model discovery paths",
-            provider.provider_kind
-        )));
-    }
-
-    let candidate_urls =
-        provider_base_url_candidates(provider.base_url_policy.allow_private_network, base_url);
-    let mut discovered = Vec::new();
-    for (capability_kind, model_path) in discovery_paths {
-        let Some(signature) =
-            discovered_provider_model_signature_for_capability(provider, capability_kind)?
-        else {
-            continue;
-        };
-        for model_name in fetch_provider_model_names_from_path(
-            transport,
-            provider,
-            api_key,
-            &candidate_urls,
-            model_path,
-        )
-        .await?
-        {
-            discovered.push(DiscoveredProviderModel { model_name, signature });
-        }
-    }
-
-    discovered.sort_by(|left, right| {
-        left.model_name
-            .cmp(&right.model_name)
-            .then(left.signature.capability_kind.cmp(right.signature.capability_kind))
-    });
-    discovered.dedup_by(|left, right| {
-        left.model_name == right.model_name
-            && left.signature.capability_kind == right.signature.capability_kind
-    });
-    Ok(discovered)
+    let paths =
+        provider.model_discovery.paths.iter().map(|path| path.path.as_str()).collect::<Vec<_>>();
+    fetch_provider_models_from_paths(provider, api_key, base_url, paths).await
 }
 
-pub(super) async fn fetch_provider_model_names_for_capabilities(
-    provider: &ProviderCatalogEntry,
-    api_key: Option<&str>,
-    base_url: &str,
-    capability_kinds: &std::collections::BTreeSet<String>,
-) -> Result<Vec<String>, ApiError> {
-    if capability_kinds.is_empty() {
-        return Err(ApiError::BadRequest(format!(
-            "provider {} model discovery requires at least one selected capability kind",
-            provider.provider_kind
-        )));
-    }
-
-    let paths = provider
-        .model_discovery
-        .paths
-        .iter()
-        .filter(|path| capability_kinds.contains(path.capability_kind.as_str()))
-        .map(|path| path.path.as_str())
-        .collect::<Vec<_>>();
-    fetch_provider_model_names_from_paths(provider, api_key, base_url, paths).await
-}
-
-async fn fetch_provider_model_names_from_paths(
+async fn fetch_provider_models_from_paths(
     provider: &ProviderCatalogEntry,
     api_key: Option<&str>,
     base_url: &str,
     paths: Vec<&str>,
-) -> Result<Vec<String>, ApiError> {
+) -> Result<Vec<DiscoveredProviderModel>, ApiError> {
     let transport = provider_validation_transport()?;
 
     let mut model_paths =
@@ -575,10 +379,10 @@ async fn fetch_provider_model_names_from_paths(
     let candidate_urls =
         provider_base_url_candidates(provider.base_url_policy.allow_private_network, base_url);
 
-    let mut discovered = Vec::new();
+    let mut discovered: Vec<DiscoveredProviderModel> = Vec::new();
     for model_path in model_paths {
         discovered.extend(
-            fetch_provider_model_names_from_path(
+            fetch_provider_models_from_path(
                 transport,
                 provider,
                 api_key,
@@ -589,18 +393,21 @@ async fn fetch_provider_model_names_from_paths(
         );
     }
 
-    discovered.sort();
-    discovered.dedup();
+    // A provider can list the same id under two discovery paths (chat and
+    // embeddings on one endpoint is the common case). Keep the first record so
+    // the result is one row per id, not one row per path it appeared on.
+    discovered.sort_by(|left, right| left.model_name.cmp(&right.model_name));
+    discovered.dedup_by(|left, right| left.model_name == right.model_name);
     Ok(discovered)
 }
 
-async fn fetch_provider_model_names_from_path(
+async fn fetch_provider_models_from_path(
     transport: &ProviderHttpTransport,
     provider: &ProviderCatalogEntry,
     api_key: Option<&str>,
     candidate_urls: &[String],
     model_path: &str,
-) -> Result<Vec<String>, ApiError> {
+) -> Result<Vec<DiscoveredProviderModel>, ApiError> {
     let mut last_error = None;
     for candidate_url in candidate_urls {
         let endpoint = provider_endpoint_url(candidate_url, model_path, provider)?;
@@ -671,19 +478,13 @@ async fn fetch_provider_model_names_from_path(
                     ));
                     continue;
                 };
+                let listed_currency = provider.model_discovery.listed_pricing_currency.as_deref();
                 return Ok(body
                     .get("data")
                     .and_then(Value::as_array)
                     .into_iter()
                     .flatten()
-                    .filter_map(|entry| {
-                        entry
-                            .get("id")
-                            .and_then(Value::as_str)
-                            .map(str::trim)
-                            .filter(|value| !value.is_empty())
-                            .map(ToString::to_string)
-                    })
+                    .filter_map(|entry| discovered_model_from_listing_entry(entry, listed_currency))
                     .collect());
             }
             Err(error) => {
@@ -705,6 +506,89 @@ async fn fetch_provider_model_names_from_path(
             ),
         )
     }))
+}
+
+/// Reads one entry of an OpenAI-style `data[]` model listing.
+///
+/// Only fields the provider declares are read. Nothing is guessed from the id:
+/// a name-based classifier would be the hand-written dictionary the product
+/// rules forbid, and it would also be wrong — routers proxy vendors whose
+/// naming conventions disagree with each other.
+pub(super) fn discovered_model_from_listing_entry(
+    entry: &Value,
+    listed_currency: Option<&str>,
+) -> Option<DiscoveredProviderModel> {
+    let model_name = entry
+        .get("id")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())?
+        .to_owned();
+    Some(DiscoveredProviderModel {
+        model_name,
+        context_window: listing_token_count(entry, "context_length")
+            .or_else(|| listing_token_count(entry, "context_window")),
+        max_output_tokens: entry
+            .get("top_provider")
+            .and_then(|provider| listing_token_count(provider, "max_completion_tokens")),
+        input_modalities: entry
+            .get("architecture")
+            .and_then(|architecture| architecture.get("input_modalities"))
+            .and_then(Value::as_array)
+            .map(|values| {
+                values
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .map(ToString::to_string)
+                    .collect()
+            })
+            .unwrap_or_default(),
+        pricing: listing_pricing(entry.get("pricing"), listed_currency),
+    })
+}
+
+fn listing_token_count(entry: &Value, field: &str) -> Option<i32> {
+    entry.get(field).and_then(Value::as_i64).and_then(|value| i32::try_from(value).ok())
+}
+
+/// Per-token rates as OpenAI-compatible routers publish them: a bare number
+/// with no unit attached. The unit comes from the provider profile, because the
+/// listing never states it — a rouble-priced router fills the same field a
+/// dollar-priced one does, and reading one as the other overstates spend a
+/// hundredfold. Without a declared unit there is no price.
+///
+/// Both directions must parse or the record carries no price at all: half a
+/// price would be recorded as a discount.
+fn listing_pricing(pricing: Option<&Value>, listed_currency: Option<&str>) -> Option<ModelPricing> {
+    let pricing = pricing?;
+    let currency_code = listed_currency?.trim();
+    if currency_code.is_empty() {
+        return None;
+    }
+    let input_price_per_1m = listing_price_per_1m(pricing, "prompt")?;
+    let output_price_per_1m = listing_price_per_1m(pricing, "completion")?;
+    Some(ModelPricing {
+        currency_code: currency_code.to_owned(),
+        input_price_per_1m,
+        cached_input_price_per_1m: listing_price_per_1m(pricing, "input_cache_read")
+            .unwrap_or(input_price_per_1m),
+        cache_write_input_price_per_1m: listing_price_per_1m(pricing, "input_cache_write")
+            .unwrap_or(input_price_per_1m),
+        output_price_per_1m,
+        long_context: None,
+    })
+}
+
+fn listing_price_per_1m(pricing: &Value, field: &str) -> Option<Decimal> {
+    let raw = pricing.get(field)?;
+    let per_token = match raw {
+        Value::String(value) => Decimal::from_str_exact(value.trim()).ok()?,
+        Value::Number(value) => Decimal::from_str_exact(&value.to_string()).ok()?,
+        _ => return None,
+    };
+    (!per_token.is_sign_negative()).then(|| per_token * Decimal::from(1_000_000))
 }
 
 fn provider_validation_transport() -> Result<&'static Arc<ProviderHttpTransport>, ApiError> {
@@ -733,15 +617,10 @@ fn provider_model_list_error(
     )
 }
 
-const fn provider_http_validation_failure_kind(
+fn provider_http_validation_failure_kind(
     error: &ProviderHttpError,
 ) -> ProviderCredentialValidationFailureKind {
-    if matches!(
-        error,
-        ProviderHttpError::ResolveFailed
-            | ProviderHttpError::ResolveTimedOut
-            | ProviderHttpError::NoAddresses
-    ) {
+    if error.resolution_failure().is_some() {
         ProviderCredentialValidationFailureKind::Transport
     } else {
         ProviderCredentialValidationFailureKind::Rejected
@@ -826,184 +705,7 @@ fn apply_provider_auth(
         ProviderAuthScheme::RawAuthorization => {
             request.header(reqwest::header::AUTHORIZATION, token)
         }
-    }
-}
-
-pub(super) fn is_provider_credential_validation_error(error: &ApiError) -> bool {
-    provider_credential_validation_failure_kind(error).is_some()
-}
-
-pub(super) fn is_loopback_base_url(value: &str) -> bool {
-    Url::parse(value)
-        .ok()
-        .and_then(|url| {
-            url.host().map(|host| match host {
-                url::Host::Domain(host) => host.eq_ignore_ascii_case("localhost"),
-                url::Host::Ipv4(host) => host.is_loopback(),
-                url::Host::Ipv6(host) => host.is_loopback(),
-            })
-        })
-        .unwrap_or(false)
-}
-
-fn loopback_runtime_error(provider: &ProviderCatalogEntry) -> ApiError {
-    provider_credential_validation_error(
-        ProviderCredentialValidationFailureKind::LoopbackUnreachable,
-        format!(
-            "provider credential validation failed for {}: IronRAG cannot reach a provider bound only to host localhost from inside Docker; expose the provider on a host-reachable interface or use a host-reachable URL",
-            provider.display_name
-        ),
-    )
-}
-
-fn select_provider_validation_model<'a>(
-    provider: &ProviderCatalogEntry,
-    models: &'a [ModelCatalogEntry],
-) -> Option<&'a ModelCatalogEntry> {
-    for purpose in [
-        AiBindingPurpose::QueryAnswer,
-        AiBindingPurpose::ExtractGraph,
-        AiBindingPurpose::ExtractText,
-    ] {
-        if let Some(profile) = bootstrap_binding_profile_for_provider_purpose(provider, purpose)
-            && let Some(model) = models.iter().find(|entry| {
-                entry.provider_catalog_id == provider.id && entry.model_name == profile.model_name
-            })
-        {
-            return Some(model);
-        }
-    }
-
-    models
-        .iter()
-        .filter(|model| model.provider_catalog_id == provider.id && model.capability_kind == "chat")
-        .min_by(|left, right| {
-            left.model_name.cmp(&right.model_name).then_with(|| left.id.cmp(&right.id))
-        })
-}
-
-pub(super) fn provider_validation_extra_parameters(
-    provider: &ProviderCatalogEntry,
-    model: &ModelCatalogEntry,
-) -> Value {
-    merge_provider_runtime_profile(
-        merge_model_request_policy(json!({}), &model.metadata_json),
-        &provider.profile,
-    )
-}
-
-pub(super) async fn validate_provider_access(
-    state: &AppState,
-    provider: &ProviderCatalogEntry,
-    models: &[ModelCatalogEntry],
-    api_key: Option<&str>,
-    base_url: Option<&str>,
-) -> Result<(), ApiError> {
-    let policy = provider_credential_policy(provider);
-    let normalized_api_key = normalize_optional(api_key);
-    let normalized_base_url = resolve_provider_base_url(provider, base_url)?;
-
-    if policy.api_key_required && normalized_api_key.is_none() {
-        return Err(ApiError::BadRequest(format!(
-            "provider {} requires an apiKey",
-            provider.provider_kind
-        )));
-    }
-    if policy.base_url_required && normalized_base_url.is_none() {
-        return Err(ApiError::BadRequest(format!(
-            "provider {} requires a baseUrl",
-            provider.provider_kind
-        )));
-    }
-
-    match policy.validation_mode {
-        ProviderCredentialValidationMode::ChatRoundTrip => {
-            let model = select_provider_validation_model(provider, models).ok_or_else(|| {
-                ApiError::BadRequest(format!(
-                    "provider {} does not expose a chat model for credential validation",
-                    provider.provider_kind
-                ))
-            })?;
-
-            state
-                .llm_gateway
-                .generate(ChatRequest {
-                    provider_kind: provider.provider_kind.clone(),
-                    model_name: model.model_name.clone(),
-                    prompt: "Reply with OK.".to_string(),
-                    api_key_override: normalized_api_key.clone(),
-                    base_url_override: normalized_base_url.clone(),
-                    system_prompt: Some(
-                        "Validate the supplied provider credentials by replying with the single token OK.".to_string(),
-                    ),
-                    temperature: Some(0.0),
-                    top_p: Some(1.0),
-                    max_output_tokens_override: Some(16),
-                    response_format: None,
-                    extra_parameters_json: provider_validation_extra_parameters(provider, model),
-                })
-                .await
-                .map(|_| ())
-                .map_err(|error| {
-                    let failure_kind = chat_round_trip_validation_failure_kind(&error);
-                    tracing::warn!(
-                        stage = "bootstrap",
-                        provider_kind = %provider.provider_kind,
-                        ?failure_kind,
-                        "provider credential validation failed"
-                    );
-                    let credential_failure_kind = match failure_kind {
-                        ChatRoundTripValidationFailureKind::CredentialRejected => {
-                            ProviderCredentialValidationFailureKind::Rejected
-                        }
-                        ChatRoundTripValidationFailureKind::ProviderUnavailable => {
-                            ProviderCredentialValidationFailureKind::Transport
-                        }
-                        ChatRoundTripValidationFailureKind::Internal => return ApiError::Internal,
-                    };
-                    provider_credential_validation_error(
-                        credential_failure_kind,
-                        format!(
-                            "provider credential validation failed for {}: upstream provider request failed; response details were redacted",
-                            provider.display_name
-                        ),
-                    )
-                })
-        }
-        ProviderCredentialValidationMode::ModelList => {
-            validate_provider_model_listing(
-                provider,
-                normalized_api_key.as_deref(),
-                normalized_base_url.as_deref(),
-            )
-            .await
-        }
-        ProviderCredentialValidationMode::None => Ok(()),
-    }
-}
-
-pub(super) async fn validate_provider_model_listing(
-    provider: &ProviderCatalogEntry,
-    api_key: Option<&str>,
-    base_url: Option<&str>,
-) -> Result<(), ApiError> {
-    let Some(base_url) = base_url else {
-        return Err(ApiError::BadRequest(format!(
-            "provider {} requires a baseUrl",
-            provider.provider_kind
-        )));
-    };
-    let loopback_base_url =
-        provider.base_url_policy.allow_private_network && is_loopback_base_url(base_url);
-    match fetch_provider_model_names(provider, api_key, base_url).await {
-        Ok(_) => Ok(()),
-        Err(error)
-            if loopback_base_url
-                && provider_credential_validation_failure_kind(&error)
-                    == Some(ProviderCredentialValidationFailureKind::Transport) =>
-        {
-            Err(loopback_runtime_error(provider))
-        }
-        Err(error) => Err(error),
+        ProviderAuthScheme::AnthropicApiKey => request.header("x-api-key", token),
+        ProviderAuthScheme::GoogleApiKey => request.header("x-goog-api-key", token),
     }
 }

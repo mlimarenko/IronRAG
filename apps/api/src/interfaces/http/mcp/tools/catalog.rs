@@ -9,8 +9,9 @@ use crate::{
 };
 
 use super::super::{
-    McpToolDescriptor, McpToolResult, audit::record_canonical_mcp_audit, ok_tool_result,
-    parse_tool_args, tool_error_result,
+    McpToolDescriptor, McpToolResult,
+    audit::{self, record_mcp_audit},
+    ok_tool_result, parse_tool_args, tool_error_result,
 };
 use super::ToolCallContext;
 
@@ -25,7 +26,7 @@ pub(crate) fn descriptor(name: &str) -> Option<McpToolDescriptor> {
                 "properties": {
                     "workspace": {
                         "type": "string",
-                        "description": "Canonical workspace ref. This becomes the stable workspace slug agents use in later MCP calls."
+                        "description": "Stable workspace ref. This becomes the stable workspace slug agents use in later MCP calls."
                     },
                     "title": {
                         "type": "string",
@@ -43,7 +44,7 @@ pub(crate) fn descriptor(name: &str) -> Option<McpToolDescriptor> {
                 "properties": {
                     "library": {
                         "type": "string",
-                        "description": "Canonical fully-qualified library ref in the form '<workspace>/<library>'."
+                        "description": "Normalized fully-qualified library ref in the form '<workspace>/<library>'."
                     },
                     "title": {
                         "type": "string",
@@ -69,7 +70,7 @@ pub(crate) fn descriptor(name: &str) -> Option<McpToolDescriptor> {
                 "properties": {
                     "workspace": {
                         "type": "string",
-                        "description": "Optional canonical workspace ref from list_workspaces."
+                        "description": "Optional stable workspace ref from list_workspaces."
                     }
                 }
             }),
@@ -83,7 +84,7 @@ pub(crate) fn descriptor(name: &str) -> Option<McpToolDescriptor> {
                 "properties": {
                     "workspace": {
                         "type": "string",
-                        "description": "Canonical workspace ref from list_workspaces."
+                        "description": "Stable workspace ref from list_workspaces."
                     },
                     "title": {
                         "type": "string",
@@ -106,7 +107,7 @@ pub(crate) fn descriptor(name: &str) -> Option<McpToolDescriptor> {
                 "properties": {
                     "library": {
                         "type": "string",
-                        "description": "Canonical fully-qualified library ref in the form '<workspace>/<library>'."
+                        "description": "Normalized fully-qualified library ref in the form '<workspace>/<library>'."
                     },
                     "title": {
                         "type": "string",
@@ -152,41 +153,45 @@ async fn create_workspace(context: ToolCallContext<'_>, arguments: &Value) -> Mc
                 .await
             {
                 Ok(payload) => {
-                    record_canonical_mcp_audit(
+                    record_mcp_audit(
                         context.state,
                         context.auth,
                         context.request_id,
-                        "catalog.workspace.create",
-                        "succeeded",
-                        Some(format!("workspace {} created", payload.name)),
-                        Some(format!(
-                            "principal {} created workspace {} via MCP",
-                            context.auth.principal_id, payload.workspace_id
-                        )),
-                        vec![AppendAuditEventSubjectCommand {
-                            subject_kind: "workspace".to_string(),
-                            subject_id: payload.workspace_id,
-                            workspace_id: Some(payload.workspace_id),
-                            library_id: None,
-                            document_id: None,
-                        }],
+                        audit::McpAuditEvent {
+                            action_kind: "catalog.workspace.create",
+                            result_kind: "succeeded",
+                            redacted_message: Some(format!("workspace {} created", payload.name)),
+                            internal_message: Some(format!(
+                                "principal {} created workspace {} via MCP",
+                                context.auth.principal_id, payload.workspace_id
+                            )),
+                            subjects: vec![AppendAuditEventSubjectCommand {
+                                subject_kind: "workspace".to_string(),
+                                subject_id: payload.workspace_id,
+                                workspace_id: Some(payload.workspace_id),
+                                library_id: None,
+                                document_id: None,
+                            }],
+                        },
                     )
                     .await;
                     ok_tool_result("Workspace created.", json!({ "workspace": payload }))
                 }
                 Err(error) => {
-                    record_canonical_mcp_audit(
+                    record_mcp_audit(
                         context.state,
                         context.auth,
                         context.request_id,
-                        "catalog.workspace.create",
-                        "rejected",
-                        Some("workspace create denied".to_string()),
-                        Some(format!(
-                            "principal {} was denied workspace create via MCP",
-                            context.auth.principal_id
-                        )),
-                        Vec::new(),
+                        audit::McpAuditEvent {
+                            action_kind: "catalog.workspace.create",
+                            result_kind: "rejected",
+                            redacted_message: Some("workspace create denied".to_string()),
+                            internal_message: Some(format!(
+                                "principal {} was denied workspace create via MCP",
+                                context.auth.principal_id
+                            )),
+                            subjects: Vec::new(),
+                        },
                     )
                     .await;
                     tool_error_result(error)
@@ -194,18 +199,20 @@ async fn create_workspace(context: ToolCallContext<'_>, arguments: &Value) -> Mc
             }
         }
         Err(error) => {
-            record_canonical_mcp_audit(
+            record_mcp_audit(
                 context.state,
                 context.auth,
                 context.request_id,
-                "catalog.workspace.create",
-                "rejected",
-                Some("workspace create payload rejected".to_string()),
-                Some(format!(
-                    "principal {} submitted invalid MCP workspace create payload",
-                    context.auth.principal_id
-                )),
-                Vec::new(),
+                audit::McpAuditEvent {
+                    action_kind: "catalog.workspace.create",
+                    result_kind: "rejected",
+                    redacted_message: Some("workspace create payload rejected".to_string()),
+                    internal_message: Some(format!(
+                        "principal {} submitted invalid MCP workspace create payload",
+                        context.auth.principal_id
+                    )),
+                    subjects: Vec::new(),
+                },
             )
             .await;
             tool_error_result(error)
@@ -223,24 +230,26 @@ async fn create_library(context: ToolCallContext<'_>, arguments: &Value) -> McpT
         .await
         {
             Ok(payload) => {
-                record_canonical_mcp_audit(
+                record_mcp_audit(
                     context.state,
                     context.auth,
                     context.request_id,
-                    "catalog.library.create",
-                    "succeeded",
-                    Some(format!("library {} created", payload.name)),
-                    Some(format!(
-                        "principal {} created library {} via MCP",
-                        context.auth.principal_id, payload.library_id
-                    )),
-                    vec![AppendAuditEventSubjectCommand {
-                        subject_kind: "library".to_string(),
-                        subject_id: payload.library_id,
-                        workspace_id: Some(payload.workspace_id),
-                        library_id: Some(payload.library_id),
-                        document_id: None,
-                    }],
+                    audit::McpAuditEvent {
+                        action_kind: "catalog.library.create",
+                        result_kind: "succeeded",
+                        redacted_message: Some(format!("library {} created", payload.name)),
+                        internal_message: Some(format!(
+                            "principal {} created library {} via MCP",
+                            context.auth.principal_id, payload.library_id
+                        )),
+                        subjects: vec![AppendAuditEventSubjectCommand {
+                            subject_kind: "library".to_string(),
+                            subject_id: payload.library_id,
+                            workspace_id: Some(payload.workspace_id),
+                            library_id: Some(payload.library_id),
+                            document_id: None,
+                        }],
+                    },
                 )
                 .await;
                 ok_tool_result("Library created.", json!({ "library": payload }))
@@ -255,45 +264,49 @@ async fn create_library(context: ToolCallContext<'_>, arguments: &Value) -> McpT
                     )
                     .await
                     .ok();
-                record_canonical_mcp_audit(
+                record_mcp_audit(
                     context.state,
                     context.auth,
                     context.request_id,
-                    "catalog.library.create",
-                    "rejected",
-                    Some("library create denied".to_string()),
-                    Some(format!(
-                        "principal {} was denied library create for ref {} via MCP",
-                        context.auth.principal_id, args.library
-                    )),
-                    workspace_scope
-                        .iter()
-                        .map(|workspace| AppendAuditEventSubjectCommand {
-                            subject_kind: "workspace".to_string(),
-                            subject_id: workspace.id,
-                            workspace_id: Some(workspace.id),
-                            library_id: None,
-                            document_id: None,
-                        })
-                        .collect(),
+                    audit::McpAuditEvent {
+                        action_kind: "catalog.library.create",
+                        result_kind: "rejected",
+                        redacted_message: Some("library create denied".to_string()),
+                        internal_message: Some(format!(
+                            "principal {} was denied library create for ref {} via MCP",
+                            context.auth.principal_id, args.library
+                        )),
+                        subjects: workspace_scope
+                            .iter()
+                            .map(|workspace| AppendAuditEventSubjectCommand {
+                                subject_kind: "workspace".to_string(),
+                                subject_id: workspace.id,
+                                workspace_id: Some(workspace.id),
+                                library_id: None,
+                                document_id: None,
+                            })
+                            .collect(),
+                    },
                 )
                 .await;
                 tool_error_result(error)
             }
         },
         Err(error) => {
-            record_canonical_mcp_audit(
+            record_mcp_audit(
                 context.state,
                 context.auth,
                 context.request_id,
-                "catalog.library.create",
-                "rejected",
-                Some("library create payload rejected".to_string()),
-                Some(format!(
-                    "principal {} submitted invalid MCP library create payload",
-                    context.auth.principal_id
-                )),
-                Vec::new(),
+                audit::McpAuditEvent {
+                    action_kind: "catalog.library.create",
+                    result_kind: "rejected",
+                    redacted_message: Some("library create payload rejected".to_string()),
+                    internal_message: Some(format!(
+                        "principal {} submitted invalid MCP library create payload",
+                        context.auth.principal_id
+                    )),
+                    subjects: Vec::new(),
+                },
             )
             .await;
             tool_error_result(error)
@@ -317,24 +330,26 @@ async fn update_workspace(context: ToolCallContext<'_>, arguments: &Value) -> Mc
                 .await
             {
                 Ok(payload) => {
-                    record_canonical_mcp_audit(
+                    record_mcp_audit(
                         context.state,
                         context.auth,
                         context.request_id,
-                        "catalog.workspace.update",
-                        "succeeded",
-                        Some(format!("workspace {} updated", payload.name)),
-                        Some(format!(
-                            "principal {} updated workspace {} via MCP",
-                            context.auth.principal_id, payload.workspace_id
-                        )),
-                        vec![AppendAuditEventSubjectCommand {
-                            subject_kind: "workspace".to_string(),
-                            subject_id: payload.workspace_id,
-                            workspace_id: Some(payload.workspace_id),
-                            library_id: None,
-                            document_id: None,
-                        }],
+                        audit::McpAuditEvent {
+                            action_kind: "catalog.workspace.update",
+                            result_kind: "succeeded",
+                            redacted_message: Some(format!("workspace {} updated", payload.name)),
+                            internal_message: Some(format!(
+                                "principal {} updated workspace {} via MCP",
+                                context.auth.principal_id, payload.workspace_id
+                            )),
+                            subjects: vec![AppendAuditEventSubjectCommand {
+                                subject_kind: "workspace".to_string(),
+                                subject_id: payload.workspace_id,
+                                workspace_id: Some(payload.workspace_id),
+                                library_id: None,
+                                document_id: None,
+                            }],
+                        },
                     )
                     .await;
                     ok_tool_result("Workspace updated.", json!({ "workspace": payload }))
@@ -353,24 +368,26 @@ async fn update_library(context: ToolCallContext<'_>, arguments: &Value) -> McpT
                 .await
             {
                 Ok(payload) => {
-                    record_canonical_mcp_audit(
+                    record_mcp_audit(
                         context.state,
                         context.auth,
                         context.request_id,
-                        "catalog.library.update",
-                        "succeeded",
-                        Some(format!("library {} updated", payload.name)),
-                        Some(format!(
-                            "principal {} updated library {} via MCP",
-                            context.auth.principal_id, payload.library_id
-                        )),
-                        vec![AppendAuditEventSubjectCommand {
-                            subject_kind: "library".to_string(),
-                            subject_id: payload.library_id,
-                            workspace_id: Some(payload.workspace_id),
-                            library_id: Some(payload.library_id),
-                            document_id: None,
-                        }],
+                        audit::McpAuditEvent {
+                            action_kind: "catalog.library.update",
+                            result_kind: "succeeded",
+                            redacted_message: Some(format!("library {} updated", payload.name)),
+                            internal_message: Some(format!(
+                                "principal {} updated library {} via MCP",
+                                context.auth.principal_id, payload.library_id
+                            )),
+                            subjects: vec![AppendAuditEventSubjectCommand {
+                                subject_kind: "library".to_string(),
+                                subject_id: payload.library_id,
+                                workspace_id: Some(payload.workspace_id),
+                                library_id: Some(payload.library_id),
+                                document_id: None,
+                            }],
+                        },
                     )
                     .await;
                     ok_tool_result("Library updated.", json!({ "library": payload }))

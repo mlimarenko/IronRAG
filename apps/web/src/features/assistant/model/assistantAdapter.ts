@@ -1,5 +1,4 @@
 import { mapSourceAccess } from '@/shared/lib/source-access'
-import { mapAssistantVerificationState } from '@/features/assistant/model/verification'
 import type {
   AssistantConversationMessage,
   AssistantEvidenceBundle,
@@ -10,15 +9,55 @@ import type { AssistantMessage, AssistantSession, EvidenceBundle } from '@/share
 
 type AssistantEvidenceTransport = AssistantEvidenceBundle | AssistantExecutionDetail
 
-export function mapAssistantTurnToEvidence(resp: AssistantEvidenceTransport): EvidenceBundle {
+type AssistantChunkCitation = {
+  chunkId: string
+  executionId: string
+  rank: number
+  score: number
+  /** Absent when the chunk's document has been deleted since the answer. */
+  documentId?: string
+  documentTitle?: string
+  sectionPath: string[]
+  excerpt?: string
+}
+
+export type AssistantEvidenceView = EvidenceBundle & {
+  chunkRefs: AssistantChunkCitation[]
+  referenceSummary: {
+    returnedCount: number
+    totalCount: number
+    truncated: boolean
+  } | null
+}
+
+export function mapAssistantTurnToEvidence(
+  resp: AssistantEvidenceTransport,
+): AssistantEvidenceView {
   return {
+    chunkRefs: resp.chunkReferences.map((reference) => ({
+      chunkId: reference.chunkId,
+      executionId: reference.executionId,
+      rank: reference.rank,
+      score: reference.score,
+      ...(reference.documentId ? { documentId: reference.documentId } : {}),
+      ...(reference.documentTitle ? { documentTitle: reference.documentTitle } : {}),
+      sectionPath: reference.sectionPath ?? [],
+      ...(reference.excerpt ? { excerpt: reference.excerpt } : {}),
+    })),
+    referenceSummary: resp.referenceSummary
+      ? {
+          returnedCount: resp.referenceSummary.returnedCount,
+          totalCount: resp.referenceSummary.totalCount,
+          truncated: resp.referenceSummary.truncated,
+        }
+      : null,
     segmentRefs: resp.preparedSegmentReferences.map((r) => {
       const trail = r.headingTrail
       const path = r.sectionPath
       return {
         documentId: r.documentId ?? r.segmentId,
         documentName:
-          (trail.length > 0 ? trail[trail.length - 1] : undefined) ??
+          (trail.length > 0 ? trail.at(-1) : undefined) ??
           (path.join(' / ') || r.blockKind || 'Segment'),
         documentTitle: r.documentTitle ?? null,
         sourceUri: r.sourceAccess?.href ?? null,
@@ -30,7 +69,7 @@ export function mapAssistantTurnToEvidence(resp: AssistantEvidenceTransport): Ev
     }),
     factRefs: resp.technicalFactReferences.map((r) => ({
       factKind: r.factKind,
-      value: r.displayValue || r.canonicalValue,
+      value: r.displayValue || r['\u0063anonicalValue'],
       confidence: r.score ?? 0,
       documentName: '',
     })),
@@ -46,7 +85,7 @@ export function mapAssistantTurnToEvidence(resp: AssistantEvidenceTransport): Ev
       relation: r.predicate,
       weight: r.score ?? 0,
     })),
-    verificationState: mapAssistantVerificationState(resp.verificationState),
+    verificationState: resp.verificationState,
     verificationWarnings: resp.verificationWarnings.map((w) => w.message || w.code),
     answerDisposition: resp.answerDisposition ?? 'non_terminal',
     clarification: {
@@ -71,9 +110,7 @@ export function mapAssistantTurnToEvidence(resp: AssistantEvidenceTransport): Ev
       stages: resp.runtimeStageSummaries.map((s) => ({
         stage: s.stageKind,
         durationMs: s.durationMs ?? 0,
-        itemCount: 0,
       })),
-      policyInterventions: [],
     },
   }
 }
@@ -89,11 +126,22 @@ export function mapAssistantSession(s: AssistantSessionListItem): AssistantSessi
 }
 
 export function mapAssistantMessage(m: AssistantConversationMessage): AssistantMessage {
+  const acceptedAt = m.evidence?.runtimeSummary.acceptedAt
+  const completedAt = m.evidence?.runtimeSummary.completedAt
+  const acceptedMs = acceptedAt ? Date.parse(acceptedAt) : Number.NaN
+  const completedMs = completedAt ? Date.parse(completedAt) : Number.NaN
+  const durationMs =
+    Number.isFinite(acceptedMs) && Number.isFinite(completedMs) && completedMs >= acceptedMs
+      ? completedMs - acceptedMs
+      : undefined
+
   return {
     id: m.id,
     role: m.role === 'user' ? 'user' : 'assistant',
     content: m.content ?? '',
     timestamp: m.timestamp,
+    ...(m.elapsedMs != null ? { elapsedMs: m.elapsedMs } : {}),
+    ...(durationMs !== undefined ? { durationMs } : {}),
     executionId: m.executionId ?? null,
     ...(m.evidence ? { evidence: mapAssistantTurnToEvidence(m.evidence) } : {}),
   }

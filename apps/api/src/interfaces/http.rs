@@ -14,6 +14,7 @@ pub mod mcp;
 pub mod middleware;
 pub mod openapi;
 pub mod ops;
+pub mod provisioning;
 pub mod query;
 pub mod query_session_mutations;
 pub mod router_support;
@@ -32,10 +33,11 @@ pub fn probe_router() -> Router<crate::app::state::AppState> {
 
 pub fn router() -> Router<crate::app::state::AppState> {
     probe_router()
-        .route("/version/update", get(health::release_update))
+        .route("/version/latest", get(health::release_update))
         .merge(openapi::router())
         .merge(iam::router())
         .merge(catalog::router())
+        .merge(provisioning::router())
         .merge(admin::router())
         .merge(ai::router())
         .merge(ingestion::router())

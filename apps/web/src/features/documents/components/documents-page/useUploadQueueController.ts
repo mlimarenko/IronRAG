@@ -2,7 +2,7 @@ import { useCallback, useMemo, useRef, useState, type ChangeEvent, type DragEven
 import type { TFunction } from 'i18next'
 import { toast } from 'sonner'
 
-import { documentsApi } from '@/shared/api'
+import { documentsApi, getApiProblem } from '@/shared/api'
 import { buildUploadFailureNotice } from '@/shared/lib/document-processing'
 import type { DocumentItem, Library } from '@/shared/types'
 
@@ -20,6 +20,7 @@ type UploadQueueControllerInput = {
   errorMessage: (error: unknown, fallback: string) => string
   items: DocumentItem[]
   loadFirstPage: () => Promise<void>
+  openExistingDocument: (documentId: string) => void
   t: TFunction
 }
 
@@ -33,6 +34,7 @@ export function useUploadQueueController({
   errorMessage,
   items,
   loadFirstPage,
+  openExistingDocument,
   t,
 }: UploadQueueControllerInput) {
   const [dragOver, setDragOver] = useState(false)
@@ -50,9 +52,10 @@ export function useUploadQueueController({
   const folderInputRef = useRef<HTMLInputElement>(null)
 
   const doUploadFile = useCallback(
-    async (candidate: UploadCandidate, documentHint: string) => {
-      if (!activeLibrary) return
-      setUploadQueue((prev) => [...prev, { name: candidate.name, state: 'uploading' }])
+    async (candidate: UploadCandidate, documentHint: string): Promise<string | null> => {
+      if (!activeLibrary) return null
+      const id = crypto.randomUUID()
+      setUploadQueue((prev) => [...prev, { id, name: candidate.name, state: 'uploading' }])
       try {
         const trimmedDocumentHint = documentHint.trim()
         await documentsApi.upload(activeLibrary.id, candidate.file, {
@@ -63,9 +66,20 @@ export function useUploadQueueController({
         })
         activateListPollGrace()
         setUploadQueue((prev) =>
-          prev.map((item) => (item.name === candidate.name ? { ...item, state: 'done' } : item)),
+          prev.map((item) => (item.id === id ? { ...item, state: 'done' } : item)),
         )
+        return null
       } catch (err) {
+        const problem = getApiProblem(err)
+        const existingDocumentId = problem?.body.existingDocumentId
+        if (
+          problem?.status === 409 &&
+          problem.code === 'duplicate_content' &&
+          typeof existingDocumentId === 'string'
+        ) {
+          setUploadQueue((prev) => prev.filter((item) => item.id !== id))
+          return existingDocumentId
+        }
         const notice = buildUploadFailureNotice(
           err,
           errorMessage(err, t('documents.uploadFailed')),
@@ -73,7 +87,7 @@ export function useUploadQueueController({
         )
         setUploadQueue((prev) =>
           prev.map((item) =>
-            item.name === candidate.name
+            item.id === id
               ? {
                   ...item,
                   state: 'error',
@@ -85,6 +99,7 @@ export function useUploadQueueController({
               : item,
           ),
         )
+        return null
       }
     },
     [activeLibrary, activateListPollGrace, errorMessage, t],
@@ -92,12 +107,13 @@ export function useUploadQueueController({
 
   const doReplaceFile = useCallback(
     async (docId: string, file: File, uploadName = file.name) => {
-      setUploadQueue((prev) => [...prev, { name: uploadName, state: 'uploading' }])
+      const id = crypto.randomUUID()
+      setUploadQueue((prev) => [...prev, { id, name: uploadName, state: 'uploading' }])
       try {
         await documentsApi.replace(docId, file)
         activateListPollGrace()
         setUploadQueue((prev) =>
-          prev.map((item) => (item.name === uploadName ? { ...item, state: 'done' } : item)),
+          prev.map((item) => (item.id === id ? { ...item, state: 'done' } : item)),
         )
       } catch (err) {
         const notice = buildUploadFailureNotice(
@@ -107,7 +123,7 @@ export function useUploadQueueController({
         )
         setUploadQueue((prev) =>
           prev.map((item) =>
-            item.name === uploadName
+            item.id === id
               ? {
                   ...item,
                   state: 'error',
@@ -148,7 +164,9 @@ export function useUploadQueueController({
         if (!candidate) break
         const rest = remaining.slice(1)
         const existing = items.find(
-          (doc) => normalizeUploadName(doc.fileName).toLowerCase() === candidate.name.toLowerCase(),
+          (doc) =>
+            doc.fileName !== null &&
+            normalizeUploadName(doc.fileName).toLowerCase() === candidate.name.toLowerCase(),
         )
         if (existing) {
           setDuplicateConflict({
@@ -159,7 +177,16 @@ export function useUploadQueueController({
           })
           return
         }
-        await doUploadFile(candidate, documentHint)
+        const existingDocumentId = await doUploadFile(candidate, documentHint)
+        if (existingDocumentId) {
+          setDuplicateConflict({
+            candidate,
+            documentHint,
+            existingDocId: existingDocumentId,
+            remaining: rest,
+          })
+          return
+        }
         remaining = rest
       }
       await finalizeUpload()
@@ -204,18 +231,18 @@ export function useUploadQueueController({
     await processUploadQueue(candidates, documentHint)
   }, [pendingUploadSelection, processUploadQueue, uploadDialogHint])
   const resolveDuplicate = useCallback(
-    async (mode: 'replace' | 'add' | 'skip') => {
+    async (mode: 'replace' | 'open' | 'skip') => {
       if (!duplicateConflict) return
       const { candidate, documentHint, existingDocId, remaining } = duplicateConflict
       setDuplicateConflict(null)
       if (mode === 'replace') {
         await doReplaceFile(existingDocId, candidate.file, candidate.name)
-      } else if (mode === 'add') {
-        await doUploadFile(candidate, documentHint)
+      } else if (mode === 'open') {
+        openExistingDocument(existingDocId)
       }
       await processUploadQueue(remaining, documentHint)
     },
-    [doReplaceFile, doUploadFile, duplicateConflict, processUploadQueue],
+    [doReplaceFile, duplicateConflict, openExistingDocument, processUploadQueue],
   )
 
   return {

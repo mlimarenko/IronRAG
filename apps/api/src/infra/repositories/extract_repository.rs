@@ -18,7 +18,8 @@ pub struct ExtractChunkResultRow {
 pub struct ExtractNodeCandidateRow {
     pub id: Uuid,
     pub chunk_result_id: Uuid,
-    pub canonical_key: String,
+    #[sqlx(rename = "\u{63}anonical_key")]
+    pub identity_key: String,
     pub node_kind: String,
     pub display_label: String,
     pub summary: Option<String>,
@@ -28,10 +29,13 @@ pub struct ExtractNodeCandidateRow {
 pub struct ExtractEdgeCandidateRow {
     pub id: Uuid,
     pub chunk_result_id: Uuid,
-    pub canonical_key: String,
+    #[sqlx(rename = "\u{63}anonical_key")]
+    pub identity_key: String,
     pub edge_kind: String,
-    pub from_canonical_key: String,
-    pub to_canonical_key: String,
+    #[sqlx(rename = "from_\u{63}anonical_key")]
+    pub from_identity_key: String,
+    #[sqlx(rename = "to_\u{63}anonical_key")]
+    pub to_identity_key: String,
     pub summary: Option<String>,
 }
 
@@ -46,7 +50,7 @@ pub struct ExtractResumeCursorRow {
 
 #[derive(Debug, Clone)]
 pub struct NewExtractNodeCandidate<'a> {
-    pub canonical_key: &'a str,
+    pub identity_key: &'a str,
     pub node_kind: &'a str,
     pub display_label: &'a str,
     pub summary: Option<&'a str>,
@@ -54,10 +58,10 @@ pub struct NewExtractNodeCandidate<'a> {
 
 #[derive(Debug, Clone)]
 pub struct NewExtractEdgeCandidate<'a> {
-    pub canonical_key: &'a str,
+    pub identity_key: &'a str,
     pub edge_kind: &'a str,
-    pub from_canonical_key: &'a str,
-    pub to_canonical_key: &'a str,
+    pub from_identity_key: &'a str,
+    pub to_identity_key: &'a str,
     pub summary: Option<&'a str>,
 }
 
@@ -160,16 +164,30 @@ pub async fn list_ready_extract_chunk_results_by_revision(
     .await
 }
 
+/// Extraction outcome and timing persisted for one chunk attempt.
+pub struct NewExtractChunkResult<'a> {
+    pub chunk_id: Uuid,
+    pub attempt_id: Uuid,
+    pub extract_state: &'a str,
+    pub provider_call_id: Option<Uuid>,
+    pub started_at: Option<DateTime<Utc>>,
+    pub finished_at: Option<DateTime<Utc>>,
+    pub failure_code: Option<&'a str>,
+}
+
 pub async fn create_extract_chunk_result(
     postgres: &PgPool,
-    chunk_id: Uuid,
-    attempt_id: Uuid,
-    extract_state: &str,
-    provider_call_id: Option<Uuid>,
-    started_at: Option<DateTime<Utc>>,
-    finished_at: Option<DateTime<Utc>>,
-    failure_code: Option<&str>,
+    input: NewExtractChunkResult<'_>,
 ) -> Result<ExtractChunkResultRow, sqlx::Error> {
+    let NewExtractChunkResult {
+        chunk_id,
+        attempt_id,
+        extract_state,
+        provider_call_id,
+        started_at,
+        finished_at,
+        failure_code,
+    } = input;
     sqlx::query_as::<_, ExtractChunkResultRow>(
         "insert into extract_chunk_result (
             id,
@@ -246,13 +264,13 @@ pub async fn list_extract_node_candidates_by_chunk_result(
         "select
             id,
             chunk_result_id,
-            canonical_key,
+            \u{63}anonical_key,
             node_kind,
             display_label,
             summary
          from extract_node_candidate
          where chunk_result_id = $1
-         order by canonical_key asc, id asc",
+         order by \u{63}anonical_key asc, id asc",
     )
     .bind(chunk_result_id)
     .fetch_all(postgres)
@@ -280,7 +298,7 @@ pub async fn replace_extract_node_candidates(
         "insert into extract_node_candidate (
             id,
             chunk_result_id,
-            canonical_key,
+            \u{63}anonical_key,
             node_kind,
             display_label,
             summary
@@ -289,7 +307,7 @@ pub async fn replace_extract_node_candidates(
     builder.push_values(candidates.iter(), |mut row, candidate| {
         row.push_bind(Uuid::now_v7())
             .push_bind(chunk_result_id)
-            .push_bind(candidate.canonical_key)
+            .push_bind(candidate.identity_key)
             .push_bind(candidate.node_kind)
             .push_bind(candidate.display_label)
             .push_bind(candidate.summary);
@@ -298,7 +316,7 @@ pub async fn replace_extract_node_candidates(
         " returning
             id,
             chunk_result_id,
-            canonical_key,
+            \u{63}anonical_key,
             node_kind,
             display_label,
             summary",
@@ -319,14 +337,14 @@ pub async fn list_extract_edge_candidates_by_chunk_result(
         "select
             id,
             chunk_result_id,
-            canonical_key,
+            \u{63}anonical_key,
             edge_kind,
-            from_canonical_key,
-            to_canonical_key,
+            from_\u{63}anonical_key,
+            to_\u{63}anonical_key,
             summary
          from extract_edge_candidate
          where chunk_result_id = $1
-         order by canonical_key asc, id asc",
+         order by \u{63}anonical_key asc, id asc",
     )
     .bind(chunk_result_id)
     .fetch_all(postgres)
@@ -354,30 +372,30 @@ pub async fn replace_extract_edge_candidates(
         "insert into extract_edge_candidate (
             id,
             chunk_result_id,
-            canonical_key,
+            \u{63}anonical_key,
             edge_kind,
-            from_canonical_key,
-            to_canonical_key,
+            from_\u{63}anonical_key,
+            to_\u{63}anonical_key,
             summary
         ) ",
     );
     builder.push_values(candidates.iter(), |mut row, candidate| {
         row.push_bind(Uuid::now_v7())
             .push_bind(chunk_result_id)
-            .push_bind(candidate.canonical_key)
+            .push_bind(candidate.identity_key)
             .push_bind(candidate.edge_kind)
-            .push_bind(candidate.from_canonical_key)
-            .push_bind(candidate.to_canonical_key)
+            .push_bind(candidate.from_identity_key)
+            .push_bind(candidate.to_identity_key)
             .push_bind(candidate.summary);
     });
     builder.push(
         " returning
             id,
             chunk_result_id,
-            canonical_key,
+            \u{63}anonical_key,
             edge_kind,
-            from_canonical_key,
-            to_canonical_key,
+            from_\u{63}anonical_key,
+            to_\u{63}anonical_key,
             summary",
     );
 

@@ -30,9 +30,10 @@ pub fn apply(router: Router<AppState>) -> Router<AppState> {
                         .map_or_else(|| "-".to_string(), |request_id| request_id.0.clone());
                     let span = tracing::info_span!(
                         "http_request",
+                        otel.kind = "server",
                         method = %request.method(),
                         matched_path,
-                        uri = %request.uri(),
+                        uri = %request.uri().path(),
                         request_id,
                         error.kind = field::Empty,
                     );
@@ -56,7 +57,7 @@ pub fn apply(router: Router<AppState>) -> Router<AppState> {
                     info!(
                         method = %request.method(),
                         matched_path,
-                        uri = %request.uri(),
+                        uri = %request.uri().path(),
                         user_agent,
                         request_id,
                         "http request started",
@@ -70,13 +71,7 @@ pub fn apply(router: Router<AppState>) -> Router<AppState> {
                         .get(router_support::REQUEST_ID_HEADER)
                         .and_then(|value| value.to_str().ok())
                         .unwrap_or("-");
-                    if status.is_server_error() {
-                        error!(%status, latency_ms, request_id, "http request completed with server error");
-                    } else if status.is_client_error() {
-                        warn!(%status, latency_ms, request_id, "http request completed with client error");
-                    } else {
-                        info!(%status, latency_ms, request_id, "http request completed");
-                    }
+                    log_completed_response(status, latency_ms, request_id);
                 })
                 .on_failure(
                     |failure_class: ServerErrorsFailureClass, latency: Duration, _span: &Span| {
@@ -88,6 +83,32 @@ pub fn apply(router: Router<AppState>) -> Router<AppState> {
                     },
                 ),
         )
+}
+
+/// Routes the completed-request log line to its level. Kept as separate
+/// single-macro helpers because a tracing macro's expansion is itself counted
+/// as cognitive complexity: one macro per leaf keeps every function below the
+/// threshold while preserving the exact level, fields and message.
+fn log_completed_response(status: axum::http::StatusCode, latency_ms: u128, request_id: &str) {
+    if status.is_server_error() {
+        log_response_server_error(status, latency_ms, request_id);
+    } else if status.is_client_error() {
+        log_response_client_error(status, latency_ms, request_id);
+    } else {
+        log_response_success(status, latency_ms, request_id);
+    }
+}
+
+fn log_response_server_error(status: axum::http::StatusCode, latency_ms: u128, request_id: &str) {
+    error!(%status, latency_ms, request_id, "http request completed with server error");
+}
+
+fn log_response_client_error(status: axum::http::StatusCode, latency_ms: u128, request_id: &str) {
+    warn!(%status, latency_ms, request_id, "http request completed with client error");
+}
+
+fn log_response_success(status: axum::http::StatusCode, latency_ms: u128, request_id: &str) {
+    info!(%status, latency_ms, request_id, "http request completed");
 }
 
 async fn inject_request_id(mut request: Request<Body>) -> Request<Body> {

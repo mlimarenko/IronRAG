@@ -18,12 +18,6 @@ pub(super) struct InlineMutationContext {
     pub(super) revision_id: Uuid,
 }
 
-#[derive(Debug, Clone)]
-pub(super) struct EditableDocumentContext {
-    pub(super) title: Option<String>,
-    pub(super) language_code: Option<String>,
-}
-
 pub(super) struct PrefetchedDocumentSummaryData {
     pub(super) revisions_by_id: HashMap<Uuid, KnowledgeRevisionRow>,
     pub(super) structured_revisions_by_revision_id: HashMap<Uuid, KnowledgeStructuredRevisionRow>,

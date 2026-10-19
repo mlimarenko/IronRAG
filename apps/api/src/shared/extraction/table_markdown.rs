@@ -21,7 +21,7 @@ fn padded_markdown_row(cells: &[String], width: usize) -> Vec<String> {
 }
 
 #[must_use]
-pub fn canonicalize_table_headers(headers: &[String], width: usize) -> Vec<String> {
+pub fn normalize_table_headers(headers: &[String], width: usize) -> Vec<String> {
     (0..width)
         .map(|index| {
             headers
@@ -96,7 +96,7 @@ pub fn build_semantic_table_row_text(
     row: &[String],
 ) -> String {
     let width = headers.len().max(row.len());
-    let normalized_headers = canonicalize_table_headers(headers, width);
+    let normalized_headers = normalize_table_headers(headers, width);
     let mut segments = Vec::with_capacity(width.saturating_add(3));
     if let Some(sheet_name) = sheet_name.map(str::trim).filter(|value| !value.is_empty()) {
         segments.push(format!("Sheet: {sheet_name}"));
@@ -126,7 +126,7 @@ pub fn render_markdown_table(headers: &[String], rows: &[Vec<String>]) -> Option
         return None;
     }
 
-    let header_row = canonicalize_table_headers(headers, width);
+    let header_row = normalize_table_headers(headers, width);
     let mut lines = Vec::with_capacity(rows.len().saturating_add(2));
     lines.push(markdown_row_line(&header_row));
     lines.push(markdown_row_line(&(0..width).map(|_| "---".to_string()).collect::<Vec<_>>()));

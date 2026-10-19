@@ -1,26 +1,23 @@
-import { useNavigate } from 'react-router-dom'
+import { ArrowLeft, Compass } from 'lucide-react'
+import { Link } from 'react-router-dom'
 import { useTranslation } from 'react-i18next'
-import { Button } from '@/shared/components/ui/button'
-import { Home } from 'lucide-react'
+import { Button } from '@/shared/ui'
 
 export default function NotFoundPage() {
   const { t } = useTranslation()
-  const navigate = useNavigate()
-
   return (
-    <div className="min-h-screen flex items-center justify-center bg-background ambient-bg">
-      <div className="text-center animate-fade-in relative z-10">
-        <div className="mb-4 bg-gradient-to-b from-foreground/15 to-foreground/5 bg-clip-text text-8xl font-black tracking-tighter text-transparent">
-          404
-        </div>
-        <h1 className="text-lg font-bold tracking-tight">{t('common.pageNotFoundTitle')}</h1>
-        <p className="text-sm text-muted-foreground mt-2 mb-6">
-          {t('common.pageNotFoundDescription')}
-        </p>
-        <Button variant="outline" onClick={() => navigate('/dashboard')}>
-          <Home className="h-4 w-4 mr-2" /> {t('common.backToHome')}
-        </Button>
-      </div>
+    <div className="not-found">
+      <Compass size={34} />
+      <span>404</span>
+      <h1>{t('notFound.title', { productName: getBranding().displayName })}</h1>
+      <p>{t('notFound.body')}</p>
+      <Button variant="primary">
+        <Link to="/dashboard">
+          <ArrowLeft size={15} />
+          {t('notFound.home')}
+        </Link>
+      </Button>
     </div>
   )
 }
+import { getBranding } from './branding'

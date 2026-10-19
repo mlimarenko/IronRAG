@@ -1,0 +1,19 @@
+services:
+  youtrack:
+    image: jetbrains/youtrack:2026.2.17548
+    ports:
+      - "127.0.0.1:${YOUTRACK_E2E_PORT:-18080}:8080"
+    volumes:
+      - youtrack-data:/opt/youtrack/data
+      - youtrack-conf:/opt/youtrack/conf
+      - youtrack-logs:/opt/youtrack/logs
+      - youtrack-backups:/opt/youtrack/backups
+    stop_grace_period: 60s
+    security_opt:
+      - no-new-privileges:true
+
+volumes:
+  youtrack-data:
+  youtrack-conf:
+  youtrack-logs:
+  youtrack-backups:

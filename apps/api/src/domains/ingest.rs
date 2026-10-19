@@ -4,7 +4,7 @@ use uuid::Uuid;
 
 use crate::shared::web::ingest::{WebClassificationReason, WebIngestUrlFilter, WebRunFailureCode};
 
-/// Maximum number of attempts for one canonical ingest job before a requested
+/// Maximum number of attempts for one ingest job before a requested
 /// retry is promoted to a terminal failure.
 pub(crate) const MAX_INGEST_ATTEMPTS: i32 = 5;
 const INGEST_RETRY_BACKOFF_BASE_SECONDS: i64 = 15;
@@ -24,8 +24,25 @@ pub(crate) fn is_retry_budget_exhausted(
     attempt_state: &str,
     retryable: bool,
     attempt_number: i32,
+    operationally_deferred: bool,
 ) -> bool {
-    attempt_state == "failed" && retryable && attempt_number >= MAX_INGEST_ATTEMPTS
+    attempt_state == "failed"
+        && retryable
+        && !operationally_deferred
+        && attempt_number >= MAX_INGEST_ATTEMPTS
+}
+
+/// Requeue delay for a failed attempt. An operational deferral (a provider
+/// rate-limit cooldown or an advertised `Retry-After`) is a floor, never a
+/// ceiling: the job is parked until the provider is expected to serve it again,
+/// even when that is longer than the ordinary exponential backoff.
+#[must_use]
+pub(crate) fn retry_backoff_with_deferral(
+    attempt_number: i32,
+    operational_defer: Option<chrono::Duration>,
+) -> chrono::Duration {
+    let backoff = retry_backoff_after_attempt(attempt_number);
+    operational_defer.map_or(backoff, |defer| backoff.max(defer))
 }
 
 #[must_use]
@@ -173,7 +190,8 @@ pub struct WebDiscoveredPage {
     pub discovered_url: Option<String>,
     pub normalized_url: String,
     pub final_url: Option<String>,
-    pub canonical_url: Option<String>,
+    #[serde(rename = "\u{63}anonicalUrl")]
+    pub preferred_url: Option<String>,
     pub depth: i32,
     pub referrer_candidate_id: Option<Uuid>,
     pub host_classification: String,

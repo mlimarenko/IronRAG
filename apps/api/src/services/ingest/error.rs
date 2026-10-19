@@ -3,6 +3,7 @@ use uuid::Uuid;
 
 use crate::{
     interfaces::http::router_support::ApiError, services::ingest::cancellation::StageError,
+    shared::provider_failure::ProviderFailure,
 };
 
 #[derive(Debug, Error)]
@@ -13,8 +14,8 @@ pub enum IngestServiceError {
     BindingNotConfigured { message: String },
     #[error("ingest state conflict: {message}")]
     StateConflict { message: String },
-    #[error("ingest provider unavailable: {message}")]
-    ProviderUnavailable { message: String },
+    #[error("ingest provider {}: {}", .0.kind_label(), .0)]
+    Provider(ProviderFailure),
     #[error("ingest operation cancelled")]
     Cancelled,
     #[error("ingest repository failure: {0}")]
@@ -52,7 +53,14 @@ impl IngestServiceError {
             Self::LibraryNotFound { .. } => "IngestServiceError::LibraryNotFound",
             Self::BindingNotConfigured { .. } => "IngestServiceError::BindingNotConfigured",
             Self::StateConflict { .. } => "IngestServiceError::StateConflict",
-            Self::ProviderUnavailable { .. } => "IngestServiceError::ProviderUnavailable",
+            Self::Provider(failure) => match failure.kind() {
+                crate::shared::provider_failure::ProviderFailureKind::Unavailable => {
+                    "IngestServiceError::ProviderUnavailable"
+                }
+                crate::shared::provider_failure::ProviderFailureKind::QuotaExhausted => {
+                    "IngestServiceError::ProviderQuotaExhausted"
+                }
+            },
             Self::Cancelled => "IngestServiceError::Cancelled",
             Self::Repository(_) => "IngestServiceError::Repository",
             Self::Internal(_) => "IngestServiceError::Internal",
@@ -75,7 +83,9 @@ impl From<ApiError> for IngestServiceError {
             | ApiError::GraphWriteContention(message)
             | ApiError::GraphPersistenceIntegrity(message)
             | ApiError::SettlementRefreshFailed(message) => Self::StateConflict { message },
-            ApiError::ProviderFailure(message) => Self::ProviderUnavailable { message },
+            ApiError::ProviderFailure(message) => {
+                Self::Provider(ProviderFailure::unavailable(message))
+            }
             other => Self::Internal(anyhow::anyhow!(other.to_string())),
         }
     }
@@ -113,7 +123,7 @@ mod tests {
 
         assert!(matches!(
             IngestServiceError::from(error),
-            IngestServiceError::ProviderUnavailable { message } if message == "opaque"
+            IngestServiceError::Provider(failure) if failure.message() == "opaque"
         ));
     }
 

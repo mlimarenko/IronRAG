@@ -73,7 +73,7 @@ struct OrderedInventoryRequirement {
     release_inventory: bool,
 }
 
-/// Internal requirements compiled from the canonical query IR.
+/// Internal requirements compiled from the compiled query IR.
 ///
 /// This type is deliberately not serialized. It keeps answer-shape policy on
 /// the compiler side of the boundary and prevents downstream stages from
@@ -420,7 +420,7 @@ fn observed_latest_inventory_items(answer: &str, release_inventory: bool) -> usi
                 .count();
             if rendered_source_units > 0 {
                 // The deterministic answer builder already deduplicates these
-                // units by canonical document/revision/version provenance.
+                // units by current document/revision/version provenance.
                 // Count the rendered units themselves so independent source
                 // records are not collapsed merely because they share a title
                 // or a version literal.
@@ -595,7 +595,7 @@ mod tests {
             target_types: target_types
                 .iter()
                 .map(|value| {
-                    QueryTargetKind::from_wire(value).expect("test target type must be canonical")
+                    QueryTargetKind::from_wire(value).expect("test target type must be normalized")
                 })
                 .collect(),
             target_entities: Vec::new(),

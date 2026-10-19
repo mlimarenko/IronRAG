@@ -3,7 +3,7 @@
 //! see the screenshot/diagram directly instead of relying on the OCR
 //! stub text.
 //!
-//! ## Canonical storage path discovered
+//! ## Content storage path
 //!
 //! Image bytes are stored at the *revision* level, not per chunk. The
 //! ingest pipeline writes the original source file (PNG/JPEG/etc.) into
@@ -13,17 +13,16 @@
 //! every chunk on an image-mime revision conceptually backs onto the
 //! same source bytes.
 //!
-//! Read path: `state.content_storage.read_revision_source(storage_key)`
+//! Read path: `state.content_storage.read_revision_source_bounded(storage_key, max_bytes)`
 //! (same trait used by `interfaces::http::content::source_download` and
 //! by the vision describer in `services::mcp::access::documents`).
 //!
-//! ## Vision-capability gating
+//! ## Capability gating
 //!
-//! Visibility (and per-call enforcement) checks the active `Agent`
-//! binding's resolved model row: a model is vision-capable iff
-//! `ai_model_catalog.modality_kind == "multimodal"` (the canonical
-//! `ai_model_modality_kind` enum value, mirrored in Rust as
-//! `AiModelCatalogRow.modality_kind: String`). No model-name hardcoding.
+//! Visibility and per-call enforcement require an active `Agent` binding whose
+//! model is explicitly related to the `extract_text` purpose. This normalized
+//! model-purpose relation is the sole eligibility authority; model metadata is
+//! observational and never grants or revokes tool access.
 
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use serde::Deserialize;
@@ -33,16 +32,18 @@ use uuid::Uuid;
 use crate::{
     app::state::AppState,
     domains::ai::AiBindingPurpose,
+    infra::repositories::ai_repository,
     interfaces::http::{
         auth::AuthContext,
-        authorization::{POLICY_MCP_MEMORY_READ, load_canonical_content_document_and_authorize},
+        authorization::{POLICY_MCP_MEMORY_READ, load_content_document_and_authorize},
         mcp::{
-            McpToolDescriptor, McpToolResult, audit::record_canonical_mcp_audit, ok_tool_result,
-            parse_tool_args, tool_error_result,
+            McpToolDescriptor, McpToolResult,
+            audit::{self, record_mcp_audit},
+            ok_tool_result, parse_tool_args, tool_error_result,
         },
         router_support::ApiError,
     },
-    mcp_types::McpLibraryDescriptor,
+    services::content::storage::BoundedRevisionSource,
 };
 
 use super::ToolCallContext;
@@ -74,7 +75,7 @@ pub(crate) fn descriptor(name: &str) -> Option<McpToolDescriptor> {
     }
     Some(McpToolDescriptor {
         name: VIEW_DOCUMENT_IMAGE_TOOL_NAME,
-        description: "Fetch the original image (PNG/JPEG/etc.) backing an image-attachment document so a vision-capable model can see the screenshot or diagram directly, beyond the OCR text excerpt. Only surfaced when the active assistant Agent binding points at a model with multimodal/vision capability. Pass `documentId` from a prior `search_documents`/`grounded_answer` hit; optionally pass `chunkId` as a citation handle (validated to belong to the same document). The response carries `mediaType`, `byteSize`, base64-encoded `data`, and an `imageUrl` data: URL suitable for multimodal chat-completion payloads. Caps payload via `maxBytes` (default 4 MiB, hard ceiling 8 MiB).",
+        description: "Fetch the original image (PNG/JPEG/etc.) backing an image-attachment document so the configured assistant can inspect the screenshot or diagram directly, beyond the OCR text excerpt. Only surfaced when the library has an active assistant Agent binding whose model is explicitly eligible for document extraction. Pass `documentId` from a prior `search_documents`/`grounded_answer` hit; optionally pass `chunkId` as a citation handle (validated to belong to the same document). The response carries `mediaType`, `byteSize`, base64-encoded `data`, and an `imageUrl` data: URL suitable for image-capable chat-completion payloads. Caps payload via `maxBytes` (default 4 MiB, hard ceiling 8 MiB).",
         input_schema: json!({
             "type": "object",
             "required": ["documentId"],
@@ -120,18 +121,20 @@ async fn view_document_image(context: ToolCallContext<'_>, arguments: &Value) ->
 
     match view_document_image_inner(context, &args).await {
         Ok(payload) => {
-            record_canonical_mcp_audit(
+            record_mcp_audit(
                 context.state,
                 context.auth,
                 context.request_id,
-                "agent.memory.view_document_image",
-                "succeeded",
-                Some("MCP document image read completed".to_string()),
-                Some(format!(
-                    "principal {} fetched image bytes for document {} via MCP",
-                    context.auth.principal_id, args.document_id
-                )),
-                Vec::new(),
+                audit::McpAuditEvent {
+                    action_kind: "agent.memory.view_document_image",
+                    result_kind: "succeeded",
+                    redacted_message: Some("MCP document image read completed".to_string()),
+                    internal_message: Some(format!(
+                        "principal {} fetched image bytes for document {} via MCP",
+                        context.auth.principal_id, args.document_id
+                    )),
+                    subjects: Vec::new(),
+                },
             )
             .await;
             ok_tool_result("Document image fetched.", payload)
@@ -144,7 +147,7 @@ async fn view_document_image_inner(
     context: ToolCallContext<'_>,
     args: &ViewDocumentImageArgs,
 ) -> Result<Value, ApiError> {
-    let document = load_canonical_content_document_and_authorize(
+    let document = load_content_document_and_authorize(
         context.auth,
         context.state,
         args.document_id,
@@ -152,25 +155,29 @@ async fn view_document_image_inner(
     )
     .await?;
 
-    // Hard-enforce vision capability per call. The listing predicate is
-    // a coarse capability flag; per-call enforcement is the source of
-    // truth because Agent binding modality is per-library.
+    // Enforce the same typed Agent-purpose eligibility used by tool listing.
     if !agent_binding_supports_vision(context.state, document.library_id).await? {
         return Err(ApiError::forbidden(
-            "view_document_image requires the active Agent binding for this library to point at a \
-             vision-capable (multimodal) model",
+            "view_document_image requires an active Agent model eligible for extract_text",
         ));
     }
 
-    let summary = context
+    let revision_id =
+        crate::infra::repositories::content_fingerprint_repository::get_current_revision_id(
+            &context.state.persistence.postgres,
+            args.document_id,
+        )
+        .await
+        .map_err(|error| ApiError::internal_with_log(error, "image visibility lookup failed"))?
+        .ok_or_else(|| ApiError::resource_not_found("image_attachment", args.document_id))?;
+    let revision = context
         .state
-        .canonical_services
+        .application_services
         .content
-        .get_document(context.state, args.document_id)
-        .await?;
-    let revision = summary
-        .active_revision
-        .as_ref()
+        .list_revisions(context.state, args.document_id)
+        .await?
+        .into_iter()
+        .find(|revision| revision.id == revision_id)
         .ok_or_else(|| ApiError::resource_not_found("revision", args.document_id))?;
 
     let mime_type = revision.mime_type.clone();
@@ -187,7 +194,7 @@ async fn view_document_image_inner(
             .await
             .map_err(|e| ApiError::internal_with_log(e, "internal"))?
             .ok_or_else(|| ApiError::resource_not_found("chunk", chunk_id))?;
-        if chunk.document_id != args.document_id {
+        if chunk.document_id != args.document_id || chunk.revision_id != revision_id {
             return Err(ApiError::BadRequest(format!(
                 "chunk {chunk_id} does not belong to document {}",
                 args.document_id
@@ -200,21 +207,18 @@ async fn view_document_image_inner(
             || ApiError::BadRequest("document revision has no stored image source".to_string()),
         )?;
 
-    let bytes = context
-        .state
-        .content_storage
-        .read_revision_source(storage_key)
-        .await
-        .map_err(ApiError::from)?;
-
-    let byte_size = bytes.len();
     let max_bytes =
         args.max_bytes.unwrap_or(DEFAULT_MAX_IMAGE_BYTES).clamp(1, HARD_MAX_IMAGE_BYTES);
-    if byte_size > max_bytes {
-        return Err(ApiError::BadRequest(format!(
-            "image payload {byte_size} bytes exceeds requested cap {max_bytes} bytes"
-        )));
-    }
+    let bytes = image_bytes_within_limit(
+        context
+            .state
+            .content_storage
+            .read_revision_source_bounded(storage_key, max_bytes)
+            .await
+            .map_err(ApiError::from)?,
+        max_bytes,
+    )?;
+    let byte_size = bytes.len();
 
     let encoded = BASE64_STANDARD.encode(&bytes);
     let image_url = format!("data:{mime_type};base64,{encoded}");
@@ -237,18 +241,41 @@ async fn view_document_image_inner(
         "caption": source_text,
     });
 
+    if !crate::infra::repositories::content_fingerprint_repository::revision_is_current(
+        &context.state.persistence.postgres,
+        args.document_id,
+        revision_id,
+    )
+    .await
+    .map_err(|error| ApiError::internal_with_log(error, "image visibility lookup failed"))?
+    {
+        return Err(ApiError::resource_not_found("image_attachment", args.document_id));
+    }
+
     Ok(payload)
 }
 
-/// Whether the active Agent binding for `library_id` resolves to a
-/// model whose `modality_kind` is `multimodal`. Used for both listing
-/// visibility and per-call enforcement.
+fn image_bytes_within_limit(
+    source: BoundedRevisionSource,
+    max_bytes: usize,
+) -> Result<Vec<u8>, ApiError> {
+    match source {
+        BoundedRevisionSource::Complete(bytes) => Ok(bytes),
+        BoundedRevisionSource::LimitExceeded { byte_size } => Err(ApiError::BadRequest(format!(
+            "image payload {byte_size} bytes exceeds requested cap {max_bytes} bytes"
+        ))),
+    }
+}
+
+/// Whether the active Agent model is explicitly eligible for document image
+/// extraction. The normalized binding-purpose relation is the sole authority;
+/// observed model metadata must not enable or disable capabilities.
 pub(crate) async fn agent_binding_supports_vision(
     state: &AppState,
     library_id: Uuid,
 ) -> Result<bool, ApiError> {
     let Some(binding) = state
-        .canonical_services
+        .application_services
         .ai_catalog
         .resolve_active_runtime_binding(state, library_id, AiBindingPurpose::Agent)
         .await?
@@ -256,11 +283,11 @@ pub(crate) async fn agent_binding_supports_vision(
         return Ok(false);
     };
     let model = state
-        .canonical_services
+        .application_services
         .ai_catalog
         .get_model_catalog(state, binding.model_catalog_id)
         .await?;
-    Ok(model.modality_kind == "multimodal")
+    Ok(model.allowed_binding_purposes.contains(&AiBindingPurpose::ExtractText))
 }
 
 /// Whether ANY accessible library has an Agent binding pointing at a
@@ -270,12 +297,9 @@ pub(crate) async fn agent_binding_supports_vision(
 pub(crate) async fn any_agent_binding_supports_vision(
     auth: &AuthContext,
     state: &AppState,
-) -> bool {
-    let Ok((_, libraries)) = crate::services::mcp::access::visible_catalog(auth, state).await
-    else {
-        return false;
-    };
-    any_library_agent_binding_supports_vision(state, &libraries).await
+) -> Result<bool, ApiError> {
+    let catalog = crate::services::mcp::access::visible_catalog_summary(auth, state).await?;
+    any_library_agent_binding_supports_vision(state, &catalog.library_ids).await
 }
 
 /// Variant for callers that already loaded the authorization-scoped catalog.
@@ -284,14 +308,16 @@ pub(crate) async fn any_agent_binding_supports_vision(
 /// `tools/list`.
 pub(crate) async fn any_library_agent_binding_supports_vision(
     state: &AppState,
-    libraries: &[McpLibraryDescriptor],
-) -> bool {
-    for library in libraries {
-        if agent_binding_supports_vision(state, library.library_id).await.unwrap_or(false) {
-            return true;
-        }
-    }
-    false
+    library_ids: &[Uuid],
+) -> Result<bool, ApiError> {
+    ai_repository::any_effective_binding_model_supports_purpose(
+        &state.persistence.postgres,
+        library_ids,
+        AiBindingPurpose::Agent.as_str(),
+        AiBindingPurpose::ExtractText.as_str(),
+    )
+    .await
+    .map_err(|error| ApiError::internal_with_log(error, "internal"))
 }
 
 #[cfg(test)]
@@ -299,7 +325,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn descriptor_advertises_canonical_input_schema() {
+    fn descriptor_advertises_declared_input_schema() {
         let descriptor = descriptor(VIEW_DOCUMENT_IMAGE_TOOL_NAME).expect("descriptor must exist");
         assert_eq!(descriptor.name, "view_document_image");
         let schema = &descriptor.input_schema;
@@ -313,7 +339,7 @@ mod tests {
     }
 
     #[test]
-    fn descriptor_only_matches_canonical_name() {
+    fn descriptor_only_matches_declared_name() {
         assert!(descriptor("view_document_image").is_some());
         assert!(descriptor("read_document").is_none());
         assert!(descriptor("").is_none());
@@ -339,6 +365,43 @@ mod tests {
         let parsed: ViewDocumentImageArgs = serde_json::from_value(raw).expect("parse");
         assert_eq!(parsed.max_bytes, Some(65536));
         assert!(parsed.chunk_id.is_some());
+    }
+
+    #[test]
+    fn args_default_optional_limits_and_citation_handle() {
+        let raw = serde_json::json!({
+            "documentId": "11111111-1111-1111-1111-111111111111",
+        });
+
+        let parsed: ViewDocumentImageArgs = serde_json::from_value(raw).expect("parse");
+
+        assert_eq!(parsed.chunk_id, None);
+        assert_eq!(parsed.max_bytes, None);
+    }
+
+    #[test]
+    fn bounded_image_bytes_preserve_normal_payload() {
+        let bytes = b"image bytes".to_vec();
+
+        let result = image_bytes_within_limit(
+            BoundedRevisionSource::Complete(bytes.clone()),
+            DEFAULT_MAX_IMAGE_BYTES,
+        )
+        .expect("image within limit");
+
+        assert_eq!(result, bytes);
+    }
+
+    #[test]
+    fn bounded_image_bytes_preserve_over_limit_error_contract() {
+        let result =
+            image_bytes_within_limit(BoundedRevisionSource::LimitExceeded { byte_size: 12 }, 5);
+
+        assert!(matches!(
+            result,
+            Err(ApiError::BadRequest(message))
+                if message == "image payload 12 bytes exceeds requested cap 5 bytes"
+        ));
     }
 
     #[test]

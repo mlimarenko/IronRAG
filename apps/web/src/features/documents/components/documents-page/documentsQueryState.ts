@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useMemo, useState, type SetStateAction } from 'react'
 
+import { getApiProblem } from '@/shared/api'
+
 import {
   LIST_POLL_GRACE_MS,
   LIST_POLL_INTERVAL_MS,
@@ -10,6 +12,15 @@ import {
 } from './documentsPageState'
 
 type CursorSetter = (action: SetStateAction<(string | null)[]>) => void
+
+export function isInvalidCursorError(error: unknown, activeCursor: string | null): boolean {
+  if (!activeCursor) return false
+  const problemStatus = getApiProblem(error)?.status
+  if (problemStatus === 400) return true
+  if (!error || typeof error !== 'object') return false
+  const candidate = error as { status?: unknown; response?: { status?: unknown } }
+  return candidate.status === 400 || candidate.response?.status === 400
+}
 
 export function useDebouncedSearch(searchQuery: string) {
   const [debouncedSearch, setDebouncedSearch] = useState(searchQuery)
@@ -23,19 +34,32 @@ export function useDebouncedSearch(searchQuery: string) {
 export function useCursorStack({
   activeLibraryId,
   debouncedSearch,
+  filtersKey,
   pageSize,
+  snapshotAt,
   sortValue,
   statusBucket,
 }: {
   activeLibraryId: string | null
   debouncedSearch: string
+  filtersKey: string
   pageSize: PageSizeOption
+  snapshotAt: string | null
   sortValue: SortValue
   statusBucket: DocumentsStatusBucket
 }) {
   const cursorScopeKey = useMemo(
-    () => JSON.stringify([activeLibraryId, debouncedSearch, sortValue, statusBucket, pageSize]),
-    [activeLibraryId, debouncedSearch, pageSize, sortValue, statusBucket],
+    () =>
+      JSON.stringify([
+        activeLibraryId,
+        debouncedSearch,
+        filtersKey,
+        sortValue,
+        statusBucket,
+        pageSize,
+        snapshotAt,
+      ]),
+    [activeLibraryId, debouncedSearch, filtersKey, pageSize, snapshotAt, sortValue, statusBucket],
   )
   const [cursorStackState, setCursorStackState] = useState<{
     scopeKey: string

@@ -21,17 +21,7 @@ pub(super) async fn execute_single_page_run(
     seed_candidate: WebDiscoveredPageRow,
 ) -> Result<WebIngestRunRow, ApiError> {
     if seed_candidate.candidate_state == WebCandidateState::Materialized.as_str() {
-        let mutation_item_id = seed_candidate.mutation_item_id.ok_or_else(|| {
-            ApiError::internal_with_log(
-                anyhow::anyhow!("materialized web page is missing mutation_item_id"),
-                "settle materialized single-page retry",
-            )
-        })?;
-        let _ = service.settle_materialized_page_for_mutation_item(state, mutation_item_id).await?;
-        return ingest_repository::get_web_ingest_run_by_id(&state.persistence.postgres, row.id)
-            .await
-            .map_err(|e| ApiError::internal_with_log(e, "internal"))?
-            .ok_or_else(|| ApiError::resource_not_found("web_ingest_run", row.id));
+        return settle_materialized_single_page(service, state, row, &seed_candidate).await;
     }
     let processing_row = ingest_repository::update_web_ingest_run(
         &state.persistence.postgres,
@@ -57,7 +47,7 @@ pub(super) async fn execute_single_page_run(
 
     if let Some(async_operation_id) = processing_row.async_operation_id {
         let _ = state
-            .canonical_services
+            .application_services
             .ops
             .update_async_operation(
                 state,
@@ -76,7 +66,7 @@ pub(super) async fn execute_single_page_run(
         seed_candidate.id,
         &crate::infra::repositories::ingest_repository::UpdateWebDiscoveredPage {
             final_url: None,
-            canonical_url: Some(processing_row.normalized_seed_url.as_str()),
+            preferred_url: Some(processing_row.normalized_seed_url.as_str()),
             host_classification: None,
             candidate_state: WebCandidateState::Processing.as_str(),
             classification_reason: Some(WebClassificationReason::SeedAccepted.as_str()),
@@ -92,16 +82,16 @@ pub(super) async fn execute_single_page_run(
     )
     .await
     .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
-    telemetry::web_candidate_event(
-        "candidate_processing",
-        processing_row.id,
-        seed_candidate.id,
-        WebCandidateState::Processing.as_str(),
-        &processing_row.normalized_seed_url,
-        0,
-        Some(WebClassificationReason::SeedAccepted.as_str()),
-        None,
-    );
+    telemetry::web_candidate_event(telemetry::WebCandidateEvent {
+        event: "candidate_processing",
+        run_id: processing_row.id,
+        candidate_id: seed_candidate.id,
+        candidate_state: WebCandidateState::Processing.as_str(),
+        normalized_url: &processing_row.normalized_seed_url,
+        depth: 0,
+        classification_reason: Some(WebClassificationReason::SeedAccepted.as_str()),
+        host_classification: None,
+    });
 
     let resource = match fetch_web_resource(service, &processing_row.seed_url).await {
         Ok(resource) => resource,
@@ -123,38 +113,14 @@ pub(super) async fn execute_single_page_run(
     if let Some(filter_exclusion) =
         classify_web_materialization_filter_exclusion(&resource.final_url, &materialization_filter)
     {
-        let _ = ingest_repository::update_web_discovered_page(
-            &state.persistence.postgres,
+        return exclude_single_page_by_url_filter(
+            state,
+            processing_row,
             seed_candidate.id,
-            &crate::infra::repositories::ingest_repository::UpdateWebDiscoveredPage {
-                final_url: Some(resource.final_url.as_str()),
-                canonical_url: Some(resource.final_url.as_str()),
-                host_classification: None,
-                candidate_state: WebCandidateState::Excluded.as_str(),
-                classification_reason: Some(WebClassificationReason::UrlFilter.as_str()),
-                classification_detail: Some(filter_exclusion.detail.as_str()),
-                content_type: resource.content_type.as_deref(),
-                http_status: Some(resource.http_status),
-                snapshot_storage_key: None,
-                updated_at: Some(Utc::now()),
-                document_id: None,
-                result_revision_id: None,
-                mutation_item_id: None,
-            },
+            &resource,
+            &filter_exclusion.detail,
         )
-        .await
-        .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
-        telemetry::web_candidate_event(
-            "candidate_excluded_url_filter",
-            processing_row.id,
-            seed_candidate.id,
-            WebCandidateState::Excluded.as_str(),
-            &resource.final_url,
-            0,
-            Some(WebClassificationReason::UrlFilter.as_str()),
-            Some(filter_exclusion.detail.as_str()),
-        );
-        return complete_single_page_run(state, processing_row).await;
+        .await;
     }
     let snapshot_storage_key =
         match persist_resource_snapshot(service, state, &processing_row, &resource).await {
@@ -170,72 +136,15 @@ pub(super) async fn execute_single_page_run(
                 .await;
             }
         };
-    let materialized = match materialize_snapshot_resource(
+    materialize_and_settle_single_page(
         service,
         state,
-        &processing_row,
+        processing_row,
+        &seed_candidate,
         &resource,
         &snapshot_storage_key,
     )
     .await
-    {
-        Ok(page) => page,
-        Err(failure) => {
-            return fail_single_page_run(
-                service,
-                state,
-                processing_row,
-                seed_candidate.id,
-                failure,
-            )
-            .await;
-        }
-    };
-
-    let (classification_reason, telemetry_event) = if materialized.is_duplicate() {
-        (WebClassificationReason::DuplicateContent, "candidate_materialized_duplicate")
-    } else {
-        (WebClassificationReason::SeedAccepted, "candidate_materialized")
-    };
-    let _ = ingest_repository::update_web_discovered_page(
-        &state.persistence.postgres,
-        seed_candidate.id,
-        &crate::infra::repositories::ingest_repository::UpdateWebDiscoveredPage {
-            final_url: Some(materialized.final_url()),
-            canonical_url: Some(materialized.final_url()),
-            host_classification: None,
-            candidate_state: WebCandidateState::Materialized.as_str(),
-            classification_reason: Some(classification_reason.as_str()),
-            classification_detail: seed_candidate.classification_detail.as_deref(),
-            content_type: Some(materialized.content_type()),
-            http_status: Some(resource.http_status),
-            snapshot_storage_key: Some(snapshot_storage_key.as_str()),
-            updated_at: Some(Utc::now()),
-            document_id: Some(materialized.document_id()),
-            result_revision_id: materialized.revision_id(),
-            mutation_item_id: Some(materialized.mutation_item_id()),
-        },
-    )
-    .await
-    .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
-    telemetry::web_candidate_event(
-        telemetry_event,
-        processing_row.id,
-        seed_candidate.id,
-        WebCandidateState::Materialized.as_str(),
-        materialized.final_url(),
-        0,
-        Some(classification_reason.as_str()),
-        None,
-    );
-
-    let _ = service
-        .settle_materialized_page_for_mutation_item(state, materialized.mutation_item_id())
-        .await?;
-    ingest_repository::get_web_ingest_run_by_id(&state.persistence.postgres, processing_row.id)
-        .await
-        .map_err(|e| ApiError::internal_with_log(e, "internal"))?
-        .ok_or_else(|| ApiError::resource_not_found("web_ingest_run", processing_row.id))
 }
 
 async fn complete_single_page_run(
@@ -286,7 +195,7 @@ async fn complete_single_page_run(
             _ => "processing",
         };
         let _ = state
-            .canonical_services
+            .application_services
             .ops
             .update_async_operation(
                 state,
@@ -314,7 +223,7 @@ async fn complete_single_page_run(
             | WebRunState::Failed
     ) {
         let _ = state
-            .canonical_services
+            .application_services
             .content
             .update_mutation(
                 state,
@@ -330,6 +239,144 @@ async fn complete_single_page_run(
     }
 
     Ok(completed_row)
+}
+
+async fn settle_materialized_single_page(
+    service: &WebIngestService,
+    state: &AppState,
+    row: WebIngestRunRow,
+    seed_candidate: &WebDiscoveredPageRow,
+) -> Result<WebIngestRunRow, ApiError> {
+    let mutation_item_id = seed_candidate.mutation_item_id.ok_or_else(|| {
+        ApiError::internal_with_log(
+            anyhow::anyhow!("materialized web page is missing mutation_item_id"),
+            "settle materialized single-page retry",
+        )
+    })?;
+    let _ = service.settle_materialized_page_for_mutation_item(state, mutation_item_id).await?;
+    ingest_repository::get_web_ingest_run_by_id(&state.persistence.postgres, row.id)
+        .await
+        .map_err(|e| ApiError::internal_with_log(e, "internal"))?
+        .ok_or_else(|| ApiError::resource_not_found("web_ingest_run", row.id))
+}
+
+/// Persist a materialization-filter exclusion for the single page and settle
+/// the run. A single page has no descendants, so this completes immediately.
+async fn exclude_single_page_by_url_filter(
+    state: &AppState,
+    processing_row: WebIngestRunRow,
+    seed_candidate_id: Uuid,
+    resource: &FetchedWebResource,
+    exclusion_detail: &str,
+) -> Result<WebIngestRunRow, ApiError> {
+    let _ = ingest_repository::update_web_discovered_page(
+        &state.persistence.postgres,
+        seed_candidate_id,
+        &crate::infra::repositories::ingest_repository::UpdateWebDiscoveredPage {
+            final_url: Some(resource.final_url.as_str()),
+            preferred_url: Some(resource.final_url.as_str()),
+            host_classification: None,
+            candidate_state: WebCandidateState::Excluded.as_str(),
+            classification_reason: Some(WebClassificationReason::UrlFilter.as_str()),
+            classification_detail: Some(exclusion_detail),
+            content_type: resource.content_type.as_deref(),
+            http_status: Some(resource.http_status),
+            snapshot_storage_key: None,
+            updated_at: Some(Utc::now()),
+            document_id: None,
+            result_revision_id: None,
+            mutation_item_id: None,
+        },
+    )
+    .await
+    .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
+    telemetry::web_candidate_event(telemetry::WebCandidateEvent {
+        event: "candidate_excluded_url_filter",
+        run_id: processing_row.id,
+        candidate_id: seed_candidate_id,
+        candidate_state: WebCandidateState::Excluded.as_str(),
+        normalized_url: &resource.final_url,
+        depth: 0,
+        classification_reason: Some(WebClassificationReason::UrlFilter.as_str()),
+        host_classification: Some(exclusion_detail),
+    });
+    complete_single_page_run(state, processing_row).await
+}
+
+async fn materialize_and_settle_single_page(
+    service: &WebIngestService,
+    state: &AppState,
+    processing_row: WebIngestRunRow,
+    seed_candidate: &WebDiscoveredPageRow,
+    resource: &FetchedWebResource,
+    snapshot_storage_key: &str,
+) -> Result<WebIngestRunRow, ApiError> {
+    let materialized = match materialize_snapshot_resource(
+        service,
+        state,
+        &processing_row,
+        resource,
+        snapshot_storage_key,
+    )
+    .await
+    {
+        Ok(page) => page,
+        Err(failure) => {
+            return fail_single_page_run(
+                service,
+                state,
+                processing_row,
+                seed_candidate.id,
+                failure,
+            )
+            .await;
+        }
+    };
+
+    let (classification_reason, telemetry_event) = if materialized.is_duplicate() {
+        (WebClassificationReason::DuplicateContent, "candidate_materialized_duplicate")
+    } else {
+        (WebClassificationReason::SeedAccepted, "candidate_materialized")
+    };
+    let _ = ingest_repository::update_web_discovered_page(
+        &state.persistence.postgres,
+        seed_candidate.id,
+        &crate::infra::repositories::ingest_repository::UpdateWebDiscoveredPage {
+            final_url: Some(materialized.final_url()),
+            preferred_url: Some(materialized.final_url()),
+            host_classification: None,
+            candidate_state: WebCandidateState::Materialized.as_str(),
+            classification_reason: Some(classification_reason.as_str()),
+            classification_detail: seed_candidate.classification_detail.as_deref(),
+            content_type: Some(materialized.content_type()),
+            http_status: Some(resource.http_status),
+            snapshot_storage_key: Some(snapshot_storage_key),
+            updated_at: Some(Utc::now()),
+            document_id: Some(materialized.document_id()),
+            result_revision_id: materialized.revision_id(),
+            mutation_item_id: Some(materialized.mutation_item_id()),
+        },
+    )
+    .await
+    .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
+    telemetry::web_candidate_event(telemetry::WebCandidateEvent {
+        event: telemetry_event,
+        run_id: processing_row.id,
+        candidate_id: seed_candidate.id,
+        candidate_state: WebCandidateState::Materialized.as_str(),
+        normalized_url: materialized.final_url(),
+        depth: 0,
+        classification_reason: Some(classification_reason.as_str()),
+        host_classification: None,
+    });
+
+    let _ = service
+        .settle_materialized_page_for_mutation_item(state, materialized.mutation_item_id())
+        .await?;
+    ingest_repository::get_web_ingest_run_by_id(&state.persistence.postgres, processing_row.id)
+        .await
+        .map_err(|e| ApiError::internal_with_log(e, "internal"))?
+        .ok_or_else(|| ApiError::resource_not_found("web_ingest_run", processing_row.id))
 }
 
 pub(super) async fn fetch_web_resource(
@@ -391,7 +438,13 @@ pub(super) async fn persist_resource_snapshot(
             &resource.payload_bytes,
         )
         .await
-        .map_err(|_| {
+        .map_err(|error| {
+            tracing::error!(
+                run_id = %run.id,
+                library_id = %run.library_id,
+                error = ?error,
+                "web resource snapshot persistence failed",
+            );
             WebRunFailure::internal(
                 WebRunFailureCode::WebSnapshotPersistFailed.as_str(),
                 Some(resource.final_url.clone()),
@@ -413,13 +466,13 @@ pub(super) async fn load_candidate_snapshot_resource(
         .ok_or_else(|| {
             WebRunFailure::internal(
                 WebRunFailureCode::WebSnapshotMissing.as_str(),
-                candidate.final_url.clone().or_else(|| candidate.canonical_url.clone()),
+                candidate.final_url.clone().or_else(|| candidate.preferred_url.clone()),
                 candidate.content_type.clone(),
                 candidate.http_status,
             )
         })?;
     let final_url =
-        candidate.final_url.as_ref().or(candidate.canonical_url.as_ref()).cloned().ok_or_else(
+        candidate.final_url.as_ref().or(candidate.preferred_url.as_ref()).cloned().ok_or_else(
             || {
                 WebRunFailure::internal(
                     WebRunFailureCode::WebSnapshotMissingFinalUrl.as_str(),
@@ -465,7 +518,7 @@ pub(super) async fn materialize_snapshot_resource(
     let file_name =
         source_file_name_from_url(&resource.final_url, resource.content_type.as_deref());
     let extraction_plan = state
-        .canonical_services
+        .application_services
         .content
         .build_runtime_extraction_plan(
             state,
@@ -475,8 +528,9 @@ pub(super) async fn materialize_snapshot_resource(
             &resource.payload_bytes,
         )
         .await
-        .map_err(|_| {
-            WebRunFailure::unsupported_content(
+        .map_err(|rejection| {
+            WebRunFailure::from_extraction_rejection(
+                &rejection,
                 Some(resource.final_url.clone()),
                 resource.content_type.clone(),
                 Some(resource.http_status),
@@ -486,7 +540,7 @@ pub(super) async fn materialize_snapshot_resource(
     let checksum = format!("sha256:{}", hex::encode(sha2::Sha256::digest(&resource.payload_bytes)));
     let content_type = resolved_web_mime_type(resource.content_type.as_deref(), &extraction_plan);
     let materialized = state
-        .canonical_services
+        .application_services
         .content
         .materialize_web_capture(
             state,
@@ -496,6 +550,7 @@ pub(super) async fn materialize_snapshot_resource(
                 mutation_id: run.mutation_id,
                 requested_by_principal_id: run.requested_by_principal_id,
                 final_url: resource.final_url.clone(),
+                file_name,
                 checksum,
                 mime_type: content_type.clone(),
                 byte_size: i64::try_from(resource.payload_bytes.len()).unwrap_or(i64::MAX),
@@ -505,7 +560,13 @@ pub(super) async fn materialize_snapshot_resource(
             },
         )
         .await
-        .map_err(|_| {
+        .map_err(|error| {
+            tracing::error!(
+                run_id = %run.id,
+                library_id = %run.library_id,
+                error = ?error,
+                "web capture materialization failed",
+            );
             WebRunFailure::internal(
                 WebRunFailureCode::WebCaptureMaterializationFailed.as_str(),
                 Some(resource.final_url.clone()),
@@ -548,7 +609,7 @@ pub(super) async fn fail_single_page_run(
         candidate_id,
         &crate::infra::repositories::ingest_repository::UpdateWebDiscoveredPage {
             final_url: failure.final_url.as_deref(),
-            canonical_url: failure.final_url.as_deref(),
+            preferred_url: failure.final_url.as_deref(),
             host_classification: None,
             candidate_state: WebCandidateState::Failed.as_str(),
             classification_reason: failure.candidate_reason.as_deref(),
@@ -579,19 +640,19 @@ pub(super) async fn fail_single_page_run(
     .await
     .map_err(|e| ApiError::internal_with_log(e, "internal"))?
     .ok_or_else(|| ApiError::resource_not_found("web_ingest_run", row.id))?;
-    telemetry::web_failure_event(
-        "single_page_failed",
-        row.id,
-        Some(candidate_id),
-        &failure.failure_code,
-        failure.candidate_reason.as_deref(),
-        failure.final_url.as_deref(),
-        failure.content_type.as_deref(),
-        failure.http_status,
-    );
+    telemetry::web_failure_event(telemetry::WebFailureEvent {
+        event: "single_page_failed",
+        run_id: row.id,
+        candidate_id: Some(candidate_id),
+        failure_code: &failure.failure_code,
+        classification_reason: failure.candidate_reason.as_deref(),
+        final_url: failure.final_url.as_deref(),
+        content_type: failure.content_type.as_deref(),
+        http_status: failure.http_status,
+    });
 
     let _ = state
-        .canonical_services
+        .application_services
         .content
         .update_mutation(
             state,
@@ -607,7 +668,7 @@ pub(super) async fn fail_single_page_run(
 
     if let Some(async_operation_id) = failed_row.async_operation_id {
         let _ = state
-            .canonical_services
+            .application_services
             .ops
             .update_async_operation(
                 state,

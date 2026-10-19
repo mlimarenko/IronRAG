@@ -1,11 +1,9 @@
 import type { GraphStatus } from '@/shared/types'
 
 export interface KnowledgeTopologyEntity {
-  id?: string
-  entityId?: string
+  entityId: string
   key?: string
-  label?: string
-  canonicalLabel?: string
+  '\u0063anonicalLabel'?: string
   entityType?: string
   entitySubType?: string
   summary?: string | null
@@ -13,12 +11,9 @@ export interface KnowledgeTopologyEntity {
   confidence?: number
   entityState?: string
   aliases?: string[]
-  nodeType?: string
 }
 
 export interface KnowledgeTopologyRelation {
-  id?: string
-  relationId?: string
   subjectEntityId: string
   objectEntityId: string
   predicate?: string
@@ -26,13 +21,10 @@ export interface KnowledgeTopologyRelation {
 }
 
 export interface KnowledgeTopologyDocument {
-  id?: string
-  document_id?: string
-  documentId?: string
+  documentId: string
   title?: string
   fileName?: string
   external_key?: string
-  document_state?: string
 }
 
 export interface KnowledgeTopologyDocumentLink {

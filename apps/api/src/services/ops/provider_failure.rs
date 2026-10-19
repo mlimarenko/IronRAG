@@ -52,6 +52,9 @@ impl ProviderFailureClassificationService {
         error: &ProviderCallError,
     ) -> Option<RuntimeProviderFailureClass> {
         match error {
+            ProviderCallError::Admission { .. } => {
+                Some(RuntimeProviderFailureClass::InternalRequestInvalid)
+            }
             ProviderCallError::Transport { source, .. } => Some(classify_reqwest_failure(source)),
             ProviderCallError::ResponseBody { source, .. }
             | ProviderCallError::ResponseJson { source, .. } => {
@@ -70,12 +73,22 @@ impl ProviderFailureClassificationService {
             ProviderCallError::Protocol { .. } => {
                 Some(RuntimeProviderFailureClass::InternalRequestInvalid)
             }
+            ProviderCallError::Timeout { .. } => Some(RuntimeProviderFailureClass::UpstreamTimeout),
         }
     }
 
     #[must_use]
     pub fn upstream_status(&self, error: &anyhow::Error) -> Option<StatusCode> {
         error.downcast_ref::<ProviderCallError>().and_then(provider_call_status)
+    }
+
+    /// The provider's advertised `Retry-After` for a 429, in whole seconds.
+    #[must_use]
+    pub fn retry_after_seconds(&self, error: &anyhow::Error) -> Option<u64> {
+        error
+            .downcast_ref::<ProviderCallError>()
+            .and_then(ProviderCallError::retry_after)
+            .map(|delay| delay.as_secs())
     }
 
     #[must_use]
@@ -100,7 +113,12 @@ impl ProviderFailureClassificationService {
         } else {
             self.classify_error(error)?
         };
-        Some(self.summarize_with_status(failure_class, observation, self.upstream_status(error)))
+        Some(self.summarize_with_status(
+            failure_class,
+            observation,
+            self.upstream_status(error),
+            self.retry_after_seconds(error),
+        ))
     }
 
     #[must_use]
@@ -109,7 +127,7 @@ impl ProviderFailureClassificationService {
         failure_class: RuntimeProviderFailureClass,
         observation: ProviderFailureObservation,
     ) -> RuntimeProviderFailureDetail {
-        self.summarize_with_status(failure_class, observation, None)
+        self.summarize_with_status(failure_class, observation, None, None)
     }
 
     fn summarize_with_status(
@@ -117,6 +135,7 @@ impl ProviderFailureClassificationService {
         failure_class: RuntimeProviderFailureClass,
         observation: ProviderFailureObservation,
         upstream_status: Option<StatusCode>,
+        retry_after_seconds: Option<u64>,
     ) -> RuntimeProviderFailureDetail {
         RuntimeProviderFailureDetail {
             failure_class,
@@ -126,6 +145,7 @@ impl ProviderFailureClassificationService {
             request_size_bytes: observation.request_size_bytes,
             chunk_count: observation.chunk_count,
             upstream_status: upstream_status.map(|status| status.as_u16().to_string()),
+            retry_after_seconds,
             elapsed_ms: observation.elapsed_ms,
             retry_decision: observation.retry_decision,
             usage_visible: observation.usage_visible,
@@ -168,18 +188,21 @@ fn classify_http_failure(status: StatusCode) -> RuntimeProviderFailureClass {
 
 fn provider_call_status(error: &ProviderCallError) -> Option<StatusCode> {
     match error {
+        ProviderCallError::Admission { .. } => None,
         ProviderCallError::Transport { source, .. }
         | ProviderCallError::ResponseBody { source, .. }
         | ProviderCallError::ResponseJson { source, .. } => source.status(),
         ProviderCallError::HttpStatus { status, .. } => Some(*status),
         ProviderCallError::ResponsePolicy { .. }
         | ProviderCallError::Json { .. }
-        | ProviderCallError::Protocol { .. } => None,
+        | ProviderCallError::Protocol { .. }
+        | ProviderCallError::Timeout { .. } => None,
     }
 }
 
 fn is_retryable_provider_call_error(error: &ProviderCallError) -> bool {
     match error {
+        ProviderCallError::Admission { .. } => false,
         ProviderCallError::Transport { source, .. }
         | ProviderCallError::ResponseBody { source, .. } => {
             source.is_timeout()
@@ -200,6 +223,7 @@ fn is_retryable_provider_call_error(error: &ProviderCallError) -> bool {
         ProviderCallError::Json { .. } => true,
         ProviderCallError::HttpStatus { status, .. } => is_retryable_http_status(*status),
         ProviderCallError::Protocol { .. } => false,
+        ProviderCallError::Timeout { .. } => false,
     }
 }
 
@@ -289,6 +313,20 @@ mod tests {
         );
         assert!(service.is_transient_retryable_error(&timeout));
         assert!(!service.is_transient_retryable_error(&rejection));
+    }
+
+    #[test]
+    fn typed_execution_deadline_timeout_is_upstream_timeout_without_status_or_retry() {
+        let service = ProviderFailureClassificationService::default();
+        let error = anyhow::Error::new(ProviderCallError::timeout("opaque deadline context"))
+            .context("wrapped provider call");
+
+        assert_eq!(
+            service.classify_error(&error),
+            Some(RuntimeProviderFailureClass::UpstreamTimeout)
+        );
+        assert_eq!(service.upstream_status(&error), None);
+        assert!(!service.is_transient_retryable_error(&error));
     }
 
     #[test]

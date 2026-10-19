@@ -3,12 +3,15 @@ import { describe, expect, it } from 'vitest'
 import type { AIAccount, AIBinding, AIModelOption, AIProvider, AIScopeKind } from '@/shared/types'
 import type { AiBindingPurpose } from '@/shared/api/generated'
 import {
-  OPTIONAL_BINDING_PURPOSES,
-  REQUIRED_BINDING_PURPOSES,
+  BINDING_PURPOSES,
   isBindingExecutable,
+  isDecisionBindingPurpose,
   isProviderCredentialValidationFailure,
   isModelAvailableForAccount,
   modelSupportsBindingPurpose,
+  providerServesPurpose,
+  aiReadinessStage,
+  reachableAiScope,
   recommendAiConfigSection,
   summarizeAiReadiness,
   suggestBindingSelection,
@@ -35,6 +38,7 @@ function provider(overrides: Partial<AIProvider> = {}): AIProvider {
   return {
     id: 'provider-alpha',
     displayName: 'Provider Alpha',
+    purposeGaps: [],
     kind: 'alpha',
     apiStyle: 'openai_chat',
     lifecycleState: 'active',
@@ -94,10 +98,9 @@ function model(overrides: Partial<AIModelOption> = {}): AIModelOption {
     id: 'model-alpha',
     providerCatalogId: 'provider-alpha',
     modelName: 'alpha-chat',
-    capabilityKind: 'chat',
-    modalityKind: 'text',
     allowedBindingPurposes: ['query_answer'],
     availabilityState: 'available',
+    seeded: true,
     availableAccountIds: ['account-alpha'],
     ...overrides,
   }
@@ -179,33 +182,30 @@ describe('summarizeAiReadiness', () => {
     expect(summary.missingPurposes).not.toContain('query_compile')
   })
 
-  it('counts canonical binding purposes without an alias profile layer', () => {
+  it('counts workflow-specific knowledge purposes without a global required taxonomy', () => {
     const runtimePurposes: AiBindingPurpose[] = [
       'extract_graph',
       'embed_chunk',
       'query_compile',
       'query_answer',
-      'agent',
     ]
     const summary = summarizeAiReadiness(
       summaryInput({
         bindingsForScope: runtimePurposes.map(runtimePurposeBinding),
         instanceBindings: runtimePurposes.map(runtimePurposeBinding),
-        models: REQUIRED_BINDING_PURPOSES.map((purpose) =>
+        models: runtimePurposes.map((purpose) =>
           model({
             id: `model-${purpose}`,
             modelName: `${purpose}-model`,
-            capabilityKind: purpose === 'embed_chunk' ? 'embedding' : 'chat',
             allowedBindingPurposes: [purpose],
           }),
         ),
       }),
     )
 
-    expect(summary.totalPurposes).toBe(5)
-    expect(summary.executableEffectiveBindings).toBe(5)
+    expect(summary.totalPurposes).toBe(4)
+    expect(summary.executableEffectiveBindings).toBe(4)
     expect(summary.missingPurposes).toEqual([])
-    expect(summary.missingOptionalPurposes).toEqual(['extract_text'])
   })
 
   it('requires an executable account/model pair before marking a purpose ready', () => {
@@ -244,7 +244,7 @@ describe('summarizeAiReadiness', () => {
     expect(summary.missingPurposes).not.toContain('query_answer')
   })
 
-  it('recommends the next canonical section from missing readiness data', () => {
+  it('recommends the next required section from missing readiness data', () => {
     expect(
       recommendAiConfigSection(
         summarizeAiReadiness(
@@ -269,113 +269,69 @@ describe('summarizeAiReadiness', () => {
   })
 })
 
-describe('canonical binding purposes', () => {
-  it('uses only API purpose identifiers for required and optional bindings', () => {
-    expect(REQUIRED_BINDING_PURPOSES).toEqual([
+describe('required binding purposes', () => {
+  it('exposes all API purposes in their UI order without required/optional categories', () => {
+    expect(BINDING_PURPOSES).toEqual([
+      'extract_text',
       'extract_graph',
+      'graph_entity_type',
       'embed_chunk',
       'query_compile',
+      'query_rerank',
       'query_answer',
       'agent',
     ])
-    expect(OPTIONAL_BINDING_PURPOSES).toEqual(['extract_text'])
-    expect(new Set([...REQUIRED_BINDING_PURPOSES, ...OPTIONAL_BINDING_PURPOSES]).size).toBe(6)
+    expect(new Set(BINDING_PURPOSES).size).toBe(8)
   })
 
-  it('accepts models only from the selected canonical purpose', () => {
-    expect(
-      modelSupportsBindingPurpose(
-        model({ modalityKind: 'multimodal', allowedBindingPurposes: ['extract_text'] }),
-        'extract_text',
-      ),
-    ).toBe(true)
-    expect(
-      modelSupportsBindingPurpose(
-        model({ modelName: 'vision-looking-name', allowedBindingPurposes: ['extract_text'] }),
-        'extract_text',
-      ),
-    ).toBe(false)
-  })
-
-  it('requires multimodal model and provider capabilities for document understanding', () => {
-    const multimodal = model({
-      modalityKind: 'multimodal',
-      allowedBindingPurposes: ['extract_text'],
+  it('offers a decision-only provider only for the decision purposes', () => {
+    const decisionProvider = provider({
+      id: 'provider-typesafe',
+      capabilities: { decision: 'supported' },
     })
+    expect(isDecisionBindingPurpose('query_rerank')).toBe(true)
+    expect(isDecisionBindingPurpose('graph_entity_type')).toBe(true)
+    expect(isDecisionBindingPurpose('query_answer')).toBe(false)
+    expect(providerServesPurpose(decisionProvider, 'query_rerank')).toBe(true)
+    expect(providerServesPurpose(decisionProvider, 'graph_entity_type')).toBe(true)
+    expect(providerServesPurpose(decisionProvider, 'extract_graph')).toBe(false)
+    expect(providerServesPurpose(account().provider, 'extract_graph')).toBe(true)
+  })
 
+  it('uses typed allowed purposes as the only model eligibility authority', () => {
     expect(
-      isBindingExecutable({
-        purpose: 'extract_text',
-        account: account({
-          provider: provider({
-            capabilities: {
-              chat: 'supported',
-              vision: 'supported',
-            },
-          }),
-        }),
-        model: multimodal,
-        modelsByAccountId: {},
-      }),
+      modelSupportsBindingPurpose(
+        model({ allowedBindingPurposes: ['extract_text'] }),
+        'extract_text',
+      ),
     ).toBe(true)
     expect(
-      isBindingExecutable({
-        purpose: 'extract_text',
-        account: account({
-          provider: provider({
-            capabilities: {
-              chat: 'supported',
-              vision: 'unsupported',
-            },
-          }),
-        }),
-        model: multimodal,
-        modelsByAccountId: {},
-      }),
-    ).toBe(false)
-    expect(
-      isBindingExecutable({
-        purpose: 'extract_text',
-        account: account({
-          provider: provider({
-            capabilities: {
-              chat: 'supported',
-              vision: 'supported',
-            },
-          }),
-        }),
-        model: model({ allowedBindingPurposes: ['extract_text'] }),
-        modelsByAccountId: {},
-      }),
+      modelSupportsBindingPurpose(
+        model({ allowedBindingPurposes: ['query_answer'] }),
+        'extract_text',
+      ),
     ).toBe(false)
   })
 
-  it('requires explicit chat and tools support for Agent execution', () => {
-    const agentModel = model({ allowedBindingPurposes: ['agent'] })
-
+  it('does not reinterpret typed eligibility through provider or catalog metadata', () => {
     expect(
       isBindingExecutable({
-        purpose: 'agent',
-        account: account(),
-        model: agentModel,
-        modelsByAccountId: {},
-      }),
-    ).toBe(true)
-    expect(
-      isBindingExecutable({
-        purpose: 'agent',
+        purpose: 'extract_text',
         account: account({
           provider: provider({
             capabilities: {
-              chat: 'supported',
+              chat: 'unknown',
+              vision: 'unsupported',
               tools: 'unknown',
             },
           }),
         }),
-        model: agentModel,
+        model: model({
+          allowedBindingPurposes: ['extract_text'],
+        }),
         modelsByAccountId: {},
       }),
-    ).toBe(false)
+    ).toBe(true)
     expect(
       isBindingExecutable({
         purpose: 'agent',
@@ -383,31 +339,22 @@ describe('canonical binding purposes', () => {
           provider: provider({
             capabilities: {
               chat: 'unknown',
-              tools: 'supported',
+              tools: 'unknown',
             },
           }),
         }),
-        model: agentModel,
-        modelsByAccountId: {},
-      }),
-    ).toBe(false)
-    expect(
-      isBindingExecutable({
-        purpose: 'agent',
-        account: account(),
         model: model({
-          capabilityKind: 'embedding',
           allowedBindingPurposes: ['agent'],
         }),
         modelsByAccountId: {},
       }),
-    ).toBe(false)
+    ).toBe(true)
   })
 
   it('keeps embed-chunk-only typed models executable for embedding', () => {
     expect(
       modelSupportsBindingPurpose(
-        model({ capabilityKind: 'embedding', allowedBindingPurposes: ['embed_chunk'] }),
+        model({ allowedBindingPurposes: ['embed_chunk'] }),
         'embed_chunk',
       ),
     ).toBe(true)
@@ -445,7 +392,7 @@ describe('isModelAvailableForAccount', () => {
 })
 
 describe('suggestBindingSelection', () => {
-  it('does not suggest an Agent pair when provider tools support is unknown', () => {
+  it('suggests a typed Agent pair without reinterpreting provider metadata', () => {
     const suggestion = suggestBindingSelection({
       purpose: 'agent',
       availableAccounts: [
@@ -461,7 +408,10 @@ describe('suggestBindingSelection', () => {
       models: [model({ allowedBindingPurposes: ['agent'] })],
     })
 
-    expect(suggestion).toEqual({ accountId: '', modelCatalogId: '' })
+    expect(suggestion).toEqual({
+      accountId: 'account-alpha',
+      modelCatalogId: 'model-alpha',
+    })
   })
 
   it('prefills a compatible active account and model for the selected purpose', () => {
@@ -532,5 +482,34 @@ describe('suggestBindingSelection', () => {
       accountId: '',
       modelCatalogId: '',
     })
+  })
+})
+
+describe('reachableAiScope', () => {
+  it('keeps a scope that is actually selectable', () => {
+    expect(reachableAiScope('library', true, true)).toBe('library')
+    expect(reachableAiScope('workspace', true, false)).toBe('workspace')
+    expect(reachableAiScope('instance', false, false)).toBe('instance')
+  })
+
+  it('falls back from library to workspace before instance', () => {
+    expect(reachableAiScope('library', true, false)).toBe('workspace')
+    expect(reachableAiScope('library', false, false)).toBe('instance')
+  })
+
+  it('falls back from workspace to instance', () => {
+    expect(reachableAiScope('workspace', false, true)).toBe('instance')
+  })
+})
+
+describe('aiReadinessStage', () => {
+  it('reports missing accounts before missing bindings', () => {
+    expect(aiReadinessStage(0, false)).toBe('missingAccounts')
+    expect(aiReadinessStage(0, true)).toBe('missingAccounts')
+  })
+
+  it('separates ready from missing bindings once an account exists', () => {
+    expect(aiReadinessStage(1, true)).toBe('ready')
+    expect(aiReadinessStage(1, false)).toBe('missingBindings')
   })
 })

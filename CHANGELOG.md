@@ -1,5 +1,41 @@
 # Changelog
 
+## 0.6.0 — 2026-10-20
+
+A breaking release. A 0.5.x database or snapshot archive cannot be upgraded in place: install on a fresh database, re-ingest the sources, and keep the old stack until the new one is verified.
+
+### Breaking
+
+- **Credential encryption is mandatory.** `IRONRAG_CREDENTIAL_MASTER_KEY` is required, and credentials are stored only as encrypted rows. Deployments holding plaintext or older envelopes must rewrap them on 0.5.x before upgrading.
+- **One schema baseline replaces the 0.5.x migrations.** A database created by an earlier release cannot boot 0.6.0.
+- **Snapshot archives are format v4.** An archive exported by 0.5.x is rejected before any row is written.
+- **Pricing lives on the model catalog row.** The separate price entity, its overrides and its endpoints are removed.
+- **The web interface is a new application**, with a compact shell, shared tabs, light and dark themes, and white-label branding.
+
+### Added
+
+- **Connectors are part of this repository.** One Python distribution, one lock file, one test run, and the same release tag for the backend, interface and connector images.
+- **WebGL2 graph rendering** for large graphs.
+- **Provider rate limiting and query admission.** Per-endpoint limits with retries, and bounded query-turn admission that fails excess bursts with a retryable `503`.
+- **DeepSeek V4 provider profiles** and a separate `query_rerank` binding purpose for semantic reranking.
+- **Cost reads report coverage** when some calls carry no price.
+
+### Fixed
+
+- Long inline revision appends survive client disconnects, and connector revision creation uses its own timeout.
+- Snapshot import and export keep only current vectors, verify restored row counts, return explicit refusal codes and expose the operation result.
+- Library and workspace deletion remove their knowledge plane and run in one order.
+- Search and answers handle matching-term indexes, exact identifiers, partial and deterministic answers, and never serve raw tool output as a grounded answer.
+- OIDC sign-in is rate limited per origin instead of locking out every user.
+- The interface handles typed API errors, keeps menus inside the viewport, and no longer renders raw translation keys.
+
+### Upgrade
+
+1. Stop the old stack and keep its database and volumes.
+2. On 0.5.x, rewrap credentials: run `ironrag-maintenance migrate credential-secrets`, then the same command with `--apply`, then the dry run again until no candidates remain.
+3. Start 0.6.0 with a fresh database and the release images pinned to the tag.
+4. Before the first connector start, fix state-volume ownership: `docker run --rm -v <volume>:/state alpine chown -R 10001:10001 /state`. A Git deploy key must be readable by uid 10001 and lives under `/var/lib/ironrag-connector/.ssh/`.
+
 ## 0.5.13 — 2026-07-19
 
 ### Fixed
@@ -13,7 +49,7 @@
 - A document-scoped grant now surfaces its parent library in catalog
   discovery, so a principal holding a document can navigate to it.
 - `GET /v1/chunks` and the other content-surface document reads resolve
-  documents and chunks from canonical content storage instead of the
+  documents and chunks from authoritative content storage instead of the
   eventually-consistent knowledge projection, which returned 404 or empty
   lists for freshly created documents.
 - Denied provider-credential creation attempts are audited again with a
@@ -69,7 +105,7 @@
 
 - **A zero-cost upgrade path for pre-hardening vector inventories.**
   `ironrag-maintenance migrate vector-profile-keys` re-keys legacy vector
-  lanes (bare model-catalog keys) onto the canonical embedding-execution
+  lanes (bare model-catalog keys) onto the authoritative embedding-execution
   profile fingerprint instead of forcing a paid provider re-embed. A library
   is re-keyed only when its active embed-chunk binding still targets the same
   model catalog entry and the lane dimensions match; mixed or retargeted
@@ -81,11 +117,11 @@
 - **Projection-parity repair commands unblock libraries stuck in
   `query_content_projection_converging`.**
   `ironrag-maintenance repair orphan-knowledge-documents` purges
-  knowledge-plane documents whose canonical row no longer exists (sweeping
+  knowledge-plane documents whose authoritative row no longer exists (sweeping
   their chunk vectors and graph evidence in the same transaction and
   re-projecting the runtime graph), and
   `repair knowledge-projection-metadata` reconciles drifted projection
-  metadata field-for-field from the canonical content plane. Either kind of
+  metadata field-for-field from the authoritative content plane. Either kind of
   historical inconsistency previously wedged its whole library behind the
   strict parity gate with no operator remedy. Both commands advance the
   library source-truth generation so running processes re-evaluate parity
@@ -116,10 +152,10 @@
   file upload for document creation; a second route replaces three separate
   append/edit/replace endpoints with one, discriminated by request shape.
   Both return `202 Accepted` with a `Location` header pointing at the
-  canonical async-operation resource.
+  authoritative async-operation resource.
 
 - **Assistant session management is durable and server-authoritative.** The web
-  session rail now renames and deletes UI conversations through canonical
+  session rail now renames and deletes UI conversations through authoritative
   authenticated API mutations instead of browser-local title/visibility
   overlays. Title validation is shared by create and rename paths; ownership,
   write capability, UI-surface isolation, active-execution state, and external
@@ -128,7 +164,7 @@
   records remain intact.
 
 - **Content and web-ingest admission now have transactional units of work.**
-  Mutation identity and fingerprinting, canonical document/revision/head
+  Mutation identity and fingerprinting, authoritative document/revision/head
   projections, async operations, mutation items, queue jobs, web runs, and
   discovery seeds commit together. Scoped idempotency replays the complete
   bundle, rejects payload conflicts, repairs only structurally unambiguous
@@ -147,7 +183,7 @@
   baseline or inline allow directive.
 
 - **UI and external MCP agents share a versioned answer-tool contract.** The
-  ordered tool names, descriptions, and canonical schemas now carry a stable
+  ordered tool names, descriptions, and declared schemas now carry a stable
   SHA-256 contract hash. Grounded answers expose bounded `compact` and diagnostic
   `full` profiles, typed completion/readiness state, preserve spans, trace IDs,
   and a one-call `repairPolicy` for external agent runtimes. The MCP descriptor
@@ -212,7 +248,7 @@
   outright rather than kept behind a compatibility flag.
 
 - **MCP Streamable HTTP is session-bound and version-strict.** `initialize`
-  negotiates every well-formed client request to the single canonical
+  negotiates every well-formed client request to the single authoritative
   `2025-11-25` version and issues an authenticated, TTL-bounded distributed
   session; every later
   `POST`, `GET`, and `DELETE` must present both that owned session and the exact
@@ -220,31 +256,31 @@
   foreign sessions fail closed, session teardown cancels local and remote
   in-flight work, and the former token-scoped/stateless coordination path is
   deleted. Every MCP transport connection with an `Origin` header is also
-  checked against the operator-configured canonical origin set before auth,
+  checked against the operator-configured configured origin set before auth,
   session lookup, or body parsing; malformed, duplicate, and untrusted origins
   fail with HTTP 403 while native clients may omit the header. Configured
   browser origins may preflight both mandatory MCP request headers, and the
   initialize response exposes `Mcp-Session-Id` so browser transports can bind
-  their subsequent requests. The canonical probes and private eval harness
+  their subsequent requests. The authoritative probes and private eval harness
   perform the same initialize/use/terminate handshake as external clients.
   Compact grounded
   answers no longer carry a compatibility copy of `executionDetail`; verifier,
   warnings, readiness, repair policy, bounded references, and trace IDs each
-  have one canonical compact field, while the full diagnostic profile retains
+  have one authoritative compact field, while the full diagnostic profile retains
   the complete execution object.
 
 - **AI configuration is consolidated around five required profiles and one
-  optional profile.** Indexing and query search use one canonical Embeddings
+  optional profile.** Indexing and query search use one authoritative Embeddings
   model, Query Understanding owns both typed compilation and semantic rerank,
   and multimodal Document Understanding owns complex extraction and visual
   analysis. The redundant `query_retrieve`, `rerank`, and `vision` binding
   purposes are removed from runtime binding resolution, API, UI, and the final
   PostgreSQL enum; the forward migration folds existing configuration into
-  canonical profiles, with no compatibility aliases or advanced overrides left
+  active profiles, with no compatibility aliases or advanced overrides left
   behind.
   Before catalog rewrites can fire library-generation triggers, the upgrade
   path also clears historical creator references whose principals no longer
-  exist, so valid pre-release databases cannot fail the canonical-purpose
+  exist, so valid pre-release databases cannot fail the authoritative-purpose
   migration on an already-orphaned optional foreign key. Versioned migration
   regressions cover both the pre-policy and pre-purpose upgrade paths. Vector
   storage and lookup use a secret-free execution-profile fingerprint, fail
@@ -258,14 +294,14 @@
 
 - **The six AI purposes are one strict public contract, not a compatibility
   layer.** Backend bootstrap, runtime resolution, OpenAPI, the generated web
-  client, and the administration UI consume the same canonical purpose type.
-  Non-canonical spellings and removed purpose names fail validation instead of
+  client, and the administration UI consume the same shared purpose type.
+  Unsupported spellings and removed purpose names fail validation instead of
   being normalized through aliases. `Agent` has its own explicit bootstrap
   configuration and never inherits or synthesizes a `QueryAnswer` binding.
-  Snapshot restore accepts only the canonical AI-account, model-catalog, and
+  Snapshot restore accepts only the authoritative AI-account, model-catalog, and
   binding tables; the pre-simplification credential, preset, and assignment
   import path is deleted. The administration client likewise keeps the
-  canonical `active`, `invalid`, and `disabled` binding states and rejects
+  authoritative `active`, `invalid`, and `disabled` binding states and rejects
   unknown state spellings instead of translating compatibility aliases.
   Agent discovery, bootstrap, writes, and runtime resolution require an
   Agent-role chat model plus provider-declared `chat` and `tools` support;
@@ -274,13 +310,13 @@
   contract while preserving existing dedicated Agent configuration.
   Catalog models whose migrated roles collapse to an empty set are retained
   only as disabled historical billing references and cannot be reactivated by
-  provider discovery without a canonical role.
+  provider discovery without a authoritative role.
 
 - **Query provider usage is durably attributed per actual call.** Runtime query
   compilation, question embedding, HyDE, primary agent turns, direct answer
   generation, and both accepted and rejected revisions reserve a stable local
   event ID before provider I/O. Provider failures terminalize that reservation,
-  while every returned response commits its canonical usage before parsing,
+  while every returned response commits its authoritative usage before parsing,
   verification, answer selection, or terminal query persistence. Repeating the
   same local reservation or completion is idempotent. A response guard owns the exact
   usage before its first database write and retries transient or ambiguous
@@ -295,9 +331,9 @@
 
 - **Vector rebuilds publish atomically without taking search offline.** A
   library rebuild writes chunk and entity vectors under an opaque staging
-  profile while queries continue using the previous canonical inventory. A
+  profile while queries continue using the previous authoritative inventory. A
   short library-scoped promotion transaction verifies the source generation,
-  exact lane counts, profile, and dimensions before replacing canonical rows
+  exact lane counts, profile, and dimensions before replacing active rows
   and manifests together; a failed rebuild removes only staging data.
   Library-scoped coordination replaces the former global exclusion, and
   generation-fenced inventory checks are singleflight-cached for one minute
@@ -307,7 +343,7 @@
   contract.** A validated effective dimension is resolved once per binding;
   explicit binding parameters override model-catalog metadata, while invalid or
   unsupported values are rejected instead of falling through to a different
-  vector space. Dimension resolution uses only typed configuration or canonical
+  vector space. Dimension resolution uses only typed configuration or authoritative
   vector inventory and never issues a hidden paid probe. Runtime query
   embeddings, including cache hits, are validated directly against the
   request-scoped exact-profile inventory, while mixed persisted dimensions
@@ -322,7 +358,7 @@
   mixed-width vectors. Exact-profile manifest dimension claims are unique per
   library and vector kind, while an empty source library atomically purges stale
   vectors and manifests without invoking an embedding provider. Filtered
-  canonical writes, staged lane writes/reconciliation, destructive revision or
+  authoritative writes, staged lane writes/reconciliation, destructive revision or
   entity cleanup, empty purges, and staged cleanup/promotion share a per-library
   cross-process serializer. Source and effective-profile generation is checked
   in the same short transaction as manifest, vector, and count updates, with no
@@ -367,7 +403,7 @@
 - **Clarification and verification are terminal, evidence-driven states.** A
   compiler-requested clarification is returned directly without a futile
   focused retry. Ordinary generated prose can no longer become `Verified`
-  merely because some evidence exists: exact canonical answers may verify,
+  merely because some evidence exists: exact authoritative answers may verify,
   supported formal claims plus unchecked prose are partial, and prose without
   a checkable claim remains not-run. Assignments must be grounded in one source
   line or structured fact, including bracketed qualifiers.
@@ -379,7 +415,7 @@
   fabricated from the ordinary input rate.
 
 - **Environment-managed provider credentials use one generic, reversible
-  contract.** A canonical standard-base64 JSON map replaces provider-specific
+  contract.** One strict standard-base64 JSON map replaces provider-specific
   environment-variable tables across the backend, installer, Compose, Helm,
   Ansible, and smoke tooling. Exact provider kinds are preserved without alias
   guessing, credential strings remain byte-exact, bounded duplicate/malformed
@@ -475,7 +511,7 @@
   only after an already complete sentence, while action-bearing filenames
   remain untouched.
 
-- **The UI answer contour starts with the canonical MCP answer path.** The first
+- **The UI answer contour starts with the authoritative MCP answer path.** The first
   `grounded_answer` call is runtime-dispatched before any model round. An
   incomplete procedure, remediation, clarification, or ordered inventory gets
   at most one non-identical focused retry, capped at 45 seconds; a ready repair
@@ -502,7 +538,7 @@
   and image artifacts, including media URLs with query/fragment suffixes,
   before they can consume ordered inventory slots.
 
-- **PostgreSQL is the canonical grounded-answer cache.** Cache identity now
+- **PostgreSQL is the authoritative grounded-answer cache.** Cache identity now
   includes runtime, policy, content, graph, and binding generations. Redis is
   limited to fill coordination and notifications; a Redis outage cannot invent
   or extend a winner, and PostgreSQL's clock owns expiry and replacement.
@@ -531,7 +567,7 @@
   graph-generation bump, and the deferred summary refresh holds a generation
   fence so stale post-commit work is skipped instead of publishing mixed truth.
 
-- **Knowledge revision projections use one canonical state vocabulary.** A
+- **Knowledge revision projections use one stable state vocabulary.** A
   forward-only migration rewrites historical text, vector, and graph spellings,
   rejects unknown rows before changing data, and installs validated database
   constraints. Runtime readers and writers no longer accept readiness aliases
@@ -557,7 +593,7 @@
   generated output is checked for drift, and shared table pagination keeps one
   typed set of supported page sizes.
 
-- **Operator dashboards expose one canonical metrics projection.** The API,
+- **Operator dashboards expose one authoritative metrics projection.** The API,
   OpenAPI contract, generated client, fixtures, and UI now consume only
   `documentMetrics`; the duplicate preformatted `overview` and `metrics`
   projections and their transport type are removed.
@@ -567,18 +603,18 @@
   reservation, usage-commit, debug, and failure semantics instead of carrying
   parallel copies that could drift.
 
-- **Pre-release HTTP inputs have one canonical wire name.** Knowledge search
+- **Pre-release HTTP inputs have one single wire name.** Knowledge search
   accepts `query` only; the hidden `q` deserialization alias is removed and an
   architecture gate rejects new production `serde` compatibility aliases.
 
 ### Removed
 
-- **Duplicate REST surfaces were removed in favor of their canonical
+- **Duplicate REST surfaces were removed in favor of their authoritative
   replacement.** The generic content-mutation list/create/get endpoints are
   superseded by the typed document/revision endpoints and the audit log; the
   imperative IAM-grants collection is superseded by the existing declarative
   per-user access document, which now carries optimistic concurrency instead;
-  several knowledge-domain endpoints that exactly duplicated the canonical
+  several knowledge-domain endpoints that exactly duplicated the authoritative
   content-document list and detail were removed with no replacement needed.
 
 - **The dormant RAPTOR summary builder and CLI command are removed.** Existing
@@ -614,7 +650,7 @@
   or Redis.
 
 - **Transient MCP conversation titles respect the aggregate domain limit.** The
-  fixed prefix and Unicode-safe truncated question now fit the canonical
+  fixed prefix and Unicode-safe truncated question now fit the authoritative
   72-character boundary together, so a valid long question cannot fail before
   grounded retrieval starts.
 
@@ -643,15 +679,15 @@
   complete admission bundle instead of leaving orphan work.
 
 - **Configuration preflight preserves already retrieved setup evidence.** When
-  exact-scope canonical selection is empty for a setup question, the answer
+  exact-scope authoritative selection is empty for a setup question, the answer
   stage now reuses only the bounded document-identity setup lanes and leaves
   ordinary relevance tails out. Technical-fact selection also diversifies
-  repeated occurrences by document, revision, kind, canonical value, and
+  repeated occurrences by document, revision, kind, normalized value, and
   qualifiers before filling the answer budget, so duplicate rows cannot crowd
   distinct facts out while their provenance remains intact in storage.
 
 - **Ordinary prose can no longer pass as a verified named claim.** The verifier
-  verifies exact canonical evidence and typed formal literals, marks a mixture
+  verifies exact authoritative evidence and typed formal literals, marks a mixture
   of supported claims and unchecked prose as partial, and leaves prose without
   checkable claims not-run. Markdown numbering or capitalization does not
   change that contract.
@@ -674,7 +710,7 @@
 
 - **Latest-N inventories use grounded release identities and version order.**
   Versions found in source text are ordered newest-first before retrieval score
-  and chunk position. Retrieval deduplicates only the same canonical document
+  and chunk position. Retrieval deduplicates only the same authoritative document
   revision, while answer assembly deduplicates only the same document,
   revision, and formal version. Distinct sources are therefore never collapsed
   because their labels or version literals happen to match, and completion
@@ -689,7 +725,7 @@
 
 - **Delete replay and legacy mutation repair are scope-safe under concurrency.**
   A fresh idempotency key on an already deleted document creates and durably
-  binds its own canonical mutation instead of borrowing the previous delete.
+  binds its own authoritative mutation instead of borrowing the previous delete.
   Legacy unbound mutation items are claimed with a compare-and-set update over
   the exact mutation and item identity; concurrent losers re-read and fail
   closed, and structurally ambiguous multi-item repairs are rejected. Missing
@@ -724,7 +760,7 @@
   marker to the handler, so the second call cannot collapse into a replay of the
   first.
 
-- **UI and external MCP agents now receive the same canonical ready-answer
+- **UI and external MCP agents now receive the same authoritative ready-answer
   contract.** The UI returns a single fresh, complete, verified
   `grounded_answer` byte-for-byte after local evidence verification and
   persistence, without an extra parent-model rewrite or literal-revision pass;
@@ -756,7 +792,7 @@
 
 - **Cached-answer replay cannot authorize stale or ungrounded output.** Replay
   locks and rechecks the exact fresh cache winner, source generation, completed
-  runtime, verified context bundle, canonical assistant answer, grounding
+  runtime, verified context bundle, authoritative assistant answer, grounding
   references, request scope, and target conversation in one transaction. Turn
   creation and replay provenance commit or roll back together.
 
@@ -783,7 +819,7 @@
   cannot persist remote-controlled diagnostics.
 
 - **Content projection drift fails closed without causing scan storms.** The
-  parity fingerprint covers canonical document, revision, chunk text, checksum,
+  parity fingerprint covers authoritative document, revision, chunk text, checksum,
   offsets, metadata, readiness, and scope. Negative parity results are cached
   until the durable generation changes, and concurrent checks share one scan.
 
@@ -809,7 +845,7 @@
   persisted webhook failures use bounded static summaries rather than remote
   response content or raw request errors.
 
-- **Maintenance repairs preserve canonical/readable parity and invalidate stale
+- **Maintenance repairs preserve authoritative/readable parity and invalidate stale
   answers exactly once.** Parent-role and temporal backfills lock the library
   first, update both content planes transactionally, reject missing or
   wrong-scope readable mirrors, and advance source truth only after a real
@@ -846,12 +882,12 @@
   current behavior.
 
 - **Long grounded assistant calls no longer fail at the generic tool timeout.**
-  The canonical grounded-answer tool has a bounded 90-second call budget inside
+  The authoritative grounded-answer tool has a bounded 90-second call budget inside
   the existing 180-second turn deadline, while all other tools retain the
   shorter collection budget.
 
 - **Rotated environment credentials reach restored and scoped bindings.**
-  Startup synchronizes every canonical bootstrap account that still carries an
+  Startup synchronizes every authoritative bootstrap account that still carries an
   older env-managed key, including workspace and library copies, while
   preserving an operator-disabled state and provider base URL.
 
@@ -978,7 +1014,7 @@
 - **The web UI is unified around one design language.** Tables, filters,
   forms, status indicators, and empty states share a single set of
   primitives across every page: one panel surface, one status-badge
-  vocabulary, filter controls with a leading icon, a canonical table
+  vocabulary, filter controls with a leading icon, a authoritative table
   contract that degrades to cards on narrow viewports, and a shared
   form-field family for dialogs. The admin navigation is grouped by area,
   and a repository gate rejects raw color literals so the palette stays
@@ -1091,9 +1127,9 @@
 
 - **The knowledge plane is PostgreSQL-only.** The backend no longer ships the
   removed ArangoDB client, bootstrap, document/search/graph stores, dependency
-  mode, or contract tests. Configuration now accepts only the canonical
+  mode, or contract tests. Configuration now accepts only the authoritative
   PostgreSQL knowledge-plane backend, and operational diagnostics report any
-  non-canonical backend value as unsupported.
+  unsupported backend value as unsupported.
 
 - **Snapshot archives are PostgreSQL-only.** The snapshot schema is bumped to
   v7, new exports no longer declare legacy Arango archive sections, and restore
@@ -1198,7 +1234,7 @@
 - **Ingest workers no longer stack memory-heavy jobs beyond their cgroup
   budget.** The worker process now derives a local job-claim cap from its
   resolved memory soft limit, reserving headroom and budgeting each active
-  canonical ingest job before claiming more leases. Docker Compose and
+  authoritative ingest job before claiming more leases. Docker Compose and
   `.env.example` now default the deployment-wide ingest caps to
   `global=4`, `workspace=2`, `library=1`, so several replicas cannot
   simultaneously pile graph-merge / extraction work onto a small swapless host.
@@ -1297,7 +1333,7 @@
   non-secret values. Secrets (admin password, provider API keys) are accepted via
   environment variables or a pre-seeded `.env` only — never as flags — because
   argv is visible to other processes and shell history. Non-interactive mode is
-  auto-selected when stdin is not a TTY (the canonical `curl | bash` path) and
+  auto-selected when stdin is not a TTY (the authoritative `curl | bash` path) and
   fails fast with the exact flag/env var to set rather than hanging when a
   required value has no safe default. `--help` documents every flag and variable.
   Interactively, the wizard now shows numbered step headers and a review screen of
@@ -1369,7 +1405,7 @@
   `DefaultHasher` and returned silently on collision, so a hash collision could
   hand back the wrong embedding for a different question — wrong retrieval with
   no error — and `DefaultHasher` is not stable across releases. Entries are now
-  keyed by a 32-byte SHA-256 of the canonical identity tuple (trimmed question
+  keyed by a 32-byte SHA-256 of the normalized identity tuple (trimmed question
   text plus every embedding-scoping binding dimension) with equality on the full
   digest width, so distinct questions or bindings can never alias. LRU bounds
   and eviction are unchanged.
@@ -1394,7 +1430,7 @@
   partial state.
 - **UI/MCP agent loop bounds each tool call and stops no-progress loops early.**
   Every tool execution future is now wrapped in a per-call timeout bounded by the
-  smaller of the remaining turn deadline and a canonical per-tool-call max, so a
+  smaller of the remaining turn deadline and a authoritative per-tool-call max, so a
   single hung tool can no longer run past every budget; a timed-out call yields a
   structured `is_error` outcome (which clears the dedup fingerprint, so a retry is
   not suppressed). Separately, when several consecutive iterations produce no
@@ -1499,7 +1535,7 @@ restore is required.
 
 - **Structural document parentage and attached-context retrieval.** A document
   admitted as a dependent of another source document (e.g. a page attachment or
-  inline image) now records its canonical `parent_document_id` and a typed
+  inline image) now records its authoritative `parent_document_id` and a typed
   `document_role` (`primary`, `attachment`, or `attached_context`), derived once
   at admission/backfill from structural inputs (declared parentage + the
   revision's media class). Connectors declare the link with an optional
@@ -1675,7 +1711,7 @@ restore is required.
 - Snapshot export and restore handle per-`(library, dim)` promoted vector
   shards instead of failing the export.
 - Grounded-answer context bundles persist correctly on PostgreSQL: the bundle
-  entity, relation, and evidence foreign keys reference the canonical runtime
+  entity, relation, and evidence foreign keys reference the authoritative runtime
   graph, so a grounded answer records its chunk and segment references instead
   of returning an unreferenced answer.
 - Restoring a library snapshot no longer fails when the archive's library slug
@@ -1714,7 +1750,7 @@ restore is required.
   A lower retrieval-breadth floor on contextual turns let the in-product agent
   narrow `topK` on follow-ups, which starved recall on how-to / configuration
   questions: the concrete answer chunks ranked below the cutoff and the model
-  hedged instead of answering. The contextual floor is pinned to the canonical
+  hedged instead of answering. The contextual floor is pinned to the authoritative
   default.
 
 ### Changed
@@ -1853,7 +1889,7 @@ restore is required.
   `delete_workspace` removed only the Postgres row; knowledge vertex
   collections, every per-dim vector shard, and the edge collections
   in Arango have no FK back to PG and were left behind as orphans.
-  Both code paths now call the canonical snapshot-restore replace
+  Both code paths now call the authoritative snapshot-restore replace
   sweep (`clear_library_arango_footprint`) after the PG cascade so
   every knowledge_* row tied to the library is removed in the same
   request. `delete_workspace` enumerates the workspace's libraries
@@ -1885,7 +1921,7 @@ restore is required.
   shard, and edge collections) for rows whose `library_id` does not
   match a live PostgreSQL `catalog_library` row, reports per-library
   per-collection orphan counts as JSON, and — with `--purge --yes` —
-  deletes the orphan rows through the same canonical sweep snapshot
+  deletes the orphan rows through the same authoritative sweep snapshot
   restore uses. Useful for cleaning up deployments that predate the
   delete cascade fix.
 
@@ -1915,7 +1951,7 @@ restore is required.
 - Chat messages show a timestamp and, on assistant replies, the response
   latency, so answer speed is visible at a glance.
 - Diagnostics (OTLP traces, metrics, logs) ship by default to the
-  configured collector and carry canonical resource labels; disable with
+  configured collector and carry authoritative resource labels; disable with
   `IRONRAG_OTEL_ENABLED=false` or repoint with `OTEL_EXPORTER_OTLP_ENDPOINT`.
 
 #### Per-library vector dimensions
@@ -1976,7 +2012,7 @@ restore is required.
 #### Maintenance scheduler + PG sweepers
 
 - New durable scheduler loop runs in the worker role and walks the
-  canonical maintenance classes on a rolling cadence (default 30 s
+  authoritative maintenance classes on a rolling cadence (default 30 s
   tick, 1 hour between successful runs of the same scope per class).
   Each tick reaps stale leases, bootstraps missing
   `maintenance_job_run` rows, and atomically picks the
@@ -2003,7 +2039,7 @@ restore is required.
 
 - The per-task maintenance binaries that previously shipped alongside
   `ironrag-backend` are removed and their behaviour moved into
-  `ironrag-maintenance` subcommands. Canonical surface is one CLI with
+  `ironrag-maintenance` subcommands. Authoritative surface is one CLI with
   one `--help` tree, one init path, and one `--dry-run` / `--json` /
   `--library` flag style. The legacy binary names are dropped without
   shim aliases.
@@ -2020,14 +2056,14 @@ restore is required.
 
   Each old binary's logic now lives under the corresponding
   `services::maintenance::{audit,gc,repair,migrate,rebuild}` module so
-  the same canonical code path is used by the operator CLI and by the
+  the same authoritative code path is used by the operator CLI and by the
   scheduler tick. Docker image installs only `ironrag-backend`,
   `ironrag-cli`, `ironrag-emit-openapi`, and `ironrag-maintenance` —
   the previous bin clutter (10 binaries) is reduced to 4.
 
 #### Maintenance pipeline foundation
 
-- New canonical operator binary `ironrag-maintenance` with grouped
+- New authoritative operator binary `ironrag-maintenance` with grouped
   subcommands: `audit storage-summary`, `audit index-bloat`,
   `audit null-head-docs`, `gc stale-chunks`, `lease show`,
   `lease summary`, `lease clear-failure`, `lease reap-stale`. All
@@ -2047,13 +2083,13 @@ restore is required.
   partial recovery-candidate index. These back a bounded null-head
   retry contract that the ingest worker will use to rate-limit
   recovery attempts before marking a document dead-letter.
-- New module `services::maintenance::lease` exposes the canonical
+- New module `services::maintenance::lease` exposes the authoritative
   lease primitives (`acquire_next_due`, `heartbeat`, `update_cursor`,
   `complete`, `fail`, `clear_dead_letter`, `reap_stale_leases`,
   `count_by_state`). The scheduler tick and the operator CLI both
   depend on the same surface — there is one source of truth for
   "what is currently running, what failed, what to retry next".
-- New module `services::maintenance::gc` houses the canonical
+- New module `services::maintenance::gc` houses the authoritative
   implementation of `gc.stale-chunks`. The sweeper now acquires the
   per-library graph advisory lock and refuses to run while any
   `ingest_job` for the library is `queued` / `leased` / `paused` —
@@ -2142,7 +2178,7 @@ restore is required.
   broad list questions can surface more known entities without corpus-specific
   routing or extra retrieval fan-out.
 - Short focused setup questions now treat a rare clipped target token as related
-  to longer canonical graph labels and technical chunks, keeping configuration
+  to longer authoritative graph labels and technical chunks, keeping configuration
   retrieval anchored to the requested entity without language-specific aliases,
   corpus-specific rules, or additional retrieval fan-out.
 - Graph evidence lookup now gives priority to explicit QueryIR entity/document
@@ -2173,7 +2209,7 @@ restore is required.
 - Follow-up grounded answers now preserve dense code-literal inventories from
   the prior assistant turn before truncating history, reuse the parent retrieval
   budget for those dense list follow-ups, surface graph-node summaries as
-  answer evidence, route wildcard identifier inventories through the canonical
+  answer evidence, route wildcard identifier inventories through the authoritative
   answer tool instead of document listings, and keep internal scope wrappers out
   of model-authored answers with a stricter no-continuation-offer boundary.
 - Broad comparison answers now preserve module, package, configuration-file,
@@ -2184,7 +2220,7 @@ restore is required.
 
 ### Documents
 
-- The document editor now loads a canonical editor-markdown representation
+- The document editor now loads a authoritative editor-markdown representation
   instead of rebuilding editable content from prepared retrieval segments.
   Markdown documents open in the rich editor with image/link/table support, and
   PDF documents use the stored source as a read-only viewer frame.
@@ -4059,3 +4095,903 @@ Large-library performance release. On a 4900-document reference library the docu
 ## 0.0.1
 
 - Initial release.
+
+## Archived connector package history
+
+The five connector packages kept their own changelogs while they lived in their
+own repositories. This section is those histories, verbatim, and it is **closed**:
+the framework at 0.2.2, BookStack at 0.2.3, Confluence at 0.3.3, Git
+repositories at 0.2.1 and YouTrack at 0.2.1.
+
+Everything after those versions is in the repository's
+[`CHANGELOG.md`](./CHANGELOG.md): connectors ship on the IronRAG version now,
+so there is one history to read and one version to name.
+
+
+---
+
+## Connector framework (ironrag-connector)
+
+Closed at 0.2.2.
+
+## 0.2.2 — 2026-08-16
+
+- **Fix:** the catalog client could not read the library list at all. The two
+  catalog list endpoints have different response shapes — `GET
+  /v1/catalog/workspaces` returns a bare JSON array, while `GET
+  /v1/catalog/workspaces/{workspaceId}/libraries` returns a bounded
+  `{items, totalCount, offset, limit}` page — and a single reader demanded an
+  array from both. Startup therefore failed with "must return a JSON array of
+  objects" before any routing ref could be resolved, so a connector pointed at
+  a workspace never came up. Each endpoint now has its own reader, chosen
+  explicitly per call site rather than inferred from the payload.
+- **Fix:** library ref resolution now walks the whole result instead of reading
+  one page. The library endpoint is paginated and clamps `limit`, so in a
+  workspace with more libraries than fit on a page a perfectly healthy ref was
+  reported as not visible. Resolution narrows server-side with `search`, then
+  compares slugs exactly — `search` is a case-insensitive substring filter, so
+  a neighbouring slug must never win — and keeps requesting pages until
+  `totalCount` is accounted for. A short page no longer ends the walk.
+- **Fix:** incompleteness is now an error instead of a silent miss. If the
+  server stops returning new rows while still claiming more, resolution fails
+  with the counts rather than downgrading to "not visible", and a malformed
+  page is rejected instead of being defaulted to an empty one.
+- **Diagnostics:** the "library ref is not visible" error now names how many
+  catalog rows were scanned, how many the server reported for that search, and
+  which workspace was searched, so an unresolvable ref can be told apart from
+  an incomplete scan without reproducing the run.
+
+## 0.2.1 — 2026-07-29
+
+- **Fix:** stop sending the redundant `library_id` multipart field when
+  creating a document. The library is already identified by the path segment,
+  and IronRAG's multipart parser rejects any field outside its allow-list with
+  `400 "unknown multipart field"` — so every file-backed upload failed. The
+  previous comment claiming the server *required* the field described an older
+  API; the path parameter is the single source of truth.
+
+## 0.2.0 — 2026-07-18
+
+- **Breaking:** rewrote `IronRagClient` for the redesigned IronRAG REST v2
+  content API. Documents are created with `create_document`
+  (`POST /v1/content/libraries/{libraryId}/documents`, `201` + `Location`),
+  revised with `create_revision`
+  (`POST /v1/content/documents/{documentId}/revisions`, `202` + operation),
+  and looked up with `find_document` / `list_documents` /
+  `walk_all_documents`. The former `upload_document`, `replace_document`,
+  `find_document_by_external_key`, and
+  `list_documents_by_external_key_prefix` methods are gone.
+- Asynchronous mutations now return a typed `OperationHandle` polled to a
+  terminal state with the SDK's single `wait_for_operation` primitive
+  (`GET /v1/ops/operations/{operationId}`); the poll cadence and budget are
+  the new `operation_poll_interval_seconds` and
+  `operation_poll_budget_seconds` settings.
+- Typed responses and errors throughout: `DocumentResource`, `DocumentPage`,
+  `OperationStatus`, and an RFC 9457 problem-details error family
+  (`IronRagProblemError`, `IronRagNotFoundError`, `IronRagConflictError`,
+  `IronRagDuplicateContentError` with `existing_document_id`,
+  `IronRagOperationFailedError`, `IronRagMutationTimeoutError`) replace
+  dict payloads and string matching.
+- **Breaking:** removed the legacy cursor-migration subsystem and its
+  `cursor_library_lookup_timeout_seconds` /
+  `cursor_library_lookup_max_rows_per_sweep` settings; cursor rows are
+  created with a non-null library binding from the start. The
+  `ironrag_mutation_timeout_seconds` setting is superseded by the operation
+  poll budget.
+- Added `rewalk_concurrency` to bound post-upgrade full re-walks driven by
+  `walk_all_documents`.
+- Orchestrator create/revise flows, the seeder, and the reaper now ride the
+  new typed client; route-move reaping keeps working via a pre-sweep
+  cursor-library snapshot.
+- Bumped the package version to 0.2.0.
+
+## 0.1.0 — 2026-07-14
+
+- Replaced UUID routing targets with canonical, human-readable
+  `<workspace-slug>/<library-slug>` catalog references shared with IronRAG MCP.
+  The redundant `workspace` key and UUID-only `library` values are no longer
+  accepted.
+- Resolve the complete routing snapshot through IronRAG's permission-filtered
+  workspace and library catalog before startup, while keeping UUIDs internal to
+  content mutations, cursor state, and orphan reaping.
+- Made routing hot reload asynchronous and atomic: every target in a candidate
+  file must resolve before routes and policies are swapped; invalid,
+  unauthorized, or temporarily unavailable candidates leave the previous
+  working snapshot active and are retried.
+- Added startup cleanup and cursor-seeder catalog resolution, strict rejection
+  of unknown routing keys, catalog response validation, and regression coverage
+  for startup failure, authorization errors, ambiguity, cross-workspace routes,
+  retry-after-failure, and friendly-ref seeding.
+- Expanded `routing.yaml.example` into the complete schema reference, including
+  every key, type, default, match rule, and policy enum.
+- Raised dependency floors to patched `pydantic-settings`, `python-multipart`,
+  and `starlette` releases after a release-gate vulnerability audit.
+- Bumped the package version to 0.1.0.
+
+## 0.0.11 — 2026-06-18
+
+- Added routing config reload for sweeps and webhooks. When `routing.yaml`
+  changes, the framework reloads the existing router and policy table in place
+  before the next sync run or webhook mutation, so route and per-kind policy
+  updates converge without restarting the connector process.
+- Invalid or temporarily unavailable routing config keeps the previous valid
+  routing active and logs `routing.reload_error` instead of breaking an
+  otherwise healthy connector loop.
+- Added regression coverage for successful routing/policy reload, failed reload
+  keep-old behavior, and sync-manager reload invocation before a sweep.
+- Bumped the package version to 0.0.11.
+
+## 0.0.10 — 2026-06-18
+
+- Added `IRONRAG_MUTATION_TIMEOUT_SECONDS` for upload/replace/delete admission
+  requests. When unset, the framework derives a bounded timeout from the
+  generic HTTP timeout and `SYNC_ITEM_TIMEOUT_SECONDS`, keeping IronRAG write
+  admissions inside the per-item budget.
+- Added `ironrag.mutation.start`, `ironrag.mutation.accepted`, and
+  `ironrag.mutation.timeout` structured logs so operators can distinguish slow
+  IronRAG mutation admission from source fetch or routing work.
+- Upload/replace admission timeouts now defer the source version for a later
+  sweep without advancing the cursor. This keeps full sweeps moving and avoids
+  turning a slow backend mutation admission into an indefinite connector lock.
+- Deferred outcomes are marked structurally with `deferred=True`, so callers do
+  not have to parse human-readable detail text to recognize retry-later cases.
+- Dependents are not pushed in the same item window when the primary document
+  write is deferred, preventing dependent writes from extending an already
+  deferred source item.
+- If a dependent write is deferred after the primary document was accepted, the
+  primary cursor is restored to its previous source version so a later sweep
+  refetches the parent and retries the dependent instead of losing it behind a
+  parent `noop_unchanged`.
+- Sync reports and outcome logs now include a `deferred` count/flag for
+  retry-later mutation outcomes.
+- Added `REAPER_LIST_TIMEOUT_SECONDS` so a slow post-sweep IronRAG prefix-list
+  request cannot hold the single-flight sync lock after source enumeration has
+  already completed.
+- Added regression coverage for client-side mutation timeout classification and
+  replace deferral without cursor advancement, including dependent suppression
+  while the primary write is deferred and dependent retry after parent cursor
+  restoration, plus reaper list timeout release.
+- Bumped the package version to 0.0.10.
+
+## 0.0.9 — 2026-06-18
+
+- Added `SYNC_ITEM_TIMEOUT_SECONDS` to bound one source ref's fetch/push work,
+  including dependents. A stuck source item is cancelled, counted as an item
+  error, and the sweep can continue to `sync.done` instead of holding the
+  process-level sweep lock indefinitely.
+- Added `sync.item.start` and `sync.item_timeout` structured logs so operators
+  can see which source item is currently in flight and where a timeout happened.
+- Added regression coverage that a timed-out item cancels its task, records an
+  error, and releases the single-flight run lock for later sweeps.
+- Bumped the package version to 0.0.9.
+
+## 0.0.8 — 2026-06-18
+
+- Added process-local single-flight protection for full sync sweeps. Manual
+  `/sync/run`, startup, and periodic triggers no longer run overlapping
+  `SyncManager.run_once()` calls against the same cursor database and IronRAG
+  target.
+- Manual `/sync/run` now returns HTTP 409 when a sweep is already active, while
+  periodic/startup triggers log a skipped event instead of starting a second
+  mutation pass.
+- Added cancellation cleanup for active item tasks and a structured
+  `sync.cancelled` log event when a manual request is cancelled before the
+  sweep finishes.
+- Added regression coverage for overlapping sweep rejection and item-task
+  cancellation.
+- Bumped the package version to 0.0.8.
+
+## 0.0.7 — 2026-06-18
+
+- Added `CURSOR_LIBRARY_LOOKUP_MAX_ROWS_PER_SWEEP` to cap best-effort legacy
+  cursor library backfill before source enumeration. Large old cursor databases
+  no longer spend minutes timing out document-detail lookups before they start
+  processing source refs.
+- Optimized legacy cursor handling for the common same-route case: if a row has
+  a document id but no stored library id, the orchestrator first checks the
+  currently resolved target library by external key. When the document is found
+  there, it backfills `ironrag_library_id` without calling document detail.
+- Backfill now updates only discovered document ownership. It does not advance
+  the stored `change_token` until upload, replace, or an intentional skip
+  policy has actually handled the current source version.
+- Kept duplicate safety unchanged: if the current target does not contain the
+  document and ownership still cannot be proven, uploads remain blocked to avoid
+  creating possible duplicates.
+- Bumped the package version to 0.0.7.
+
+## 0.0.6 — 2026-06-18
+
+- Made legacy cursor library backfill bounded and non-fatal. A sweep now
+  resolves old cursor rows with a short per-document timeout and limited
+  concurrency instead of letting a single slow document-detail request block
+  `/sync/run` before source enumeration starts.
+- Added `CURSOR_LIBRARY_LOOKUP_TIMEOUT_SECONDS` so operators can tune that
+  metadata backfill independently from large upload/replace request timeouts.
+- Defined the degraded reaper contract for unresolved legacy cursor rows:
+  lookup failures skip destructive cleanup for unknown historical libraries in
+  that sweep, while per-item orchestration still refuses to upload a possible
+  duplicate until ownership is proven or the target-library lookup succeeds.
+- Added regression coverage for cursor lookup timeouts before enumeration,
+  partial reaper scans, duplicate-prevention on unresolved legacy cursors, and
+  the existing fast route-move cleanup path.
+- Bumped the package version to 0.0.6.
+
+## 0.0.5 — 2026-06-18
+
+- Fixed orphan reaping against cursor-paginated IronRAG document lists.
+  `IronRagClient.list_documents_by_external_key_prefix` now follows
+  `nextCursor` / `next_cursor` pages before returning the prefix set that
+  `SyncManager` compares with the latest clean source enumeration. When a
+  connector rule changes, or a source item disappears, documents outside the
+  new `iter_items()` result are now considered by the reaper across the full
+  library rather than only the first page.
+- Cursor rows now remember the IronRAG library that owns their document id.
+  The orchestrator trusts a cached document id only when it belongs to the
+  currently resolved route, and the reaper also scans previously routed
+  libraries from the cursor snapshot. This lets routing-target changes move a
+  still-existing item to its new library and delete the old target document
+  during the same clean sweep.
+- Preserved the existing fallback paths: if `externalKeyPrefix` is rejected
+  by the backend, the client scans pages without the server-side prefix and
+  filters client-side; legacy `total` + `offset` pagination still works.
+- Existing SQLite cursor databases are migrated in place with the new nullable
+  `ironrag_library_id` column. Legacy rows that already have an
+  `ironrag_document_id` are backfilled from IronRAG document detail before the
+  cursor is trusted; if the owning library cannot be proven, the connector
+  refuses to upload a possible duplicate and reports the item visibly.
+- Deferred replace attempts when IronRAG reports a document is still processing
+  a previous mutation. The connector now leaves the cursor on the previous
+  `change_token` and retries on the next sweep instead of failing the item and
+  leaving the whole sync report red for a transient backend state.
+- Added the package `py.typed` marker so downstream connectors can type-check
+  against `ironrag_connector` without treating the SDK as `Any`.
+- Bumped the package version to 0.0.5.
+
+## 0.0.4 — 2026-06-10
+
+- Dependents (a page's attachments and inline images, emitted via
+  `SourceItem.dependents`) are now auto-linked to their source item. The
+  orchestrator threads the parent's `external_key` down to each dependent's
+  upload as the new `parent_external_key` multipart field; primary items
+  upload with no parent and stay `document_role=primary`. The link is
+  injected once at `Orchestrator.push_ref`, so every connector inherits
+  correct parentage with no adapter change.
+- `IronRagClient.upload_document` gained an optional `parent_external_key`
+  parameter, forwarded as the `parent_external_key` multipart form field
+  only when set. IronRAG resolves it to the canonical parent and derives
+  `document_role` (`attached_context` for image media, `attachment`
+  otherwise) — the connector sends no role itself.
+- Bumped the package version to 0.0.4.
+
+## 0.0.3 — 2026-05-29
+
+- `Orchestrator` default idempotency keys are now derived from a SHA-256
+  of the payload bytes (plus operation and item identity) instead of the
+  source `change_token`. A payload that is not byte-stable when
+  re-rendered for the same logical version no longer collides with a
+  stuck prior attempt (`409 idempotency_conflict`); identical retries
+  still dedupe into a single mutation.
+- `IronRagClient.find_document_by_external_key` resolves a document in a
+  single request via the list endpoint's `search` filter, comparing the
+  external key exactly client-side, and falls back to full pagination
+  when the backend does not support the filter. Replaces the per-lookup
+  full-library scan that dominated request volume on large libraries.
+- `Orchestrator.push_ref` persists the discovered document id into the
+  cursor on the unchanged path, so subsequent sweeps short-circuit via
+  the cursor with no list-endpoint calls.
+- Bumped the package version to 0.0.3.
+
+## 0.0.2 — 2026-05-17
+
+- Added `SourceItem.document_hint`, a user-facing citation label that
+  adapters can set independently from the technical `external_key`.
+- Forward `document_hint` through IronRAG upload and replace multipart
+  requests.
+- Bumped the package version to 0.0.2.
+
+## 0.0.1 — 2026-05-17
+
+Initial release of the IronRAG connector framework.
+
+### Framework surface
+
+- `SourceAdapter` Protocol — implement once per vendor, with
+  `SourceItemRef` (diff stage) and `SourceItem` (full payload) shapes.
+  `kinds` + `primary_kinds` separate enumerated kinds from dependent
+  ones (attachments/images) so the reaper never deletes a live
+  dependent.
+- `IronRagClient` — find-by-external-key, upload, replace, delete,
+  list-by-prefix. Handles 409 duplicate-content sentinel and
+  invalidates the cursor on a 404 replace.
+- `BaseConnectorSettings` (pydantic-settings) — IronRAG creds, sync
+  loop tuning, server bind, state path, pidfile, default policies.
+  Run modes: `poll | webhook | both`.
+- YAML `routing.yaml` — arbitrary fact-bag match against
+  `ref.routing_facts`; per-kind `policies:` overrides for `on_new` /
+  `on_changed` / `on_missing` / `on_duplicate_content`.
+- `StateStore` — SQLite persistent cursor `(kind, item_id) →
+  change_token`. Survives restart; framework trusts cursor over
+  server-side find to dodge list-endpoint quirks.
+- `Orchestrator` — per-item dispatch with in-sweep dedup (shared
+  external_keys collapse to one IronRAG mutation), op-prefixed
+  idempotency keys (separate upload vs replace key namespace).
+- `SyncManager` — bounded-concurrency sweep, orphan reaper gated on
+  clean enumeration, only walks `primary_kinds`.
+- `build_app()` — FastAPI factory. `/health`, `/sync/run`,
+  `/webhook/{name}` mounts with admin bearer + adapter-supplied
+  extra-auth (HMAC). Webhooks register via `webhook_factory(orch)`
+  so handlers share the framework-owned orchestrator.
+- `seed_cursor` — one-shot bootstrap helper for libraries that
+  already contain connector-owned documents.
+- Structured per-item logging: `sync.item.<action>` events carry
+  external_key, ironrag_document_id, library_id, title, and detail
+  (the *why*).
+
+### Reference adapter
+
+- `examples/echo_connector/` — in-memory dict-backed SourceAdapter
+  demonstrating the minimum surface a real connector implements.
+
+### Distribution
+
+- Dockerfile base image (`pipingspace/ironrag-connector:0.0.1`).
+- 20 unit tests, ruff strict.
+
+
+---
+
+## BookStack
+
+Closed at 0.2.3.
+
+## 0.2.3 — 2026-08-16
+
+- **Fix:** picks up `ironrag-connector` 0.2.2, which repairs catalog reads. The
+  library-list endpoint returns a bounded page (`{items, totalCount, offset,
+  limit}`) while the workspace-list endpoint returns a bare array, and the
+  framework demanded an array from both — so a connector configured with a
+  `<workspace-slug>/<library-slug>` routing ref could not resolve it and failed
+  during startup instead of ingesting anything.
+- **Fix:** library ref resolution now walks every page of the library list
+  instead of reading the first one, so a valid ref in a workspace with more
+  libraries than fit on one page is no longer reported as not visible. An
+  incomplete scan is now an error carrying the row counts rather than a silent
+  "not visible".
+- Bumped the release workflow pin to framework `v0.2.2`; without it the
+  published image would still carry the broken catalog client.
+
+## 0.2.2 — 2026-07-29
+
+- **Fix:** the release workflow pinned framework `v0.2.0`, so the 0.2.1 image
+  shipped without the `library_id` multipart fix it claimed to carry. Bumped
+  the pin to `v0.2.1`.
+
+## 0.2.1 — 2026-07-29
+
+- **Fix:** picks up `ironrag-connector` 0.2.1, which stops sending the
+  redundant `library_id` multipart field on document creation. IronRAG rejects
+  unknown multipart fields with `400`, so every file-backed upload failed
+  before this.
+
+## 0.2.0 — 2026-07-18
+
+- Migrated to connector framework 0.2.0 (redesigned IronRAG REST v2 content
+  API): typed document resources, `201`-create / `202`-revision semantics
+  with operation polling, and the RFC 9457 problem-details error family.
+- Replaced removed framework settings in `.env.example`
+  (`IRONRAG_MUTATION_TIMEOUT_SECONDS`,
+  `CURSOR_LIBRARY_LOOKUP_TIMEOUT_SECONDS`,
+  `CURSOR_LIBRARY_LOOKUP_MAX_ROWS_PER_SWEEP`) with the new
+  `OPERATION_POLL_INTERVAL_SECONDS`, `OPERATION_POLL_BUDGET_SECONDS`, and
+  `REWALK_CONCURRENCY` knobs; refreshed README and architecture notes for
+  the create/revision endpoint surface and async operation polling.
+- Pinned the release workflow to framework `v0.2.0`.
+- Bumped the package version to 0.2.0.
+
+## 0.1.0 — 2026-07-14
+
+- Replaced workspace and library UUID routing with canonical
+  `<workspace-slug>/<library-slug>` references resolved by ConnectorTemplate
+  0.1.0.
+- Expanded `routing.yaml.example` into a complete strict schema reference with
+  every BookStack fact and item kind, exact/list matching semantics, policy
+  enums, defaults, and multi-workspace examples.
+- Removed the unsupported `name_pattern` example and aligned the documented
+  routing facts with the adapter's actual page, book, chapter, shelf, and tag
+  fields.
+- Added the exact page `name` to full-context routing facts so title-based rules
+  behave consistently between summary and enriched routing paths.
+- Refreshes full-context routing demand on every sweep while retaining facts
+  required by the last active snapshot when a reload candidate is rejected.
+- Updated deployment and architecture documentation for one-process,
+  multi-library routing and pinned release builds to ConnectorTemplate 0.1.0.
+- Bumped the package version to 0.1.0.
+
+## 0.0.13 — 2026-06-18
+
+- Build against framework `v0.0.11`: `routing.yaml` and per-kind policy
+  overrides are reloaded before each sweep and webhook-handled item, so routing
+  rule changes take effect without a connector restart.
+- Invalid or temporarily unreadable routing configuration keeps the last valid
+  routing state active, avoiding accidental document movement or deletion during
+  configuration edits.
+
+## 0.0.12 — 2026-06-18
+
+- Build against framework `v0.0.10`: IronRAG upload/replace/delete admission
+  requests now have their own bounded timeout via
+  `IRONRAG_MUTATION_TIMEOUT_SECONDS`. When unset, it is derived from the
+  generic request timeout and `SYNC_ITEM_TIMEOUT_SECONDS`.
+- Inherits framework mutation phase logs and timeout deferral: a slow IronRAG
+  mutation admission no longer holds the whole item until the outer item
+  timeout fires, and the connector retries the source version on a later sweep
+  without advancing the cursor.
+- Dependent documents now wait for the next sweep when their primary document
+  write is deferred, avoiding extra child mutations inside an already deferred
+  item window.
+- If a dependent document write is deferred after its primary document was
+  accepted, the framework restores the primary cursor to the previous source
+  version so the next sweep refetches the parent and retries the dependent.
+- Inherits `REAPER_LIST_TIMEOUT_SECONDS`, preventing a slow post-sweep IronRAG
+  prefix-list request from holding the connector's single-flight sync lock.
+
+## 0.0.11 — 2026-06-18
+
+- Build against framework `v0.0.9`: one source ref's fetch/push work,
+  including dependents, is bounded by `SYNC_ITEM_TIMEOUT_SECONDS`. A stuck item
+  is cancelled and counted as an item error so the sweep can continue to
+  `sync.done` instead of holding the single-flight sync lock indefinitely.
+- Inherits `sync.item.start` and `sync.item_timeout` logs for identifying the
+  source ref that is currently in flight or timed out.
+
+## 0.0.10 — 2026-06-18
+
+- Build against framework `v0.0.8`: full sweeps are now single-flight inside
+  the connector process, so manual, startup, and periodic triggers cannot run
+  overlapping mutation passes against the same cursor database. Concurrent
+  manual `/sync/run` requests return HTTP 409 while an existing sweep is active.
+- Inherits framework cancellation cleanup for manual sync requests that are
+  disconnected before the sweep finishes.
+
+## 0.0.9 — 2026-06-18
+
+- Build against framework `v0.0.7`: large legacy cursor databases now cap
+  best-effort document-detail backfill before source enumeration, and the
+  same-route path backfills cursor ownership via the target library's
+  external-key lookup before trying slower document-detail calls.
+- Added the `CURSOR_LIBRARY_LOOKUP_MAX_ROWS_PER_SWEEP` operator knob inherited
+  from the framework.
+
+## 0.0.8 — 2026-06-18
+
+- Build against framework `v0.0.6`: legacy cursor library backfill is now
+  bounded and non-fatal, so a slow document-detail lookup no longer makes
+  manual `/sync/run` return 500 before BookStack enumeration starts. Unresolved
+  legacy cursor ownership still blocks possible duplicate uploads; destructive
+  cleanup for unknown historical libraries is deferred to a later sweep.
+- Optimized full sweeps by inspecting routing rule keys structurally. Default
+  routing, and rules satisfied by `/api/pages` summary fields, now yield page
+  refs without fetching full page context or refreshing the shelf index.
+  Shelf/tag rules still request the full BookStack context.
+- Added regression coverage for summary-first routing and shelf/tag fallback.
+
+## 0.0.7 — 2026-06-18
+
+- Build against framework `v0.0.5`: cursor rows now retain the target
+  library, orphan scans follow cursor pagination, route moves avoid deleting
+  newly-routed documents, legacy cursor rows are backfilled from IronRAG
+  document details, and transient conflicting mutations are retried on a later
+  sweep without advancing the cursor.
+- Tightened connector type annotations so strict mypy passes against the typed
+  framework package.
+
+## 0.0.6 — 2026-06-10
+
+- Page attachments and inline images now ingest as attached context of
+  their source page instead of as peer documents. Each dependent is
+  auto-linked to its page via the framework's `parent_external_key`; no
+  config change is required. Inherited from the connector SDK — IronRAG
+  derives the child's role from the declared parent and media class.
+
+## 0.0.5 — 2026-05-30
+
+- Build against framework `v0.0.3`: content-addressed idempotency keys
+  (fixes `409 idempotency_conflict` when a re-exported page is byte-unstable),
+  single-request external-key lookup via the list `search` filter, and
+  cursor document-id persistence on the unchanged path (steady-state sweeps
+  no longer re-scan the IronRAG list endpoint).
+
+## 0.0.2 — 2026-05-17
+
+- Added per-kind `document_hint` URLs so pages, attachments, and inline images
+  point IronRAG citations back to their original BookStack browser URLs.
+
+## 0.0.1 — 2026-05-17
+
+Initial public release on top of the
+[IronRAG Connector Template](https://github.com/mlimarenko/IronRAG.ConnectorTemplate).
+
+### Sync behavior
+
+- Periodic poll loop (default 1800s) ships only pages whose BookStack
+  `updated_at` advanced since the last successful push. Webhook
+  endpoint `/webhook/bookstack` (HMAC-SHA256 + admin bearer)
+  dispatches through the same orchestrator.
+- Three external-key namespaces, each with its own per-kind policy:
+  - `bookstack:page:<id>` — page markdown export.
+  - `bookstack:attachment:<id>` — base64-decoded attachment payload.
+  - `bookstack:image:<sha256-prefix-16>` — content-addressed dedup of
+    inline images across pages.
+- Routing YAML maps shelf / book / chapter / tag / page-slug facts
+  emitted by the adapter to `(workspace, library)` pairs. Per-kind
+  policy overrides — pages and attachments default to
+  `on_missing: delete`, images to `on_missing: ignore`.
+- Orphan reaper runs after each clean sweep against the `page` kind
+  only; attachments and images are dependent kinds whose lifecycle
+  follows their parent.
+
+### Distribution
+
+- Docker image: `pipingspace/ironrag.bookstack:0.0.1` (multi-arch).
+- 21 unit tests, ruff strict.
+
+
+---
+
+## Confluence
+
+Closed at 0.3.3.
+
+## 0.3.3 — 2026-08-16
+
+- **Fix:** the connector could not start against a workspace at all. The
+  framework's catalog client demanded a bare JSON array from both catalog list
+  endpoints, but the library list is a bounded `{items, totalCount, offset,
+  limit}` page, so reading it failed before any routing ref could be resolved
+  and the process exited on every attempt. Picks up `ironrag-connector` 0.2.2,
+  which reads each endpoint with its own reader, walks the library list to
+  completion instead of stopping at the first page, treats an incomplete scan
+  as an error rather than a silent miss, and reports the scanned/expected
+  counts when a ref really is not visible.
+- Bumped the release workflow's framework pin to `v0.2.2` so the published
+  image carries the fix.
+- Refreshed `uv.lock`, which had not been regenerated for the 0.3.2 bump.
+
+## 0.3.2 — 2026-07-29
+
+- **Fix:** the release workflow pinned framework `v0.2.0`, so the 0.3.1 image
+  shipped without the `library_id` multipart fix it claimed to carry. Bumped
+  the pin to `v0.2.1`.
+
+## 0.3.1 — 2026-07-29
+
+- **Fix:** picks up `ironrag-connector` 0.2.1, which stops sending the
+  redundant `library_id` multipart field on document creation. IronRAG rejects
+  unknown multipart fields with `400`, so every file-backed upload failed
+  before this.
+
+## 0.3.0 — 2026-07-18
+
+- Migrated to connector framework 0.2.0 (redesigned IronRAG REST v2 content
+  API): typed document resources, `201`-create / `202`-revision semantics
+  with operation polling, and the RFC 9457 problem-details error family.
+- Replaced removed framework settings in `.env.example`
+  (`IRONRAG_MUTATION_TIMEOUT_SECONDS`,
+  `CURSOR_LIBRARY_LOOKUP_TIMEOUT_SECONDS`,
+  `CURSOR_LIBRARY_LOOKUP_MAX_ROWS_PER_SWEEP`) with the new
+  `OPERATION_POLL_INTERVAL_SECONDS`, `OPERATION_POLL_BUDGET_SECONDS`, and
+  `REWALK_CONCURRENCY` knobs; rewrote the README timeout guidance for the
+  operation-poll budget model.
+- Pinned the release workflow to framework `v0.2.0`.
+- Bumped the package version to 0.3.0.
+
+## 0.2.0 — 2026-07-14
+
+- Replaced workspace and library UUID routing with canonical
+  `<workspace-slug>/<library-slug>` references resolved by ConnectorTemplate
+  0.1.0.
+- Expanded `routing.yaml.example` into a complete strict schema reference with
+  every key, type, default, match rule, policy enum, Confluence fact, and item
+  kind.
+- Documented and regression-tested the emitted `status` fact alongside space
+  and ancestor routing, including cross-workspace examples without a redundant
+  `workspace` field.
+- Updated deployment documentation and pinned release builds to
+  ConnectorTemplate 0.1.0.
+- Bumped the package version to 0.2.0.
+
+## 0.1.9 — 2026-06-18
+
+- Build against framework `v0.0.11`: `routing.yaml` and per-kind policy
+  overrides are reloaded before each sweep and webhook-handled item, so routing
+  rule changes take effect without a connector restart.
+- Invalid or temporarily unreadable routing configuration keeps the last valid
+  routing state active, avoiding accidental document movement or deletion during
+  configuration edits.
+
+## 0.1.8 — 2026-06-18
+
+- Build against framework `v0.0.10`: IronRAG upload, replace, and delete
+  admission now fail fast with configurable mutation timeouts and are recorded
+  as deferred instead of holding a sweep indefinitely.
+- Inherits deferred cursor handling for primary and dependent items, plus a
+  bounded post-sweep reaper list call, so a slow backend can be retried by a
+  later sweep without advancing cursors for work that was not accepted.
+
+## 0.1.7 — 2026-06-18
+
+- Build against framework `v0.0.9`: one source ref's fetch/push work,
+  including dependents, is bounded by `SYNC_ITEM_TIMEOUT_SECONDS`. A stuck item
+  is cancelled and counted as an item error so the sweep can continue to
+  `sync.done` instead of holding the single-flight sync lock indefinitely.
+- Inherits `sync.item.start` and `sync.item_timeout` logs for identifying the
+  source ref that is currently in flight or timed out.
+
+## 0.1.6 — 2026-06-18
+
+- Build against framework `v0.0.8`: full sweeps are now single-flight inside
+  the connector process, so manual, startup, and periodic triggers cannot run
+  overlapping mutation passes against the same cursor database. Concurrent
+  manual `/sync/run` requests return HTTP 409 while an existing sweep is active.
+- Inherits framework cancellation cleanup for manual sync requests that are
+  disconnected before the sweep finishes.
+
+## 0.1.5 — 2026-06-18
+
+- Build against framework `v0.0.7`: large legacy cursor databases now cap
+  best-effort document-detail backfill before source enumeration, and the
+  same-route path backfills cursor ownership via the target library's
+  external-key lookup before trying slower document-detail calls.
+
+## 0.1.4 — 2026-06-18
+
+- Build against framework `v0.0.6`: legacy cursor library backfill is now
+  bounded and non-fatal, so a slow document-detail lookup no longer makes
+  manual `/sync/run` return 500 before Confluence enumeration starts.
+  Unresolved legacy cursor ownership still blocks possible duplicate uploads;
+  destructive cleanup for unknown historical libraries is deferred to a later
+  sweep.
+
+## 0.1.3 — 2026-06-18
+
+- Build against framework `v0.0.5`: cursor rows now retain the target
+  library, orphan scans follow cursor pagination, route moves avoid deleting
+  newly-routed documents, legacy cursor rows are backfilled from IronRAG
+  document details, and transient conflicting mutations are retried on a later
+  sweep without advancing the cursor.
+- Tightened connector type annotations so strict mypy passes against the typed
+  framework package.
+
+## 0.1.2 — 2026-06-10
+
+- Page attachments and inline images now ingest as attached context of
+  their source page instead of as peer documents. Each dependent is
+  auto-linked to its page via the framework's `parent_external_key`; no
+  config change is required. Inherited from the connector SDK — IronRAG
+  derives the child's role from the declared parent and media class.
+
+## 0.1.1 — 2026-05-29
+
+- Pages whose own body is empty but which host attachments are no longer
+  dropped. The page is emitted with a synthesized index body listing its
+  attachments, and each attachment is ingested as its own document.
+  Previously an empty page body caused the whole item — including its
+  attachments — to be skipped.
+- Build against framework `v0.0.3`: content-addressed idempotency keys
+  (fixes `409 idempotency_conflict` on re-rendered page updates),
+  single-request external-key lookup via the list `search` filter, and
+  cursor document-id persistence on the unchanged path (steady-state
+  sweeps no longer re-scan the IronRAG list endpoint).
+
+## 0.1.0 — 2026-05-22
+
+- Initial public release.
+
+
+---
+
+## Git repositories
+
+Closed at 0.2.1.
+
+## 0.2.1 — 2026-08-16
+
+- Pinned the release workflow to framework `v0.2.2`, up from `v0.2.0`. The
+  published image therefore picks up two framework fixes at once, and either
+  one alone was enough to stop this connector from doing any work.
+- **Fix (framework 0.2.2):** routing refs could not be resolved, so the
+  connector failed during startup instead of sweeping. The two catalog list
+  endpoints return different shapes — a bare JSON array of workspaces, and a
+  bounded `{items, totalCount, offset, limit}` page of libraries — and a single
+  reader demanded an array from both. Library resolution now also walks every
+  page rather than judging visibility from the first one, so a
+  `<workspace-slug>/<library-slug>` ref in `routing.yaml` still resolves in a
+  workspace holding more libraries than fit on one page.
+- **Fix (framework 0.2.1):** document creation sent a redundant `library_id`
+  multipart field that the server rejects with `400`, so every upload failed.
+  This connector pushes every git blob as file bytes, which is exactly that
+  path — no file could be ingested at all.
+- Bumped the package version to 0.2.1.
+
+## 0.2.0 — 2026-07-18
+
+- Migrated to connector framework 0.2.0 (redesigned IronRAG REST v2 content
+  API): typed document resources, `201`-create / `202`-revision semantics
+  with operation polling, and the RFC 9457 problem-details error family.
+- Replaced the removed `IRONRAG_MUTATION_TIMEOUT_SECONDS` setting in
+  `.env.example` with the new `OPERATION_POLL_INTERVAL_SECONDS`,
+  `OPERATION_POLL_BUDGET_SECONDS`, and `REWALK_CONCURRENCY` knobs.
+- Pinned the release workflow to framework `v0.2.0`.
+- Bumped the package version to 0.2.0.
+
+## 0.1.0 — 2026-07-14
+
+- Replaced workspace and library UUID routing with canonical
+  `<workspace-slug>/<library-slug>` references resolved by ConnectorTemplate
+  0.1.0.
+- Expanded `routing.yaml.example` into a complete strict schema reference with
+  every key, type, default, match rule, policy enum, built-in Git fact, optional
+  `repo_url`, and custom fact behavior.
+- Expanded `repos.yaml.example` to document every repository key, source
+  exclusivity rule, branch and glob constraint, default exclusion, fact
+  collision behavior, and file-size default.
+- Updated deployment documentation and pinned release builds to
+  ConnectorTemplate 0.1.0.
+- Bumped the package version to 0.1.0.
+
+## 0.0.5 — 2026-06-18
+
+- Reload `repos.yaml` automatically between sweeps when the file changes.
+  Include/exclude, branch, repo, and fact-rule changes now affect the next
+  clean enumeration without restarting the connector process.
+- Build against framework `v0.0.11`, including full cursor-paginated reaper
+  listing, route-target-aware cursor handling, transient busy-document replace
+  deferral, bounded mutation admission, deferred cursor handling, and bounded
+  post-sweep reaper listing. Routing and per-kind policy changes in
+  `routing.yaml` are also reloaded before sweeps and webhooks.
+
+## 0.0.4 — 2026-06-10
+
+- The framework can now ingest a page's attachments and inline images as
+  attached context of their source document, auto-linked via
+  `parent_external_key`. This connector emits one document per text file
+  and skips binary blobs, so it has no image/attachment dependents — the
+  capability is inherited from the SDK but currently unused here.
+
+## 0.0.3 — 2026-05-30
+
+- Binary blobs are no longer ingested. Detection is content-based — a
+  blob is binary iff it carries a NUL byte in its first sniff window
+  (the same heuristic git uses), so every text extension is ingested
+  (including unknown ones) while images, archives, and compiled
+  artifacts are skipped. No extension blocklist is consulted.
+- `.gitignore` is honoured implicitly: enumeration walks the committed
+  tree via `git ls-tree`, which never lists ignored/untracked files.
+- Unknown text files now default to `text/plain` instead of
+  `application/octet-stream`.
+- Build against framework `v0.0.3` (content-addressed idempotency keys,
+  single-request external-key lookup, cursor document-id persistence).
+
+## 0.0.1 — 2026-05-23
+
+Initial public release on top of the
+[IronRAG Connector Template](https://github.com/mlimarenko/IronRAG.ConnectorTemplate).
+
+### Sync behavior
+
+- Tracks an arbitrary number of git repositories (remote SSH/HTTPS or
+  local working trees). Each repo can mirror one or more branches; the
+  connector emits one IronRAG document per `(repo, branch, path)`
+  triple.
+- Periodic sweep (default 1800s) fetches every remote repo
+  (`git fetch --prune`), walks each tracked branch's tree
+  (`git ls-tree -r -l -z`), and ships files whose blob SHA advanced
+  since the last successful push.
+- Bare clones with `--filter=blob:none` keep the local cache small;
+  blobs stream in only when a file is actually fetched.
+- One external-key namespace, `gitrepos:file:<repo>:<branch>:<path>`,
+  URL-encoded so colons in branch or path names cannot break the
+  external-key parse.
+- Routing YAML maps `repo`, `branch`, `path`, `dir`, `ext`, `top_dir`,
+  and custom `facts:` keys from `repos.yaml` to `(workspace, library)`
+  pairs. Per-kind policies override the env-var defaults — files
+  default to `on_missing: delete` so renames and deletions reflect in
+  IronRAG.
+
+### Configuration
+
+- `repos.yaml` describes every tracked repository: name, source
+  (`url` or `local_path`), branches, include/exclude globs, and
+  arbitrary fact tags. Common dependency / build directories
+  (`node_modules`, `__pycache__`, `target/{debug,release}`, …) are
+  excluded by default.
+- Per-file size ceiling is configurable both globally
+  (`GITREPOS_MAX_FILE_BYTES`) and per-repo (`max_file_bytes`).
+- The connector itself stores no vendor credentials: mount your SSH
+  key or git credential helper at the container level.
+
+
+---
+
+## YouTrack
+
+Closed at 0.2.1.
+
+## 0.2.1 — 2026-08-16
+
+- Pinned the release workflow to connector framework `v0.2.2`, moving the
+  published image two framework versions forward from `v0.2.1`.
+- Picks up the framework catalog-client fix (`0.2.2`): the two catalog list
+  endpoints have different response shapes — the workspace list returns a bare
+  JSON array while the library list returns a bounded `{items, totalCount,
+  offset, limit}` page — and a single reader demanded an array from both, so
+  startup failed before any routing ref could be resolved and the connector
+  never came up. Library ref resolution now also walks every page instead of
+  reading one, narrowing server-side with `search` and comparing slugs exactly,
+  so a library beyond the first page is no longer reported as not visible.
+- Picks up the framework upload fix (`0.2.1`): the redundant `library_id`
+  multipart field is no longer sent when creating a document. The library is
+  already identified by the path segment, and IronRAG rejects any field outside
+  its multipart allow-list, so every file-backed upload failed.
+- Bumped the package version to 0.2.1.
+
+## 0.2.0 — 2026-07-18
+
+- Migrated to connector framework 0.2.0 (redesigned IronRAG REST v2 content
+  API): typed document resources, `201`-create / `202`-revision semantics with
+  operation polling, and the RFC 9457 problem-details error family.
+- Rewrote the lifecycle test double to the redesigned client surface
+  (`create_document` returning typed resources, revision/delete operations
+  polled to a terminal state, typed not-found errors) and updated the e2e
+  runtime preparation script and architecture notes to the create/revise
+  terminology and the content + operations endpoint surface.
+- Replaced removed framework settings in `.env.example`
+  (`IRONRAG_MUTATION_TIMEOUT_SECONDS`,
+  `CURSOR_LIBRARY_LOOKUP_TIMEOUT_SECONDS`,
+  `CURSOR_LIBRARY_LOOKUP_MAX_ROWS_PER_SWEEP`) with the new
+  `OPERATION_POLL_INTERVAL_SECONDS`, `OPERATION_POLL_BUDGET_SECONDS`, and
+  `REWALK_CONCURRENCY` knobs.
+- Pinned the release workflow to framework `v0.2.0`.
+- Bumped the package version to 0.2.0.
+
+## 0.1.0 — 2026-07-14
+
+- Replaced workspace and library UUID routing with canonical
+  `<workspace-slug>/<library-slug>` references resolved by ConnectorTemplate
+  0.1.0.
+- Expanded `routing.yaml.example` into a complete strict schema reference with
+  every YouTrack fact, item kind, key, type, default, match rule, and policy
+  enum.
+- Extended the full-stack bootstrap contract with workspace and library slugs.
+  Generated routing files now contain only the friendly catalog ref, while
+  internal IDs remain isolated to IAM and lifecycle assertions.
+- Added regression coverage for friendly runtime generation and migrated both
+  real-YouTrack lifecycle fixtures to compiled routing targets.
+- Documented all environment constraints and retained the successful isolated
+  Docker lifecycle coverage for create, update, empty content, delete, restart,
+  reaping, worker chunks, and search.
+- Rejects webhook-only and combined run modes because YouTrack Knowledge Base
+  has no complete lifecycle webhooks; polling is the only safe mode.
+- Pinned release builds to ConnectorTemplate 0.1.0 and bumped the package
+  version to 0.1.0.
+
+## 0.0.1 — 2026-07-13
+
+- Added a poll-only YouTrack Knowledge Base connector on ConnectorTemplate
+  v0.0.11.
+- Added permanent-token validation, context-path-safe REST URLs, explicit
+  pagination, retry/backoff, and two-pass snapshot consistency checks.
+- Added stable database-ID mapping, project filters and routing facts,
+  composite change tokens, deterministic Markdown rendering, and safe handling
+  of empty content and attachment metadata.
+- Added unit, framework lifecycle, and opt-in Docker E2E coverage for create,
+  no-op, update, clear, delete, restart, and partial-enumeration safety.
+- Added a reproducible full-stack Docker E2E fixture with real YouTrack,
+  IronRAG v0.5.9, worker ingestion, scoped credentials, and a deterministic
+  local OpenAI-compatible provider. The lifecycle verifies source revisions,
+  knowledge chunks, search, soft deletion, and persisted connector state.
+- Added identity revalidation, duplicate-page rejection, fetch-time route
+  revalidation, a loopback-safe automated YouTrack bootstrap, and guarded live
+  fixture cleanup.
+- Added release test gates, safe tag validation, a commit-pinned framework
+  checkout, and lockfile-based container dependency installation.

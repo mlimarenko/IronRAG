@@ -2,6 +2,11 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { Query } from './generated'
 import { queryApi } from './query'
+import {
+  markSessionSignedIn,
+  markSessionSignedOut,
+  subscribeToSessionExpired,
+} from './sessionLifecycle'
 
 function streamThatFailsAfterActivity(): ReadableStream<Uint8Array> {
   let pulled = false
@@ -145,6 +150,34 @@ describe('queryApi.createTurnStream', () => {
     expect(Query.getQueryExecution).not.toHaveBeenCalledWith({
       path: { executionId: 'old-execution' },
     })
+  })
+
+  it('ends the assistant stream through the session lifecycle when the session died', async () => {
+    // The SSE turn is a hand-rolled fetch, so it does not pass through the
+    // generated client's interceptor. It must still report the dead session,
+    // and it must not fall into durable-session recovery — that would poll a
+    // door the server has already closed.
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      new Response(JSON.stringify({ detail: 'unauthorized' }), {
+        status: 401,
+        headers: { 'Content-Type': 'application/json' },
+      }),
+    )
+    const getSession = vi.spyOn(Query, 'getQuerySession')
+    const expired = vi.fn()
+    const unsubscribe = subscribeToSessionExpired(expired)
+    markSessionSignedIn()
+
+    try {
+      await expect(queryApi.createTurnStream('session-1', 'Question', 0)).rejects.toMatchObject({
+        status: 401,
+      })
+      expect(expired).toHaveBeenCalledTimes(1)
+      expect(getSession).not.toHaveBeenCalled()
+    } finally {
+      unsubscribe()
+      markSessionSignedOut()
+    }
   })
 
   it('does not hide backend failure events behind durable-session recovery', async () => {

@@ -1,7 +1,7 @@
 //! AST-based identifier extraction for code blocks via tree-sitter.
 //!
 //! Supports the subset of programming languages whose tree-sitter
-//! grammars are ABI-compatible with the backend's canonical
+//! grammars are ABI-compatible with the backend's supported
 //! `tree-sitter` crate. When a structured block carries
 //! a `code_language` tag that matches one of the supported grammars,
 //! this module parses the block's text into an AST and walks it for
@@ -259,15 +259,20 @@ fn parse_source(source: &str, language: &str) -> Option<Tree> {
     let mut parser = Parser::new();
     if parser.set_language(&ts_language).is_err() {
         #[cfg(test)]
-        tracing::warn!("[tree-sitter] set_language failed for {language}");
+        warn_parse_source_failure(language, "set_language failed");
         return None;
     }
     let tree = parser.parse(source, None);
     if tree.is_none() {
         #[cfg(test)]
-        tracing::warn!("[tree-sitter] parse returned None for {language}");
+        warn_parse_source_failure(language, "parse returned None");
     }
     tree
+}
+
+#[cfg(test)]
+fn warn_parse_source_failure(language: &str, stage: &str) {
+    tracing::warn!("[tree-sitter] {stage} for {language}");
 }
 
 fn node_name_text<'a>(node: Node<'_>, source: &'a str) -> Option<&'a str> {
@@ -559,6 +564,11 @@ mod tests {
         let names: Vec<&str> = ids.iter().map(|i| i.name.as_str()).collect();
         assert!(names.contains(&"ViewModel"), "swift names: {names:?}");
         assert!(names.contains(&"loadData"), "swift names: {names:?}");
+    }
+
+    #[test]
+    fn detect_language_selects_rust_from_unannotated_code() {
+        assert_eq!(detect_language("fn render() { let value = 1; }"), Some("rust"));
     }
 
     #[test]

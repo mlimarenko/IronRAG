@@ -9,8 +9,9 @@ use crate::{
 };
 
 use super::super::{
-    McpToolDescriptor, McpToolResult, audit::record_canonical_mcp_audit, ok_tool_result,
-    parse_tool_args, tool_error_result,
+    McpToolDescriptor, McpToolResult,
+    audit::{self, record_mcp_audit},
+    ok_tool_result, parse_tool_args, tool_error_result,
 };
 use super::ToolCallContext;
 
@@ -135,18 +136,23 @@ async fn search_entities(context: ToolCallContext<'_>, arguments: &Value) -> Mcp
                 .await
                 {
                     Ok(entities) => {
-                        record_canonical_mcp_audit(
+                        record_mcp_audit(
                             context.state,
                             context.auth,
                             context.request_id,
-                            "agent.graph.search_entities",
-                            "succeeded",
-                            Some(format!("entity search returned {} hit(s)", entities.len())),
-                            Some(format!(
-                                "principal {} searched entities in library {}",
-                                context.auth.principal_id, library.id
-                            )),
-                            Vec::new(),
+                            audit::McpAuditEvent {
+                                action_kind: "agent.graph.search_entities",
+                                result_kind: "succeeded",
+                                redacted_message: Some(format!(
+                                    "entity search returned {} hit(s)",
+                                    entities.len()
+                                )),
+                                internal_message: Some(format!(
+                                    "principal {} searched entities in library {}",
+                                    context.auth.principal_id, library.id
+                                )),
+                                subjects: Vec::new(),
+                            },
                         )
                         .await;
                         ok_tool_result("Entity search completed.", json!({ "entities": entities }))
@@ -178,18 +184,20 @@ async fn get_graph_topology(context: ToolCallContext<'_>, arguments: &Value) -> 
                 .await
                 {
                     Ok(payload) => {
-                        record_canonical_mcp_audit(
+                        record_mcp_audit(
                             context.state,
                             context.auth,
                             context.request_id,
-                            "agent.graph.topology",
-                            "succeeded",
-                            Some("graph topology loaded".to_string()),
-                            Some(format!(
-                                "principal {} loaded graph topology for library {}",
-                                context.auth.principal_id, library.id
-                            )),
-                            Vec::new(),
+                            audit::McpAuditEvent {
+                                action_kind: "agent.graph.topology",
+                                result_kind: "succeeded",
+                                redacted_message: Some("graph topology loaded".to_string()),
+                                internal_message: Some(format!(
+                                    "principal {} loaded graph topology for library {}",
+                                    context.auth.principal_id, library.id
+                                )),
+                                subjects: Vec::new(),
+                            },
                         )
                         .await;
                         ok_tool_result("Graph topology loaded.", payload)
@@ -222,18 +230,23 @@ async fn list_relations(context: ToolCallContext<'_>, arguments: &Value) -> McpT
                 .await
                 {
                     Ok(payload) => {
-                        record_canonical_mcp_audit(
+                        record_mcp_audit(
                             context.state,
                             context.auth,
                             context.request_id,
-                            "agent.graph.list_relations",
-                            "succeeded",
-                            Some(format!("listed {} relation(s)", payload.len())),
-                            Some(format!(
-                                "principal {} listed relations for library {}",
-                                context.auth.principal_id, library.id
-                            )),
-                            Vec::new(),
+                            audit::McpAuditEvent {
+                                action_kind: "agent.graph.list_relations",
+                                result_kind: "succeeded",
+                                redacted_message: Some(format!(
+                                    "listed {} relation(s)",
+                                    payload.len()
+                                )),
+                                internal_message: Some(format!(
+                                    "principal {} listed relations for library {}",
+                                    context.auth.principal_id, library.id
+                                )),
+                                subjects: Vec::new(),
+                            },
                         )
                         .await;
                         ok_tool_result("Relations loaded.", json!({ "relations": payload }))

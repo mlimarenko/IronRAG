@@ -1,4 +1,8 @@
 pub mod ai_catalog_service;
+
+#[cfg(test)]
+mod bench_tests;
+
 pub mod catalog_service;
 pub mod content;
 pub mod graph;

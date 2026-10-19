@@ -1,5 +1,5 @@
 import { Iam } from './generated'
-import { ApiError, type ApiErrorBody, unwrap } from './runtime'
+import { unwrap } from './runtime'
 import type {
   BootstrapSetupRequest,
   BootstrapStatus,
@@ -12,51 +12,43 @@ export type BootstrapSetup = BootstrapSetupRequest
 export type { BootstrapProviderBindingBundle } from './generated'
 export type { BootstrapStatus, SessionResolveResponse, SessionResponse }
 
-function toApiErrorBody(error: unknown): ApiErrorBody {
-  if (error instanceof Error) {
-    return { error: error.message }
-  }
-  if (typeof error === 'object' && error !== null) {
-    return { ...error }
-  }
-  return { error: String(error) }
+export interface SessionSelection {
+  activeWorkspaceId?: string
+  activeLibraryId?: string
 }
 
 function unwrapRequired<T>(
   result: { data?: T | undefined; error?: unknown; response?: Response | undefined },
   operation: string,
 ): T {
-  if (result.error !== undefined && result.error !== null) {
-    const status = result.response?.status ?? 0
-    throw new ApiError(status, toApiErrorBody(result.error))
-  }
-  if (result.data === undefined) {
+  const data = unwrap(result)
+  if (data === undefined) {
     throw new Error(`${operation} returned no response body`)
   }
-  return result.data
+  return data
 }
 
 export const authApi = {
-  getBootstrapStatus: (): Promise<BootstrapStatus> =>
-    Iam.getBootstrapStatus().then((result) =>
-      unwrapRequired<BootstrapStatus>(result, 'getBootstrapStatus'),
+  getIamBootstrap: (): Promise<BootstrapStatus> =>
+    Iam.getIamBootstrap().then((result) =>
+      unwrapRequired<BootstrapStatus>(result, 'getIamBootstrap'),
     ),
-  resolveSession: (): Promise<SessionResolveResponse> =>
-    Iam.resolveIamSession().then((result) =>
+  resolveSession: (selection: SessionSelection = {}): Promise<SessionResolveResponse> =>
+    Iam.getIamContext({ query: selection }).then((result) =>
       unwrapRequired<SessionResolveResponse>(result, 'resolveSession'),
     ),
   login: (login: string, password: string): Promise<SessionResponse> => {
     const body: LoginSessionRequest = { login, password }
-    return Iam.loginIamSession({ body }).then((result) =>
+    return Iam.createIamSession({ body }).then((result) =>
       unwrapRequired<SessionResponse>(result, 'login'),
     )
   },
   logout: () =>
-    Iam.logoutIamSession().then((result) => {
+    Iam.deleteIamSession().then((result) => {
       unwrap(result)
     }),
   bootstrapSetup: (data: BootstrapSetupRequest): Promise<SessionResponse> =>
-    Iam.postBootstrapSetup({ body: data }).then((result) =>
+    Iam.createIamBootstrap({ body: data }).then((result) =>
       unwrapRequired<SessionResponse>(result, 'bootstrapSetup'),
     ),
 }

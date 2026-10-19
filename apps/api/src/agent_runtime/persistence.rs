@@ -7,7 +7,7 @@ use crate::{
 };
 
 /// # Errors
-/// Returns any `SQLx` error raised while inserting the canonical runtime execution row.
+/// Returns any `SQLx` error raised while inserting the active runtime execution row.
 pub async fn create_runtime_execution(
     pool: &PgPool,
     execution: &RuntimeExecution,
@@ -42,8 +42,10 @@ pub async fn persist_runtime_result(
     execution: &RuntimeExecution,
     trace: &RuntimeExecutionTraceView,
 ) -> Result<(), sqlx::Error> {
+    let mut transaction = pool.begin().await?;
+
     runtime_repository::update_runtime_execution(
-        pool,
+        &mut *transaction,
         execution.id,
         &runtime_repository::UpdateRuntimeExecution {
             lifecycle_state: execution.lifecycle_state.as_str(),
@@ -59,7 +61,7 @@ pub async fn persist_runtime_result(
 
     for stage in &trace.stages {
         runtime_repository::create_runtime_stage_record(
-            pool,
+            &mut *transaction,
             &runtime_repository::NewRuntimeStageRecord {
                 id: stage.id,
                 runtime_execution_id: stage.runtime_execution_id,
@@ -81,7 +83,7 @@ pub async fn persist_runtime_result(
 
     for action in &trace.actions {
         runtime_repository::create_runtime_action_record(
-            pool,
+            &mut *transaction,
             &runtime_repository::NewRuntimeActionRecord {
                 id: action.id,
                 runtime_execution_id: action.runtime_execution_id,
@@ -100,7 +102,7 @@ pub async fn persist_runtime_result(
 
     for decision in &trace.policy_decisions {
         runtime_repository::create_runtime_policy_decision(
-            pool,
+            &mut *transaction,
             &runtime_repository::NewRuntimePolicyDecision {
                 id: decision.id,
                 runtime_execution_id: decision.runtime_execution_id,
@@ -115,5 +117,6 @@ pub async fn persist_runtime_result(
         .await?;
     }
 
+    transaction.commit().await?;
     Ok(())
 }

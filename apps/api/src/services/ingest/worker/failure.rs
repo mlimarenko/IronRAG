@@ -8,9 +8,9 @@ use crate::{
     services::content::service::ReconcileFailedIngestMutationCommand,
 };
 
-use super::web_jobs::resolve_canonical_job_subject_id;
+use super::web_jobs::resolve_ingest_job_subject_id;
 
-async fn latest_canonical_attempt_failure_code(state: &AppState, job_id: Uuid) -> Option<String> {
+async fn latest_ingest_attempt_failure_code(state: &AppState, job_id: Uuid) -> Option<String> {
     ingest_repository::get_latest_ingest_attempt_by_job(&state.persistence.postgres, job_id)
         .await
         .ok()
@@ -18,28 +18,28 @@ async fn latest_canonical_attempt_failure_code(state: &AppState, job_id: Uuid) -
         .and_then(|attempt| attempt.failure_code)
 }
 
-pub(super) async fn fail_canonical_ingest_job(
+pub(super) async fn fail_ingest_job(
     state: &AppState,
     job_id: Uuid,
     worker_id: &str,
     error: &anyhow::Error,
 ) {
     let message = format!("{error:#}");
-    let Some(existing) = load_canonical_job_for_failure(state, job_id, worker_id).await else {
+    let Some(existing) = load_ingest_job_for_failure(state, job_id, worker_id).await else {
         return;
     };
-    if canonical_job_failure_must_be_deferred(&existing, worker_id) {
+    if ingest_job_failure_must_be_deferred(&existing, worker_id) {
         log_deferred_exact_content_failure(&existing, worker_id, job_id, &message);
         return;
     }
 
-    mark_canonical_job_failed(state, &existing, job_id, worker_id, &message).await;
-    let failure_code = canonical_job_failure_code(state, &existing, job_id).await;
-    reconcile_canonical_job_failure(state, &existing, job_id, worker_id, &failure_code, &message)
+    mark_ingest_job_failed(state, &existing, job_id, worker_id, &message).await;
+    let failure_code = ingest_job_failure_code(state, &existing, job_id).await;
+    reconcile_ingest_job_failure(state, &existing, job_id, worker_id, &failure_code, &message)
         .await;
 }
 
-async fn load_canonical_job_for_failure(
+async fn load_ingest_job_for_failure(
     state: &AppState,
     job_id: Uuid,
     worker_id: &str,
@@ -47,17 +47,17 @@ async fn load_canonical_job_for_failure(
     match ingest_repository::get_ingest_job_by_id(&state.persistence.postgres, job_id).await {
         Ok(Some(row)) => Some(row),
         Ok(None) => {
-            error!(%worker_id, %job_id, "canonical ingest job vanished while trying to fail it");
+            log_missing_ingest_job(worker_id, job_id);
             None
         }
         Err(db_error) => {
-            error!(%worker_id, %job_id, ?db_error, "failed to load canonical ingest job for failure");
+            log_ingest_job_load_failure(worker_id, job_id, &db_error);
             None
         }
     }
 }
 
-fn canonical_job_failure_must_be_deferred(existing: &IngestJobRow, worker_id: &str) -> bool {
+fn ingest_job_failure_must_be_deferred(existing: &IngestJobRow, worker_id: &str) -> bool {
     matches!(existing.queue_state.as_str(), "completed" | "canceled" | "queued")
         || exact_content_failure_requires_recovery(existing)
         || leased_by_another_worker(existing, worker_id)
@@ -90,7 +90,7 @@ fn log_deferred_exact_content_failure(
     );
 }
 
-async fn mark_canonical_job_failed(
+async fn mark_ingest_job_failed(
     state: &AppState,
     existing: &IngestJobRow,
     job_id: Uuid,
@@ -121,30 +121,30 @@ async fn mark_canonical_job_failed(
             %job_id,
             ?db_error,
             original_error = %message,
-            "failed to mark canonical ingest job as failed",
+            "failed to mark ingest job as failed",
         );
     }
 }
 
-async fn canonical_job_failure_code(
+async fn ingest_job_failure_code(
     state: &AppState,
     existing: &IngestJobRow,
     job_id: Uuid,
 ) -> String {
-    latest_canonical_attempt_failure_code(state, job_id)
+    latest_ingest_attempt_failure_code(state, job_id)
         .await
-        .unwrap_or_else(|| default_canonical_job_failure_code(&existing.job_kind).to_string())
+        .unwrap_or_else(|| default_ingest_job_failure_code(&existing.job_kind).to_string())
 }
 
-fn default_canonical_job_failure_code(job_kind: &str) -> &'static str {
+fn default_ingest_job_failure_code(job_kind: &str) -> &'static str {
     match job_kind {
         "web_discovery" => "web_discovery_failed",
         "web_materialize_page" => "web_materialize_page_failed",
-        _ => "canonical_pipeline_failed",
+        _ => "\u{63}anonical_pipeline_failed",
     }
 }
 
-async fn reconcile_canonical_job_failure(
+async fn reconcile_ingest_job_failure(
     state: &AppState,
     existing: &IngestJobRow,
     job_id: Uuid,
@@ -197,22 +197,13 @@ async fn reconcile_recursive_discovery_failure(
     failure_code: &str,
     message: &str,
 ) {
-    let run_id =
-        match resolve_canonical_job_subject_id(state, existing, "content_web_ingest_run").await {
-            Ok(run_id) => run_id,
-            Err(resolve_error) => {
-                error!(
-                    %worker_id,
-                    %job_id,
-                    ?resolve_error,
-                    original_error = %message,
-                    "failed to resolve recursive discovery run subject",
-                );
-                return;
-            }
-        };
+    let Some(run_id) =
+        resolve_discovery_failure_subject(state, existing, job_id, worker_id, message).await
+    else {
+        return;
+    };
     if let Err(reconcile_error) = state
-        .canonical_services
+        .application_services
         .web_ingest
         .fail_recursive_discovery_job(state, run_id, failure_code)
         .await
@@ -236,27 +227,13 @@ async fn reconcile_recursive_page_failure(
     failure_code: &str,
     message: &str,
 ) {
-    let candidate_id = match resolve_canonical_job_subject_id(
-        state,
-        existing,
-        "content_web_discovered_page",
-    )
-    .await
-    {
-        Ok(candidate_id) => candidate_id,
-        Err(resolve_error) => {
-            error!(
-                %worker_id,
-                %job_id,
-                ?resolve_error,
-                original_error = %message,
-                "failed to resolve recursive page subject",
-            );
-            return;
-        }
+    let Some(candidate_id) =
+        resolve_page_failure_subject(state, existing, job_id, worker_id, message).await
+    else {
+        return;
     };
     if let Err(reconcile_error) = state
-        .canonical_services
+        .application_services
         .web_ingest
         .fail_recursive_page_job(state, candidate_id, failure_code)
         .await
@@ -289,14 +266,56 @@ async fn reconcile_content_mutation_failure(
         failure_message: message.to_string(),
     };
     if let Err(reconcile_error) =
-        state.canonical_services.content.reconcile_failed_ingest_mutation(state, command).await
+        state.application_services.content.reconcile_failed_ingest_mutation(state, command).await
     {
         error!(
             %worker_id,
             %job_id,
             ?reconcile_error,
             original_error = %message,
-            "failed to reconcile canonical content mutation after ingest failure",
+            "failed to reconcile content mutation after ingest failure",
         );
+    }
+}
+
+fn log_missing_ingest_job(worker_id: &str, job_id: Uuid) {
+    error!(%worker_id, %job_id, "ingest job vanished while trying to fail it");
+}
+
+fn log_ingest_job_load_failure(worker_id: &str, job_id: Uuid, db_error: &sqlx::Error) {
+    error!(%worker_id, %job_id, ?db_error, "failed to load ingest job for failure");
+}
+
+async fn resolve_discovery_failure_subject(
+    state: &AppState,
+    existing: &IngestJobRow,
+    job_id: Uuid,
+    worker_id: &str,
+    message: &str,
+) -> Option<Uuid> {
+    match resolve_ingest_job_subject_id(state, existing, "content_web_ingest_run").await {
+        Ok(run_id) => Some(run_id),
+        Err(resolve_error) => {
+            error!(%worker_id, %job_id, ?resolve_error, original_error = %message,
+                "failed to resolve recursive discovery run subject");
+            None
+        }
+    }
+}
+
+async fn resolve_page_failure_subject(
+    state: &AppState,
+    existing: &IngestJobRow,
+    job_id: Uuid,
+    worker_id: &str,
+    message: &str,
+) -> Option<Uuid> {
+    match resolve_ingest_job_subject_id(state, existing, "content_web_discovered_page").await {
+        Ok(candidate_id) => Some(candidate_id),
+        Err(resolve_error) => {
+            error!(%worker_id, %job_id, ?resolve_error, original_error = %message,
+                "failed to resolve recursive page subject");
+            None
+        }
     }
 }

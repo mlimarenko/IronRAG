@@ -1,0 +1,52 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="1120" viewBox="0 0 1600 1120"><defs><linearGradient id="bg" x2="1" y2="1"><stop stop-color="#f8fafc"/><stop offset="1" stop-color="#eef2f7"/></linearGradient><marker id="arrow" markerWidth="8" markerHeight="8" refX="6" refY="4" orient="auto"><path d="M0 0L8 4L0 8" fill="none" stroke="#94a3b8" stroke-width="1.5"/></marker></defs><style>text{font-family:Inter,Arial,sans-serif;fill:#152235}.muted{fill:#64748b}.label{font-size:16px;font-weight:700;letter-spacing:2px}.title{font-size:23px;font-weight:700}.body{font-size:18px}.small{font-size:16px}.arrow{fill:none;stroke:#94a3b8;stroke-width:2;marker-end:url(#arrow)}</style><rect width="1600" height="1120" rx="28" fill="url(#bg)"/><svg x="56" y="36" width="46" height="60" viewBox="292 204 566 686" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="silverFill" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#F4F7FA"/>
+      <stop offset="18%" stop-color="#DCE4EB"/>
+      <stop offset="40%" stop-color="#A8B4C0"/>
+      <stop offset="65%" stop-color="#E6EDF3"/>
+      <stop offset="100%" stop-color="#7E8B97"/>
+    </linearGradient>
+    <linearGradient id="steelFill" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#8A97A5"/>
+      <stop offset="22%" stop-color="#5D6975"/>
+      <stop offset="48%" stop-color="#2F3943"/>
+      <stop offset="72%" stop-color="#66717D"/>
+      <stop offset="100%" stop-color="#1E2730"/>
+    </linearGradient>
+    <linearGradient id="copperFill" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#F1B287"/>
+      <stop offset="18%" stop-color="#D98A58"/>
+      <stop offset="45%" stop-color="#A95F36"/>
+      <stop offset="70%" stop-color="#E5A078"/>
+      <stop offset="100%" stop-color="#7A3F22"/>
+    </linearGradient>
+    <pattern id="brushed" width="8" height="8" patternUnits="userSpaceOnUse" patternTransform="rotate(135)">
+      <rect width="8" height="8" fill="transparent"/>
+      <rect x="0" y="0" width="1" height="8" fill="#FFFFFF" opacity="0.08"/>
+      <rect x="2" y="0" width="1" height="8" fill="#FFFFFF" opacity="0.04"/>
+      <rect x="5" y="0" width="1" height="8" fill="#000000" opacity="0.05"/>
+      <rect x="7" y="0" width="1" height="8" fill="#FFFFFF" opacity="0.03"/>
+    </pattern>
+    <mask id="cutoutMask" maskUnits="userSpaceOnUse" x="292" y="204" width="566" height="686">
+      <rect x="292" y="204" width="566" height="686" fill="#fff"/>
+      <rect x="336" y="414" width="96" height="314" rx="9" fill="#000"/>
+      <path
+        d="M560.116 418.836L659.800 418.836Q777.376 418.836 777.376 508.722L777.376 508.722Q777.376 564.102 731.794 590.514L731.794 590.514L814.438 723L715.606 723L659.374 612.240L647.020 612.240L647.020 723L560.116 723L560.116 418.836ZM660.226 481.032L660.226 481.032L647.020 481.032L647.020 550.470L658.522 550.470Q665.764 550.470 673.006 546.849Q680.248 543.228 685.147 534.921Q690.046 526.614 690.046 512.556L690.046 512.556Q690.046 497.646 683.230 489.339Q676.414 481.032 660.226 481.032Z"
+        fill="#000"
+        stroke="#000"
+        stroke-width="10"
+        stroke-linejoin="round"
+        stroke-linecap="round"/>
+    </mask>
+  </defs>
+  <g mask="url(#cutoutMask)">
+    <polygon points="292,342 468,204 468,760 292,890" fill="url(#silverFill)"/>
+    <polygon points="292,342 468,204 468,760 292,890" fill="url(#brushed)" opacity="0.55"/>
+    <polygon points="487,342 663,204 663,760 487,890" fill="url(#steelFill)"/>
+    <polygon points="487,342 663,204 663,760 487,890" fill="url(#brushed)" opacity="0.4"/>
+    <polygon points="682,342 858,204 858,760 682,890" fill="url(#copperFill)"/>
+    <polygon points="682,342 858,204 858,760 682,890" fill="url(#brushed)" opacity="0.3"/>
+  </g>
+</svg>
+<text x="119" y="68" class="label">IRONRAG</text><text x="56" y="142" class="title">From documents to grounded answers</text><text x="56" y="178" class="body" style="fill:#64748b">One knowledge pipeline for the web app, assistant and MCP agents.</text><text x="56" y="235" class="label" style="fill:#be5a20">01  INGEST</text><text x="260" y="235" class="body" style="fill:#64748b">Turn source material into searchable knowledge.</text><rect x="56" y="259" width="350" height="160" rx="18" fill="#fff" stroke="#dce3ed"/><rect x="76" y="279" width="34" height="34" rx="10" fill="#be5a20" stroke="#be5a20"/><text x="87" y="303" class="body" style="fill:#fff">1</text><text x="124" y="304" class="title">Add sources</text><text x="80" y="350" class="body" style="fill:#64748b">Files, code and web pages</text><text x="80" y="377" class="body" style="fill:#64748b">Upload or ingest through MCP</text><rect x="435" y="259" width="350" height="160" rx="18" fill="#fff" stroke="#dce3ed"/><rect x="455" y="279" width="34" height="34" rx="10" fill="#be5a20" stroke="#be5a20"/><text x="466" y="303" class="body" style="fill:#fff">2</text><text x="503" y="304" class="title">Recognize &amp; normalize</text><text x="459" y="350" class="body" style="fill:#64748b">Native text · Docling · vision</text><text x="459" y="377" class="body" style="fill:#64748b">Keep readable source content</text><rect x="814" y="259" width="350" height="160" rx="18" fill="#fff" stroke="#dce3ed"/><rect x="834" y="279" width="34" height="34" rx="10" fill="#be5a20" stroke="#be5a20"/><text x="845" y="303" class="body" style="fill:#fff">3</text><text x="882" y="304" class="title">Structure &amp; enrich</text><text x="838" y="350" class="body" style="fill:#64748b">Split into structured chunks</text><text x="838" y="377" class="body" style="fill:#64748b">Extract entities, links and facts</text><rect x="1193" y="259" width="350" height="160" rx="18" fill="#fff" stroke="#dce3ed"/><rect x="1213" y="279" width="34" height="34" rx="10" fill="#be5a20" stroke="#be5a20"/><text x="1224" y="303" class="body" style="fill:#fff">4</text><text x="1261" y="304" class="title">Index knowledge</text><text x="1217" y="350" class="body" style="fill:#64748b">Embed content for retrieval</text><text x="1217" y="377" class="body" style="fill:#64748b">Publish the indexed revision</text><path d="M410 339H428" class="arrow"/><path d="M789 339H807" class="arrow"/><path d="M1168 339H1186" class="arrow"/><path d="M1368 420V455H800V480" class="arrow"/><text x="56" y="475" class="label" style="fill:#23785a">02  KNOWLEDGE</text><rect x="56" y="498" width="1488" height="188" rx="18" fill="#f0f8f4" stroke="#cbded4"/><text x="84" y="539" class="title" style="fill:#216648">PostgreSQL + pgvector</text><text x="84" y="574" class="body" style="fill:#45675a">Documents &amp; revisions · chunks &amp; vectors</text><text x="84" y="604" class="body" style="fill:#45675a">Entities &amp; relationships · technical facts</text><path d="M706 524V660M1150 524V660" stroke="#cbded4"/><text x="738" y="539" class="title" style="fill:#216648">Source storage</text><text x="738" y="574" class="body" style="fill:#45675a">Original files</text><text x="738" y="604" class="body" style="fill:#45675a">Configured storage backend</text><text x="1182" y="539" class="title" style="fill:#216648">Redis + workers</text><text x="1182" y="574" class="body" style="fill:#45675a">Background ingestion</text><text x="1182" y="604" class="body" style="fill:#45675a">Job coordination</text><text x="84" y="655" class="small" style="fill:#64748b">A shared, revision-aware knowledge layer</text><path d="M610 687V750" class="arrow"/><text x="56" y="736" class="label" style="fill:#3459c2">03  QUERY</text><text x="850" y="736" class="body" style="fill:#64748b">Retrieve evidence, then answer with sources.</text><rect x="56" y="760" width="350" height="160" rx="18" fill="#fff" stroke="#dce3ed"/><rect x="76" y="780" width="34" height="34" rx="10" fill="#3459c2" stroke="#3459c2"/><text x="87" y="804" class="body" style="fill:#fff">1</text><text x="124" y="805" class="title">Ask a question</text><text x="80" y="851" class="body" style="fill:#64748b">Web app · assistant · MCP</text><text x="80" y="878" class="body" style="fill:#64748b">One shared service layer</text><rect x="435" y="760" width="350" height="160" rx="18" fill="#fff" stroke="#dce3ed"/><rect x="455" y="780" width="34" height="34" rx="10" fill="#3459c2" stroke="#3459c2"/><text x="466" y="804" class="body" style="fill:#fff">2</text><text x="503" y="805" class="title">Hybrid retrieval</text><text x="459" y="851" class="body" style="fill:#64748b">Vector + lexical search</text><text x="459" y="878" class="body" style="fill:#64748b">Graph context + technical facts</text><rect x="814" y="760" width="350" height="160" rx="18" fill="#fff" stroke="#dce3ed"/><rect x="834" y="780" width="34" height="34" rx="10" fill="#3459c2" stroke="#3459c2"/><text x="845" y="804" class="body" style="fill:#fff">3</text><text x="882" y="805" class="title">Ground the answer</text><text x="838" y="851" class="body" style="fill:#64748b">Generate from retrieved evidence</text><text x="838" y="878" class="body" style="fill:#64748b">Verify support and cite sources</text><rect x="1193" y="760" width="350" height="160" rx="18" fill="#fff" stroke="#dce3ed"/><rect x="1213" y="780" width="34" height="34" rx="10" fill="#3459c2" stroke="#3459c2"/><text x="1224" y="804" class="body" style="fill:#fff">4</text><text x="1261" y="805" class="title">Return evidence</text><text x="1217" y="851" class="body" style="fill:#64748b">A traceable answer</text><text x="1217" y="878" class="body" style="fill:#64748b">Citations and clear limitations</text><path d="M410 840H428" class="arrow"/><path d="M789 840H807" class="arrow"/><path d="M1168 840H1186" class="arrow"/><rect x="56" y="958" width="1488" height="108" rx="18" fill="#e9edf6" stroke="#d4dcea"/><text x="84" y="998" class="title" style="fill:#3459c2">AI provider bindings</text><text x="84" y="1032" class="body" style="fill:#64748b">Models selected by purpose</text><text x="492" y="998" class="body">Extract · embed · compile · answer · agent</text><text x="492" y="1032" class="body" style="fill:#64748b">Resolve configuration: library → workspace → instance</text><text x="1205" y="998" class="body">Provider agnostic</text><text x="1205" y="1032" class="body" style="fill:#64748b">Across AI stages</text></svg>

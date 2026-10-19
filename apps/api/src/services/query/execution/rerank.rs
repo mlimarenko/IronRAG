@@ -16,9 +16,10 @@ use crate::{
 };
 
 use super::semantic_rerank::{
-    SemanticCandidateOrder, SemanticRerankAttempt, SemanticRerankFailure, SemanticRerankPolicy,
-    execute_semantic_rerank, prepare_semantic_rerank_request, try_acquire_distributed_shadow_lease,
-    try_acquire_shadow_task_permit,
+    SemanticCandidateOrder, SemanticRerankAttempt, SemanticRerankDegradation,
+    SemanticRerankFailure, SemanticRerankPolicy, await_semantic_rerank_within_turn_wait,
+    execute_semantic_rerank, prepare_semantic_rerank_request, record_semantic_rerank_degradation,
+    try_acquire_distributed_shadow_lease, try_acquire_shadow_task_permit,
 };
 use super::types::{
     RetrievalBundle, RuntimeChunkScoreKind, RuntimeMatchedChunk, RuntimeMatchedEntity,
@@ -27,15 +28,28 @@ use super::types::{
 
 const RERANK_RUNTIME_EVIDENCE_TEXT_CHARS: usize = 2_400;
 
-pub(crate) async fn apply_configured_rerank(
-    state: &AppState,
-    library_id: uuid::Uuid,
-    semantic_rerank_context: SemanticRerankExecutionContext,
-    question: &str,
-    plan: &RuntimeQueryPlan,
-    bundle: &mut RetrievalBundle,
-    semantic_chunk_ranks: &mut HashMap<uuid::Uuid, usize>,
-) -> RerankMetadata {
+/// Inputs of one configured rerank pass: the query turn, the semantic rerank
+/// context that decides the strategy, and the bundle/ranks it rewrites in place.
+pub(crate) struct ApplyRerankRequest<'a> {
+    pub(crate) state: &'a AppState,
+    pub(crate) library_id: uuid::Uuid,
+    pub(crate) semantic_rerank_context: SemanticRerankExecutionContext,
+    pub(crate) question: &'a str,
+    pub(crate) plan: &'a RuntimeQueryPlan,
+    pub(crate) bundle: &'a mut RetrievalBundle,
+    pub(crate) semantic_chunk_ranks: &'a mut HashMap<uuid::Uuid, usize>,
+}
+
+pub(crate) async fn apply_configured_rerank(request: ApplyRerankRequest<'_>) -> RerankMetadata {
+    let ApplyRerankRequest {
+        state,
+        library_id,
+        semantic_rerank_context,
+        question,
+        plan,
+        bundle,
+        semantic_chunk_ranks,
+    } = request;
     let mode = state.retrieval_intelligence.semantic_rerank.mode;
     if mode == SemanticRerankMode::Off || !state.retrieval_intelligence.rerank_enabled {
         return apply_deterministic_rerank(state, question, plan, bundle);
@@ -91,20 +105,44 @@ pub(crate) async fn apply_configured_rerank(
             metadata
         }
         SemanticRerankMode::Active => {
-            match execute_semantic_rerank(
-                state,
-                library_id,
-                semantic_rerank_context,
-                prepared,
-                policy,
+            let query_execution_id = semantic_rerank_context.query_execution_id;
+            if !policy.provider_fits_turn_wait() {
+                record_semantic_rerank_degradation(
+                    SemanticRerankDegradation::ProviderBudgetExceedsTurnWait,
+                );
+                log_provider_budget_exceeds_turn_wait(
+                    &policy,
+                    library_id,
+                    query_execution_id,
+                    prepared_candidate_count,
+                );
+                return semantic_fallback_metadata(
+                    apply_deterministic_rerank(state, question, plan, bundle),
+                    mode,
+                    prepared_candidate_count,
+                    SemanticRerankOutcome::TimedOut,
+                );
+            }
+            let attempt = await_semantic_rerank_within_turn_wait(
+                policy.turn_wait,
+                // The provider stage is large and only optionally on the turn
+                // path; boxing keeps the enclosing query futures below the
+                // `large_futures` limit instead of inlining it three calls deep.
+                Box::pin(execute_semantic_rerank(
+                    state,
+                    library_id,
+                    semantic_rerank_context,
+                    prepared,
+                    policy,
+                )),
             )
-            .await
-            {
-                SemanticRerankAttempt::Applied {
+            .await;
+            match attempt {
+                Some(SemanticRerankAttempt::Applied {
                     order,
                     prepared_candidate_count,
                     reordered_count,
-                } => {
+                }) => {
                     semantic_chunk_ranks.extend(
                         order.provider_ranked_chunk_ids().iter().enumerate().filter_map(
                             |(rank, chunk_id)| {
@@ -127,19 +165,72 @@ pub(crate) async fn apply_configured_rerank(
                         }),
                     }
                 }
-                SemanticRerankAttempt::Failed { failure, prepared_candidate_count } => {
-                    let mut metadata = apply_deterministic_rerank(state, question, plan, bundle);
-                    metadata.semantic_rerank = Some(SemanticRerankMetadata {
+                Some(SemanticRerankAttempt::Failed { failure, prepared_candidate_count }) => {
+                    record_semantic_rerank_degradation(SemanticRerankDegradation::from_failure(
+                        failure,
+                    ));
+                    semantic_fallback_metadata(
+                        apply_deterministic_rerank(state, question, plan, bundle),
                         mode,
-                        strategy: SemanticRerankStrategy::LexicalHeuristicFallback,
-                        outcome: failure_metadata_outcome(failure),
                         prepared_candidate_count,
-                    });
-                    metadata
+                        failure_metadata_outcome(failure),
+                    )
+                }
+                None => {
+                    record_semantic_rerank_degradation(SemanticRerankDegradation::TurnWaitExceeded);
+                    log_turn_wait_exceeded(
+                        &policy,
+                        library_id,
+                        query_execution_id,
+                        prepared_candidate_count,
+                    );
+                    semantic_fallback_metadata(
+                        apply_deterministic_rerank(state, question, plan, bundle),
+                        mode,
+                        prepared_candidate_count,
+                        SemanticRerankOutcome::TimedOut,
+                    )
                 }
             }
         }
     }
+}
+
+/// Logs a provider budget that cannot fit inside the turn wait budget.
+fn log_provider_budget_exceeds_turn_wait(
+    policy: &SemanticRerankPolicy,
+    library_id: uuid::Uuid,
+    query_execution_id: uuid::Uuid,
+    prepared_candidate_count: usize,
+) {
+    tracing::warn!(
+        stage = "retrieval.semantic_rerank",
+        reason = "provider_budget_exceeds_turn_wait",
+        provider_budget_ms = policy.timeout.as_millis(),
+        turn_wait_ms = policy.turn_wait.as_millis(),
+        library_id = %library_id,
+        query_execution_id = %query_execution_id,
+        prepared_candidate_count,
+        "semantic rerank provider budget cannot fit the turn wait budget; deterministic fallback applied without a provider call"
+    );
+}
+
+/// Logs a semantic rerank that exceeded the turn wait budget.
+fn log_turn_wait_exceeded(
+    policy: &SemanticRerankPolicy,
+    library_id: uuid::Uuid,
+    query_execution_id: uuid::Uuid,
+    prepared_candidate_count: usize,
+) {
+    tracing::warn!(
+        stage = "retrieval.semantic_rerank",
+        reason = "turn_wait_exceeded",
+        turn_wait_ms = policy.turn_wait.as_millis(),
+        library_id = %library_id,
+        query_execution_id = %query_execution_id,
+        prepared_candidate_count,
+        "semantic rerank exceeded the turn wait budget; deterministic fallback applied"
+    );
 }
 
 fn apply_deterministic_rerank(
@@ -270,6 +361,25 @@ const fn failure_metadata_outcome(failure: SemanticRerankFailure) -> SemanticRer
         SemanticRerankFailure::ProviderFailure => SemanticRerankOutcome::ProviderFailure,
         SemanticRerankFailure::InvalidResponse => SemanticRerankOutcome::InvalidResponse,
     }
+}
+
+/// Attach the deterministic lexical rerank as the semantic stage's fallback
+/// outcome. Used for every `active` path that cannot apply a provider ranking
+/// inside the turn wait budget, so the metadata always names the strategy
+/// actually used.
+fn semantic_fallback_metadata(
+    mut metadata: RerankMetadata,
+    mode: SemanticRerankMode,
+    prepared_candidate_count: usize,
+    outcome: SemanticRerankOutcome,
+) -> RerankMetadata {
+    metadata.semantic_rerank = Some(SemanticRerankMetadata {
+        mode,
+        strategy: SemanticRerankStrategy::LexicalHeuristicFallback,
+        outcome,
+        prepared_candidate_count,
+    });
+    metadata
 }
 
 pub(crate) fn apply_hybrid_rerank(
@@ -494,6 +604,15 @@ mod tests {
             source_text: "Exact runtime evidence: AlphaSwitch escalates through mailbox Z-19."
                 .to_string(),
         }
+    }
+
+    #[test]
+    fn a_missing_rerank_binding_degrades_to_the_lexical_fallback_outcome() {
+        assert_eq!(
+            failure_metadata_outcome(SemanticRerankFailure::MissingBinding),
+            SemanticRerankOutcome::MissingBinding,
+            "an absent query_rerank binding must degrade the stage, never fail the turn",
+        );
     }
 
     #[test]

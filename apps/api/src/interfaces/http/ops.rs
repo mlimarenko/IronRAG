@@ -12,11 +12,11 @@ use crate::{
         ingest,
         knowledge::{KnowledgeLibraryGeneration, KnowledgeLibrarySummary},
         ops::{
-            OpsAsyncOperation, OpsAsyncOperationProgress, OpsAsyncOperationStatus, OpsLibraryState,
-            OpsLibraryWarning,
+            ASYNC_OP_STATUS_FAILED, ASYNC_OP_STATUS_READY, OpsAsyncOperation,
+            OpsAsyncOperationProgress, OpsAsyncOperationStatus, OpsLibraryState, OpsLibraryWarning,
         },
     },
-    infra::repositories::ingest_repository,
+    infra::repositories::{ingest_repository, ops_repository},
     interfaces::http::{
         auth::AuthContext,
         authorization::{
@@ -33,6 +33,7 @@ use crate::{
         ingestion::{IngestQueueQuery, IngestQueueResponse, list_ingest_queue},
         router_support::ApiError,
     },
+    shared::cancellation::{DetachedFinalizerGuard, spawn_detached_awaited},
 };
 use ironrag_contracts::{
     diagnostics::{MessageLevel, OperatorWarning},
@@ -159,7 +160,7 @@ pub fn router() -> Router<AppState> {
         .route("/ops/ingest-queue/jobs/{job_id}/cancel", post(cancel_ingest_queue_job))
 }
 
-/// Canonical async-operation polling payload. Exposes the raw parent row
+/// Shared async-operation polling payload. Exposes the raw parent row
 /// plus aggregated child-operation counts, so any batch endpoint (batch
 /// rerun, batch delete, future batch annotate, …) can be polled via the
 /// same response shape. `progress` is populated whenever at least one child
@@ -200,9 +201,9 @@ pub async fn get_async_operation(
     let _ = load_async_operation_and_authorize(&auth, &state, operation_id, POLICY_OPERATION_READ)
         .await?;
     let mut operation =
-        state.canonical_services.ops.get_async_operation(&state, operation_id).await?;
+        state.application_services.ops.get_async_operation(&state, operation_id).await?;
     let progress =
-        state.canonical_services.ops.get_async_operation_progress(&state, operation_id).await?;
+        state.application_services.ops.get_async_operation_progress(&state, operation_id).await?;
 
     // For parent batch ops (children present), the effective status is
     // usually derived from child progress. Batch delete is the exception:
@@ -259,7 +260,7 @@ pub async fn get_library_state(
 ) -> Result<Json<OpsLibraryStateResponse>, ApiError> {
     let _ = load_library_and_authorize(&auth, &state, library_id, POLICY_USAGE_READ).await?;
     let snapshot_with_warnings = state
-        .canonical_services
+        .application_services
         .ops
         .get_library_state_snapshot_with_warnings(&state, library_id)
         .await?;
@@ -297,7 +298,7 @@ pub async fn move_ingest_queue_job(
     Path(job_id): Path<Uuid>,
     Json(payload): Json<MoveIngestQueueJobRequest>,
 ) -> Result<Json<IngestQueueResponse>, ApiError> {
-    let job = state.canonical_services.ingest.get_job(&state, job_id).await?;
+    let job = state.application_services.ingest.get_job(&state, job_id).await?;
     authorize_library_permission(&auth, job.workspace_id, job.library_id, POLICY_LIBRARY_WRITE)?;
     let moved = ingest_repository::move_queued_ingest_job(
         &state.persistence.postgres,
@@ -339,9 +340,9 @@ pub async fn retry_ingest_queue_job(
     State(state): State<AppState>,
     Path(job_id): Path<Uuid>,
 ) -> Result<Json<IngestQueueResponse>, ApiError> {
-    let job = state.canonical_services.ingest.get_job(&state, job_id).await?;
+    let job = state.application_services.ingest.get_job(&state, job_id).await?;
     authorize_library_permission(&auth, job.workspace_id, job.library_id, POLICY_LIBRARY_WRITE)?;
-    state.canonical_services.ingest.retry_job(&state, job_id, None).await?;
+    state.application_services.ingest.retry_job(&state, job_id, None).await?;
     list_ingest_queue(
         auth,
         State(state),
@@ -368,19 +369,201 @@ pub async fn bulk_ingest_queue_action(
     Json(payload): Json<BulkIngestQueueActionRequest>,
 ) -> Result<Json<BulkIngestQueueActionResponse>, ApiError> {
     auth.require_any_scope(POLICY_USAGE_READ)?;
-    let mut results = Vec::with_capacity(payload.job_ids.len());
-    for job_id in payload.job_ids {
-        let result = apply_bulk_queue_action(&auth, &state, payload.action, job_id).await;
-        results.push(result);
-    }
-    let queue = list_ingest_queue(
-        auth,
-        State(state),
-        Query(IngestQueueQuery { workspace_id: None, library_id: None }),
+    // IRG-203 SITE-4: the sequential fan-out mutates one job at a time. Run in
+    // the caller future, an abort mid-loop applied some jobs and silently
+    // dropped the rest. Detach the whole loop + refreshed list; awaiting the
+    // handle keeps the reply shape, while an abort detaches so every selected
+    // job is still applied.
+    //
+    // The detached task owns a parent `ops_async_operation`: it creates it
+    // before the fan-out and finalizes it (`ready`/`failed`) when the fan-out
+    // returns, so an abort cannot leave untracked in-flight work. The row is
+    // created inside the detached task, not by the caller — a row created by
+    // the caller and then stranded by a caller abort would be the very class
+    // bug this fixes. Its scope comes from the first selected job that loads;
+    // a selection with no loadable job mutates nothing, so it creates no
+    // parent. The response shape is deliberately unchanged: the operation is a
+    // tracking parent, not a new contract.
+    let span = tracing::Span::current();
+    let auth_for_task = auth.clone();
+    let state_for_task = state.clone();
+    let action = payload.action;
+    let job_ids = payload.job_ids;
+
+    let response = spawn_detached_awaited(
+        Box::pin(async move {
+            let parent_id = match first_loadable_job_scope(&state_for_task, &job_ids).await {
+                Some((workspace_id, library_id)) => {
+                    match state_for_task
+                        .application_services
+                        .ops
+                        .create_library_fan_out_operation(
+                            &state_for_task,
+                            workspace_id,
+                            library_id,
+                            Some(auth_for_task.principal_id),
+                            "bulk_ingest_queue_action",
+                        )
+                        .await
+                    {
+                        Ok(operation) => Some(operation.id),
+                        Err(error) => {
+                            tracing::error!(
+                                error = %error,
+                                "failed to create bulk ingest queue action parent operation"
+                            );
+                            None
+                        }
+                    }
+                }
+                None => None,
+            };
+            let mut finalizer = DetachedFinalizerGuard::new({
+                let state = state_for_task.clone();
+                move || {
+                    let Some(parent_id) = parent_id else {
+                        return;
+                    };
+                    let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+                        tracing::warn!(
+                            %parent_id,
+                            "bulk ingest queue action aborted with no runtime to finalize its parent operation"
+                        );
+                        return;
+                    };
+                    runtime.spawn(async move {
+                        if let Err(error) = state
+                            .application_services
+                            .ops
+                            .settle_fan_out_parent_from_children(
+                                &state,
+                                parent_id,
+                                crate::services::ops::service::FanOutParentSettle {
+                                    fallback_failure_code: Some("bulk_action_aborted"),
+                                    childless_status: None,
+                                    detail: None,
+                                    guard: ops_repository::FanOutSettleGuard::InFlight,
+                                },
+                            )
+                            .await
+                        {
+                            tracing::error!(
+                                %parent_id,
+                                error = %error,
+                                "abort guard failed to fail bulk ingest queue action parent operation"
+                            );
+                        }
+                    });
+                }
+            });
+
+            let response = async {
+                let mut results = Vec::with_capacity(job_ids.len());
+                for job_id in job_ids {
+                    let result =
+                        apply_bulk_queue_action(&auth_for_task, &state_for_task, action, job_id)
+                            .await;
+                    results.push(result);
+                    // One-shot probe: the first item consumes it, so this pauses
+                    // after the first application only. Compiled out of production.
+                    #[cfg(feature = "test-support")]
+                    {
+                        crate::shared::cancellation::one_shot_pause_probe::pause().await;
+                    }
+                }
+                let queue = list_ingest_queue(
+                    auth_for_task,
+                    State(state_for_task.clone()),
+                    Query(IngestQueueQuery { workspace_id: None, library_id: None }),
+                )
+                .await?
+                .0;
+                Ok::<_, ApiError>(BulkIngestQueueActionResponse { queue, results })
+            }
+            .await;
+
+            if let Some(parent_id) = parent_id {
+                let failed_items = response.as_ref().map_or(0, |body| {
+                    body.results
+                        .iter()
+                        .filter(|item| matches!(item.status, IngestQueueBulkResultStatus::Failed))
+                        .count()
+                });
+                let (childless_status, fallback_failure_code) =
+                    bulk_parent_terminal(response.is_err(), failed_items);
+                match state_for_task
+                    .application_services
+                    .ops
+                    .settle_fan_out_parent_from_children(
+                        &state_for_task,
+                        parent_id,
+                        crate::services::ops::service::FanOutParentSettle {
+                            fallback_failure_code: fallback_failure_code.as_deref(),
+                            childless_status: Some(childless_status),
+                            detail: None,
+                            guard: ops_repository::FanOutSettleGuard::InFlight,
+                        },
+                    )
+                    .await
+                {
+                    Ok(_) => finalizer.disarm(),
+                    Err(error) => tracing::error!(
+                        %parent_id,
+                        error = %error,
+                        "failed to settle bulk ingest queue action parent operation; the abort guard will mark it failed"
+                    ),
+                }
+            }
+
+            response
+        }),
+        span,
     )
-    .await?
-    .0;
-    Ok(Json(BulkIngestQueueActionResponse { queue, results }))
+    .await
+    .map_err(|join_error| {
+        tracing::error!(
+            error = %join_error,
+            "detached bulk ingest queue action task did not join"
+        );
+        ApiError::internal_with_log(
+            join_error,
+            "detached bulk ingest queue action task join failed",
+        )
+    })??;
+    Ok(Json(response))
+}
+
+/// Resolves the workspace/library a bulk queue action's parent operation is
+/// scoped to from the first selected job that loads.
+///
+/// Returns `None` only when no selected job can be loaded at all: the fan-out
+/// then mutates nothing, so there is no in-flight work to track and no parent
+/// row to create.
+async fn first_loadable_job_scope(state: &AppState, job_ids: &[Uuid]) -> Option<(Uuid, Uuid)> {
+    for job_id in job_ids {
+        if let Ok(job) = state.application_services.ingest.get_job(state, *job_id).await {
+            return Some((job.workspace_id, job.library_id));
+        }
+    }
+    None
+}
+
+/// Terminal `(status, failure_code)` for a bulk fan-out's tracking parent.
+///
+/// The parent must never claim `ready` when the fan-out itself errored or any
+/// selected job failed: per-item outcomes live in the response body, but the
+/// operation row is what direct SQL and metrics readers see.
+fn bulk_parent_terminal(
+    internal_error: bool,
+    failed_items: usize,
+) -> (&'static str, Option<String>) {
+    if internal_error {
+        (ASYNC_OP_STATUS_FAILED, Some("bulk_action_failed".to_string()))
+    } else if failed_items > 0 {
+        (ASYNC_OP_STATUS_FAILED, Some("bulk_action_partial_failure".to_string()))
+    } else {
+        (ASYNC_OP_STATUS_READY, None)
+    }
 }
 
 async fn apply_bulk_queue_action(
@@ -389,7 +572,7 @@ async fn apply_bulk_queue_action(
     action: IngestQueueBulkAction,
     job_id: Uuid,
 ) -> IngestQueueBulkResultItem {
-    let job = match state.canonical_services.ingest.get_job(state, job_id).await {
+    let job = match state.application_services.ingest.get_job(state, job_id).await {
         Ok(job) => job,
         Err(ApiError::NotFound(_)) => {
             return bulk_result(
@@ -422,13 +605,13 @@ async fn apply_bulk_queue_action(
 
     let action_result = match action {
         IngestQueueBulkAction::RetryRequeue => {
-            state.canonical_services.ingest.retry_job(state, job_id, None).await.map(|_| ())
+            state.application_services.ingest.retry_job(state, job_id, None).await.map(|_| ())
         }
         IngestQueueBulkAction::Pause => {
-            state.canonical_services.ingest.pause_job(state, job_id).await
+            state.application_services.ingest.pause_job(state, job_id).await
         }
         IngestQueueBulkAction::Resume => {
-            state.canonical_services.ingest.resume_job(state, job_id).await
+            state.application_services.ingest.resume_job(state, job_id).await
         }
         IngestQueueBulkAction::Cancel => {
             ingest_repository::cancel_ingest_job(&state.persistence.postgres, job_id)
@@ -510,9 +693,9 @@ pub async fn pause_ingest_queue_job(
     State(state): State<AppState>,
     Path(job_id): Path<Uuid>,
 ) -> Result<Json<IngestQueueResponse>, ApiError> {
-    let job = state.canonical_services.ingest.get_job(&state, job_id).await?;
+    let job = state.application_services.ingest.get_job(&state, job_id).await?;
     authorize_library_permission(&auth, job.workspace_id, job.library_id, POLICY_LIBRARY_WRITE)?;
-    state.canonical_services.ingest.pause_job(&state, job_id).await?;
+    state.application_services.ingest.pause_job(&state, job_id).await?;
     list_ingest_queue(
         auth,
         State(state),
@@ -541,9 +724,9 @@ pub async fn resume_ingest_queue_job(
     State(state): State<AppState>,
     Path(job_id): Path<Uuid>,
 ) -> Result<Json<IngestQueueResponse>, ApiError> {
-    let job = state.canonical_services.ingest.get_job(&state, job_id).await?;
+    let job = state.application_services.ingest.get_job(&state, job_id).await?;
     authorize_library_permission(&auth, job.workspace_id, job.library_id, POLICY_LIBRARY_WRITE)?;
-    state.canonical_services.ingest.resume_job(&state, job_id).await?;
+    state.application_services.ingest.resume_job(&state, job_id).await?;
     list_ingest_queue(
         auth,
         State(state),
@@ -572,7 +755,7 @@ pub async fn cancel_ingest_queue_job(
     State(state): State<AppState>,
     Path(job_id): Path<Uuid>,
 ) -> Result<Json<IngestQueueResponse>, ApiError> {
-    let job = state.canonical_services.ingest.get_job(&state, job_id).await?;
+    let job = state.application_services.ingest.get_job(&state, job_id).await?;
     authorize_library_permission(&auth, job.workspace_id, job.library_id, POLICY_LIBRARY_WRITE)?;
     let canceled = ingest_repository::cancel_ingest_job(&state.persistence.postgres, job_id)
         .await
@@ -597,7 +780,7 @@ pub async fn cancel_ingest_queue_job(
     operation_id = "getLibraryDashboard",
     params(("libraryId" = uuid::Uuid, Path, description = "Library identifier")),
     responses(
-        (status = 200, description = "Library dashboard surface (canonical document metrics, attention items, recent documents, graph, web run summaries)", body = DashboardSurface),
+        (status = 200, description = "Library dashboard surface (aggregated document metrics, attention items, recent documents, graph, web run summaries)", body = DashboardSurface),
         (status = 401, description = "Caller is not authenticated"),
         (status = 403, description = "Caller is not authorized for the library"),
         (status = 404, description = "Library not found"),
@@ -618,7 +801,7 @@ pub async fn get_library_dashboard(
     let span = tracing::Span::current();
     let _ = load_library_and_authorize(&auth, &state, library_id, POLICY_USAGE_READ).await?;
 
-    // Canonical bounded fetch — no more `list_documents` enumeration.
+    // Bounded fetch — no more `list_documents` enumeration.
     // Top 6 recent entries for the "Recent documents" strip + the
     // aggregate status counts for the dashboard tiles. The old path
     // spent ~7.5 s on a 5k-doc library because it enumerated every
@@ -630,31 +813,49 @@ pub async fn get_library_dashboard(
         cursor: None,
         limit: 6,
         search: None,
-        sort: crate::infra::repositories::content_repository::DocumentListSortColumn::CreatedAt,
+        normalized_search: None,
+        search_statuses: Vec::new(),
+        filters: Default::default(),
+        search_ranges: Default::default(),
+        snapshot_at: chrono::Utc::now(),
+        sort: crate::infra::repositories::content_document_list_repository::DocumentListSortColumn::CreatedAt,
         sort_desc: true,
         status_filter: Vec::new(),
-        id_filter: Vec::new(),
+        id_filter: None,
+        include_status_counts: false,
     };
-    let (
-        recent_page,
-        document_metrics,
-        recent_web_runs,
-        knowledge_summary,
-        ops_snapshot_with_warnings,
-    ) = tokio::try_join!(
-        state.canonical_services.content.list_documents_page(&state, recent_page_command),
+    let (recent_page, recent_web_runs, dashboard_snapshot, mut knowledge_generations) = tokio::try_join!(
+        state.application_services.content.list_documents_page(&state, recent_page_command),
+        state.application_services.web_ingest.list_runs(&state, library_id, 6),
         async {
-            crate::infra::repositories::content_repository::aggregate_library_document_metrics(
+            crate::infra::repositories::content_document_list_repository::load_library_dashboard_snapshot(
                 &state.persistence.postgres,
                 library_id,
             )
             .await
             .map_err(|e| ApiError::internal_with_log(e, "internal"))
         },
-        state.canonical_services.web_ingest.list_runs(&state, library_id, 6),
-        state.canonical_services.knowledge.get_library_summary(&state, library_id),
-        state.canonical_services.ops.get_library_state_snapshot_with_warnings(&state, library_id),
+        state.application_services.knowledge.list_library_generations(&state, library_id),
     )?;
+    knowledge_generations.sort_by(|left, right| {
+        right.created_at.cmp(&left.created_at).then_with(|| right.id.cmp(&left.id))
+    });
+    let knowledge_summary =
+        crate::services::knowledge::service::build_library_summary_from_dashboard_snapshot(
+            library_id,
+            &dashboard_snapshot,
+            knowledge_generations.first().cloned(),
+        );
+    let ops_snapshot_with_warnings = state
+        .application_services
+        .ops
+        .get_library_state_snapshot_with_warnings_from_dashboard_snapshot(
+            &state,
+            library_id,
+            &dashboard_snapshot,
+            knowledge_generations,
+        )
+        .await?;
     let ops_warnings = ops_snapshot_with_warnings.warnings;
     let ops_snapshot = ops_snapshot_with_warnings.snapshot;
 
@@ -671,7 +872,7 @@ pub async fn get_library_dashboard(
     span.record("elapsed_ms", started_at.elapsed().as_millis() as u64);
 
     Ok(Json(DashboardSurface {
-        document_metrics,
+        document_metrics: dashboard_snapshot.metrics,
         recent_documents,
         recent_web_runs: recent_web_runs.into_iter().map(map_web_run_summary).collect(),
         graph,
@@ -692,8 +893,8 @@ fn map_list_entry_to_dashboard_summary(
         workspace_id: Some(entry.workspace_id),
         library_id: Some(entry.library_id),
         file_name: entry.file_name,
-        file_type: entry.file_type.unwrap_or_else(|| "unknown".to_string()),
-        file_size: entry.file_size.unwrap_or(0),
+        file_type: entry.file_type,
+        file_size: entry.file_size,
         uploaded_at: entry.uploaded_at,
         status: entry.status,
         readiness: entry.readiness,
@@ -722,7 +923,7 @@ fn build_attention_items_bounded(
             code: "failed_documents".to_string(),
             title: "Failed documents need review".to_string(),
             detail: format!(
-                "{} documents are currently failed in the active library.",
+                "Open the {} failed documents, review each error, and retry processing or replace the source file.",
                 ops_state.failed_document_count
             ),
             route_path: "/documents?status=failed".to_string(),
@@ -735,9 +936,9 @@ fn build_attention_items_bounded(
             code: "graph_coverage_gap".to_string(),
             title: "Graph coverage remains partial".to_string(),
             detail: format!(
-                "{graph_coverage_gap_count} readable documents still do not contribute to the graph."
+                "{graph_coverage_gap_count} ready documents are missing graph coverage. Open them and reprocess the affected files."
             ),
-            route_path: "/graph".to_string(),
+            route_path: "/documents?status=graphgap".to_string(),
             level: MessageLevel::Warning,
         });
     }
@@ -746,11 +947,8 @@ fn build_attention_items_bounded(
         attention.push(DashboardAttentionItem {
             code: "retryable_document".to_string(),
             title: "A document can be retried".to_string(),
-            detail: format!(
-                "{} reported a retryable failure or stalled ingest step.",
-                document.file_name
-            ),
-            route_path: "/documents?status=failed".to_string(),
+            detail: "Open this document and retry its processing.".to_string(),
+            route_path: format!("/documents?documentId={}", document.id),
             level: MessageLevel::Warning,
         });
     }
@@ -807,29 +1005,46 @@ fn map_ops_warning(warning: &OpsLibraryWarning) -> OpsLibraryWarningResponse {
 
 fn map_attention_item(warning: &OpsLibraryWarning) -> DashboardAttentionItem {
     let (title, detail, route_path) = match warning.warning_kind.as_str() {
-        "stale_vectors" => (
-            "Vector rebuild is still running",
-            "Some readable documents have not converged onto current vector state yet.",
-            "/documents?status=processing",
+        // The affected revisions are `ready` by derived status — that is the
+        // whole complaint: they are offered as searchable and hold no chunk
+        // vectors. So the destination cannot be a status: `vectorgap` is the
+        // documents-screen bucket that resolves to exactly this set, the same
+        // list the count above is taken from. On a 2200-document library the
+        // ready list held the answer and buried it.
+        "vector_index_gap" => (
+            "Ready documents are missing their vectors",
+            "Open the documents whose vectors are missing and reprocess them.",
+            "/documents?status=vectorgap",
         ),
-        "stale_relations" => (
-            "Graph rebuild is still running",
-            "The graph remains behind the readable document set for this library.",
-            "/graph",
+        // The same permanent hole in the graph plane: ready documents the active
+        // projection does not cover. `graphgap` resolves to exactly that set —
+        // the same documents the `graphSparse` counter counts — matching the
+        // dashboard attention item this warning is deduped against by code. The
+        // ready list was a superset, so it buried the answer among documents
+        // that were already covered.
+        "graph_coverage_gap" => (
+            "Graph coverage remains partial",
+            "Open the documents missing graph coverage and reprocess them.",
+            "/documents?status=graphgap",
+        ),
+        "queue_not_progressing" => (
+            "Ingest queue is not progressing",
+            "Open the ingest queue and resume, retry, or cancel the jobs that are blocking progress.",
+            "/admin/queue",
         ),
         "failed_rebuilds" => (
             "Recent rebuild failed",
-            "At least one recent ingestion rebuild failed and needs operator review.",
-            "/graph",
+            "Open failed documents, review the processing error, and retry or replace the affected file.",
+            "/documents?status=failed",
         ),
         "bundle_assembly_failures" => (
             "Context bundle assembly failed",
-            "Recent bundle assembly failed and downstream graph context may be incomplete.",
-            "/graph",
+            "Open the Assistant and retry the failed question. If it fails again, review the library AI configuration.",
+            "/assistant",
         ),
         _ => (
             "Operator warning",
-            "The backend reported a library warning that needs attention.",
+            "Open the document list and review the library for failed or stalled processing.",
             "/documents",
         ),
     };
@@ -1074,3 +1289,21 @@ fn saturating_i32_from_i64(value: i64) -> i32 {
 #[cfg(test)]
 #[path = "ops_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+mod cancellation_tests {
+    use super::*;
+
+    #[test]
+    fn bulk_parent_terminal_fails_on_internal_error_or_any_failed_item() {
+        assert_eq!(bulk_parent_terminal(false, 0), (ASYNC_OP_STATUS_READY, None));
+        assert_eq!(
+            bulk_parent_terminal(false, 2),
+            (ASYNC_OP_STATUS_FAILED, Some("bulk_action_partial_failure".to_string()))
+        );
+        assert_eq!(
+            bulk_parent_terminal(true, 0),
+            (ASYNC_OP_STATUS_FAILED, Some("bulk_action_failed".to_string()))
+        );
+    }
+}

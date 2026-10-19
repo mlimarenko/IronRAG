@@ -29,7 +29,7 @@ type Role = User['role'] // 'admin' | 'operator' | 'viewer'
  *   - `users.*` — user management (admin → Users, a new surface)
  *   - `devmode.*` — who may flip developer mode
  */
-export type Capability =
+type Capability =
   // viewer+ (everyone authenticated)
   | 'documents.view'
   | 'graph.view'
@@ -81,7 +81,7 @@ const ADMIN_CAPABILITIES: readonly Capability[] = [
 ]
 
 /**
- * The canonical role → capability sets. Adding a capability is a single-edit
+ * The derived role → capability sets. Adding a capability is a single-edit
  * change here; never branch on the raw role string elsewhere in the app.
  */
 const ROLE_CAPABILITIES: Record<Role, ReadonlySet<Capability>> = {

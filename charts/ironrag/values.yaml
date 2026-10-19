@@ -46,7 +46,7 @@ resourcePresets:
       cpu: "2"
       memory: 4096Mi
       ephemeral-storage: 4Gi
-  # Ingest worker. Mirrors x-ironrag-resources-worker. 3 GiB is the canonical
+  # Ingest worker. Mirrors x-ironrag-resources-worker. 3 GiB is the configured
   # docling containment: auto_docling_max_concurrency_for_limits resolves a
   # 3 GiB limit to docling concurrency = 1, so a docling/python spike cgroup-
   # OOMs the worker pod (job retries) instead of starving co-scheduled pods.
@@ -89,18 +89,64 @@ runtimeSecret:
   # roll API, worker, and startup pods.
   restartNonce: ""
 
+# Credentials for bundled stateful dependencies are deliberately separate from
+# the application runtime Secret. Production operators can provide this Secret
+# out of band without rendering the PostgreSQL password into Helm values.
+bundledDependencySecret:
+  existingSecret: ""
+  # Required with existingSecret so a rotation deterministically restarts the
+  # bundled PostgreSQL/S4 pod that consumes it.
+  restartNonce: ""
+
 app:
   environment: production
-  # Canonical browser origin admitted by UI CORS and MCP Streamable HTTP.
+  # Allowed browser origin admitted by UI CORS and MCP Streamable HTTP.
   frontendOrigin: https://ironrag.example.com
-  # Optional canonical public API origin advertised by OpenAPI and admitted by MCP.
+  # Optional configured public API origin advertised by OpenAPI and admitted by MCP.
   openapiPublicOrigin: ""
+  # Optional OIDC SSO. Set these four non-secret settings together with
+  # IRONRAG_OIDC_CLIENT_SECRET in the operator-managed runtime Secret. The
+  # optional IRONRAG_OIDC_BOOTSTRAP_ADMIN_SUBJECT also belongs only there.
+  # The chart-managed runtime Secret has no field for either, so enabling
+  # OIDC requires runtimeSecret.existingSecret.
+  oidc:
+    issuerUrl: ""
+    clientId: ""
+    redirectUrl: ""
+    requiredGroup: ""
   logFilter: info
   # Deployment-wide app connection budget. Runtime divides it across the HPA
   # maxima when autoscaling is enabled, otherwise across worker.replicaCount
   # plus api.replicaCount and one API rollout surge slot, before opening SQLx
   # pools.
   databaseMaxConnections: 20
+  queryTurn:
+    maxConcurrent: 32
+    admissionQueue: 80
+    admissionTimeoutMs: 15000
+  # Owned proxies that append to X-Forwarded-For before a login reaches the
+  # API: the bundled web nginx is one; an ingress gateway ahead of it is a
+  # second. Over-estimating lets a caller forge its own login source bucket.
+  loginRateLimit:
+    trustedProxyHops: 1
+  ingestion:
+    maxParallelJobsGlobal: 4
+    maxParallelJobsPerWorkspace: 2
+    maxParallelJobsPerLibrary: 1
+    doclingPageBatchSize: 10
+    doclingPageStreamWindowPages: 40
+    doclingMaxConcurrency: auto
+    # Bounded wait, in seconds, for one Docling extraction slot before the
+    # waiter refuses. The default covers a full queue of maximum-length
+    # extractions (waiters per process × extractor timeout).
+    doclingAcquireTimeoutSecs: 1800
+    heavyPipelineParallelism: auto
+    # Bounded wait, in seconds, for one heavy-revision pipeline slot. The
+    # default matches Docling because one pipeline slot is backed by one
+    # Docling queue.
+    heavyAcquireTimeoutSecs: 1800
+    embeddingParallelism: 8
+    graphExtractParallelismPerDocument: 16
   knowledgePlaneBackend: postgres
   queryAnswerSourceLinksEnabled: false
   providerConcurrency:
@@ -109,6 +155,13 @@ app:
     acquireTimeoutMs: 30000
     registryMaxEntries: 64
     registryIdleTtlSeconds: 900
+  providerRateLimit:
+    requestsPerSecond: 8
+    burst: 16
+  providerRetry:
+    maxAttempts: 3
+    initialBackoffMs: 200
+    maxBackoffMs: 5000
   pgHnsw:
     efSearch: 400
     maxScanTuples: 50000
@@ -119,46 +172,51 @@ app:
     candidateLimit: 24
     semantic:
       # Provider-backed reranking is off by default. Roll out through shadow
-      # before active; active remains bounded and falls back locally.
+      # before active; active remains bounded and falls back locally. The
+      # timeout is the provider decision budget and must fit the 1000 ms turn
+      # wait budget (SEMANTIC_RERANK_TURN_WAIT_MS) or active startup fails.
       mode: "off"
-      timeoutMs: 1500
+      timeoutMs: 1000
       candidateLimit: 16
       candidateTextChars: 1200
       totalTextChars: 18000
   uiDefaultLocale: ru
-  # Dedicated at-rest credential key. Prefer supplying this key through
+  # Dedicated at-rest credential key. REQUIRED: the API and workers refuse to
+  # start without a valid key, and every stored credential is a mandatory v3
+  # encryption envelope. Prefer supplying this key through
   # runtimeSecret.existingSecret in production. When set here it must be
-  # canonical standard-base64 for exactly 32 random bytes and is required when
-  # any app.providerSecrets value below is set inline.
+  # strict standard-base64 for exactly 32 random bytes
+  # (generate with `openssl rand -base64 32`).
   credentialMasterKey: ""
   # Authenticated ID written into new v3 envelopes. Keep empty to use the
-  # backwards-compatible `default` ID for the inline master key.
+  # default `default` ID for the master key.
   credentialMasterKeyId: ""
   # Temporary read/rewrap keyring during rotation. Prefer existingSecret;
   # entries are sorted `id=base64,id=base64` and removed after migration.
   credentialPreviousMasterKeys: ""
-  # Defaults closed so the first mixed-version upgrade can deploy the
-  # dual-reader everywhere before any v3 envelopes are written. Enable only in
-  # a subsequent, verified rollout. Fresh install.sh deployments set it true.
-  credentialEncryptionWriteEnabled: false
   bootstrapToken: bootstrap-local
   bootstrapAdmin:
     login: ""
+    # The API accepts the bootstrap admin only as a complete login + email +
+    # password triple (all three set or all unset), so a login without an email
+    # leaves the API refusing to start. With runtimeSecret.existingSecret the
+    # operator's own secret supplies this value instead.
+    email: ""
     password: ""
     apiToken: ""
   modelDefaults:
     extractGraphProviderKind: openai
-    extractGraphModelName: gpt-5.4-nano
+    extractGraphModelName: gpt-6-luna
     embedChunkProviderKind: openai
     embedChunkModelName: text-embedding-3-large
     queryCompileProviderKind: openai
-    queryCompileModelName: gpt-5.4-nano
+    queryCompileModelName: gpt-6-luna
     queryAnswerProviderKind: openai
-    queryAnswerModelName: gpt-5.4-mini
+    queryAnswerModelName: gpt-6-luna
     agentProviderKind: openai
-    agentModelName: gpt-5.4-mini
+    agentModelName: gpt-6-luna
     extractTextProviderKind: openai
-    extractTextModelName: gpt-5.4-mini
+    extractTextModelName: gpt-6-luna
   # Optional inline provider credentials keyed by the exact catalog provider
   # kind. Prefer existingSecret in production; this map is primarily for
   # small, self-contained installs. Values are preserved exactly; the generic
@@ -260,13 +318,22 @@ startup:
   mode: startup_job
   backoffLimit: 3
   ttlSecondsAfterFinished: 3600
+  jobAnnotations: {}
   resources: *ironrag-resources-db
   wait:
     image:
       repository: registry.k8s.io/kubectl
       tag: v1.35.1
+      digest: ""
       pullPolicy: IfNotPresent
     timeoutSeconds: 900
+    resources:
+      requests:
+        cpu: 25m
+        memory: 32Mi
+      limits:
+        cpu: 200m
+        memory: 128Mi
 
 security:
   # Runtime images define fixed non-root users; keep this value in lockstep.
@@ -278,6 +345,8 @@ api:
     repository: pipingspace/ironrag-backend
     # Empty means use Chart.appVersion.
     tag: ""
+    # When set, digest wins over tag and produces repository@sha256:...
+    digest: ""
     pullPolicy: IfNotPresent
   service:
     type: ClusterIP
@@ -298,6 +367,7 @@ worker:
     repository: pipingspace/ironrag-backend
     # Empty means use Chart.appVersion.
     tag: ""
+    digest: ""
     pullPolicy: IfNotPresent
   service:
     type: ClusterIP
@@ -313,6 +383,7 @@ web:
     repository: pipingspace/ironrag-frontend
     # Empty means use Chart.appVersion.
     tag: ""
+    digest: ""
     pullPolicy: IfNotPresent
   service:
     type: ClusterIP
@@ -339,6 +410,8 @@ storage:
   filesystem:
     size: 20Gi
     storageClassName: ""
+    # Existing operator-managed PVC; non-empty suppresses chart PVC creation.
+    existingClaim: ""
   s3:
     mode: bundled
     bucket: ironrag
@@ -357,6 +430,7 @@ storage:
     persistence:
       size: 20Gi
       storageClassName: ""
+      existingClaim: ""
     resources: *ironrag-resources-db
 
 # Bundled dependency images stay in lockstep with docker-compose.yml defaults.
@@ -376,13 +450,23 @@ dependencies:
     # fails with `No space left on device` -> HTTP 500. Counts against the
     # pod memory limit, so keep it modest.
     shmSize: 256Mi
+    # PostgreSQL server settings must stay explicit because production
+    # connection and memory budgets are larger than the image defaults.
+    # shmSize is a ceiling for dynamic shared-memory files, not preallocated
+    # RAM; size its expected use together with sharedBuffers under the pod
+    # memory limit.
+    maxConnections: 100
+    sharedBuffers: 128MB
+    workMem: 4MB
     image:
       repository: pgvector/pgvector
       tag: pg18
+      digest: ""
       pullPolicy: IfNotPresent
     persistence:
       size: 20Gi
       storageClassName: ""
+      existingClaim: ""
     resources: *ironrag-resources-db
   redis:
     mode: bundled
@@ -391,7 +475,8 @@ dependencies:
     port: 6379
     image:
       repository: redis
-      tag: "8.8"
+      tag: "8.10.1"
+      digest: ""
       pullPolicy: IfNotPresent
     maxMemory: 512mb
     resources: *ironrag-resources-cache

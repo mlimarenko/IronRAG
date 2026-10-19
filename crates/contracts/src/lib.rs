@@ -5,10 +5,8 @@
 
 /// Administration and operator-facing transport contracts.
 pub mod admin;
-/// Canonical AI binding purpose contracts.
+/// Shared AI binding purpose contracts.
 pub mod ai;
-/// API reference surface contracts.
-pub mod apiref;
 /// Assistant conversation, evidence, and execution contracts.
 pub mod assistant;
 /// Authentication, authorization, and bootstrap contracts.

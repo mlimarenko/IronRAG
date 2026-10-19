@@ -1,0 +1,27 @@
+-- Additive live schema for the IRG-173 ingest failure disposition.
+--
+-- Fresh installs receive this exact column from
+-- apps/api/migrations/0001_init.sql. An existing database receives it
+-- only through the operator path in docs/ru/CLI.md, in one
+-- maintenance window:
+--
+--   1. Apply this file, statements only, against the target database:
+--        psql "<database-url>" -v ON_ERROR_STOP=1 \
+--          -f apps/api/ops/apply-ops-failure-disposition-schema.sql
+--   2. Verify the column before touching the migration record:
+--        select data_type, is_nullable
+--          from information_schema.columns
+--         where table_schema = 'public'
+--           and table_name = 'ops_async_operation'
+--           and column_name = 'failure_disposition';
+--      expect: text | YES
+--   3. Compare-and-set _sqlx_migrations.checksum from the verified old baseline
+--      to this release's baseline checksum (see docs/en/CLI.md). Readiness
+--      refuses to serve and the baseline object check refuses to stamp while the
+--      column is absent, so the order above is not optional.
+--
+-- Idempotent: re-running after a partial rollout is a no-op. The column is
+-- nullable with no default, so every existing row stays valid under it and the
+-- previous binary keeps working.
+ALTER TABLE public.ops_async_operation
+    ADD COLUMN IF NOT EXISTS failure_disposition text;

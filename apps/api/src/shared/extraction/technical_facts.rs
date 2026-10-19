@@ -96,7 +96,7 @@ pub enum TechnicalFactValue {
 
 impl TechnicalFactValue {
     #[must_use]
-    pub fn canonical_string(&self) -> String {
+    pub fn normalized_string(&self) -> String {
         match self {
             Self::Text(value) => value.clone(),
             Self::Integer(value) => value.to_string(),
@@ -116,7 +116,8 @@ pub struct TechnicalFactQualifier {
 pub struct TechnicalFactConflict {
     pub conflict_group_id: String,
     pub fact_kind: TechnicalFactKind,
-    pub canonical_values: Vec<String>,
+    #[serde(rename = "\u{63}anonicalValues")]
+    pub normalized_values: Vec<String>,
     pub fact_ids: Vec<Uuid>,
 }
 

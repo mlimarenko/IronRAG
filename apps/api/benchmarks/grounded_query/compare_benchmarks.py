@@ -4,12 +4,18 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import math
+import sys
 from pathlib import Path
 from typing import Any, Sequence
 
-from run_live_benchmark import (
+REPOSITORY_ROOT = Path(__file__).resolve().parents[4]
+if str(REPOSITORY_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPOSITORY_ROOT))
+
+from apps.api.benchmarks.grounded_query.run_live_benchmark import (
     BENCHMARK_INTEGRITY_SCHEMA_VERSION,
     CACHE_POLICIES,
     CASE_ORDER_POLICY,
@@ -20,9 +26,24 @@ from run_live_benchmark import (
     normalized_artifact_digest,
     permute_case_ids_for_round,
     valid_artifact_digest,
+    validate_data_state_identity,
     validate_environment_identity,
     validate_release_host_eligibility_policy,
+    compute_marker_rank_metrics,
+    compute_rank_metrics,
+    contains_all,
+    contains_any,
+    contains_any_whole_word,
+    first_answer_sentence,
+    lower_text,
+    matches_any_regex,
+    normalize_relevant_keys,
+    references_contain_all_labels,
+    relation_references_contain_all_text,
+    summarize_search_hits,
 )
+from apps.api.benchmarks.lifecycle_state import TREATMENT_INVARIANT_FIELDS
+from apps.api.benchmarks.lifecycle_state import canonical_turn_payload
 
 
 RANK_METRIC_KEYS = ("mrr", "hit@1", "hit@3", "hit@5", "hit@10")
@@ -30,6 +51,18 @@ LATENCY_PERCENTILE_KEYS = ("p50", "p95", "p99")
 DEFAULT_MAX_LATENCY_REGRESSION_PERCENT = 10.0
 DEFAULT_MAX_CANDIDATE_P50_MS = 12_000.0
 DEFAULT_MAX_CANDIDATE_P95_MS = 30_000.0
+COMPARISON_KINDS = ("code_change", "data_lifecycle")
+
+
+def stable_json_sha256(payload: Any) -> str:
+    encoded = json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
 
 
 def valid_sha256(value: Any) -> bool:
@@ -66,6 +99,15 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument("baseline_dir", type=Path)
     parser.add_argument("candidate_dir", type=Path)
+    parser.add_argument(
+        "--comparison-kind",
+        choices=COMPARISON_KINDS,
+        default="code_change",
+        help=(
+            "code_change requires distinct build digests; data_lifecycle "
+            "requires one build and distinct attested vector states"
+        ),
+    )
     parser.add_argument(
         "--max-latency-regression-percent",
         type=float,
@@ -109,35 +151,183 @@ def load_matrix(result_dir: Path) -> dict[str, Any]:
     return payload
 
 
-def case_passed(case: dict[str, Any]) -> bool:
-    """Read the flat schema emitted by run_live_benchmark, with legacy fallback."""
-    if "strictCasePass" in case:
-        return case.get("strictCasePass") is True
+def raw_evaluation_evidence(
+    case: dict[str, Any],
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], dict[str, Any], dict[str, Any]]:
+    """Unpack the recorded API evidence, refusing anything the recomputation cannot redo."""
+    policy = case.get("casePolicy")
+    raw = case.get("rawEvaluationEvidence")
+    if not isinstance(policy, dict) or not isinstance(raw, dict):
+        raise ValueError("canonical comparison requires casePolicy and rawEvaluationEvidence")
+    if set(raw) != {"turnPayload", "executionDetail", "searchPayload"}:
+        raise ValueError("rawEvaluationEvidence schema is incomplete")
+    turn = raw.get("turnPayload")
+    detail = raw.get("executionDetail")
+    search_evidence = raw.get("searchPayload")
+    if (
+        not isinstance(turn, dict)
+        or not isinstance(detail, dict)
+        or not isinstance(search_evidence, dict)
+        or set(search_evidence)
+        != {"workspaceId", "libraryId", "queryText", "responsePayload"}
+    ):
+        raise ValueError("rawEvaluationEvidence does not contain complete API evidence")
+    search = search_evidence.get("responsePayload")
+    if not isinstance(search, dict) or not isinstance(search.get("documentHits"), list):
+        raise ValueError("rawEvaluationEvidence search response is incomplete")
+    return policy, turn, detail, search_evidence, search
 
-    dimensions = case.get("dimensions")
-    if not isinstance(dimensions, dict) or not dimensions:
-        return False
-    return all(
-        isinstance(dimension, dict) and dimension.get("pass") is True
-        for dimension in dimensions.values()
+
+def verified_case_binding(
+    case: dict[str, Any],
+    search_evidence: dict[str, Any],
+    *,
+    expected_library_id: str | None,
+    expected_workspace_id: str | None,
+) -> str:
+    """The evidence must belong to this case, this library and this workspace."""
+    expected_question = case.get("question")
+    if not isinstance(expected_question, str):
+        raise ValueError("canonical comparison case question is missing")
+    expected_search_query = case.get("searchQuery")
+    if not isinstance(expected_search_query, str):
+        raise ValueError("canonical comparison case search query is missing")
+    if search_evidence.get("queryText") != expected_search_query:
+        raise ValueError("search evidence query differs from benchmark case")
+    if (
+        expected_library_id is not None
+        and search_evidence.get("libraryId") != expected_library_id
+    ):
+        raise ValueError("search evidence library differs from selected library")
+    if (
+        expected_workspace_id is not None
+        and search_evidence.get("workspaceId") != expected_workspace_id
+    ):
+        raise ValueError("search evidence workspace differs from selected workspace")
+    return expected_question
+
+
+def answer_policy_verdicts(
+    answer: str, policy: dict[str, Any]
+) -> tuple[bool, bool, bool]:
+    """Whether the answer satisfies the required, opening and forbidden clauses."""
+    required = contains_all(answer, policy.get("answer_required_all", []))
+    required = required and (
+        not policy.get("answer_required_any")
+        or contains_any(answer, policy.get("answer_required_any", []))
     )
+    required = required and (
+        not policy.get("answer_required_regex_any")
+        or matches_any_regex(answer, policy.get("answer_required_regex_any", []))
+    )
+    opening_ok = not policy.get("answer_opening_required_any") or contains_any(
+        first_answer_sentence(answer), policy.get("answer_opening_required_any", [])
+    )
+    forbidden = contains_any_whole_word(
+        answer, policy.get("answer_forbidden_any", [])
+    ) or matches_any_regex(answer, policy.get("answer_forbidden_regex_any", []))
+    return required, opening_ok, forbidden
+
+
+def recompute_case_evaluation(
+    case: dict[str, Any],
+    *,
+    expected_library_id: str | None = None,
+    expected_workspace_id: str | None = None,
+) -> dict[str, Any]:
+    policy, turn, detail, search_evidence, search = raw_evaluation_evidence(case)
+    expected_question = verified_case_binding(
+        case,
+        search_evidence,
+        expected_library_id=expected_library_id,
+        expected_workspace_id=expected_workspace_id,
+    )
+    canonical_turn = canonical_turn_payload(
+        turn,
+        expected_question=expected_question,
+        expected_library_id=expected_library_id,
+        expected_workspace_id=expected_workspace_id,
+    )
+    canonical_detail = canonical_turn_payload(
+        detail,
+        expected_question=expected_question,
+        expected_library_id=expected_library_id,
+        expected_workspace_id=expected_workspace_id,
+    )
+    if (
+        canonical_detail["executionId"] != canonical_turn["executionId"]
+        or detail["execution"] != turn["execution"]
+        or detail["responseTurn"] != turn["responseTurn"]
+    ):
+        raise ValueError("execution detail belongs to another turn")
+    answer = canonical_turn["answerText"]
+    summaries, search_text, ranked_documents, ranked_chunks = summarize_search_hits(search)
+    top_title = summaries[0]["title"] if summaries else None
+    top_ok = not policy.get("expected_documents_contains") or any(
+        lower_text(needle) in lower_text(top_title)
+        for needle in policy.get("expected_documents_contains", [])
+    )
+    required, opening_ok, forbidden = answer_policy_verdicts(answer, policy)
+    chunk_refs = detail.get("chunkReferences", [])
+    prepared_refs = detail.get("preparedSegmentReferences", [])
+    fact_refs = detail.get("technicalFactReferences", [])
+    entity_refs = detail.get("entityReferences", [])
+    relation_refs = detail.get("relationReferences", [])
+    verification_state = detail.get("verificationState") or "not_run"
+    checks = {
+        "top_document": top_ok,
+        "retrieval_contains_required": contains_all(
+            search_text, policy.get("search_required_all", [])
+        ),
+        "answer_required": required,
+        "answer_opening_required": opening_ok,
+        "answer_forbidden": not forbidden,
+        "chunk_references": len(chunk_refs) >= policy.get("min_chunk_reference_count", 0),
+        "prepared_segment_references": len(prepared_refs)
+        >= policy.get("min_prepared_segment_reference_count", 0),
+        "technical_fact_references": len(fact_refs)
+        >= policy.get("min_technical_fact_reference_count", 0),
+        "entity_references": len(entity_refs) >= policy.get("min_entity_reference_count", 0),
+        "relation_references": len(relation_refs)
+        >= policy.get("min_relation_reference_count", 0),
+        "entity_reference_labels": references_contain_all_labels(
+            entity_refs, policy.get("expected_entity_reference_labels_contains", [])
+        ),
+        "relation_reference_text": relation_references_contain_all_text(
+            relation_refs, policy.get("expected_relation_reference_text_contains", [])
+        ),
+        "verification_state": verification_state
+        in policy.get("allowed_verification_states", []),
+    }
+    rank_metrics = {
+        key: value
+        for key, value in {
+            "documents": compute_rank_metrics(
+                ranked_documents,
+                normalize_relevant_keys(policy.get("relevant_documents", [])),
+            ),
+            "chunks": compute_marker_rank_metrics(
+                ranked_chunks, policy.get("relevant_chunks", [])
+            ),
+        }.items()
+        if value is not None
+    }
+    return {
+        "passed": all(checks.values()),
+        "failedChecks": [name for name, passed in checks.items() if not passed],
+        "rankMetrics": rank_metrics,
+    }
+
+
+def case_passed(case: dict[str, Any]) -> bool:
+    """Recompute canonical case quality from persisted raw API responses."""
+    recomputed = recompute_case_evaluation(case)
+    return recomputed["passed"] is True
 
 
 def case_failure_details(case: dict[str, Any]) -> list[str]:
-    """Read failure codes from the runner's flat schema, with legacy fallback."""
-    failed_checks = case.get("failedChecks")
-    if isinstance(failed_checks, list):
-        return [str(item) for item in failed_checks]
-
-    details: list[str] = []
-    dimensions = case.get("dimensions")
-    if not isinstance(dimensions, dict):
-        return details
-    for name, value in dimensions.items():
-        if isinstance(value, dict) and value.get("pass") is not True:
-            detail = value.get("detail", value.get("reason", ""))
-            details.append(f"{name}: {detail}" if detail else str(name))
-    return details
+    recomputed = recompute_case_evaluation(case)
+    return [str(item) for item in recomputed["failedChecks"]]
 
 
 def indexed_cases(matrix: dict[str, Any]) -> dict[str, dict[str, Any]]:
@@ -183,6 +373,16 @@ def validate_runtime_identity(
         value = version_endpoint.get(key)
         if not isinstance(value, str) or not value.strip():
             invalid.append(f"{label}.runtimeIdentity.versionEndpoint.{key}")
+    binary_sha256 = version_endpoint.get("binarySha256")
+    config_sha256 = version_endpoint.get("resolvedConfigSha256")
+    if not valid_artifact_digest(binary_sha256):
+        invalid.append(f"{label}.runtimeIdentity.versionEndpoint.binarySha256")
+    elif normalized_artifact_digest(binary_sha256) != normalized_artifact_digest(
+        runtime_identity.get("artifactDigest")
+    ):
+        invalid.append(f"{label}.runtimeIdentity.artifactDigest:notEndpoint")
+    if not valid_artifact_digest(config_sha256):
+        invalid.append(f"{label}.runtimeIdentity.versionEndpoint.resolvedConfigSha256")
 
 
 def validated_host_measurements(
@@ -193,20 +393,33 @@ def validated_host_measurements(
 ) -> tuple[dict[str, dict[str, Any]], dict[str, Any]]:
     host_eligibility: dict[str, dict[str, Any]] = {}
     host_snapshots: dict[str, dict[str, Any]] = {}
-    for phase, field in (
-        ("pre", "hostPreflight"),
-        ("mid", "hostMidflight"),
-        ("post", "hostPostflight"),
+    for phase, start_phase, start_field, end_field in (
+        ("pre", "preStart", "hostPreflightStart", "hostPreflight"),
+        ("mid", "pre", "hostPreflight", "hostMidflight"),
+        ("post", "mid", "hostMidflight", "hostPostflight"),
     ):
-        snapshot = measurement_protocol.get(field)
-        if not isinstance(snapshot, dict) or not isinstance(host_policy, dict):
-            invalid.append(f"{label}.measurementProtocol.{field}")
+        start_snapshot = measurement_protocol.get(start_field)
+        snapshot = measurement_protocol.get(end_field)
+        if (
+            not isinstance(start_snapshot, dict)
+            or not isinstance(snapshot, dict)
+            or not isinstance(host_policy, dict)
+        ):
+            if not isinstance(start_snapshot, dict):
+                invalid.append(f"{label}.measurementProtocol.{start_field}")
+            if not isinstance(snapshot, dict):
+                invalid.append(f"{label}.measurementProtocol.{end_field}")
             continue
-        evaluation = evaluate_host_snapshot(snapshot, host_policy)
+        evaluation = evaluate_host_snapshot(
+            snapshot,
+            host_policy,
+            swap_activity_start=start_snapshot,
+        )
+        host_snapshots[start_phase] = start_snapshot
         host_snapshots[phase] = snapshot
         host_eligibility[phase] = evaluation
         if not evaluation["passed"]:
-            invalid.append(f"{label}.measurementProtocol.{field}:ineligible")
+            invalid.append(f"{label}.measurementProtocol.{end_field}:ineligible")
     return host_eligibility, evaluate_host_snapshot_sequence(host_snapshots)
 
 
@@ -330,7 +543,7 @@ def validate_matrix_integrity(
         matrix.get("suites") if isinstance(matrix.get("suites"), list) else [],
         query_top_k=query_top_k,
         skip_upload=integrity["skipUpload"],
-        canonicalize_reused_library=integrity["canonicalizeReusedLibrary"],
+        normalize_reused_library=integrity["canonicalizeReusedLibrary"],
         cache_policy=integrity["cachePolicy"],
         round_id=integrity["roundId"],
     )
@@ -362,45 +575,175 @@ def compare_matrix_integrities(
             mismatches.append(f"matrix.{key}")
 
 
+SHARED_VERSION_KEYS = (
+    "service",
+    "environment",
+    "role",
+    "resolvedConfigSha256",
+    "queryTurnMaxConcurrent",
+)
+
+
+def runtime_field(runtime: Any, field: str) -> Any:
+    """One field of a runtime identity, or None when the identity is absent."""
+    return runtime.get(field) if isinstance(runtime, dict) else None
+
+
+def compare_artifact_digests(
+    baseline_digest: Any,
+    candidate_digest: Any,
+    mismatches: list[str],
+    comparison_kind: str,
+) -> None:
+    """A code change must move the artifact digest; a data lifecycle must not."""
+    if not valid_artifact_digest(baseline_digest) or not valid_artifact_digest(
+        candidate_digest
+    ):
+        return
+    digests_equal = normalized_artifact_digest(
+        baseline_digest
+    ) == normalized_artifact_digest(candidate_digest)
+    if comparison_kind == "code_change" and digests_equal:
+        mismatches.append("runtime.artifactDigest:notDistinct")
+    if comparison_kind == "data_lifecycle" and not digests_equal:
+        mismatches.append("runtime.artifactDigest:notEqual")
+
+
 def compare_runtime_identities(
     baseline_matrix: dict[str, Any],
     candidate_matrix: dict[str, Any],
     mismatches: list[str],
+    comparison_kind: str,
 ) -> None:
     baseline_runtime = baseline_matrix.get("runtimeIdentity")
     candidate_runtime = candidate_matrix.get("runtimeIdentity")
-    baseline_digest = (
-        baseline_runtime.get("artifactDigest")
-        if isinstance(baseline_runtime, dict)
-        else None
+    compare_artifact_digests(
+        runtime_field(baseline_runtime, "artifactDigest"),
+        runtime_field(candidate_runtime, "artifactDigest"),
+        mismatches,
+        comparison_kind,
     )
-    candidate_digest = (
-        candidate_runtime.get("artifactDigest")
-        if isinstance(candidate_runtime, dict)
-        else None
-    )
-    if (
-        valid_artifact_digest(baseline_digest)
-        and valid_artifact_digest(candidate_digest)
-        and normalized_artifact_digest(baseline_digest)
-        == normalized_artifact_digest(candidate_digest)
-    ):
-        mismatches.append("runtime.artifactDigest:notDistinct")
-    baseline_version = (
-        baseline_runtime.get("versionEndpoint")
-        if isinstance(baseline_runtime, dict)
-        else None
-    )
-    candidate_version = (
-        candidate_runtime.get("versionEndpoint")
-        if isinstance(candidate_runtime, dict)
-        else None
-    )
+    baseline_version = runtime_field(baseline_runtime, "versionEndpoint")
+    candidate_version = runtime_field(candidate_runtime, "versionEndpoint")
     if not isinstance(baseline_version, dict) or not isinstance(candidate_version, dict):
         return
-    for key in ("service", "environment", "role"):
+    version_keys = list(SHARED_VERSION_KEYS)
+    if comparison_kind == "data_lifecycle":
+        version_keys.extend(("version", "binarySha256", "redisServiceSha256"))
+        if baseline_version.get("redisEndpointSha256") == candidate_version.get(
+            "redisEndpointSha256"
+        ):
+            mismatches.append("runtime.versionEndpoint.redisEndpointSha256:notDistinct")
+    for key in version_keys:
         if baseline_version.get(key) != candidate_version.get(key):
             mismatches.append(f"runtime.versionEndpoint.{key}")
+
+
+def validate_data_state(
+    label: str,
+    matrix: dict[str, Any],
+    invalid: list[str],
+) -> dict[str, Any] | None:
+    identity = matrix.get("dataStateIdentity")
+    if not isinstance(identity, dict):
+        invalid.append(f"{label}.dataStateIdentity")
+        return None
+    invalid.extend(
+        f"{label}.dataStateIdentity.{field}"
+        for field in validate_data_state_identity(identity)
+    )
+    runtime = matrix.get("runtimeIdentity")
+    version = runtime.get("versionEndpoint") if isinstance(runtime, dict) else None
+    database = identity.get("databaseIdentity")
+    if (
+        not isinstance(version, dict)
+        or not isinstance(database, dict)
+        or version.get("deploymentId") != database.get("deploymentId")
+    ):
+        invalid.append(f"{label}.runtimeIdentity.deploymentId")
+    return identity
+
+
+DISTINCT_STATE_DIGESTS = (
+    "vectorIdentitySha256",
+    "physicalVectorStateSha256",
+    "evidenceArtifactSha256",
+)
+
+
+def compare_vector_rows(
+    baseline: dict[str, Any],
+    candidate: dict[str, Any],
+    invalid_baseline: list[str],
+    invalid_candidate: list[str],
+    mismatches: list[str],
+) -> None:
+    """Baseline must still hold removable rows, candidate must hold none."""
+    baseline_rows = baseline.get("vectorRows")
+    candidate_rows = candidate.get("vectorRows")
+    if not isinstance(baseline_rows, dict) or not isinstance(candidate_rows, dict):
+        return
+    if baseline_rows.get("supersededReadableHistory", 0) <= 0:
+        invalid_baseline.append(
+            "baseline.dataStateIdentity.vectorRows.supersededReadableHistory:notPositive"
+        )
+    if baseline_rows.get("inconsistentOrOrphan") != 0:
+        invalid_baseline.append(
+            "baseline.dataStateIdentity.vectorRows.inconsistentOrOrphan:notZero"
+        )
+    if candidate_rows.get("supersededReadableHistory") != 0:
+        invalid_candidate.append(
+            "candidate.dataStateIdentity.vectorRows.supersededReadableHistory:notZero"
+        )
+    if candidate_rows.get("inconsistentOrOrphan") != 0:
+        invalid_candidate.append(
+            "candidate.dataStateIdentity.vectorRows.inconsistentOrOrphan:notZero"
+        )
+    for key in ("currentReadable", "protectedActiveIngest"):
+        if baseline_rows.get(key) != candidate_rows.get(key):
+            mismatches.append(f"dataState.vectorRows.{key}")
+
+
+def compare_state_digests(
+    baseline: dict[str, Any], candidate: dict[str, Any], mismatches: list[str]
+) -> None:
+    """What treatment must leave alone must match; what it removes must differ."""
+    for field in TREATMENT_INVARIANT_FIELDS:
+        if baseline.get(field) != candidate.get(field):
+            mismatches.append(f"dataState.{field}")
+    if baseline.get("headBoundVectorIdentitySha256") != candidate.get(
+        "headBoundVectorIdentitySha256"
+    ):
+        mismatches.append("dataState.headBoundVectorIdentitySha256")
+    baseline_categories = baseline.get("vectorCategoryIdentitySha256") or {}
+    candidate_categories = candidate.get("vectorCategoryIdentitySha256") or {}
+    for key in ("currentReadable", "protectedActiveIngest"):
+        if baseline_categories.get(key) != candidate_categories.get(key):
+            mismatches.append(f"dataState.vectorCategoryIdentitySha256.{key}")
+    for field in DISTINCT_STATE_DIGESTS:
+        if baseline.get(field) == candidate.get(field):
+            mismatches.append(f"dataState.{field}:notDistinct")
+
+
+def compare_data_states(
+    baseline_matrix: dict[str, Any],
+    candidate_matrix: dict[str, Any],
+    invalid_baseline: list[str],
+    invalid_candidate: list[str],
+    mismatches: list[str],
+) -> None:
+    baseline = validate_data_state("baseline", baseline_matrix, invalid_baseline)
+    candidate = validate_data_state("candidate", candidate_matrix, invalid_candidate)
+    if baseline is None or candidate is None:
+        return
+    if baseline.get("role") != "baseline":
+        invalid_baseline.append("baseline.dataStateIdentity.role")
+    if candidate.get("role") != "candidate":
+        invalid_candidate.append("candidate.dataStateIdentity.role")
+    compare_state_digests(baseline, candidate, mismatches)
+    compare_vector_rows(
+        baseline, candidate, invalid_baseline, invalid_candidate, mismatches
+    )
 
 
 def compare_measurement_protocols(
@@ -572,6 +915,7 @@ def integrity_gate_passed(
 def build_benchmark_integrity_gate(
     baseline_matrix: dict[str, Any],
     candidate_matrix: dict[str, Any],
+    comparison_kind: str = "code_change",
 ) -> dict[str, Any]:
     """Require identical benchmark definitions, runtime knobs, and corpus bytes."""
     invalid_baseline: list[str] = []
@@ -585,8 +929,21 @@ def build_benchmark_integrity_gate(
     )
     if baseline_integrity is not None and candidate_integrity is not None:
         compare_matrix_integrities(baseline_integrity, candidate_integrity, mismatches)
-        compare_runtime_identities(baseline_matrix, candidate_matrix, mismatches)
+        compare_runtime_identities(
+            baseline_matrix,
+            candidate_matrix,
+            mismatches,
+            comparison_kind,
+        )
         compare_measurement_protocols(baseline_matrix, candidate_matrix, mismatches)
+    if comparison_kind == "data_lifecycle":
+        compare_data_states(
+            baseline_matrix,
+            candidate_matrix,
+            invalid_baseline,
+            invalid_candidate,
+            mismatches,
+        )
 
     baseline_suites = indexed_suites(baseline_matrix)
     candidate_suites = indexed_suites(candidate_matrix)
@@ -1039,10 +1396,14 @@ def build_comparison_report(
     max_latency_regression_percent: float = DEFAULT_MAX_LATENCY_REGRESSION_PERCENT,
     max_candidate_p50_ms: float = DEFAULT_MAX_CANDIDATE_P50_MS,
     max_candidate_p95_ms: float = DEFAULT_MAX_CANDIDATE_P95_MS,
+    comparison_kind: str = "code_change",
 ) -> dict[str, Any]:
+    if comparison_kind not in COMPARISON_KINDS:
+        raise ValueError(f"unsupported comparison kind: {comparison_kind}")
     benchmark_integrity_gate = build_benchmark_integrity_gate(
         baseline_matrix,
         candidate_matrix,
+        comparison_kind,
     )
     baseline_latency, candidate_latency, missing_paired_samples = paired_latency_summaries(
         baseline_matrix,
@@ -1059,6 +1420,11 @@ def build_comparison_report(
     correctness_gate = build_correctness_gate(baseline_matrix, candidate_matrix)
     retrieval_quality_gate = build_retrieval_quality_gate(baseline_matrix, candidate_matrix)
     return {
+        "comparisonKind": comparison_kind,
+        "inputMatrixSha256": {
+            "baseline": stable_json_sha256(baseline_matrix),
+            "candidate": stable_json_sha256(candidate_matrix),
+        },
         "benchmarkIntegrityGate": benchmark_integrity_gate,
         "latencyGate": latency_gate,
         "correctnessGate": correctness_gate,
@@ -1253,6 +1619,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         max_latency_regression_percent=args.max_latency_regression_percent,
         max_candidate_p50_ms=args.max_candidate_p50_ms,
         max_candidate_p95_ms=args.max_candidate_p95_ms,
+        comparison_kind=args.comparison_kind,
     )
     print_comparison_report(baseline_matrix, candidate_matrix, report)
     if args.json_output:

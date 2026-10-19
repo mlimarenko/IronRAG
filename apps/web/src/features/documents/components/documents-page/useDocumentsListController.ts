@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import type { Dispatch, SetStateAction } from 'react'
 import type { TFunction } from 'i18next'
 import { toast } from 'sonner'
@@ -6,21 +6,20 @@ import { toast } from 'sonner'
 import {
   ASYNC_OPERATION_TERMINAL_STATES,
   documentsApi,
-  type DocumentListPageResponse,
+  type DocumentColumnFilters,
   type DocumentListSortKey,
   type DocumentListSortOrder,
   type DocumentListStatusFilter,
 } from '@/shared/api'
 import type { DocumentItem, Library } from '@/shared/types'
-
-import { getDocumentProcessingDurationMs } from '@/features/documents/model/documentAdapter'
+import type { DocumentSearchRanges } from '@/shared/api/generated'
 
 import {
+  selectAllMatchingAvailable,
   splitSortValue,
   type BulkRerunState,
+  type DocumentsListFilter,
   type DocumentsTableState,
-  type LocalSortKey,
-  type LocalSortState,
   type PageSizeOption,
   type SortValue,
   type UpdateSearchParamState,
@@ -30,97 +29,134 @@ import { useBulkRerunProgressQuery } from './useBulkRerunProgressQuery'
 type DocumentsListControllerInput = {
   activeLibrary: Library
   activateListPollGrace: () => void
-  debouncedSearch: string
   errorMessage: (error: unknown, fallback: string) => string
   filteredTotal: number | null
+  /**
+   * Whether the current filter has another cursor page. The indexing buckets
+   * carry no total, so this is the only signal that "select all matching" has
+   * anything more to collect.
+   */
+  hasMorePages: boolean
   items: DocumentItem[]
   loadFirstPage: () => Promise<void>
-  localSort: LocalSortState
-  onSelectionModeChange: (selectionMode: boolean) => void
   pageSize: PageSizeOption
   setTableState: Dispatch<SetStateAction<DocumentsTableState>>
   sortBy: DocumentListSortKey
   sortOrder: DocumentListSortOrder
   sortValue: SortValue
-  statusBackendFilter: DocumentListStatusFilter[]
+  listFilter: DocumentsListFilter
+  /** Everything the list is filtering by, repeated for "select all matching". */
+  columnFilters: DocumentColumnFilters | undefined
+  search: string
+  searchStatus: DocumentListStatusFilter[]
+  normalizedSearch: string | null
+  searchRanges: DocumentSearchRanges | null
+  snapshotAt: string | null
   t: TFunction
   updateSearchParamState: UpdateSearchParamState
+}
+
+type DocumentListRequest = Parameters<typeof documentsApi.list>[0]
+
+/**
+ * The one request the "select all matching" cursor walk builds. Every optional
+ * scope is attached only when it is set, so an absent filter stays absent on
+ * the wire rather than becoming an empty, fail-closed value.
+ */
+function buildSelectionRequest(input: {
+  libraryId: string
+  limit: number
+  sortBy: DocumentListSortKey
+  sortOrder: DocumentListSortOrder
+  cursor: string | null | undefined
+  search: string
+  searchStatus: DocumentListStatusFilter[]
+  normalizedSearch: string | null
+  searchRanges: DocumentSearchRanges | null
+  snapshotAt: string | null
+  columnFilters: DocumentColumnFilters | undefined
+  status: DocumentListStatusFilter[] | undefined
+  indexing: DocumentsListFilter['indexing']
+}): DocumentListRequest {
+  const request: DocumentListRequest = {
+    libraryId: input.libraryId,
+    limit: input.limit,
+    sortBy: input.sortBy,
+    sortOrder: input.sortOrder,
+    includeTotal: false,
+  }
+  if (input.cursor) request.cursor = input.cursor
+  if (input.search) request.search = input.search
+  if (input.searchStatus.length > 0) request.searchStatus = input.searchStatus
+  if (input.normalizedSearch) request.normalizedSearch = input.normalizedSearch
+  if (input.searchRanges) request.searchRanges = input.searchRanges
+  if (input.snapshotAt) request.snapshotAt = input.snapshotAt
+  if (input.columnFilters) request.columnFilters = input.columnFilters
+  if (input.status) request.status = input.status
+  if (input.indexing) request.indexing = input.indexing
+  return request
 }
 
 export function useDocumentsListController({
   activeLibrary,
   activateListPollGrace,
-  debouncedSearch,
   errorMessage,
   filteredTotal,
+  hasMorePages,
   items,
   loadFirstPage,
-  localSort,
-  onSelectionModeChange,
   pageSize,
   setTableState,
   sortBy,
   sortOrder,
   sortValue,
-  statusBackendFilter,
+  listFilter,
+  columnFilters,
+  search,
+  searchStatus,
+  normalizedSearch,
+  searchRanges,
+  snapshotAt,
   t,
   updateSearchParamState,
 }: DocumentsListControllerInput) {
-  const [selectionMode, setSelectionMode] = useState(false)
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set())
   const [expandingSelection, setExpandingSelection] = useState(false)
   const [bulkRerun, setBulkRerun] = useState<BulkRerunState | null>(null)
-  const [processingClockMs, setProcessingClockMs] = useState(() => Date.now())
   const terminalToastFiredRef = useRef(false)
   const bulkQuery = useBulkRerunProgressQuery(bulkRerun)
 
   const clearSelection = useCallback(() => {
     setSelectedIds(new Set())
-    setSelectionMode(false)
     setExpandingSelection(false)
   }, [])
-  useEffect(() => onSelectionModeChange(selectionMode), [onSelectionModeChange, selectionMode])
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
-      if (event.key === 'Escape' && selectionMode) clearSelection()
+      if (event.key === 'Escape' && selectedIds.size > 0) clearSelection()
     }
     document.addEventListener('keydown', onKey)
     return () => document.removeEventListener('keydown', onKey)
-  }, [clearSelection, selectionMode])
-
-  const hasInFlightDocs = useMemo(
-    () => items.some((doc) => doc.status === 'queued' || doc.status === 'processing'),
-    [items],
-  )
-  useEffect(() => {
-    if (!hasInFlightDocs) return undefined
-    const id = window.setInterval(() => setProcessingClockMs(Date.now()), 1000)
-    return () => window.clearInterval(id)
-  }, [hasInFlightDocs])
-
-  const displayedItems = useMemo(() => {
-    if (!localSort) return items
-    const direction = localSort.direction === 'asc' ? 1 : -1
-    const score = (doc: DocumentItem) => {
-      if (localSort.key === 'cost') return doc.cost ?? -Infinity
-      if (localSort.key === 'time') {
-        return getDocumentProcessingDurationMs(doc, processingClockMs) ?? -Infinity
-      }
-      return doc.processingFinishedAt ? Date.parse(doc.processingFinishedAt) : -Infinity
-    }
-    return [...items].sort((left, right) => {
-      const lhs = score(left)
-      const rhs = score(right)
-      if (lhs === rhs) return 0
-      return lhs < rhs ? -1 * direction : direction
-    })
-  }, [items, localSort, processingClockMs])
+  }, [clearSelection, selectedIds.size])
 
   const toggleSelection = useCallback((id: string) => {
     setSelectedIds((prev) => {
       const next = new Set(prev)
       if (next.has(id)) next.delete(id)
       else next.add(id)
+      return next
+    })
+  }, [])
+  /**
+   * The header checkbox acts on exactly the rows on screen, in one action.
+   * Selection is an id set, so ids chosen on another page are untouched.
+   */
+  const toggleAllVisible = useCallback((checked: boolean, rows: DocumentItem[]) => {
+    setSelectedIds((prev) => {
+      const next = new Set(prev)
+      for (const document of rows) {
+        if (checked) next.add(document.id)
+        else next.delete(document.id)
+      }
       return next
     })
   }, [])
@@ -142,31 +178,15 @@ export function useDocumentsListController({
     },
     [onSortChange, sortBy, sortOrder],
   )
-  const toggleLocalSort = useCallback(
-    (key: LocalSortKey) => {
-      setTableState((prev) => ({
-        ...prev,
-        localSort:
-          prev.localSort?.key === key
-            ? { key, direction: prev.localSort.direction === 'asc' ? 'desc' : 'asc' }
-            : { key, direction: 'desc' },
-      }))
-    },
-    [setTableState],
-  )
   const toggleDetailColumns = useCallback(() => {
-    setTableState((prev) => {
-      const next = !prev.showDetailColumns
-      return {
-        ...prev,
-        showDetailColumns: next,
-        // Collapsing the detail columns also clears any page-scoped sort so
-        // the hidden in-memory ordering does not silently persist.
-        localSort: next ? prev.localSort : null,
-      }
-    })
+    setTableState((prev) => ({ ...prev, showDetailColumns: !prev.showDetailColumns }))
   }, [setTableState])
 
+  /**
+   * Walks every page the current filter, search and sort produce, not only the
+   * loaded page: the same cursor call the list makes, carrying the same column
+   * filters, typed search and status scope.
+   */
   const selectAllMatching = useCallback(async () => {
     if (expandingSelection) return
     setExpandingSelection(true)
@@ -174,18 +194,27 @@ export function useDocumentsListController({
       const split = splitSortValue(sortValue)
       const collected = new Set(selectedIds)
       let cursor: string | null | undefined
+      let selectionSnapshot = snapshotAt
       while (collected.size < 100_000) {
-        const page: DocumentListPageResponse = await documentsApi.list({
-          libraryId: activeLibrary.id,
-          limit: pageSize,
-          sortBy: split.sortBy,
-          sortOrder: split.sortOrder,
-          includeTotal: false,
-          ...(cursor ? { cursor } : {}),
-          ...(debouncedSearch ? { search: debouncedSearch } : {}),
-          ...(statusBackendFilter.length > 0 ? { status: statusBackendFilter } : {}),
-        })
+        const page = await documentsApi.list(
+          buildSelectionRequest({
+            libraryId: activeLibrary.id,
+            limit: pageSize,
+            sortBy: split.sortBy,
+            sortOrder: split.sortOrder,
+            cursor,
+            search,
+            searchStatus,
+            normalizedSearch,
+            searchRanges,
+            snapshotAt: selectionSnapshot,
+            columnFilters,
+            status: listFilter.status,
+            indexing: listFilter.indexing,
+          }),
+        )
         for (const row of page.items) collected.add(row.id)
+        selectionSnapshot ??= page.snapshotAt
         if (!page.nextCursor) break
         cursor = page.nextCursor
       }
@@ -197,13 +226,19 @@ export function useDocumentsListController({
     }
   }, [
     activeLibrary.id,
-    debouncedSearch,
+    columnFilters,
     errorMessage,
     expandingSelection,
+    listFilter.indexing,
+    listFilter.status,
+    normalizedSearch,
     pageSize,
+    search,
+    searchStatus,
+    searchRanges,
+    snapshotAt,
     selectedIds,
     sortValue,
-    statusBackendFilter,
     t,
   ])
 
@@ -255,6 +290,18 @@ export function useDocumentsListController({
       toast.error(t('documents.bulkReprocessFailed'))
     }
   }, [selectedIds, startBulkRerun, t])
+  const reprocessDocument = useCallback(
+    async (documentId: string) => {
+      try {
+        await documentsApi.reprocess(documentId)
+        activateListPollGrace()
+        await loadFirstPage()
+      } catch (err) {
+        toast.error(errorMessage(err, t('documents.reprocessFailed')))
+      }
+    },
+    [activateListPollGrace, errorMessage, loadFirstPage, t],
+  )
 
   useEffect(() => {
     const detail = bulkQuery.operationQuery.data
@@ -295,28 +342,24 @@ export function useDocumentsListController({
   return {
     bulkProgress: bulkQuery.progress,
     clearSelection,
-    displayedItems,
     expandingSelection,
     handleBulkCancel,
     handleBulkDelete,
     handleBulkReprocess,
-    localSort,
-    processingClockMs,
+    reprocessDocument,
     selectAllMatching,
     selectedIds,
-    selectionMode,
     setBulkRerun,
     setSelectedIds,
-    setSelectionMode,
-    showSelectAllMatching:
-      selectionMode &&
-      items.length > 0 &&
-      items.every((doc) => selectedIds.has(doc.id)) &&
-      filteredTotal != null &&
-      filteredTotal > items.length &&
-      selectedIds.size < filteredTotal,
+    showSelectAllMatching: selectAllMatchingAvailable({
+      allVisibleSelected: items.length > 0 && items.every((doc) => selectedIds.has(doc.id)),
+      filteredTotal,
+      hasMorePages,
+      itemCount: items.length,
+      selectedCount: selectedIds.size,
+    }),
+    toggleAllVisible,
     toggleDetailColumns,
-    toggleLocalSort,
     toggleSelection,
     toggleSortDirection,
   }

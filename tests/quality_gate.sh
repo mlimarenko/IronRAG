@@ -111,7 +111,7 @@ if [[ -n "$TOKEN" ]]; then
   pass "Bearer token configured"
 else
   log "Logging in as $ADMIN_LOGIN..."
-  LOGIN_RESP=$(curl -sS -X POST "${BASE_URL}/v1/iam/session/login" \
+  LOGIN_RESP=$(curl -sS -X POST "${BASE_URL}/v1/iam/sessions" \
     -H "Content-Type: application/json" \
     -c "$COOKIE_JAR" \
     -d "{\"login\":\"$ADMIN_LOGIN\",\"password\":\"$ADMIN_PASSWORD\"}")
@@ -515,7 +515,7 @@ use uuid::Uuid;
 pub struct KnowledgeEntity {
     pub id: Uuid,
     pub library_id: Uuid,
-    pub canonical_label: String,
+    pub normalized_label: String,
     pub entity_type: EntityType,
     pub aliases: Vec<String>,
     pub support_count: i32,
@@ -566,8 +566,8 @@ impl KnowledgeEntity {
         if self.entity_type != other.entity_type {
             return false;
         }
-        let a = self.canonical_label.to_lowercase();
-        let b = other.canonical_label.to_lowercase();
+        let a = self.normalized_label.to_lowercase();
+        let b = other.normalized_label.to_lowercase();
         a == b || self.aliases.iter().any(|alias| alias.to_lowercase() == b)
     }
 }
@@ -722,7 +722,7 @@ grounded question answering through a hybrid retrieval pipeline.
 
 ## Data Flow
 
-1. **Ingestion**: Documents enter via HTTP upload or MCP `upload_documents` tool
+1. **Ingestion**: Documents enter via HTTP upload or MCP `create_documents` tool
 2. **Extraction**: Text is extracted using format-specific parsers (PDF, DOCX, etc.)
 3. **Chunking**: Content is split into ~2800-character semantic chunks with 10% overlap
 4. **Embedding**: Each chunk is embedded via OpenAI `text-embedding-3-small`
@@ -1023,7 +1023,7 @@ if [[ "$ENTITY_COUNT" -gt 0 ]]; then
   echo "$ENTITIES_RESP" | jq -r '
     sort_by(-(.support_count // .supportCount // 0)) |
     .[:10] | .[] |
-    "    \(.support_count // .supportCount // 0)x [\(.entity_type // .entityType)] \(.canonical_label // .canonicalLabel)"'
+    "    \(.support_count // .supportCount // 0)x [\(.entity_type // .entityType)] \(.normalized_label // .normalizedLabel)"'
 
   echo ""
   log "  Top 10 relation types:"
@@ -1045,8 +1045,8 @@ section "Phase 8: AI assistant Q&A"
 set +e
 
 # Create a query session
-SESSION_RESP=$(api_json POST "/query/sessions" \
-  -d "{\"workspaceId\":\"$WS_ID\",\"libraryId\":\"$LIB_ID\",\"title\":\"Quality Gate Test\"}")
+SESSION_RESP=$(api_json POST "/query/libraries/$LIB_ID/sessions" \
+  -d "{\"title\":\"Quality Gate Test\"}")
 SESSION_ID=$(echo "$SESSION_RESP" | jq -r '.id // empty')
 
 if [[ -z "$SESSION_ID" ]]; then

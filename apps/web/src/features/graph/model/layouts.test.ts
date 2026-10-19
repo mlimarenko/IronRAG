@@ -1,11 +1,14 @@
-import Graph from 'graphology'
 import { describe, expect, it } from 'vitest'
 
 import { GRAPH_LAYOUT_OPTIONS } from './config'
 import { applyGraphLayout } from './layouts'
+import { LayoutGraph, type LayoutTopology } from './layoutGraph'
 
-function buildSyntheticGraph(): Graph {
-  const graph = new Graph()
+/**
+ * Synthetic 8-node topology over the typed-array LayoutGraph shim — the same
+ * structure every geometric layout receives from the worker.
+ */
+function buildSyntheticTopology(): LayoutTopology {
   const nodes = [
     ['doc-1', 'document', 7],
     ['doc-2', 'document', 4],
@@ -16,40 +19,60 @@ function buildSyntheticGraph(): Graph {
     ['entity-5', 'location', 2],
     ['entity-6', 'process', 1],
   ] as const
+  const edges: Array<[number, number]> = [
+    [0, 2],
+    [0, 3],
+    [1, 4],
+    [2, 3],
+    [2, 4],
+    [4, 5],
+    [5, 6],
+  ]
 
-  nodes.forEach(([id, nodeType, size]) => {
-    graph.addNode(id, {
-      label: id,
-      nodeType,
-      size,
-      x: 0,
-      y: 0,
-    })
-  })
+  const count = nodes.length
+  const degrees = new Uint32Array(count)
+  for (const [source, target] of edges) {
+    degrees[source]! += 1
+    degrees[target]! += 1
+  }
+  const neighborOffsets = new Uint32Array(count + 1)
+  for (let node = 0; node < count; node += 1) {
+    neighborOffsets[node + 1] = neighborOffsets[node]! + degrees[node]!
+  }
+  const neighborIndices = new Uint32Array(neighborOffsets[count]!)
+  const cursor = neighborOffsets.slice(0, count)
+  for (const [source, target] of edges) {
+    neighborIndices[cursor[source]!] = target
+    cursor[source]! += 1
+    neighborIndices[cursor[target]!] = source
+    cursor[target]! += 1
+  }
 
-  graph.addEdge('doc-1', 'entity-1')
-  graph.addEdge('doc-1', 'entity-2')
-  graph.addEdge('doc-2', 'entity-3')
-  graph.addEdge('entity-1', 'entity-2')
-  graph.addEdge('entity-1', 'entity-3')
-  graph.addEdge('entity-3', 'entity-4')
-  graph.addEdge('entity-4', 'entity-5')
-
-  return graph
+  return {
+    count,
+    labels: nodes.map(([id]) => id),
+    types: nodes.map(([, type]) => type),
+    sizes: new Float32Array(nodes.map(([, , size]) => size)),
+    neighborOffsets,
+    neighborIndices,
+  }
 }
 
-function collectPositions(graph: Graph): Record<string, [number, number]> {
+function collectPositions(graph: LayoutGraph): Record<string, [number, number]> {
   const positions: Record<string, [number, number]> = {}
-  graph.forEachNode((node, attrs) => {
-    positions[node] = [attrs.x as number, attrs.y as number]
+  graph.forEachNode((node) => {
+    positions[node] = [
+      graph.getNodeAttribute(node, 'x') as number,
+      graph.getNodeAttribute(node, 'y') as number,
+    ]
   })
   return positions
 }
 
 describe('graph layouts', () => {
   it.each(GRAPH_LAYOUT_OPTIONS)('$id assigns finite deterministic positions', (option) => {
-    const first = buildSyntheticGraph()
-    const second = buildSyntheticGraph()
+    const first = new LayoutGraph(buildSyntheticTopology())
+    const second = new LayoutGraph(buildSyntheticTopology())
 
     applyGraphLayout(first, option.id)
     applyGraphLayout(second, option.id)

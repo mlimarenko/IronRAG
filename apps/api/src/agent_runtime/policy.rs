@@ -5,7 +5,6 @@ use crate::domains::agent_runtime::{
 };
 
 pub const DEFAULT_RUNTIME_POLICY_REASON_CODE: &str = "runtime_policy";
-pub const DEFAULT_RUNTIME_POLICY_REASON_SUMMARY: &str = "runtime policy decision";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RuntimePolicyContext {

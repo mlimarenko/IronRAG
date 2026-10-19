@@ -3,8 +3,8 @@
 // `import { Catalog } from '@/shared/api'` without reaching into the generated/
 // sub-tree (an ESLint boundary rule will be added with the feature-folder
 // migration in a later sprint).
-export { Catalog, Ops } from './generated'
-export { ApiError, unwrap } from './runtime'
+export { Catalog } from './generated'
+export { ApiError, getApiProblem, unwrap } from './runtime'
 
 // Generated TanStack Query 5 query/mutation options + key factories for
 // server-state hooks.
@@ -20,10 +20,42 @@ export type {
   WebBoundaryPolicy,
   WebIngestMode,
   WebIngestPattern,
-  WebIngestUrlFilter,
 } from './generated'
-export { documentsApi, librarySnapshotApi, DOCUMENT_LIST_STATUS_FILTERS } from './documents'
+export {
+  documentsApi,
+  documentListQuery,
+  documentFacetsInfiniteOptions,
+  librarySnapshotApi,
+} from './documents'
+export { auditApi, auditFacetQuery, auditFacetsInfiniteOptions, auditListQuery } from './audit'
 export type {
+  AuditColumnFilters,
+  AuditEventPage,
+  AuditFacetParams,
+  AuditFacetsResponse,
+  AuditFacetValue,
+  AuditGridColumnId,
+  AuditListParams,
+  AuditSearchHints,
+  AuditSelectedValue,
+  AuditSortOrder,
+} from './audit'
+export { adminLibraryFacetsInfiniteOptions, adminLibraryListQuery } from './libraries'
+export type { AdminLibraryFacetParams, AdminLibraryListParams } from './libraries'
+export type {
+  AdminLibraryColumnFilters,
+  AdminLibraryFacetColumn,
+  AdminLibraryFacetsResponse,
+  AdminLibrarySearchHints,
+} from './libraries'
+export type {
+  DocumentColumnFilters,
+  DocumentFacetColumn,
+  DocumentFacetParams,
+  DocumentFacetRawValue,
+  DocumentFacetsResponse,
+  DocumentFacetValue,
+  DocumentIndexingFilter,
   DocumentListPageResponse,
   DocumentListSortKey,
   DocumentListSortOrder,
@@ -32,13 +64,7 @@ export type {
   WebIngestRunPageItem,
 } from './documents'
 export { ASYNC_OPERATION_TERMINAL_STATES } from './ops'
-export type { AsyncOperationDetail, AsyncOperationStatus } from './ops'
+export type { AsyncOperationDetail } from './ops'
 export { queryApi } from './query'
 export { knowledgeApi } from './knowledge'
-export {
-  ADMIN_MODEL_CATALOG_QUERY_KEY,
-  adminApi,
-  adminModelCatalogOptions,
-  adminModelCatalogQueryKey,
-} from './admin'
-export type { ListModelsParams } from './admin'
+export { adminApi } from './admin'

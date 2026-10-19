@@ -31,8 +31,8 @@ pub(crate) const MAX_PROMPT_HISTORY_TURN_CHARS: usize = 1_200;
 pub(crate) const MAX_EFFECTIVE_QUERY_HISTORY_TURNS: usize = 3;
 pub(crate) const MAX_EFFECTIVE_QUERY_TURN_CHARS: usize = 220;
 pub(crate) const MAX_GROUNDED_ANSWER_TOOL_HISTORY_TURNS: usize = 6;
-pub(crate) const MAX_GROUNDED_ANSWER_TOOL_HISTORY_CHARS: usize = 2_000;
-pub(crate) const CANONICAL_QUERY_MODE: RuntimeQueryMode = RuntimeQueryMode::Mix;
+pub(crate) const MAX_GROUNDED_ANSWER_TOOL_HISTORY_CHARS: usize = 1_200;
+pub(crate) const GROUNDED_ANSWER_QUERY_MODE: RuntimeQueryMode = RuntimeQueryMode::Mix;
 pub(crate) const MAX_DETAIL_TECHNICAL_FACT_REFERENCES: usize = 24;
 pub(crate) const MAX_DETAIL_PREPARED_SEGMENT_REFERENCES: usize = 48;
 pub(crate) const MAX_DETAIL_PREPARED_SEGMENT_REFERENCES_PER_REVISION: usize = 8;
@@ -44,7 +44,7 @@ pub(crate) const MAX_DETAIL_GRAPH_EDGE_REFERENCES: usize = 96;
 pub(crate) const PREPARED_SEGMENT_FOCUS_MIN_TOKEN_LEN: usize = 4;
 const MAX_RUNTIME_FAILURE_PUBLIC_SUMMARY_CHARS: usize = 120;
 
-/// Returns a public-safe summary only for a canonical typed failure code.
+/// Returns a public-safe summary only for a validated typed failure code.
 ///
 /// Runtime diagnostics are intentionally not accepted here. Failure codes are
 /// protocol identifiers and therefore must use bounded ASCII snake_case. This
@@ -54,13 +54,45 @@ pub(crate) fn runtime_failure_summary_from_typed_code(code: &str) -> Option<Stri
     let bytes = code.as_bytes();
     let first = bytes.first().copied()?;
     let last = bytes.last().copied()?;
-    let is_canonical = bytes.len() <= MAX_RUNTIME_FAILURE_PUBLIC_SUMMARY_CHARS
+    let is_normalized = bytes.len() <= MAX_RUNTIME_FAILURE_PUBLIC_SUMMARY_CHARS
         && first.is_ascii_lowercase()
         && last.is_ascii_alphanumeric()
         && bytes
             .iter()
             .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || *byte == b'_');
-    is_canonical.then(|| code.to_string())
+    is_normalized.then(|| code.to_string())
+}
+
+/// Combines the typed failure code with an optional value-free detail token
+/// (`<code>: <detail>`) for the operator-facing redacted summary column.
+/// The detail is produced only by typed classifiers
+/// ([`crate::integrations::retry::ProviderCallError::redacted_detail`] and
+/// friends); the alphabet filter here is defense in depth, not a redaction
+/// mechanism — free-form diagnostics must never reach this function.
+pub(crate) fn combined_runtime_failure_summary(
+    code: &str,
+    detail_redacted: Option<&str>,
+) -> Option<String> {
+    let base = runtime_failure_summary_from_typed_code(code)?;
+    let Some(detail) = detail_redacted.and_then(sanitized_runtime_failure_detail) else {
+        return Some(base);
+    };
+    let mut combined = base;
+    combined.push_str(": ");
+    combined.push_str(&detail);
+    Some(combined.chars().take(MAX_RUNTIME_FAILURE_PUBLIC_SUMMARY_CHARS).collect())
+}
+
+fn sanitized_runtime_failure_detail(detail: &str) -> Option<String> {
+    let sanitized: String = detail
+        .chars()
+        .filter(|ch| {
+            ch.is_ascii_lowercase() || ch.is_ascii_digit() || matches!(ch, '_' | ' ' | '=' | '-')
+        })
+        .take(MAX_RUNTIME_FAILURE_PUBLIC_SUMMARY_CHARS)
+        .collect();
+    let trimmed = sanitized.trim();
+    if trimmed.is_empty() { None } else { Some(trimmed.to_string()) }
 }
 
 /// Identifies protocol-level failures whose accompanying summary originates
@@ -191,7 +223,7 @@ pub struct QueryTurnExecutionResult {
     /// Persisted finalizer-owned answer disposition. Live and result-cache
     /// replay paths both read this from the execution context bundle.
     pub answer_disposition: crate::domains::query::QueryAnswerDisposition,
-    /// Canonical typed compiler output for the answer. MCP completion policy
+    /// Compiled typed query output for the answer. MCP completion policy
     /// consumes this directly instead of reclassifying the raw question.
     pub query_ir: Option<QueryIR>,
     /// Typed clarification metadata persisted with the final answer outcome.
@@ -199,12 +231,24 @@ pub struct QueryTurnExecutionResult {
 }
 
 #[derive(Clone, Default)]
-pub struct QueryService;
+pub struct QueryService {
+    #[cfg(feature = "test-support")]
+    replay_read_pause: std::sync::Arc<tokio::sync::Mutex<Option<QueryReadPause>>>,
+    #[cfg(feature = "test-support")]
+    execution_read_pause: std::sync::Arc<tokio::sync::Mutex<Option<QueryReadPause>>>,
+}
+
+#[cfg(feature = "test-support")]
+struct QueryReadPause {
+    library_id: Uuid,
+    reached: tokio::sync::oneshot::Sender<()>,
+    release: tokio::sync::oneshot::Receiver<()>,
+}
 
 impl QueryService {
     #[must_use]
-    pub const fn new() -> Self {
-        Self
+    pub fn new() -> Self {
+        Self::default()
     }
 }
 

@@ -2,18 +2,14 @@ import type {
   AuditEventPageResponse,
   AuditEventResponse,
   OpsLibraryStateResponse,
-  PriceCatalogEntryResponse,
   TokenResponse,
 } from '@/shared/api/generated'
 import type {
-  AIModelOption,
-  AIProvider,
   APIToken,
   AuditEvent,
   AuditEventPage,
   OperationsSnapshot,
   OperationsWarning,
-  PricingRule,
 } from '@/shared/types'
 
 function tokenStatus(value: string): APIToken['status'] {
@@ -120,33 +116,6 @@ export function mapToken(raw: TokenResponse): APIToken {
   return token
 }
 
-export function mapPricing(
-  raw: PriceCatalogEntryResponse,
-  providers: AIProvider[],
-  models: AIModelOption[],
-): PricingRule {
-  const model = models.find((m) => m.id === raw.modelCatalogId)
-  const provider = model ? providers.find((p) => p.id === model.providerCatalogId) : undefined
-  const pricing: PricingRule = {
-    id: raw.id,
-    modelCatalogId: raw.modelCatalogId ?? '',
-    provider: provider?.displayName ?? '',
-    model: model?.modelName ?? raw.modelCatalogId ?? '',
-    billingUnit: raw.billingUnit ?? '',
-    unitPrice: Number.parseFloat(raw.unitPrice ?? '') || 0,
-    currency: raw.currencyCode ?? 'USD',
-    effectiveFrom: raw.effectiveFrom ? new Date(raw.effectiveFrom).toISOString().slice(0, 10) : '',
-    sourceOrigin: raw.catalogScope ?? 'catalog',
-  }
-  if (raw.workspaceId) {
-    pricing.workspaceId = raw.workspaceId
-  }
-  if (raw.effectiveTo) {
-    pricing.effectiveTo = new Date(raw.effectiveTo).toISOString().slice(0, 10)
-  }
-  return pricing
-}
-
 export function mapOps(raw: OpsLibraryStateResponse): OperationsSnapshot {
   const state = raw.state
   return {
@@ -214,8 +183,7 @@ export function mapAudit(raw: AuditEventResponse): AuditEvent {
 export function mapAuditPage(raw: AuditEventPageResponse): AuditEventPage {
   return {
     items: raw.items.map(mapAudit),
+    nextCursor: raw.nextCursor ?? null,
     total: raw.total,
-    limit: raw.limit,
-    offset: raw.offset,
   }
 }

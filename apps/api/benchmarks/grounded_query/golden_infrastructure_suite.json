@@ -27,7 +27,7 @@
       "minTechnicalFactReferenceCount": 0,
       "minEntityReferenceCount": 0,
       "minRelationReferenceCount": 0,
-      "allowedVerificationStates": ["verified", "unverified"]
+      "allowedVerificationStates": ["verified", "partially_supported"]
     },
     {
       "id": "k8s_service_types",
@@ -43,7 +43,7 @@
       "minTechnicalFactReferenceCount": 0,
       "minEntityReferenceCount": 0,
       "minRelationReferenceCount": 0,
-      "allowedVerificationStates": ["verified", "unverified"]
+      "allowedVerificationStates": ["verified", "partially_supported"]
     },
     {
       "id": "k8s_deployment_strategy",
@@ -58,22 +58,30 @@
       "minTechnicalFactReferenceCount": 0,
       "minEntityReferenceCount": 0,
       "minRelationReferenceCount": 0,
-      "allowedVerificationStates": ["verified", "unverified"]
+      "allowedVerificationStates": ["verified", "partially_supported"]
     },
     {
       "id": "k8s_components_overview",
-      "question": "What are the main components of the Kubernetes control plane?",
-      "searchQuery": "Kubernetes control plane components kube-apiserver etcd scheduler controller-manager",
+      "question": "What capabilities does Kubernetes provide for managing containerized workloads?",
+      "searchQuery": "Kubernetes capabilities service discovery load balancing self-healing horizontal scaling storage orchestration",
       "expectedDocumentsContains": ["k8s_overview"],
-      "searchRequiredAll": ["control plane"],
-      "answerRequiredAny": ["kube-apiserver", "API server", "etcd", "scheduler", "controller"],
+      "searchRequiredAll": [
+    "bin packing"
+   ],
+      "answerRequiredAny": [
+    "service discovery",
+    "load balancing",
+    "self-healing",
+    "horizontal scaling",
+    "storage orchestration"
+   ],
       "answerForbiddenAny": [],
       "minChunkReferenceCount": 1,
       "minPreparedSegmentReferenceCount": 0,
       "minTechnicalFactReferenceCount": 0,
       "minEntityReferenceCount": 0,
       "minRelationReferenceCount": 0,
-      "allowedVerificationStates": ["verified", "unverified"]
+      "allowedVerificationStates": ["verified", "partially_supported"]
     },
     {
       "id": "cross_k8s_terraform_node_config",
@@ -89,7 +97,7 @@
       "minTechnicalFactReferenceCount": 0,
       "minEntityReferenceCount": 0,
       "minRelationReferenceCount": 0,
-      "allowedVerificationStates": ["verified", "unverified"]
+      "allowedVerificationStates": ["verified", "partially_supported"]
     },
     {
       "id": "cross_k8s_docker_healthchecks",
@@ -104,7 +112,7 @@
       "minTechnicalFactReferenceCount": 0,
       "minEntityReferenceCount": 0,
       "minRelationReferenceCount": 0,
-      "allowedVerificationStates": ["verified", "unverified"]
+      "allowedVerificationStates": ["verified", "partially_supported"]
     },
     {
       "id": "k8s_configmap_usage",
@@ -119,7 +127,7 @@
       "minTechnicalFactReferenceCount": 0,
       "minEntityReferenceCount": 0,
       "minRelationReferenceCount": 0,
-      "allowedVerificationStates": ["verified", "unverified"]
+      "allowedVerificationStates": ["verified", "partially_supported"]
     },
     {
       "id": "k8s_secrets_vs_configmaps",
@@ -135,7 +143,7 @@
       "minTechnicalFactReferenceCount": 0,
       "minEntityReferenceCount": 0,
       "minRelationReferenceCount": 0,
-      "allowedVerificationStates": ["verified", "unverified"]
+      "allowedVerificationStates": ["verified", "partially_supported"]
     }
   ]
 }

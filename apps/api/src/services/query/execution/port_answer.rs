@@ -15,7 +15,7 @@ use super::technical_literals::{
     technical_literal_focus_keywords,
 };
 use super::types::RuntimeMatchedChunk;
-use super::{CanonicalAnswerEvidence, technical_answer::document_focus_preference};
+use super::{AuthoritativeAnswerEvidence, technical_answer::document_focus_preference};
 
 fn fact_kind_matches(
     fact: &crate::infra::knowledge_rows::KnowledgeTechnicalFactRow,
@@ -100,7 +100,7 @@ fn select_port_scope_ids(
 }
 
 fn collect_document_fact_values(
-    evidence: &CanonicalAnswerEvidence,
+    evidence: &AuthoritativeAnswerEvidence,
     document_id: Uuid,
     kind: TechnicalFactKind,
 ) -> Vec<String> {
@@ -115,7 +115,7 @@ fn collect_document_fact_values(
 }
 
 fn unique_document_protocol(
-    evidence: &CanonicalAnswerEvidence,
+    evidence: &AuthoritativeAnswerEvidence,
     document_id: Uuid,
 ) -> Option<String> {
     let protocols =
@@ -150,7 +150,7 @@ fn port_fact_score(
 pub(super) fn build_port_and_protocol_answer_from_facts(
     question: &str,
     query_ir: &QueryIR,
-    evidence: &CanonicalAnswerEvidence,
+    evidence: &AuthoritativeAnswerEvidence,
     chunks: &[RuntimeMatchedChunk],
 ) -> Option<String> {
     let intents = classify_question_or_ir_intents(question, query_ir);
@@ -221,7 +221,7 @@ pub(super) fn build_port_and_protocol_answer_from_facts(
 pub(super) fn build_port_answer_from_facts(
     question: &str,
     query_ir: &QueryIR,
-    evidence: &CanonicalAnswerEvidence,
+    evidence: &AuthoritativeAnswerEvidence,
     chunks: &[RuntimeMatchedChunk],
 ) -> Option<String> {
     let intents = classify_question_or_ir_intents(question, query_ir);

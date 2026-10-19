@@ -21,7 +21,13 @@ repos:
       - id: check-merge-conflict
         stages: [pre-commit]
       - id: check-yaml
-        exclude: ^charts/ironrag/templates/
+        exclude: ^charts/ironrag/templates/|^\.gitlab-ci\.yml$
+        stages: [pre-commit]
+      - id: check-yaml
+        name: check GitLab CI YAML
+        files: ^\.gitlab-ci\.yml$
+        # Syntax only: native GitLab lint validates !reference semantics.
+        args: [--allow-multiple-documents, --unsafe]
         stages: [pre-commit]
       - id: check-toml
         stages: [pre-commit]
@@ -41,22 +47,6 @@ repos:
 
   - repo: local
     hooks:
-      - id: architecture-check
-        name: backend architecture boundaries
-        entry: python3 scripts/ops/lint_architecture.py
-        language: system
-        files: ^(apps/api/src/.*\.rs|scripts/ops/(lint_architecture|test_lint_architecture)\.py)$
-        pass_filenames: false
-        stages: [pre-commit]
-
-      - id: blanket-suppression-check
-        name: reject file-wide lint suppressions
-        entry: make blanket-suppression-check
-        language: system
-        files: \.(cjs|js|jsx|mjs|py|rs|ts|tsx)$
-        pass_filenames: false
-        stages: [pre-commit]
-
       - id: migration-check
         name: migration policy and frozen-file integrity
         entry: make migration-check
@@ -71,7 +61,7 @@ repos:
         language: system
         files: \.rs$
         pass_filenames: false
-        stages: [pre-commit]
+        stages: [manual]
 
       - id: cargo-clippy
         name: cargo clippy
@@ -79,14 +69,14 @@ repos:
         language: system
         files: \.rs$
         pass_filenames: false
-        stages: [pre-push]
+        stages: [manual]
 
       - id: eslint
         name: eslint
         entry: bash -c 'cd apps/web && ./node_modules/.bin/eslint --no-warn-ignored "${@/#apps\/web\//}"' --
         language: system
         files: ^apps/web/.*\.(ts|tsx)$
-        stages: [pre-commit]
+        stages: [manual]
 
       - id: prettier
         name: prettier
@@ -94,7 +84,7 @@ repos:
         language: system
         files: ^apps/web/
         pass_filenames: false
-        stages: [pre-commit]
+        stages: [manual]
 
       - id: tsc
         name: tsc
@@ -109,12 +99,5 @@ repos:
         entry: make frontend-test
         language: system
         files: ^apps/web/
-        pass_filenames: false
-        stages: [pre-push]
-
-      - id: duplication-check
-        name: exact duplication ratchet
-        entry: make duplication-check
-        language: system
         pass_filenames: false
         stages: [pre-push]

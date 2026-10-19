@@ -7,12 +7,14 @@ use crate::{
     app::state::AppState,
     infra::repositories::{
         self, RuntimeGraphDocumentLinkRow, RuntimeGraphEdgeRow, RuntimeGraphNodeRow,
+        RuntimeGraphProjectionIdentity,
     },
     interfaces::http::router_support::ApiError,
-    services::graph::canonical_projection::{
-        canonicalize_runtime_graph_document_links, canonicalize_runtime_graph_nodes,
-        canonicalize_runtime_graph_projection,
+    services::graph::normalized_projection::{
+        normalize_runtime_graph_document_links, normalize_runtime_graph_nodes,
+        normalize_runtime_graph_projection,
     },
+    services::knowledge::runtime_read::{ensure_selected_graph_current, selected_graph_projection},
 };
 
 const DEFAULT_GRAPH_ENTITY_LIMIT: usize = 200;
@@ -135,7 +137,7 @@ pub(crate) async fn get_graph_topology(
     limit: Option<usize>,
 ) -> Result<serde_json::Value, ApiError> {
     let library = state
-        .canonical_services
+        .application_services
         .catalog
         .get_library(state, library_id)
         .await
@@ -154,7 +156,8 @@ pub(crate) async fn get_graph_topology(
         return Ok(empty_graph_payload());
     }
 
-    let projection_version = snapshot.projection_version;
+    let selected_projection = selected_graph_projection(&snapshot).map_err(ApiError::from)?;
+    let projection_version = selected_projection.projection_version;
     let entity_limit = limit.unwrap_or(DEFAULT_GRAPH_ENTITY_LIMIT).clamp(1, MAX_GRAPH_ENTITY_LIMIT);
     let total_entities = repositories::count_admitted_runtime_graph_entities_by_library(
         &state.persistence.postgres,
@@ -188,15 +191,15 @@ pub(crate) async fn get_graph_topology(
     .await
     .map_err(|error| ApiError::internal_with_log(error, "internal"))?;
 
-    let canonical_projection = canonicalize_runtime_graph_projection(entity_rows, edge_rows);
+    let normalized_projection = normalize_runtime_graph_projection(entity_rows, edge_rows);
     let ranked = select_ranked_subgraph(
-        canonical_projection.nodes,
-        canonical_projection.edges,
+        normalized_projection.nodes,
+        normalized_projection.edges,
         entity_limit,
     );
     let mut visible_target_ids: Vec<Uuid> = ranked.entities.iter().map(|row| row.id).collect();
     visible_target_ids.extend(ranked.relations.iter().map(|row| row.id));
-    visible_target_ids.extend(canonical_projection.node_id_remap.keys().copied());
+    visible_target_ids.extend(normalized_projection.node_id_remap.keys().copied());
     let document_link_rows = repositories::list_runtime_graph_document_links_by_target_ids(
         &state.persistence.postgres,
         library_id,
@@ -205,10 +208,10 @@ pub(crate) async fn get_graph_topology(
     )
     .await
     .map_err(|error| ApiError::internal_with_log(error, "internal"))?;
-    let document_link_rows = canonicalize_runtime_graph_document_links(
+    let document_link_rows = normalize_runtime_graph_document_links(
         document_link_rows,
         &ranked.entities,
-        &canonical_projection.node_id_remap,
+        &normalized_projection.node_id_remap,
     );
     let selected = select_graph_topology_slice(
         ranked.entities,
@@ -238,6 +241,7 @@ pub(crate) async fn get_graph_topology(
             .then_with(|| left.external_key.cmp(&right.external_key))
     });
 
+    ensure_selected_graph_current(state, selected_projection).await.map_err(ApiError::from)?;
     Ok(json!({
         "documents": documents.iter().map(|doc| json!({
             "documentId": doc.document_id,
@@ -278,37 +282,48 @@ pub(crate) async fn get_graph_topology(
     }))
 }
 
+async fn load_nonempty_graph_projection(
+    state: &AppState,
+    library_id: Uuid,
+) -> Result<Option<RuntimeGraphProjectionIdentity>, ApiError> {
+    let Some(snapshot) =
+        repositories::get_runtime_graph_snapshot(&state.persistence.postgres, library_id)
+            .await
+            .map_err(|error| ApiError::internal_with_log(error, "internal"))?
+    else {
+        return Ok(None);
+    };
+
+    if snapshot.graph_status == "empty" || snapshot.projection_version <= 0 {
+        return Ok(None);
+    }
+
+    selected_graph_projection(&snapshot).map(Some).map_err(ApiError::from)
+}
+
 pub(crate) async fn search_entities(
     state: &AppState,
     library_id: Uuid,
     query: &str,
     limit: usize,
 ) -> Result<Vec<serde_json::Value>, ApiError> {
-    let Some(snapshot) =
-        repositories::get_runtime_graph_snapshot(&state.persistence.postgres, library_id)
-            .await
-            .map_err(|error| ApiError::internal_with_log(error, "internal"))?
-    else {
+    let Some(selected_projection) = load_nonempty_graph_projection(state, library_id).await? else {
         return Ok(Vec::new());
     };
-
-    if snapshot.graph_status == "empty" || snapshot.projection_version <= 0 {
-        return Ok(Vec::new());
-    }
-
     let rows = repositories::search_admitted_runtime_graph_entities_by_query_text(
         &state.persistence.postgres,
         library_id,
-        snapshot.projection_version,
+        selected_projection.projection_version,
         query,
         limit.clamp(1, MAX_ENTITY_SEARCH_LIMIT) as i64,
     )
     .await
     .map_err(|error| ApiError::internal_with_log(error, "internal"))?;
 
-    let canonical_nodes = canonicalize_runtime_graph_nodes(rows);
+    let normalized_nodes = normalize_runtime_graph_nodes(rows);
 
-    Ok(canonical_nodes
+    ensure_selected_graph_current(state, selected_projection).await.map_err(ApiError::from)?;
+    Ok(normalized_nodes
         .nodes
         .into_iter()
         .map(|row| {
@@ -328,19 +343,10 @@ pub(crate) async fn list_relations(
     library_id: Uuid,
     limit: usize,
 ) -> Result<Vec<serde_json::Value>, ApiError> {
-    let Some(snapshot) =
-        repositories::get_runtime_graph_snapshot(&state.persistence.postgres, library_id)
-            .await
-            .map_err(|error| ApiError::internal_with_log(error, "internal"))?
-    else {
+    let Some(selected_projection) = load_nonempty_graph_projection(state, library_id).await? else {
         return Ok(Vec::new());
     };
-
-    if snapshot.graph_status == "empty" || snapshot.projection_version <= 0 {
-        return Ok(Vec::new());
-    }
-
-    let projection_version = snapshot.projection_version;
+    let projection_version = selected_projection.projection_version;
     let relation_rows = repositories::list_top_admitted_runtime_graph_relations_by_library(
         &state.persistence.postgres,
         library_id,
@@ -366,11 +372,12 @@ pub(crate) async fn list_relations(
     )
     .await
     .map_err(|error| ApiError::internal_with_log(error, "internal"))?;
-    let canonical_projection = canonicalize_runtime_graph_projection(node_rows, relation_rows);
+    let normalized_projection = normalize_runtime_graph_projection(node_rows, relation_rows);
     let node_labels: HashMap<Uuid, &str> =
-        canonical_projection.nodes.iter().map(|row| (row.id, row.label.as_str())).collect();
+        normalized_projection.nodes.iter().map(|row| (row.id, row.label.as_str())).collect();
 
-    Ok(canonical_projection
+    ensure_selected_graph_current(state, selected_projection).await.map_err(ApiError::from)?;
+    Ok(normalized_projection
         .edges
         .iter()
         .map(|row| {
@@ -392,14 +399,19 @@ pub(crate) async fn get_communities(
     library_id: Uuid,
     limit: usize,
 ) -> Result<Vec<serde_json::Value>, ApiError> {
-    let projection_version =
+    let snapshot =
         match repositories::get_runtime_graph_snapshot(&state.persistence.postgres, library_id)
             .await
             .map_err(|error| ApiError::internal_with_log(error, "internal"))?
         {
-            Some(snapshot) => snapshot.projection_version,
+            Some(snapshot) => snapshot,
             None => return Ok(Vec::new()),
         };
+    if snapshot.graph_status == "empty" {
+        return Ok(Vec::new());
+    }
+    let selected_projection = selected_graph_projection(&snapshot).map_err(ApiError::from)?;
+    let projection_version = selected_projection.projection_version;
 
     let communities = sqlx::query_as::<_, (Uuid, Option<String>, Vec<String>, i32, i64)>(
         "WITH top_communities AS (
@@ -451,6 +463,7 @@ pub(crate) async fn get_communities(
     .await
     .map_err(|error| ApiError::internal_with_log(error, "internal"))?;
 
+    ensure_selected_graph_current(state, selected_projection).await.map_err(ApiError::from)?;
     Ok(communities
         .into_iter()
         .map(|(community_id, summary, top_entities, node_count, edge_count)| {
@@ -476,7 +489,7 @@ mod tests {
         RuntimeGraphNodeRow {
             id: Uuid::now_v7(),
             library_id: Uuid::now_v7(),
-            canonical_key: format!("entity:{label}"),
+            identity_key: format!("entity:{label}"),
             label: label.to_string(),
             node_type: "entity".to_string(),
             aliases_json: json!([]),
@@ -501,7 +514,7 @@ mod tests {
             from_node_id,
             to_node_id,
             relation_type: relation_type.to_string(),
-            canonical_key: format!("{from_node_id}:{relation_type}:{to_node_id}"),
+            identity_key: format!("{from_node_id}:{relation_type}:{to_node_id}"),
             summary: Some(format!("{relation_type} summary")),
             weight: None,
             support_count,

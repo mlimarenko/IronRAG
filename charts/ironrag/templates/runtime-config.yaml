@@ -10,6 +10,21 @@ data:
   IRONRAG_DATABASE_MAX_CONNECTIONS: {{ .Values.app.databaseMaxConnections | quote }}
   IRONRAG_API_REPLICAS: {{ include "ironrag.apiCapacityReplicas" . | quote }}
   IRONRAG_WORKER_REPLICAS: {{ include "ironrag.workerCapacityReplicas" . | quote }}
+  IRONRAG_QUERY_TURN_MAX_CONCURRENT: {{ .Values.app.queryTurn.maxConcurrent | quote }}
+  IRONRAG_QUERY_TURN_ADMISSION_QUEUE: {{ .Values.app.queryTurn.admissionQueue | quote }}
+  IRONRAG_QUERY_TURN_ADMISSION_TIMEOUT_MS: {{ .Values.app.queryTurn.admissionTimeoutMs | quote }}
+  IRONRAG_LOGIN_RATE_LIMIT_TRUSTED_PROXY_HOPS: {{ .Values.app.loginRateLimit.trustedProxyHops | quote }}
+  IRONRAG_INGESTION_MAX_PARALLEL_JOBS_GLOBAL: {{ .Values.app.ingestion.maxParallelJobsGlobal | quote }}
+  IRONRAG_INGESTION_MAX_PARALLEL_JOBS_PER_WORKSPACE: {{ .Values.app.ingestion.maxParallelJobsPerWorkspace | quote }}
+  IRONRAG_INGESTION_MAX_PARALLEL_JOBS_PER_LIBRARY: {{ .Values.app.ingestion.maxParallelJobsPerLibrary | quote }}
+  IRONRAG_DOCLING_PAGE_BATCH_SIZE: {{ .Values.app.ingestion.doclingPageBatchSize | quote }}
+  IRONRAG_DOCLING_PAGE_STREAM_WINDOW_PAGES: {{ .Values.app.ingestion.doclingPageStreamWindowPages | quote }}
+  IRONRAG_DOCLING_MAX_CONCURRENCY: {{ .Values.app.ingestion.doclingMaxConcurrency | quote }}
+  IRONRAG_DOCLING_ACQUIRE_TIMEOUT_SECS: {{ .Values.app.ingestion.doclingAcquireTimeoutSecs | quote }}
+  IRONRAG_INGESTION_HEAVY_PIPELINE_PARALLELISM: {{ .Values.app.ingestion.heavyPipelineParallelism | quote }}
+  IRONRAG_INGESTION_HEAVY_ACQUIRE_TIMEOUT_SECS: {{ .Values.app.ingestion.heavyAcquireTimeoutSecs | quote }}
+  IRONRAG_INGESTION_EMBEDDING_PARALLELISM: {{ .Values.app.ingestion.embeddingParallelism | quote }}
+  IRONRAG_INGESTION_GRAPH_EXTRACT_PARALLELISM_PER_DOC: {{ .Values.app.ingestion.graphExtractParallelismPerDocument | quote }}
   IRONRAG_KNOWLEDGE_PLANE_BACKEND: {{ .Values.app.knowledgePlaneBackend | quote }}
   IRONRAG_QUERY_ANSWER_SOURCE_LINKS_ENABLED: {{ .Values.app.queryAnswerSourceLinksEnabled | quote }}
   IRONRAG_PROVIDER_CONCURRENCY_MAX_OUTBOUND: {{ .Values.app.providerConcurrency.maxOutbound | quote }}
@@ -17,6 +32,11 @@ data:
   IRONRAG_PROVIDER_CONCURRENCY_ACQUIRE_TIMEOUT_MS: {{ .Values.app.providerConcurrency.acquireTimeoutMs | quote }}
   IRONRAG_PROVIDER_CONCURRENCY_REGISTRY_MAX_ENTRIES: {{ .Values.app.providerConcurrency.registryMaxEntries | quote }}
   IRONRAG_PROVIDER_CONCURRENCY_REGISTRY_IDLE_TTL_SECONDS: {{ .Values.app.providerConcurrency.registryIdleTtlSeconds | quote }}
+  IRONRAG_PROVIDER_RATE_LIMIT_REQUESTS_PER_SECOND: {{ .Values.app.providerRateLimit.requestsPerSecond | quote }}
+  IRONRAG_PROVIDER_RATE_LIMIT_BURST: {{ .Values.app.providerRateLimit.burst | quote }}
+  IRONRAG_PROVIDER_RETRY_MAX_ATTEMPTS: {{ .Values.app.providerRetry.maxAttempts | quote }}
+  IRONRAG_PROVIDER_RETRY_INITIAL_BACKOFF_MS: {{ .Values.app.providerRetry.initialBackoffMs | quote }}
+  IRONRAG_PROVIDER_RETRY_MAX_BACKOFF_MS: {{ .Values.app.providerRetry.maxBackoffMs | quote }}
   IRONRAG_PG_HNSW_EF_SEARCH: {{ .Values.app.pgHnsw.efSearch | quote }}
   IRONRAG_PG_HNSW_MAX_SCAN_TUPLES: {{ .Values.app.pgHnsw.maxScanTuples | quote }}
   IRONRAG_PG_HNSW_SCAN_MEM_MULTIPLIER: {{ .Values.app.pgHnsw.scanMemMultiplier | quote }}
@@ -31,7 +51,13 @@ data:
   IRONRAG_LOG_FILTER: {{ .Values.app.logFilter | quote }}
   IRONRAG_FRONTEND_ORIGIN: {{ .Values.app.frontendOrigin | quote }}
   IRONRAG_OPENAPI_PUBLIC_ORIGIN: {{ .Values.app.openapiPublicOrigin | quote }}
-  IRONRAG_CREDENTIAL_ENCRYPTION_WRITE_ENABLED: {{ .Values.app.credentialEncryptionWriteEnabled | quote }}
+  {{- $oidcIssuerUrl := trim .Values.app.oidc.issuerUrl }}
+  {{- if $oidcIssuerUrl }}
+  IRONRAG_OIDC_ISSUER_URL: {{ $oidcIssuerUrl | quote }}
+  IRONRAG_OIDC_CLIENT_ID: {{ trim .Values.app.oidc.clientId | quote }}
+  IRONRAG_OIDC_REDIRECT_URL: {{ trim .Values.app.oidc.redirectUrl | quote }}
+  IRONRAG_OIDC_REQUIRED_GROUP: {{ trim .Values.app.oidc.requiredGroup | quote }}
+  {{- end }}
   IRONRAG_UI_BOOTSTRAP_ADMIN_LOGIN: {{ .Values.app.bootstrapAdmin.login | quote }}
   IRONRAG_UI_BOOTSTRAP_EXTRACT_GRAPH_PROVIDER_KIND: {{ .Values.app.modelDefaults.extractGraphProviderKind | quote }}
   IRONRAG_UI_BOOTSTRAP_EXTRACT_GRAPH_MODEL_NAME: {{ .Values.app.modelDefaults.extractGraphModelName | quote }}

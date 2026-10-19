@@ -109,7 +109,7 @@ impl Drop for SensitiveWebhookHeaders {
     }
 }
 
-/// Validates an API value and returns its bounded canonical JSON plaintext.
+/// Validates an API value and returns its bounded normalized JSON plaintext.
 /// The returned buffer is zeroized after the caller encrypts it.
 pub fn validate_and_serialize(value: &Value) -> Result<Zeroizing<String>, CustomHeadersError> {
     let validated = validate_value(value)?;
@@ -121,33 +121,29 @@ pub fn validate_and_serialize(value: &Value) -> Result<Zeroizing<String>, Custom
     Ok(Zeroizing::new(serialized))
 }
 
-/// Reads a current encrypted JSON string or a legacy object/null row, then
-/// applies exactly the same validation used at the HTTP boundary.
+/// Reads a stored encrypted JSON string envelope, then applies exactly the same
+/// validation used at the HTTP boundary.
+///
+/// Custom headers are always persisted as a v3 envelope, so any non-string
+/// stored value (including a pre-encryption plaintext object or JSON null) is
+/// rejected fail-closed. Operators rewrap such rows with the maintenance
+/// migration before upgrading to a mandatory-encryption release.
 pub fn decrypt_and_validate_stored(
     cipher: &CredentialCipher,
     subscription_id: Uuid,
     stored: &Value,
 ) -> Result<SensitiveWebhookHeaders, CustomHeadersError> {
-    match stored {
-        Value::String(stored_value) => {
-            let plaintext = cipher.decrypt(
-                SecretPurpose::WebhookCustomHeaders,
-                subscription_id,
-                stored_value,
-            )?;
-            if plaintext.expose_secret().len() > MAX_CUSTOM_HEADERS_JSON_BYTES {
-                return Err(CustomHeadersError::SerializedSizeExceeded);
-            }
-            let value: Value = serde_json::from_str(plaintext.expose_secret())
-                .map_err(|_| CustomHeadersError::InvalidStoredValue)?;
-            validate_value(&value)
-        }
-        Value::Object(_) => validate_value(stored),
-        // Older API requests that omitted the field were deserialized as JSON
-        // null. Treat that historical representation as an empty object.
-        Value::Null => validate_value(&serde_json::json!({})),
-        _ => Err(CustomHeadersError::InvalidStoredValue),
+    let Value::String(stored_value) = stored else {
+        return Err(CustomHeadersError::InvalidStoredValue);
+    };
+    let plaintext =
+        cipher.decrypt(SecretPurpose::WebhookCustomHeaders, subscription_id, stored_value)?;
+    if plaintext.expose_secret().len() > MAX_CUSTOM_HEADERS_JSON_BYTES {
+        return Err(CustomHeadersError::SerializedSizeExceeded);
     }
+    let value: Value = serde_json::from_str(plaintext.expose_secret())
+        .map_err(|_| CustomHeadersError::InvalidStoredValue)?;
+    validate_value(&value)
 }
 
 /// Best-effort scrubbing for request/database JSON buffers that may contain
@@ -212,7 +208,7 @@ mod tests {
     use super::*;
 
     fn cipher() -> CredentialCipher {
-        CredentialCipher::from_optional_base64(Some(&STANDARD.encode([73_u8; 32])))
+        CredentialCipher::from_base64(&STANDARD.encode([73_u8; 32]))
             .expect("test key must be valid")
     }
 
@@ -243,15 +239,15 @@ mod tests {
     }
 
     #[test]
-    fn legacy_object_and_null_are_read_compatibly() {
-        let legacy =
-            decrypt_and_validate_stored(&cipher(), Uuid::now_v7(), &json!({"X-Legacy": "value"}))
-                .expect("legacy object should remain readable");
-        let omitted = decrypt_and_validate_stored(&cipher(), Uuid::now_v7(), &Value::Null)
-            .expect("legacy null should mean empty headers");
-
-        assert_eq!(legacy.iter().count(), 1);
-        assert!(omitted.is_empty());
+    fn non_envelope_stored_values_are_rejected_fail_closed() {
+        assert!(matches!(
+            decrypt_and_validate_stored(&cipher(), Uuid::now_v7(), &json!({"X-Legacy": "value"})),
+            Err(CustomHeadersError::InvalidStoredValue)
+        ));
+        assert!(matches!(
+            decrypt_and_validate_stored(&cipher(), Uuid::now_v7(), &Value::Null),
+            Err(CustomHeadersError::InvalidStoredValue)
+        ));
     }
 
     #[test]

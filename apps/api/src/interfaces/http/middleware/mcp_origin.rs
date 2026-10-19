@@ -69,10 +69,10 @@ mod tests {
     use super::apply;
 
     const CONFIGURED_ORIGIN: &str = "https://console.example";
-    const CANONICAL_PUBLIC_ORIGIN: &str = "https://api.example";
+    const API_PUBLIC_ORIGIN: &str = "https://api.example";
 
     fn policy() -> McpHttpOriginPolicy {
-        McpHttpOriginPolicy::try_from_origins([CONFIGURED_ORIGIN], Some(CANONICAL_PUBLIC_ORIGIN))
+        McpHttpOriginPolicy::try_from_origins([CONFIGURED_ORIGIN], Some(API_PUBLIC_ORIGIN))
             .expect("synthetic origin policy must be valid")
     }
 
@@ -140,9 +140,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn exact_configured_and_canonical_public_origins_are_allowed_on_both_surfaces() {
+    async fn exact_configured_and_api_public_origins_are_allowed_on_both_surfaces() {
         for path in [MCP_PUBLIC_JSONRPC_ROUTE, MCP_PUBLIC_DIAGNOSTICS_JSONRPC_ROUTE] {
-            for origin in [CONFIGURED_ORIGIN, CANONICAL_PUBLIC_ORIGIN] {
+            for origin in [CONFIGURED_ORIGIN, API_PUBLIC_ORIGIN] {
                 let response = transport_router()
                     .oneshot(post_request(path, &[origin], "{}"))
                     .await
@@ -193,7 +193,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn malformed_or_noncanonical_origins_are_rejected_on_both_surfaces() {
+    async fn malformed_origins_are_rejected_on_both_surfaces() {
         for path in [MCP_PUBLIC_JSONRPC_ROUTE, MCP_PUBLIC_DIAGNOSTICS_JSONRPC_ROUTE] {
             for origin in ["not-an-origin", "https://console.example/", "null"] {
                 let response = transport_router()

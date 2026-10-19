@@ -2,7 +2,5 @@ pub mod knowledge_plane;
 pub mod knowledge_rows;
 pub mod persistence;
 pub mod postgres;
-// Canonical domain repositories now live under `infra::repositories::{catalog_repository, ...}`.
-// The remaining flat helpers inside `infra::repositories` are a temporary removal boundary for the
-// greenfield rewrite and must disappear once the canonical cutover is complete.
 pub mod repositories;
+mod tls_pin_proxy;

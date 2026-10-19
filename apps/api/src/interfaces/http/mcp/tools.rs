@@ -17,7 +17,8 @@ use crate::{
 
 use super::{
     McpJsonRpcResponse, McpToolCallParams, McpToolDescriptor, McpToolResult, McpToolSurface,
-    audit::record_canonical_mcp_audit, mcp_api_error_response, success_response, tool_error_result,
+    audit::{self, record_mcp_audit},
+    mcp_api_error_response, success_response, tool_error_result,
 };
 use document_image::VIEW_DOCUMENT_IMAGE_TOOL_NAME;
 use documents::{READ_DOCUMENT_TOOL_NAME, SEARCH_DOCUMENTS_TOOL_NAME};
@@ -51,7 +52,7 @@ pub(crate) struct ToolVisibilityCapabilities {
 
 /// Version of the deterministic framing used by [`tool_contract_hash_from_components`].
 /// Exposed alongside the hash so clients can reject an unsupported future
-/// canonicalization rather than comparing unlike digest formats.
+/// normalization rather than comparing unlike digest formats.
 pub(crate) const MCP_TOOL_CONTRACT_VERSION: u32 = 1;
 
 #[derive(Debug, Clone)]
@@ -99,7 +100,7 @@ fn tool_contract_for_names(
 }
 
 /// Hashes the exact LLM-facing contract: ordered name, description, and
-/// canonical JSON input schema for every visible tool.
+/// declared JSON input schema for every visible tool.
 ///
 /// Length-prefixed frames avoid concatenation ambiguity. Recursive object-key
 /// sorting keeps the digest stable if an equivalent schema was constructed in
@@ -172,10 +173,14 @@ fn update_tool_contract_hash_json(hasher: &mut Sha256, value: &Value) {
 }
 
 /// Which of the two physical MCP mounts (`/v1/mcp` answer surface,
-/// `/v1/mcp/diagnostics`) expose one [`ToolRegistryEntry`]. `BOTH` covers
-/// reads; mutating tools are `DIAGNOSTICS_ONLY` (§6.3 rule: "чтения видимы
-/// на обеих поверхностях по умолчанию; всё, что мутирует состояние —
-/// только diagnostics").
+/// `/v1/mcp/diagnostics`) expose one [`ToolRegistryEntry`]. Read-only tools
+/// are `BOTH`; administration mutations stay `DIAGNOSTICS_ONLY` (§6.3 rule:
+/// "чтения видимы на обеих поверхностях по умолчанию; всё, что мутирует
+/// состояние — только diagnostics"). `grounded_answer` is the deliberate
+/// exception: a durable-side-effect query that must stay on the answer
+/// surface, so `mutating` is independent of this field. The
+/// `mutating_tools_are_pinned_and_answer_surface_bounded` test pins that
+/// exactly one mutating tool is answer-visible.
 #[derive(Debug, Clone, Copy)]
 struct ToolSurfaces {
     answer: bool,
@@ -197,9 +202,9 @@ impl ToolSurfaces {
 /// One row per MCP tool: its name, which surface(s) expose it, and the
 /// single grant predicate that decides whether one caller sees it.
 ///
-/// This table is the single canonical tool registry (plan §6.4): both
+/// This table is the single tool registry (plan §6.4): both
 /// `tools/list` filters ([`visible_tool_names_with_capabilities`]) and the
-/// exhaustive per-surface name lists ([`canonical_tool_names`], which back
+/// exhaustive per-surface name lists ([`supported_tool_names`], which back
 /// the public `MCP_ANSWER_TOOL_NAMES`/`MCP_DIAGNOSTICS_TOOL_NAMES`
 /// capability-advertisement statics) derive from it. It replaces the old
 /// `visible_answer_tool_names`/`visible_diagnostics_tool_names` pair, which
@@ -209,6 +214,15 @@ impl ToolSurfaces {
 struct ToolRegistryEntry {
     name: &'static str,
     surfaces: ToolSurfaces,
+    /// Whether this tool writes durable domain state ([`is_mutating_tool`]).
+    /// A mutating dispatch must be detached from the bounded `tools/call`
+    /// deadline so a client timeout cannot cancel it mid-write, and its
+    /// admission lease/registration must be held until it finishes
+    /// (IRG-203 SITE-5, `lease::McpRegisteredToolCall::spawn`). The
+    /// `mutating_tools_are_pinned_and_answer_surface_bounded` test pins the
+    /// set and forbids any mutating tool other than `grounded_answer` from
+    /// appearing on the answer surface.
+    mutating: bool,
     visible: fn(&AuthContext, ToolVisibilityCapabilities) -> bool,
 }
 
@@ -232,31 +246,37 @@ const TOOL_REGISTRY: &[ToolRegistryEntry] = &[
     ToolRegistryEntry {
         name: "list_workspaces",
         surfaces: ToolSurfaces::BOTH,
+        mutating: false,
         visible: always_visible,
     },
     ToolRegistryEntry {
         name: "list_libraries",
         surfaces: ToolSurfaces::BOTH,
+        mutating: false,
         visible: always_visible,
     },
     ToolRegistryEntry {
         name: "grounded_answer",
         surfaces: ToolSurfaces::BOTH,
+        mutating: true,
         visible: |auth, _capabilities| auth.can_read_any_library_memory(POLICY_QUERY_RUN),
     },
     ToolRegistryEntry {
         name: SEARCH_DOCUMENTS_TOOL_NAME,
         surfaces: ToolSurfaces::BOTH,
+        mutating: false,
         visible: can_read_library_memory,
     },
     ToolRegistryEntry {
         name: READ_DOCUMENT_TOOL_NAME,
         surfaces: ToolSurfaces::BOTH,
+        mutating: false,
         visible: |auth, _capabilities| auth.can_read_any_document_memory(POLICY_MCP_MEMORY_READ),
     },
     ToolRegistryEntry {
         name: VIEW_DOCUMENT_IMAGE_TOOL_NAME,
         surfaces: ToolSurfaces::BOTH,
+        mutating: false,
         visible: |auth, capabilities| {
             auth.can_read_any_document_memory(POLICY_MCP_MEMORY_READ)
                 && capabilities.agent_vision_available
@@ -265,86 +285,103 @@ const TOOL_REGISTRY: &[ToolRegistryEntry] = &[
     ToolRegistryEntry {
         name: "list_documents",
         surfaces: ToolSurfaces::BOTH,
+        mutating: false,
         visible: can_read_library_memory,
     },
     ToolRegistryEntry {
         name: "search_entities",
         surfaces: ToolSurfaces::BOTH,
+        mutating: false,
         visible: can_read_library_memory,
     },
     ToolRegistryEntry {
         name: "get_graph_topology",
         surfaces: ToolSurfaces::BOTH,
+        mutating: false,
         visible: can_read_library_memory,
     },
     ToolRegistryEntry {
         name: "list_relations",
         surfaces: ToolSurfaces::BOTH,
+        mutating: false,
         visible: can_read_library_memory,
     },
     ToolRegistryEntry {
         name: "get_communities",
         surfaces: ToolSurfaces::BOTH,
+        mutating: false,
         visible: can_read_library_memory,
     },
     ToolRegistryEntry {
         name: "get_runtime_execution",
         surfaces: ToolSurfaces::BOTH,
+        mutating: false,
         visible: can_read_runtime,
     },
     ToolRegistryEntry {
         name: "get_runtime_execution_trace",
         surfaces: ToolSurfaces::BOTH,
+        mutating: false,
         visible: can_read_runtime,
     },
     ToolRegistryEntry {
         name: "get_web_run",
         surfaces: ToolSurfaces::BOTH,
+        mutating: false,
         visible: can_read_web_runs,
     },
     ToolRegistryEntry {
         name: "list_web_run_pages",
         surfaces: ToolSurfaces::BOTH,
+        mutating: false,
         visible: can_read_web_runs,
     },
     ToolRegistryEntry {
         name: "create_workspace",
         surfaces: ToolSurfaces::DIAGNOSTICS_ONLY,
+        mutating: true,
         visible: |auth, _capabilities| auth.is_system_admin,
     },
     ToolRegistryEntry {
         name: "create_library",
         surfaces: ToolSurfaces::DIAGNOSTICS_ONLY,
+        mutating: true,
         visible: |auth, _capabilities| auth.can_admin_any_workspace(POLICY_WORKSPACE_ADMIN),
     },
     ToolRegistryEntry {
         name: "update_workspace",
         surfaces: ToolSurfaces::DIAGNOSTICS_ONLY,
+        mutating: true,
         visible: |auth, _capabilities| auth.is_system_admin,
     },
     ToolRegistryEntry {
         name: "update_library",
         surfaces: ToolSurfaces::DIAGNOSTICS_ONLY,
+        mutating: true,
         visible: |auth, _capabilities| auth.can_admin_any_workspace(POLICY_WORKSPACE_ADMIN),
     },
     ToolRegistryEntry {
         name: "create_documents",
         surfaces: ToolSurfaces::DIAGNOSTICS_ONLY,
+        mutating: true,
         visible: |auth, _capabilities| auth.can_write_any_document_memory(POLICY_DOCUMENTS_WRITE),
     },
     ToolRegistryEntry {
         name: "create_document_revision",
         surfaces: ToolSurfaces::DIAGNOSTICS_ONLY,
+        mutating: true,
         visible: |auth, _capabilities| auth.can_write_any_document_memory(POLICY_DOCUMENTS_WRITE),
     },
     ToolRegistryEntry {
         name: "delete_document",
         surfaces: ToolSurfaces::DIAGNOSTICS_ONLY,
+        mutating: true,
         visible: |auth, _capabilities| auth.can_write_any_document_memory(POLICY_DOCUMENTS_WRITE),
     },
     ToolRegistryEntry {
         name: "get_operation",
         surfaces: ToolSurfaces::DIAGNOSTICS_ONLY,
+        mutating: false,
         // Same contract as the REST poll route: admitting a mutation implies
         // the right to poll its operation to a terminal state.
         visible: |auth, _capabilities| auth.can_read_any_document_memory(POLICY_OPERATION_READ),
@@ -352,11 +389,13 @@ const TOOL_REGISTRY: &[ToolRegistryEntry] = &[
     ToolRegistryEntry {
         name: "submit_web_run",
         surfaces: ToolSurfaces::DIAGNOSTICS_ONLY,
+        mutating: true,
         visible: |auth, _capabilities| auth.can_write_any_library_memory(POLICY_LIBRARY_WRITE),
     },
     ToolRegistryEntry {
         name: "cancel_web_run",
         surfaces: ToolSurfaces::DIAGNOSTICS_ONLY,
+        mutating: true,
         visible: |auth, _capabilities| auth.can_write_any_library_memory(POLICY_LIBRARY_WRITE),
     },
 ];
@@ -382,12 +421,21 @@ pub(crate) fn visible_tool_names_with_capabilities(
 /// caller's grants. Backs the public `MCP_ANSWER_TOOL_NAMES`/
 /// `MCP_DIAGNOSTICS_TOOL_NAMES` capability-advertisement statics in
 /// `interfaces::http::mcp`.
-pub(crate) fn canonical_tool_names(surface: McpToolSurface) -> Vec<&'static str> {
+pub(crate) fn supported_tool_names(surface: McpToolSurface) -> Vec<&'static str> {
     TOOL_REGISTRY
         .iter()
         .filter(|entry| entry.surfaces.includes(surface))
         .map(|entry| entry.name)
         .collect()
+}
+
+/// Whether `name` is registered as a state-mutating tool (IRG-203 SITE-5).
+///
+/// Only names present in [`TOOL_REGISTRY`] with `mutating: true` qualify; an
+/// unknown name is not mutating here and is rejected later as an unsupported
+/// tool.
+pub(crate) fn is_mutating_tool(name: &str) -> bool {
+    TOOL_REGISTRY.iter().any(|entry| entry.name == name && entry.mutating)
 }
 
 pub(super) async fn handle_tools_list(
@@ -397,25 +445,29 @@ pub(super) async fn handle_tools_list(
     id: Option<Value>,
     surface: McpToolSurface,
 ) -> McpJsonRpcResponse {
-    let capabilities = ToolVisibilityCapabilities {
-        agent_vision_available: document_image::any_agent_binding_supports_vision(auth, state)
-            .await,
-    };
+    let agent_vision_available =
+        match document_image::any_agent_binding_supports_vision(auth, state).await {
+            Ok(available) => available,
+            Err(error) => return mcp_api_error_response(id, error),
+        };
+    let capabilities = ToolVisibilityCapabilities { agent_vision_available };
     let contract = match visible_tool_contract_with_capabilities(auth, surface, capabilities) {
         Ok(contract) => contract,
         Err(error) => {
-            record_canonical_mcp_audit(
+            record_mcp_audit(
                 state,
                 auth,
                 request_id,
-                "mcp.tools.list",
-                "failed",
-                Some("MCP tool contract preflight failed.".to_string()),
-                Some(format!(
-                    "principal {} could not list the MCP tool contract",
-                    auth.principal_id
-                )),
-                Vec::new(),
+                audit::McpAuditEvent {
+                    action_kind: "mcp.tools.list",
+                    result_kind: "failed",
+                    redacted_message: Some("MCP tool contract preflight failed.".to_string()),
+                    internal_message: Some(format!(
+                        "principal {} could not list the MCP tool contract",
+                        auth.principal_id
+                    )),
+                    subjects: Vec::new(),
+                },
             )
             .await;
             return mcp_api_error_response(
@@ -425,19 +477,21 @@ pub(super) async fn handle_tools_list(
         }
     };
 
-    record_canonical_mcp_audit(
+    record_mcp_audit(
         state,
         auth,
         request_id,
-        "mcp.tools.list",
-        "succeeded",
-        Some("MCP tools list returned.".to_string()),
-        Some(format!(
-            "principal {} listed {} MCP tools",
-            auth.principal_id,
-            contract.descriptors.len()
-        )),
-        Vec::new(),
+        audit::McpAuditEvent {
+            action_kind: "mcp.tools.list",
+            result_kind: "succeeded",
+            redacted_message: Some("MCP tools list returned.".to_string()),
+            internal_message: Some(format!(
+                "principal {} listed {} MCP tools",
+                auth.principal_id,
+                contract.descriptors.len()
+            )),
+            subjects: Vec::new(),
+        },
     )
     .await;
 
@@ -478,9 +532,9 @@ pub(super) async fn handle_tools_call(
     // model modality; every other answer/diagnostics tool has the same
     // membership when the flag is false.
     let capabilities = if parsed.name == VIEW_DOCUMENT_IMAGE_TOOL_NAME {
-        ToolVisibilityCapabilities {
-            agent_vision_available: document_image::any_agent_binding_supports_vision(auth, state)
-                .await,
+        match document_image::any_agent_binding_supports_vision(auth, state).await {
+            Ok(agent_vision_available) => ToolVisibilityCapabilities { agent_vision_available },
+            Err(error) => return mcp_api_error_response(id, error),
         }
     } else {
         ToolVisibilityCapabilities::default()
@@ -508,6 +562,15 @@ pub(super) async fn handle_tools_call(
     let context =
         ToolCallContext { auth, state, request_id, surface_kind: RuntimeSurfaceKind::Mcp };
     let dispatch_started_at = std::time::Instant::now();
+    // IRG-203 SITE-5: the dispatch stays inline here. Whether it must detach
+    // from the bounded `tools/call` deadline is declared once in
+    // [`TOOL_REGISTRY`] (`mutating`) and read by
+    // `jsonrpc::handle_session_tool_call`, which forwards it to
+    // `lease::McpRegisteredToolCall::spawn`. That chokepoint spawns a
+    // mutating dispatch detached from the deadline and keeps its join handle
+    // so the admission lease/registration are not released until the durable
+    // write finishes; a non-mutating dispatch is cancelled at the deadline.
+    // Detaching here as well would be a second, redundant spawn.
     let dispatch_result =
         Box::pin(call_named_tool(parsed.name.as_str(), context, &parsed.arguments)).await;
     let duration_ms = dispatch_started_at.elapsed().as_millis();
@@ -531,21 +594,23 @@ pub(super) async fn handle_tools_call(
     // different job (per-call access log vs structured business event with
     // query/runtime correlation), see plan §1.4/§6.4 hedge-audit finding #2.
     let outcome = if result.is_error { "failed" } else { "succeeded" };
-    record_canonical_mcp_audit(
+    record_mcp_audit(
         state,
         auth,
         request_id,
-        "mcp.tools.call",
-        outcome,
-        Some(format!("MCP tool '{}' call {outcome}.", parsed.name)),
-        Some(format!(
-            "principal {} called MCP tool '{}' on {} surface in {duration_ms}ms with args {}",
-            auth.principal_id,
-            parsed.name,
-            surface.label(),
-            redacted_args_summary(&parsed.arguments),
-        )),
-        Vec::new(),
+        audit::McpAuditEvent {
+            action_kind: "mcp.tools.call",
+            result_kind: outcome,
+            redacted_message: Some(format!("MCP tool '{}' call {outcome}.", parsed.name)),
+            internal_message: Some(format!(
+                "principal {} called MCP tool '{}' on {} surface in {duration_ms}ms with args {}",
+                auth.principal_id,
+                parsed.name,
+                surface.label(),
+                redacted_args_summary(&parsed.arguments),
+            )),
+            subjects: Vec::new(),
+        },
     )
     .await;
 
@@ -585,7 +650,7 @@ pub(crate) async fn call_named_tool<'a>(
 ) -> Option<McpToolResult> {
     if let Some(result) = catalog::call_tool(name, context, arguments).await {
         Some(result)
-    } else if let Some(result) = documents::call_tool(name, context, arguments).await {
+    } else if let Some(result) = Box::pin(documents::call_tool(name, context, arguments)).await {
         Some(result)
     } else if let Some(result) = document_image::call_tool(name, context, arguments).await {
         Some(result)
@@ -695,7 +760,7 @@ mod tests {
             McpToolSurface::Answer,
             super::ToolVisibilityCapabilities { agent_vision_available: true },
         );
-        let canonical = crate::interfaces::http::mcp::MCP_ANSWER_TOOL_NAMES.as_slice();
+        let expected_tool_names = crate::interfaces::http::mcp::MCP_ANSWER_TOOL_NAMES.as_slice();
 
         for expected in [
             "grounded_answer",
@@ -725,9 +790,9 @@ mod tests {
         ] {
             assert!(!tools.iter().any(|name| name == forbidden), "forbidden {forbidden}");
         }
-        assert!(canonical.contains(&"list_documents"));
-        assert!(canonical.contains(&"view_document_image"));
-        assert_eq!(canonical.len(), tools.len());
+        assert!(expected_tool_names.contains(&"list_documents"));
+        assert!(expected_tool_names.contains(&"view_document_image"));
+        assert_eq!(expected_tool_names.len(), tools.len());
     }
 
     #[test]
@@ -816,7 +881,7 @@ mod tests {
                 McpToolSurface::Answer,
                 capabilities,
             )
-            .expect("canonical MCP descriptors must be complete");
+            .expect("MCP descriptors must be complete");
             let ui_tools =
                 crate::services::query::agent_loop::answer_surface_tool_defs(&auth, capabilities)
                     .expect("complete UI answer tool contract");
@@ -862,5 +927,47 @@ mod tests {
         .expect_err("unknown requested tools must fail loudly");
 
         assert!(error.to_string().contains("missing_tool"));
+    }
+
+    #[test]
+    fn mutating_tools_are_pinned_and_answer_surface_bounded() {
+        let mutating = super::TOOL_REGISTRY
+            .iter()
+            .filter(|entry| entry.mutating)
+            .map(|entry| entry.name)
+            .collect::<BTreeSet<_>>();
+
+        // `grounded_answer` is a durable-side-effect query: it writes a
+        // conversation row, execution rows and a query-execution audit row
+        // before returning, so it must detach like every other mutating tool
+        // (IRG-203 SITE-5). It is also the only mutating tool deliberately
+        // exposed on the answer surface.
+        let answer_surface_mutating = super::TOOL_REGISTRY
+            .iter()
+            .filter(|entry| entry.mutating && entry.surfaces.answer)
+            .map(|entry| entry.name)
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            answer_surface_mutating,
+            BTreeSet::from(["grounded_answer"]),
+            "only grounded_answer may mutate durable state on the answer surface",
+        );
+
+        let pinned = BTreeSet::from([
+            "grounded_answer",
+            "create_workspace",
+            "update_workspace",
+            "create_library",
+            "update_library",
+            "create_documents",
+            "create_document_revision",
+            "delete_document",
+            "submit_web_run",
+            "cancel_web_run",
+        ]);
+        assert_eq!(
+            mutating, pinned,
+            "the registered mutating tool set changed; classify the new tool explicitly",
+        );
     }
 }

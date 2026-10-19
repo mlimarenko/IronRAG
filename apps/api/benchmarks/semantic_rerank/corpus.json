@@ -1,0 +1,1945 @@
+{
+  "version": "2026-09-28.1",
+  "description": "Labelled query-candidate shortlists for the optional semantic-rerank stage (IRG-186).",
+  "sources": {
+    "wikipedia": {
+      "path": "apps/api/benchmarks/grounded_query/corpus/wikipedia/*.md",
+      "license": "CC BY-SA 4.0 (Wikipedia plaintext extracts; attribution in each file)"
+    },
+    "docs": {
+      "path": "apps/api/benchmarks/grounded_query/corpus/docs/*.md",
+      "license": "MIT (repository-authored benchmark documents)"
+    }
+  },
+  "grading": {
+    "3": "the fragment of the gold document that best matches the query by distinct query-term overlap",
+    "2": "another fragment of the gold document",
+    "1": "a fragment of the topically related document",
+    "0": "a fragment of an unrelated document",
+    "relevant_for_precision": "grade >= 2"
+  },
+  "candidate_order": "frozen pre-rerank order: deterministic shuffle seeded by the query id; the `off` arm keeps it",
+  "candidates_per_query": 12,
+  "queries": [
+    {
+      "id": "q01",
+      "query": "What is a vector database and what is it used for?",
+      "gold_source": "wikipedia/vector_database_wikipedia.md",
+      "related_source": "wikipedia/graph_database_wikipedia.md",
+      "candidates": [
+        {
+          "id": "q01-c01",
+          "source": "wikipedia/optical_character_recognition_wikipedia.md",
+          "grade": 0,
+          "text": "== Applications == OCR engines have been developed into software applications specializing in various subjects such as receipts, invoices, checks, and legal billing documents. The software can be used for:"
+        },
+        {
+          "id": "q01-c02",
+          "source": "wikipedia/optical_character_recognition_wikipedia.md",
+          "grade": 0,
+          "text": "=== Pre-processing === OCR software often pre-processes images to improve the chances of successful recognition. Techniques include:"
+        },
+        {
+          "id": "q01-c03",
+          "source": "wikipedia/optical_character_recognition_wikipedia.md",
+          "grade": 0,
+          "text": "== Types == Optical character recognition (OCR) – targets typewritten text, one glyph or character at a time. Optical word recognition – targets typewritten text, one word at a time (for languages that use a space as a word divider). Usually just called \"OCR\". Intelligent character recognition (ICR) – also targets handwritten printscript or cursive text one glyph or character at a time, usually involving machine learning. Intelligent word recognition (IWR) – also targets handwritten printscript or cursive text, one word at a time. This is especially useful for languages where glyphs are not separated in cursive script. OCR is generally an offline process, which analyses a static document. There are cloud based services which provide an online OCR API service. Handwriting movement analysis can be used as input to handwriting recognition. Instead of merely using the shapes of glyphs and words, this technique is able to capture motion, such as the order in which segments are drawn, the direction, and the pattern of putting the pen down and lifting it. This additional information can make the process more accurate. This technology is also known as \"online character recognition\", \"dynam"
+        },
+        {
+          "id": "q01-c04",
+          "source": "wikipedia/optical_character_recognition_wikipedia.md",
+          "grade": 0,
+          "text": "=== Visually impaired users === In 1974, Ray Kurzweil started the company Kurzweil Computer Products, Inc. and continued development of omni-font OCR, which could recognize text printed in virtually any font. (Kurzweil is often credited with inventing omni-font OCR, but it was in use by companies, including CompuScan, in the late 1960s and 1970s.) Kurzweil used the technology to create a reading machine for blind people to have a computer read text to them out loud. The device included a CCD-type flatbed scanner and a text-to-speech synthesizer. On January 13, 1976, the finished product was unveiled during a widely reported news conference headed by Kurzweil and the leaders of the National Federation of the Blind. In 1978, Kurzweil Computer Products began selling a commercial version of the optical character recognition computer program. LexisNexis was one of the first customers, and bought the program to upload legal paper and news documents onto its nascent online databases. Two years later, Kurzweil sold his company to Xerox, which eventually spun it off as Scansoft, which merged with Nuance Communications. In the 2000s, OCR was made available online as a service (WebOCR), in a "
+        },
+        {
+          "id": "q01-c05",
+          "source": "wikipedia/graph_database_wikipedia.md",
+          "grade": 1,
+          "text": "== History == In the mid-1960s, navigational databases such as IBM's IMS supported tree-like structures in its hierarchical model, but the strict tree structure could be circumvented with virtual records. Graph structures could be represented in network model databases from the late 1960s. CODASYL, which had defined COBOL in 1959, defined the Network Database Language in 1969. Labeled graphs could be represented in graph databases from the mid-1980s, such as the Logical Data Model. Commercial object databases (ODBMSs) emerged in the early 1990s. In 2000, the Object Data Management Group published a standard language for defining object and relationship (graph) structures in their ODMG'93 publication. Several improvements to graph databases appeared in the early 1990s, accelerating in the late 1990s with endeavors to index web pages. In the mid-to-late 2000s, commercial graph databases with ACID guarantees such as Neo4j and Oracle Spatial and Graph became available. In the 2010s, commercial ACID graph databases that could be scaled horizontally became available. Further, SAP HANA brought in-memory and columnar technologies to graph databases. Also in the 2010s, multi-model databases"
+        },
+        {
+          "id": "q01-c06",
+          "source": "wikipedia/graph_database_wikipedia.md",
+          "grade": 1,
+          "text": "A graph database (GDB) is a database that uses graph structures for semantic queries with nodes, edges, and properties to represent and store data. A key concept of the system is the graph (or edge or relationship). The graph relates the data items in the store to a collection of nodes and edges, the edges representing the relationships between the nodes. The relationships allow data in the store to be linked together directly and, in many cases, retrieved with one operation. Graph databases hold the relationships between data as a priority. Querying relationships is fast because they are perpetually stored in the database. Relationships can be intuitively visualized using graph databases, making them useful for heavily inter-connected data. Graph databases are commonly referred to as a NoSQL database. Graph databases are similar to 1970s network model databases in that both represent general graphs, but network-model databases operate at a lower level of abstraction and lack easy traversal over a chain of edges. The underlying storage mechanism of graph databases can vary. Relationships are first-class citizens in a graph database and can be labeled, directed, and given properties"
+        },
+        {
+          "id": "q01-c07",
+          "source": "wikipedia/vector_database_wikipedia.md",
+          "grade": 3,
+          "text": "A vector database, vector store or vector search engine is a database that stores and retrieves embeddings of data in vector space. Vector databases typically implement approximate nearest neighbor algorithms so users can search for records semantically similar to a given input, unlike traditional databases which primarily look up records by exact match. Use-cases for vector databases include similarity search, semantic search, multi-modal search, recommendations engines, object detection, and retrieval-augmented generation (RAG). Vector embeddings are mathematical representations of data in a high-dimensional space. In this space, each dimension corresponds to a feature of the data, with the number of dimensions ranging from a few hundred to tens of thousands, depending on the complexity of the data being represented. Each data item is represented by one vector in this space. Words, phrases, or entire documents, as well as images, audio, and other types of data, can all be vectorized. These feature vectors may be computed from the raw data using machine learning methods such as feature extraction algorithms, word embeddings or deep learning networks. The goal is that semantically "
+        },
+        {
+          "id": "q01-c08",
+          "source": "wikipedia/optical_character_recognition_wikipedia.md",
+          "grade": 0,
+          "text": "Early optical character recognition may be traced to technologies involving telegraphy and creating reading devices for the blind. In 1914, Emanuel Goldberg developed a machine that read characters and converted them into standard telegraph code. Concurrently, Edmund Fournier d'Albe developed the Optophone, a handheld scanner that when moved across a printed page, produced tones that corresponded to specific letters or characters. In the late 1920s and into the 1930s, Emanuel Goldberg developed what he called a \"Statistical Machine\" for searching microfilm archives using an optical code recognition system. In 1931, he was granted US Patent number 1,838,389 for the invention. The patent was acquired by IBM."
+        },
+        {
+          "id": "q01-c09",
+          "source": "wikipedia/vector_database_wikipedia.md",
+          "grade": 2,
+          "text": "Hierarchical Navigable Small World (HNSW) graphs Locality-sensitive Hashing (LSH) and Sketching Product Quantization (PQ) Inverted Files and combinations of these techniques. In recent benchmarks, HNSW-based implementations have been among the best performers. Conferences such as the International Conference on Similarity Search and Applications (SISAP) and the Conference on Neural Information Processing Systems (NeurIPS) have hosted competitions on vector search in large databases."
+        },
+        {
+          "id": "q01-c10",
+          "source": "wikipedia/optical_character_recognition_wikipedia.md",
+          "grade": 0,
+          "text": "Entering data for business documents, e.g. checks, passports, invoices, bank statements and receipts Automatic number-plate recognition Passport recognition and information extraction in airports Automatically extracting key information from insurance documents Traffic-sign recognition Extracting business card information into a contact list Creating textual versions of printed documents, e.g. book scanning for Project Gutenberg Making electronic images of printed documents searchable, e.g. Google Books Converting handwriting in real-time to control a computer (pen computing) Defeating or testing the robustness of CAPTCHA anti-bot systems, though these are specifically designed to prevent OCR. Assistive technology for blind and visually impaired users Writing instructions for vehicles by identifying CAD images in a database that are appropriate to the vehicle design as it changes in real time Making scanned documents searchable by converting them to PDFs"
+        },
+        {
+          "id": "q01-c11",
+          "source": "wikipedia/vector_database_wikipedia.md",
+          "grade": 2,
+          "text": "An especially common use-case for vector databases is in retrieval-augmented generation (RAG), a method to improve domain-specific responses of large language models. The retrieval component of a RAG can be any search system, but is most often implemented as a vector database. Text documents describing the domain of interest are collected, and for each document or document section, a feature vector (known as an \"embedding\") is computed, typically using a deep learning network, and stored in a vector database along with a link to the document. Given a user prompt, the feature vector of the prompt is computed, and the database is queried to retrieve the most relevant documents. These are then automatically added into the context window of the large language model, and the large language model proceeds to create a response to the prompt given this context."
+        },
+        {
+          "id": "q01-c12",
+          "source": "wikipedia/optical_character_recognition_wikipedia.md",
+          "grade": 0,
+          "text": "Optical character recognition (OCR) or optical character reader is the electronic or mechanical conversion of images of typed, handwritten or printed text into machine-encoded text, whether from a scanned document, a photo of a document, a scene photo (for example the text on signs and billboards in a landscape photo) or from subtitle text superimposed on an image (for example: from a television broadcast). Widely used as a form of data entry from printed paper data records – whether passport documents, invoices, bank statements, computerized receipts, business cards, mail, printed data, or any suitable documentation – it is a common method of digitizing printed texts so that they can be electronically edited, searched, stored more compactly, displayed online, and used in machine processes such as cognitive computing, machine translation, (extracted) text-to-speech, key data and text mining. OCR is a field of research in pattern recognition, artificial intelligence and computer vision. Early versions needed to be trained with images of each character, and worked on one font at a time. Advanced systems capable of producing a high degree of accuracy for most fonts are now common, and"
+        }
+      ]
+    },
+    {
+      "id": "q02",
+      "query": "How does retrieval-augmented generation combine retrieval with a language model?",
+      "gold_source": "wikipedia/retrieval_augmented_generation_wikipedia.md",
+      "related_source": "wikipedia/large_language_model_wikipedia.md",
+      "candidates": [
+        {
+          "id": "q02-c01",
+          "source": "wikipedia/retrieval_augmented_generation_wikipedia.md",
+          "grade": 2,
+          "text": "== RAG and LLM limitations == LLMs can provide incorrect information. For example, when Google first demonstrated its LLM tool \"Google Bard\" (later re-branded to Gemini), the LLM provided incorrect information about the James Webb Space Telescope. This error contributed to a $100 billion decline in Google's’s stock value. RAG is used to prevent these errors, but it does not solve all the problems. For example, LLMs can generate misinformation even when pulling from factually correct sources if they misinterpret the context. MIT Technology Review gives the example of an AI-generated response stating, \"The United States has had one Muslim president, Barack Hussein Obama.\" The model retrieved this from an academic book rhetorically titled Barack Hussein Obama: America’s First Muslim President? The LLM did not \"know\" or \"understand\" the context of the title, generating a false statement. LLMs with RAG are programmed to prioritize new information. This technique has been called \"prompt stuffing.\" Without prompt stuffing, the LLM's input is generated by a user; with prompt stuffing, additional relevant context is added to this input to guide the model’s response. This approach provides t"
+        },
+        {
+          "id": "q02-c02",
+          "source": "wikipedia/optical_character_recognition_wikipedia.md",
+          "grade": 0,
+          "text": "== Types == Optical character recognition (OCR) – targets typewritten text, one glyph or character at a time. Optical word recognition – targets typewritten text, one word at a time (for languages that use a space as a word divider). Usually just called \"OCR\". Intelligent character recognition (ICR) – also targets handwritten printscript or cursive text one glyph or character at a time, usually involving machine learning. Intelligent word recognition (IWR) – also targets handwritten printscript or cursive text, one word at a time. This is especially useful for languages where glyphs are not separated in cursive script. OCR is generally an offline process, which analyses a static document. There are cloud based services which provide an online OCR API service. Handwriting movement analysis can be used as input to handwriting recognition. Instead of merely using the shapes of glyphs and words, this technique is able to capture motion, such as the order in which segments are drawn, the direction, and the pattern of putting the pen down and lifting it. This additional information can make the process more accurate. This technology is also known as \"online character recognition\", \"dynam"
+        },
+        {
+          "id": "q02-c03",
+          "source": "wikipedia/optical_character_recognition_wikipedia.md",
+          "grade": 0,
+          "text": "Entering data for business documents, e.g. checks, passports, invoices, bank statements and receipts Automatic number-plate recognition Passport recognition and information extraction in airports Automatically extracting key information from insurance documents Traffic-sign recognition Extracting business card information into a contact list Creating textual versions of printed documents, e.g. book scanning for Project Gutenberg Making electronic images of printed documents searchable, e.g. Google Books Converting handwriting in real-time to control a computer (pen computing) Defeating or testing the robustness of CAPTCHA anti-bot systems, though these are specifically designed to prevent OCR. Assistive technology for blind and visually impaired users Writing instructions for vehicles by identifying CAD images in a database that are appropriate to the vehicle design as it changes in real time Making scanned documents searchable by converting them to PDFs"
+        },
+        {
+          "id": "q02-c04",
+          "source": "wikipedia/optical_character_recognition_wikipedia.md",
+          "grade": 0,
+          "text": "Optical character recognition (OCR) or optical character reader is the electronic or mechanical conversion of images of typed, handwritten or printed text into machine-encoded text, whether from a scanned document, a photo of a document, a scene photo (for example the text on signs and billboards in a landscape photo) or from subtitle text superimposed on an image (for example: from a television broadcast). Widely used as a form of data entry from printed paper data records – whether passport documents, invoices, bank statements, computerized receipts, business cards, mail, printed data, or any suitable documentation – it is a common method of digitizing printed texts so that they can be electronically edited, searched, stored more compactly, displayed online, and used in machine processes such as cognitive computing, machine translation, (extracted) text-to-speech, key data and text mining. OCR is a field of research in pattern recognition, artificial intelligence and computer vision. Early versions needed to be trained with images of each character, and worked on one font at a time. Advanced systems capable of producing a high degree of accuracy for most fonts are now common, and"
+        },
+        {
+          "id": "q02-c05",
+          "source": "wikipedia/optical_character_recognition_wikipedia.md",
+          "grade": 0,
+          "text": "=== Visually impaired users === In 1974, Ray Kurzweil started the company Kurzweil Computer Products, Inc. and continued development of omni-font OCR, which could recognize text printed in virtually any font. (Kurzweil is often credited with inventing omni-font OCR, but it was in use by companies, including CompuScan, in the late 1960s and 1970s.) Kurzweil used the technology to create a reading machine for blind people to have a computer read text to them out loud. The device included a CCD-type flatbed scanner and a text-to-speech synthesizer. On January 13, 1976, the finished product was unveiled during a widely reported news conference headed by Kurzweil and the leaders of the National Federation of the Blind. In 1978, Kurzweil Computer Products began selling a commercial version of the optical character recognition computer program. LexisNexis was one of the first customers, and bought the program to upload legal paper and news documents onto its nascent online databases. Two years later, Kurzweil sold his company to Xerox, which eventually spun it off as Scansoft, which merged with Nuance Communications. In the 2000s, OCR was made available online as a service (WebOCR), in a "
+        },
+        {
+          "id": "q02-c06",
+          "source": "wikipedia/optical_character_recognition_wikipedia.md",
+          "grade": 0,
+          "text": "=== Pre-processing === OCR software often pre-processes images to improve the chances of successful recognition. Techniques include:"
+        },
+        {
+          "id": "q02-c07",
+          "source": "wikipedia/large_language_model_wikipedia.md",
+          "grade": 1,
+          "text": "Before the emergence of transformer-based models in 2017, some language models were considered large relative to the computational and data constraints of their time. In the early 1990s, IBM's statistical models pioneered word alignment techniques for machine translation, laying the groundwork for corpus-based language modeling. In 2001, a smoothed n-gram model, such as those employing Kneser–Ney smoothing, trained on 300 million words, achieved state-of-the-art perplexity on benchmark tests. During the 2000s, with the rise of widespread internet access, researchers began compiling massive text datasets from the web (\"web as corpus\") to train statistical language models."
+        },
+        {
+          "id": "q02-c08",
+          "source": "wikipedia/optical_character_recognition_wikipedia.md",
+          "grade": 0,
+          "text": "Early optical character recognition may be traced to technologies involving telegraphy and creating reading devices for the blind. In 1914, Emanuel Goldberg developed a machine that read characters and converted them into standard telegraph code. Concurrently, Edmund Fournier d'Albe developed the Optophone, a handheld scanner that when moved across a printed page, produced tones that corresponded to specific letters or characters. In the late 1920s and into the 1930s, Emanuel Goldberg developed what he called a \"Statistical Machine\" for searching microfilm archives using an optical code recognition system. In 1931, he was granted US Patent number 1,838,389 for the invention. The patent was acquired by IBM."
+        },
+        {
+          "id": "q02-c09",
+          "source": "wikipedia/retrieval_augmented_generation_wikipedia.md",
+          "grade": 2,
+          "text": "== Process == Retrieval-augmented generation (RAG) enhances large language models (LLMs) by incorporating an information-retrieval mechanism that allows models to access and utilize additional data beyond their original training set. Ars Technica notes that \"when new information becomes available, rather than having to retrain the model, all that’s needed is to augment the model’s external knowledge base with the updated information\" (\"augmentation\"). IBM states that \"in the generative phase, the LLM draws from the augmented prompt and its internal representation of its training data to synthesize\" an answer."
+        },
+        {
+          "id": "q02-c10",
+          "source": "wikipedia/retrieval_augmented_generation_wikipedia.md",
+          "grade": 3,
+          "text": "Retrieval-augmented generation (RAG) is a technique that enables large language models (LLMs) to retrieve and incorporate new information from external data sources. With RAG, LLMs first refer to a specified set of documents, then respond to user queries. These documents supplement information from the LLM's pre-existing training data. This allows LLMs to use domain-specific and/or updated information that is not available in the training data. For example, this helps LLM-based chatbots access internal company data or generate responses based on authoritative sources. RAG improves large language models (LLMs) by incorporating information retrieval before generating responses. Unlike LLMs that rely on static training data, RAG pulls relevant text from databases, uploaded documents, or web sources. According to Ars Technica, \"RAG is a way of improving LLM performance, in essence by blending the LLM process with a web search or other document look-up process to help LLMs stick to the facts.\" This method helps reduce AI hallucinations, which have caused chatbots to describe policies that don't exist, or recommend nonexistent legal cases to lawyers that are looking for citations to supp"
+        },
+        {
+          "id": "q02-c11",
+          "source": "wikipedia/large_language_model_wikipedia.md",
+          "grade": 1,
+          "text": "A large language model (LLM) is a computational model trained on a vast amount of data, designed for natural language processing tasks, especially language generation. The largest and most capable LLMs are generative pre-trained transformers (GPTs) that provide the core capabilities of modern chatbots. LLMs use large numbers of artificial intelligence parameters to generate, summarize, translate and reason over text in a large variety of contexts. Models may be fine-tuned to perform specific tasks, or users can give them more specific prompts to refine their output. As LLMs are trained on collections of human-written text, they are able to reflect patterns in natural language. They may include inaccuracies and biases which the humans who produced the training data held. Compared to earlier statistical and recurrent neural network approaches to language modeling, LLMs use a transformer architecture. This allows for more efficient parallelization, longer context handling, and scalable training using higher data volumes. Models like GPT, BERT, and their successors used these advances to demonstrate emergent behaviors at scale, such as finding specific data from a large data set and co"
+        },
+        {
+          "id": "q02-c12",
+          "source": "wikipedia/optical_character_recognition_wikipedia.md",
+          "grade": 0,
+          "text": "== Applications == OCR engines have been developed into software applications specializing in various subjects such as receipts, invoices, checks, and legal billing documents. The software can be used for:"
+        }
+      ]
+    },
+    {
+      "id": "q03",
+      "query": "What is a knowledge graph?",
+      "gold_source": "wikipedia/knowledge_graph_wikipedia.md",
+      "related_source": "wikipedia/semantic_web_wikipedia.md",
+      "candidates": [
+        {
+          "id": "q03-c01",
+          "source": "docs/fastapi_nested_models.md",
+          "grade": 0,
+          "text": "class Item(BaseModel): name: str description: str | None = None price: float tax: float | None = None tags: set[str] = set()"
+        },
+        {
+          "id": "q03-c02",
+          "source": "wikipedia/semantic_web_wikipedia.md",
+          "grade": 1,
+          "text": "The Semantic Web, sometimes known as Web 3.0, is an extension of the World Wide Web through standards set by the World Wide Web Consortium (W3C). The goal of the Semantic Web is to make Internet data machine-readable. To enable the encoding of semantics with the data, technologies such as Resource Description Framework (RDF) and Web Ontology Language (OWL) are used. These technologies are used to formally represent metadata. For example, ontology can describe concepts, relationships between entities, and categories of things. These embedded semantics offer significant advantages such as reasoning over data and operating with heterogeneous data sources. These standards promote common data formats and exchange protocols on the Web, fundamentally the RDF. According to the W3C, \"The Semantic Web provides a common framework that allows data to be shared and reused across application, enterprise, and community boundaries.\" The Semantic Web is therefore regarded as an integrator across different content and information applications and systems."
+        },
+        {
+          "id": "q03-c03",
+          "source": "docs/fastapi_nested_models.md",
+          "grade": 0,
+          "text": "class Item(BaseModel): name: str description: str | None = None price: float tax: float | None = None tags: list[str] = []"
+        },
+        {
+          "id": "q03-c04",
+          "source": "wikipedia/knowledge_graph_wikipedia.md",
+          "grade": 2,
+          "text": "== History == The term was coined as early as 1972 by the Austrian linguist Edgar W. Schneider, in a discussion of how to build modular instructional systems for courses. In the late 1980s, the University of Groningen and University of Twente jointly began a project called Knowledge Graphs, focusing on the design of semantic networks with edges restricted to a limited set of relations, to facilitate algebras on the graph. In subsequent decades, the distinction between semantic networks and knowledge graphs was blurred. Some early knowledge graphs were topic-specific. In 1985, Wordnet was founded, capturing semantic relationships between words and meanings – an application of this idea to language itself. In 2005, Marc Wirk founded Geonames to capture relationships between different geographic names and locales and associated entities. In 1998, Andrew Edmonds of Science in Finance Ltd in the UK created a system called ThinkBase that offered fuzzy-logic based reasoning in a graphical context. In 2007, both DBpedia and Freebase were founded as graph-based knowledge repositories for general-purpose knowledge. DBpedia focused exclusively on data extracted from Wikipedia, while Freebase "
+        },
+        {
+          "id": "q03-c05",
+          "source": "docs/fastapi_nested_models.md",
+          "grade": 0,
+          "text": "To declare types that have type parameters (internal types), like `list`, `dict`, `tuple`, pass the internal type(s) as \"type parameters\" using square brackets: `[` and `]`"
+        },
+        {
+          "id": "q03-c06",
+          "source": "wikipedia/knowledge_graph_wikipedia.md",
+          "grade": 3,
+          "text": "In knowledge representation and reasoning, a knowledge graph is a knowledge base that uses a graph-structured data model or topology to represent and operate on data. Knowledge graphs are often used to store interlinked descriptions of entities – objects, events, situations or abstract concepts – while also encoding the free-form semantics or relationships underlying these entities. Since the development of the Semantic Web, knowledge graphs have often been associated with linked open data projects, focusing on the connections between concepts and entities. They are also historically associated with and used by search engines such as Google, Bing, and Yahoo; knowledge engines and question-answering services such as WolframAlpha, Apple's Siri, and Amazon Alexa; and social networks such as LinkedIn and Facebook. Recent developments in data science and machine learning, particularly in graph neural networks and representation learning and also in machine learning, have broadened the scope of knowledge graphs beyond their traditional use in search engines and recommender systems. They are increasingly used in scientific research, with notable applications in fields such as genomics, pr"
+        },
+        {
+          "id": "q03-c07",
+          "source": "docs/fastapi_nested_models.md",
+          "grade": 0,
+          "text": "```json { \"name\": \"Foo\", \"description\": \"The pretender\", \"price\": 42.0, \"tax\": 3.2, \"tags\": [\"rock\", \"metal\", \"bar\"], \"image\": { \"url\": \"http://example.com/baz.jpg\", \"name\": \"The Foo live\" } } ```"
+        },
+        {
+          "id": "q03-c08",
+          "source": "docs/fastapi_nested_models.md",
+          "grade": 0,
+          "text": "class Item(BaseModel): name: str description: str | None = None price: float tax: float | None = None tags: set[str] = set() image: Image | None = None"
+        },
+        {
+          "id": "q03-c09",
+          "source": "docs/fastapi_nested_models.md",
+          "grade": 0,
+          "text": "Use that same standard syntax for model attributes with internal types. So, in our example, we can make `tags` be specifically a \"list of strings\":"
+        },
+        {
+          "id": "q03-c10",
+          "source": "wikipedia/knowledge_graph_wikipedia.md",
+          "grade": 2,
+          "text": "== Definitions == There is no single commonly accepted definition of a knowledge graph. Most definitions view the topic through a Semantic Web lens and include these features:"
+        },
+        {
+          "id": "q03-c11",
+          "source": "wikipedia/semantic_web_wikipedia.md",
+          "grade": 1,
+          "text": "== History == The term was coined by Tim Berners-Lee for a web of data (or data web) that can be processed by machines—that is, one in which much of the meaning is machine-readable. While its critics have questioned its feasibility, proponents argue that applications in library and information science, industry, biology and human sciences research have already proven the validity of the original concept. The idea of adding semantics to the Web predates the term itself. Berners-Lee discussed the need for semantics in the Web at the first International World Wide Web Conference in 1994. In 1998, he published a design document titled \"Semantic Web Road map\", outlining the architecture for a web of machine-processable data. The first patent for the creation of a semantic web was filed by Amit Sheth et al. on 30 October 2001. Berners-Lee originally expressed his vision of the Semantic Web in 1999 as follows:"
+        },
+        {
+          "id": "q03-c12",
+          "source": "docs/fastapi_nested_models.md",
+          "grade": 0,
+          "text": "@app.put(\"/items/{item_id}\") async def update_item(item_id: int, item: Item): results = {\"item_id\": item_id, \"item\": item} return results ```"
+        }
+      ]
+    },
+    {
+      "id": "q04",
+      "query": "What is a graph database and how does it store data?",
+      "gold_source": "wikipedia/graph_database_wikipedia.md",
+      "related_source": "wikipedia/knowledge_graph_wikipedia.md",
+      "candidates": [
+        {
+          "id": "q04-c01",
+          "source": "wikipedia/knowledge_graph_wikipedia.md",
+          "grade": 1,
+          "text": "In knowledge representation and reasoning, a knowledge graph is a knowledge base that uses a graph-structured data model or topology to represent and operate on data. Knowledge graphs are often used to store interlinked descriptions of entities – objects, events, situations or abstract concepts – while also encoding the free-form semantics or relationships underlying these entities. Since the development of the Semantic Web, knowledge graphs have often been associated with linked open data projects, focusing on the connections between concepts and entities. They are also historically associated with and used by search engines such as Google, Bing, and Yahoo; knowledge engines and question-answering services such as WolframAlpha, Apple's Siri, and Amazon Alexa; and social networks such as LinkedIn and Facebook. Recent developments in data science and machine learning, particularly in graph neural networks and representation learning and also in machine learning, have broadened the scope of knowledge graphs beyond their traditional use in search engines and recommender systems. They are increasingly used in scientific research, with notable applications in fields such as genomics, pr"
+        },
+        {
+          "id": "q04-c02",
+          "source": "wikipedia/vector_database_wikipedia.md",
+          "grade": 0,
+          "text": "A vector database, vector store or vector search engine is a database that stores and retrieves embeddings of data in vector space. Vector databases typically implement approximate nearest neighbor algorithms so users can search for records semantically similar to a given input, unlike traditional databases which primarily look up records by exact match. Use-cases for vector databases include similarity search, semantic search, multi-modal search, recommendations engines, object detection, and retrieval-augmented generation (RAG). Vector embeddings are mathematical representations of data in a high-dimensional space. In this space, each dimension corresponds to a feature of the data, with the number of dimensions ranging from a few hundred to tens of thousands, depending on the complexity of the data being represented. Each data item is represented by one vector in this space. Words, phrases, or entire documents, as well as images, audio, and other types of data, can all be vectorized. These feature vectors may be computed from the raw data using machine learning methods such as feature extraction algorithms, word embeddings or deep learning networks. The goal is that semantically "
+        },
+        {
+          "id": "q04-c03",
+          "source": "docs/checkout_runtime_contract.md",
+          "grade": 0,
+          "text": "- No `/graphql` endpoint is exposed for this library. - No GraphQL schema or GraphQL introspection contract is available. - The authoritative integration path for system information is the REST endpoint `GET /system/info`."
+        },
+        {
+          "id": "q04-c04",
+          "source": "wikipedia/vector_database_wikipedia.md",
+          "grade": 0,
+          "text": "An especially common use-case for vector databases is in retrieval-augmented generation (RAG), a method to improve domain-specific responses of large language models. The retrieval component of a RAG can be any search system, but is most often implemented as a vector database. Text documents describing the domain of interest are collected, and for each document or document section, a feature vector (known as an \"embedding\") is computed, typically using a deep learning network, and stored in a vector database along with a link to the document. Given a user prompt, the feature vector of the prompt is computed, and the database is queried to retrieve the most relevant documents. These are then automatically added into the context window of the large language model, and the large language model proceeds to create a response to the prompt given this context."
+        },
+        {
+          "id": "q04-c05",
+          "source": "wikipedia/vector_database_wikipedia.md",
+          "grade": 0,
+          "text": "Hierarchical Navigable Small World (HNSW) graphs Locality-sensitive Hashing (LSH) and Sketching Product Quantization (PQ) Inverted Files and combinations of these techniques. In recent benchmarks, HNSW-based implementations have been among the best performers. Conferences such as the International Conference on Similarity Search and Applications (SISAP) and the Conference on Neural Information Processing Systems (NeurIPS) have hosted competitions on vector search in large databases."
+        },
+        {
+          "id": "q04-c06",
+          "source": "wikipedia/vector_database_wikipedia.md",
+          "grade": 0,
+          "text": "== Applications == Vector databases are used in a wide range of machine learning applications including similarity search, semantic search, multi-modal search, recommendations engines, object detection, and retrieval-augmented generation."
+        },
+        {
+          "id": "q04-c07",
+          "source": "wikipedia/graph_database_wikipedia.md",
+          "grade": 2,
+          "text": "== History == In the mid-1960s, navigational databases such as IBM's IMS supported tree-like structures in its hierarchical model, but the strict tree structure could be circumvented with virtual records. Graph structures could be represented in network model databases from the late 1960s. CODASYL, which had defined COBOL in 1959, defined the Network Database Language in 1969. Labeled graphs could be represented in graph databases from the mid-1980s, such as the Logical Data Model. Commercial object databases (ODBMSs) emerged in the early 1990s. In 2000, the Object Data Management Group published a standard language for defining object and relationship (graph) structures in their ODMG'93 publication. Several improvements to graph databases appeared in the early 1990s, accelerating in the late 1990s with endeavors to index web pages. In the mid-to-late 2000s, commercial graph databases with ACID guarantees such as Neo4j and Oracle Spatial and Graph became available. In the 2010s, commercial ACID graph databases that could be scaled horizontally became available. Further, SAP HANA brought in-memory and columnar technologies to graph databases. Also in the 2010s, multi-model databases"
+        },
+        {
+          "id": "q04-c08",
+          "source": "docs/checkout_runtime_contract.md",
+          "grade": 0,
+          "text": "- Method: `GET` - Path: `/system/info` - Purpose: return the current checkout server system information, build metadata, and runtime status. - Transport contract: JSON over HTTP."
+        },
+        {
+          "id": "q04-c09",
+          "source": "wikipedia/graph_database_wikipedia.md",
+          "grade": 3,
+          "text": "A graph database (GDB) is a database that uses graph structures for semantic queries with nodes, edges, and properties to represent and store data. A key concept of the system is the graph (or edge or relationship). The graph relates the data items in the store to a collection of nodes and edges, the edges representing the relationships between the nodes. The relationships allow data in the store to be linked together directly and, in many cases, retrieved with one operation. Graph databases hold the relationships between data as a priority. Querying relationships is fast because they are perpetually stored in the database. Relationships can be intuitively visualized using graph databases, making them useful for heavily inter-connected data. Graph databases are commonly referred to as a NoSQL database. Graph databases are similar to 1970s network model databases in that both represent general graphs, but network-model databases operate at a lower level of abstraction and lack easy traversal over a chain of edges. The underlying storage mechanism of graph databases can vary. Relationships are first-class citizens in a graph database and can be labeled, directed, and given properties"
+        },
+        {
+          "id": "q04-c10",
+          "source": "wikipedia/graph_database_wikipedia.md",
+          "grade": 2,
+          "text": "Graph databases portray the data as it is viewed conceptually. This is accomplished by transferring the data into nodes and its relationships into edges. A graph database is a database that is based on graph theory. It consists of a set of objects, which can be a node or an edge."
+        },
+        {
+          "id": "q04-c11",
+          "source": "wikipedia/vector_database_wikipedia.md",
+          "grade": 0,
+          "text": "== See also == Curse of dimensionality – Difficulties arising when analyzing data with many aspects (\"dimensions\") Graph database – Database using graph structures for queries Machine learning – Study of algorithms that improve automatically through experience Nearest neighbor search – Optimization problem in computer science Recommender system – System to predict users' preferences"
+        },
+        {
+          "id": "q04-c12",
+          "source": "wikipedia/knowledge_graph_wikipedia.md",
+          "grade": 1,
+          "text": "== History == The term was coined as early as 1972 by the Austrian linguist Edgar W. Schneider, in a discussion of how to build modular instructional systems for courses. In the late 1980s, the University of Groningen and University of Twente jointly began a project called Knowledge Graphs, focusing on the design of semantic networks with edges restricted to a limited set of relations, to facilitate algebras on the graph. In subsequent decades, the distinction between semantic networks and knowledge graphs was blurred. Some early knowledge graphs were topic-specific. In 1985, Wordnet was founded, capturing semantic relationships between words and meanings – an application of this idea to language itself. In 2005, Marc Wirk founded Geonames to capture relationships between different geographic names and locales and associated entities. In 1998, Andrew Edmonds of Science in Finance Ltd in the UK created a system called ThinkBase that offered fuzzy-logic based reasoning in a graphical context. In 2007, both DBpedia and Freebase were founded as graph-based knowledge repositories for general-purpose knowledge. DBpedia focused exclusively on data extracted from Wikipedia, while Freebase "
+        }
+      ]
+    },
+    {
+      "id": "q05",
+      "query": "What does named entity recognition identify in text?",
+      "gold_source": "wikipedia/named_entity_recognition_wikipedia.md",
+      "related_source": "wikipedia/information_retrieval_wikipedia.md",
+      "candidates": [
+        {
+          "id": "q05-c01",
+          "source": "wikipedia/named_entity_recognition_wikipedia.md",
+          "grade": 2,
+          "text": "[Jim]Person bought 300 shares of [Acme Corp.]Organization in [2006]Time. In this example, a person name consisting of one token, a two-token company name and a temporal expression have been detected and classified."
+        },
+        {
+          "id": "q05-c02",
+          "source": "docs/relay_twin_standard.md",
+          "grade": 0,
+          "text": "The standard interconnect profile, registered as RLY-STD-204, is the default relay configuration for rings that carry mixed tenant traffic."
+        },
+        {
+          "id": "q05-c03",
+          "source": "docs/relay_twin_standard.md",
+          "grade": 0,
+          "text": "RLY-STD-204 favors throughput over failover speed. The cumulative acknowledgement mode batches confirmations, which keeps the control channel quiet but delays loss detection by up to one full frame window. Rings that host latency-sensitive tenants should evaluate the extended profile instead of tuning RLY-STD-204 beyond its registered parameters."
+        },
+        {
+          "id": "q05-c04",
+          "source": "wikipedia/information_retrieval_wikipedia.md",
+          "grade": 1,
+          "text": "== Overview == An information retrieval process begins when a user enters a query into the system. Queries are formal statements of information needs, for example search strings in web search engines. In information retrieval, a query does not uniquely identify a single object in the collection. Instead, several objects may match the query, perhaps with different degrees of relevance. An object is an entity that is represented by information in a content collection or database. User queries are matched against the database information. However, as opposed to classical SQL queries of a database, in information retrieval the results returned may or may not match the query, so results are typically ranked. This ranking of results is a key difference of information retrieval searching compared to database searching. Depending on the application the data objects may be, for example, text documents, images, audio, mind maps or videos. Often the documents themselves are not kept or stored directly in the IR system, but are instead represented in the system by document surrogates or metadata. Most IR systems compute a numeric score on how well each object in the database matches the query,"
+        },
+        {
+          "id": "q05-c05",
+          "source": "docs/relay_twin_standard.md",
+          "grade": 0,
+          "text": "- Registration id: RLY-STD-204 - Frame window: 64 frames - Acknowledgement mode: cumulative - Redundancy: single spare relay per ring - Failover deadline: 800 ms"
+        },
+        {
+          "id": "q05-c06",
+          "source": "docs/relay_twin_standard.md",
+          "grade": 0,
+          "text": "Changing the frame window of a registered profile is not permitted; a different window requires registering a new profile id."
+        },
+        {
+          "id": "q05-c07",
+          "source": "wikipedia/named_entity_recognition_wikipedia.md",
+          "grade": 2,
+          "text": "=== Definition === In the expression named entity, the word named restricts the task to those entities for which one or many strings, such as words or phrases, stand (fairly) consistently for some referent. This is closely related to rigid designators, as defined by Saul Kripke, although in practice NER deals with many names and referents that are not philosophically \"rigid\". For instance, the automotive company created by Henry Ford in 1903 can be referred to as Ford or Ford Motor Company, although \"Ford\" can refer to many other entities as well (see Ford). Rigid designators include proper names as well as terms for certain biological species and substances, but exclude pronouns (such as \"it\"; see coreference resolution), descriptions that pick out a referent by its properties (see also De dicto and de re), and names for kinds of things as opposed to individuals (for example \"Bank\"). Full named-entity recognition is often broken down, conceptually and possibly also in implementations, as two distinct problems: detection of names, and classification of the names by the type of entity they refer to (e.g. person, organization, or location). The first phase is typically simplified to "
+        },
+        {
+          "id": "q05-c08",
+          "source": "wikipedia/large_language_model_wikipedia.md",
+          "grade": 0,
+          "text": "Moving beyond n-gram models, researchers started in 2000 to use neural networks to learn language models. Following the breakthrough of deep neural networks in image classification around 2012, similar architectures were adapted for language tasks. This shift was marked by the development of word embeddings (e.g., Word2Vec by Mikolov in 2013) and sequence-to-sequence (seq2seq) models using LSTM. In 2016, Google transitioned its translation service to neural machine translation (NMT), replacing statistical phrase-based models with deep recurrent neural networks. These early NMT systems used LSTM-based encoder-decoder architectures, as they preceded the invention of transformers. At the 2017 NeurIPS conference, Google researchers introduced the transformer architecture in their landmark paper \"Attention Is All You Need\". This paper's goal was to improve upon 2014 seq2seq technology, and was based mainly on the attention mechanism developed by Bahdanau et al. in 2014. The following year in 2018, BERT was introduced and quickly became \"ubiquitous\". Though the original transformer has both encoder and decoder blocks, BERT is an encoder-only model. Academic and research usage of BERT beg"
+        },
+        {
+          "id": "q05-c09",
+          "source": "wikipedia/large_language_model_wikipedia.md",
+          "grade": 0,
+          "text": "Before the emergence of transformer-based models in 2017, some language models were considered large relative to the computational and data constraints of their time. In the early 1990s, IBM's statistical models pioneered word alignment techniques for machine translation, laying the groundwork for corpus-based language modeling. In 2001, a smoothed n-gram model, such as those employing Kneser–Ney smoothing, trained on 300 million words, achieved state-of-the-art perplexity on benchmark tests. During the 2000s, with the rise of widespread internet access, researchers began compiling massive text datasets from the web (\"web as corpus\") to train statistical language models."
+        },
+        {
+          "id": "q05-c10",
+          "source": "wikipedia/large_language_model_wikipedia.md",
+          "grade": 0,
+          "text": "A large language model (LLM) is a computational model trained on a vast amount of data, designed for natural language processing tasks, especially language generation. The largest and most capable LLMs are generative pre-trained transformers (GPTs) that provide the core capabilities of modern chatbots. LLMs use large numbers of artificial intelligence parameters to generate, summarize, translate and reason over text in a large variety of contexts. Models may be fine-tuned to perform specific tasks, or users can give them more specific prompts to refine their output. As LLMs are trained on collections of human-written text, they are able to reflect patterns in natural language. They may include inaccuracies and biases which the humans who produced the training data held. Compared to earlier statistical and recurrent neural network approaches to language modeling, LLMs use a transformer architecture. This allows for more efficient parallelization, longer context handling, and scalable training using higher data volumes. Models like GPT, BERT, and their successors used these advances to demonstrate emergent behaviors at scale, such as finding specific data from a large data set and co"
+        },
+        {
+          "id": "q05-c11",
+          "source": "wikipedia/named_entity_recognition_wikipedia.md",
+          "grade": 3,
+          "text": "Named-entity recognition (NER) (also known as (named) entity identification, entity chunking, and entity extraction) is a subtask of information extraction that seeks to locate and classify named entities mentioned in unstructured text into pre-defined categories such as person names (PER), organizations (ORG), locations (LOC), geopolitical entities (GPE), vehicles (VEH), medical codes, time expressions, quantities, monetary values, percentages, etc. Most research on NER/NEE systems has been structured as taking an unannotated block of text, such as transducing:"
+        },
+        {
+          "id": "q05-c12",
+          "source": "wikipedia/information_retrieval_wikipedia.md",
+          "grade": 1,
+          "text": "Information retrieval (IR) in computing and information science is the task of identifying and retrieving information system resources that are relevant to an information need. The information need can be specified in the form of a search query. In the case of document retrieval, queries can be based on full-text or other content-based indexing. Information retrieval is the science of searching for information in a document, searching for documents themselves, and also searching for the metadata that describes data, and for databases of texts, images, or sounds. Cross-modal retrieval implies retrieval across modalities. Automated information retrieval systems are used to reduce what has been called information overload. An IR system is a software system that provides access to books, journals, and other documents, as well as storing and managing those documents. Web search engines are the most visible IR applications."
+        }
+      ]
+    },
+    {
+      "id": "q06",
+      "query": "What is optical character recognition used for?",
+      "gold_source": "wikipedia/optical_character_recognition_wikipedia.md",
+      "related_source": "wikipedia/information_retrieval_wikipedia.md",
+      "candidates": [
+        {
+          "id": "q06-c01",
+          "source": "wikipedia/optical_character_recognition_wikipedia.md",
+          "grade": 2,
+          "text": "=== Visually impaired users === In 1974, Ray Kurzweil started the company Kurzweil Computer Products, Inc. and continued development of omni-font OCR, which could recognize text printed in virtually any font. (Kurzweil is often credited with inventing omni-font OCR, but it was in use by companies, including CompuScan, in the late 1960s and 1970s.) Kurzweil used the technology to create a reading machine for blind people to have a computer read text to them out loud. The device included a CCD-type flatbed scanner and a text-to-speech synthesizer. On January 13, 1976, the finished product was unveiled during a widely reported news conference headed by Kurzweil and the leaders of the National Federation of the Blind. In 1978, Kurzweil Computer Products began selling a commercial version of the optical character recognition computer program. LexisNexis was one of the first customers, and bought the program to upload legal paper and news documents onto its nascent online databases. Two years later, Kurzweil sold his company to Xerox, which eventually spun it off as Scansoft, which merged with Nuance Communications. In the 2000s, OCR was made available online as a service (WebOCR), in a "
+        },
+        {
+          "id": "q06-c02",
+          "source": "docs/http2_protocol.md",
+          "grade": 0,
+          "text": "HTTP/2 is a substantial upgrade to the HTTP network protocol that powers the web. As the first major revision since HTTP/1.1 was standardized in 1997, HTTP/2 was officially published as RFC 7540 on May 14, 2015. The protocol emerged from Google's experimental SPDY project and was developed through the Internet Engineering Task Force's HTTP Working Group (httpbis)."
+        },
+        {
+          "id": "q06-c03",
+          "source": "docs/http2_protocol.md",
+          "grade": 0,
+          "text": "Server Push represents another significant feature, allowing servers to proactively transmit resources a browser will need before receiving explicit requests, eliminating latency from additional request cycles."
+        },
+        {
+          "id": "q06-c04",
+          "source": "docs/http2_protocol.md",
+          "grade": 0,
+          "text": "The standardization timeline began in December 2007 with HTTP/1.1 revision drafts. The IETF accepted HTTP/2 as a Proposed Standard in February 2015, following a December 2014 submission."
+        },
+        {
+          "id": "q06-c05",
+          "source": "wikipedia/information_retrieval_wikipedia.md",
+          "grade": 1,
+          "text": "== Overview == An information retrieval process begins when a user enters a query into the system. Queries are formal statements of information needs, for example search strings in web search engines. In information retrieval, a query does not uniquely identify a single object in the collection. Instead, several objects may match the query, perhaps with different degrees of relevance. An object is an entity that is represented by information in a content collection or database. User queries are matched against the database information. However, as opposed to classical SQL queries of a database, in information retrieval the results returned may or may not match the query, so results are typically ranked. This ranking of results is a key difference of information retrieval searching compared to database searching. Depending on the application the data objects may be, for example, text documents, images, audio, mind maps or videos. Often the documents themselves are not kept or stored directly in the IR system, but are instead represented in the system by document surrogates or metadata. Most IR systems compute a numeric score on how well each object in the database matches the query,"
+        },
+        {
+          "id": "q06-c06",
+          "source": "docs/http2_protocol.md",
+          "grade": 0,
+          "text": "While HTTP/2 preserves the high-level semantics of its predecessor, the protocol introduces fundamental changes in how data is framed and transmitted. The specification states that \"new applications can take advantage of new features for increased speed.\""
+        },
+        {
+          "id": "q06-c07",
+          "source": "docs/http2_protocol.md",
+          "grade": 0,
+          "text": "The protocol addresses a critical HTTP/1.1 limitation through multiplexing--handling multiple concurrent requests across a single TCP connection. This eliminates the head-of-line blocking problems that plagued earlier versions, even when HTTP pipelining was employed. Additionally, HTTP/2 implements fixed Huffman code-based header compression, replacing SPDY's stream-based approach to mitigate compression oracle attacks like CRIME."
+        },
+        {
+          "id": "q06-c08",
+          "source": "wikipedia/optical_character_recognition_wikipedia.md",
+          "grade": 3,
+          "text": "Optical character recognition (OCR) or optical character reader is the electronic or mechanical conversion of images of typed, handwritten or printed text into machine-encoded text, whether from a scanned document, a photo of a document, a scene photo (for example the text on signs and billboards in a landscape photo) or from subtitle text superimposed on an image (for example: from a television broadcast). Widely used as a form of data entry from printed paper data records – whether passport documents, invoices, bank statements, computerized receipts, business cards, mail, printed data, or any suitable documentation – it is a common method of digitizing printed texts so that they can be electronically edited, searched, stored more compactly, displayed online, and used in machine processes such as cognitive computing, machine translation, (extracted) text-to-speech, key data and text mining. OCR is a field of research in pattern recognition, artificial intelligence and computer vision. Early versions needed to be trained with images of each character, and worked on one font at a time. Advanced systems capable of producing a high degree of accuracy for most fonts are now common, and"
+        },
+        {
+          "id": "q06-c09",
+          "source": "wikipedia/information_retrieval_wikipedia.md",
+          "grade": 1,
+          "text": "Information retrieval (IR) in computing and information science is the task of identifying and retrieving information system resources that are relevant to an information need. The information need can be specified in the form of a search query. In the case of document retrieval, queries can be based on full-text or other content-based indexing. Information retrieval is the science of searching for information in a document, searching for documents themselves, and also searching for the metadata that describes data, and for databases of texts, images, or sounds. Cross-modal retrieval implies retrieval across modalities. Automated information retrieval systems are used to reduce what has been called information overload. An IR system is a software system that provides access to books, journals, and other documents, as well as storing and managing those documents. Web search engines are the most visible IR applications."
+        },
+        {
+          "id": "q06-c10",
+          "source": "wikipedia/optical_character_recognition_wikipedia.md",
+          "grade": 2,
+          "text": "Early optical character recognition may be traced to technologies involving telegraphy and creating reading devices for the blind. In 1914, Emanuel Goldberg developed a machine that read characters and converted them into standard telegraph code. Concurrently, Edmund Fournier d'Albe developed the Optophone, a handheld scanner that when moved across a printed page, produced tones that corresponded to specific letters or characters. In the late 1920s and into the 1930s, Emanuel Goldberg developed what he called a \"Statistical Machine\" for searching microfilm archives using an optical code recognition system. In 1931, he was granted US Patent number 1,838,389 for the invention. The patent was acquired by IBM."
+        },
+        {
+          "id": "q06-c11",
+          "source": "docs/http2_protocol.md",
+          "grade": 0,
+          "text": "- Create negotiation mechanisms allowing clients and servers to select HTTP versions - Maintain backward compatibility with HTTP/1.1 semantics (methods, status codes, URIs, headers) - Reduce latency to accelerate webpage loading through header compression, server push capabilities, request prioritization, and multiplexing over single TCP connections - Support existing HTTP use cases across browsers, mobile devices, web APIs, and various server architectures"
+        },
+        {
+          "id": "q06-c12",
+          "source": "docs/http2_protocol.md",
+          "grade": 0,
+          "text": "SPDY, developed by Google as an experimental protocol, served as HTTP/2's foundation. SPDY introduced stream IDs enabling single TCP channels with separate control and data frames. Testing demonstrated \"page load speedup ranging from 11% to 47%\" compared to HTTP/1.1."
+        }
+      ]
+    },
+    {
+      "id": "q07",
+      "query": "What is information retrieval as a field?",
+      "gold_source": "wikipedia/information_retrieval_wikipedia.md",
+      "related_source": "wikipedia/question_answering_wikipedia.md",
+      "candidates": [
+        {
+          "id": "q07-c01",
+          "source": "wikipedia/question_answering_wikipedia.md",
+          "grade": 1,
+          "text": "Question answering (QA) is a computer science discipline within the fields of information retrieval and natural language processing (NLP) that is concerned with building systems that automatically answer questions that are posed by humans in a natural language. A question-answering implementation, usually a computer program, may construct its answers by querying a structured database of knowledge or information, usually a knowledge base. More commonly, question-answering systems can pull answers from an unstructured collection of natural language documents. Some examples of natural language document collections used for question answering systems include reference texts, compiled newswire reports, Wikipedia pages and other World Wide Web pages."
+        },
+        {
+          "id": "q07-c02",
+          "source": "docs/checkout_runtime_contract.md",
+          "grade": 0,
+          "text": "- No `/graphql` endpoint is exposed for this library. - No GraphQL schema or GraphQL introspection contract is available. - The authoritative integration path for system information is the REST endpoint `GET /system/info`."
+        },
+        {
+          "id": "q07-c03",
+          "source": "docs/fastapi_path_params.md",
+          "grade": 0,
+          "text": "In this case, `item_id` is declared to be an `int`. This will give you editor support inside of your function, with error checks, completion, etc."
+        },
+        {
+          "id": "q07-c04",
+          "source": "docs/fastapi_path_params.md",
+          "grade": 0,
+          "text": "Notice that the value your function received (and returned) is `3`, as a Python `int`, not a string `\"3\"`. So, with that type declaration, **FastAPI** gives you automatic request \"parsing\"."
+        },
+        {
+          "id": "q07-c05",
+          "source": "wikipedia/question_answering_wikipedia.md",
+          "grade": 1,
+          "text": "== History == Two early question answering systems were BASEBALL and LUNAR. BASEBALL answered questions about Major League Baseball over a period of one year. LUNAR answered questions about the geological analysis of rocks returned by the Apollo Moon missions. Both question answering systems were very effective in their chosen domains. LUNAR was demonstrated at a lunar science convention in 1971 and it was able to answer 90% of the questions in its domain that were posed by people untrained on the system. Further restricted-domain question answering systems were developed in the following years. The common feature of all these systems is that they had a core database or knowledge system that was hand-written by experts of the chosen domain. The language abilities of BASEBALL and LUNAR used techniques similar to ELIZA and DOCTOR, the first chatterbot programs. SHRDLU was a successful question-answering program developed by Terry Winograd in the late 1960s and early 1970s. It simulated the operation of a robot in a toy world (the \"blocks world\"), and it offered the possibility of asking the robot questions about the state of the world. The strength of this system was the choice of a "
+        },
+        {
+          "id": "q07-c06",
+          "source": "docs/fastapi_path_params.md",
+          "grade": 0,
+          "text": "Because the path parameter `item_id` had a value of `\"foo\"`, which is not an `int`. So, with the same Python type declaration, **FastAPI** gives you data validation."
+        },
+        {
+          "id": "q07-c07",
+          "source": "docs/fastapi_path_params.md",
+          "grade": 0,
+          "text": "When you open your browser at `http://127.0.0.1:8000/docs`, you will see an automatic, interactive, API documentation. Again, just with that same Python type declaration, **FastAPI** gives you automatic, interactive documentation (integrating Swagger UI)."
+        },
+        {
+          "id": "q07-c08",
+          "source": "docs/checkout_runtime_contract.md",
+          "grade": 0,
+          "text": "- Method: `GET` - Path: `/system/info` - Purpose: return the current checkout server system information, build metadata, and runtime status. - Transport contract: JSON over HTTP."
+        },
+        {
+          "id": "q07-c09",
+          "source": "docs/fastapi_path_params.md",
+          "grade": 0,
+          "text": "```json { \"detail\": [ { \"type\": \"int_parsing\", \"loc\": [ \"path\", \"item_id\" ], \"msg\": \"Input should be a valid integer, unable to parse string as an integer\", \"input\": \"foo\" } ] } ```"
+        },
+        {
+          "id": "q07-c10",
+          "source": "wikipedia/information_retrieval_wikipedia.md",
+          "grade": 3,
+          "text": "Information retrieval (IR) in computing and information science is the task of identifying and retrieving information system resources that are relevant to an information need. The information need can be specified in the form of a search query. In the case of document retrieval, queries can be based on full-text or other content-based indexing. Information retrieval is the science of searching for information in a document, searching for documents themselves, and also searching for the metadata that describes data, and for databases of texts, images, or sounds. Cross-modal retrieval implies retrieval across modalities. Automated information retrieval systems are used to reduce what has been called information overload. An IR system is a software system that provides access to books, journals, and other documents, as well as storing and managing those documents. Web search engines are the most visible IR applications."
+        },
+        {
+          "id": "q07-c11",
+          "source": "wikipedia/information_retrieval_wikipedia.md",
+          "grade": 2,
+          "text": "The idea of using computers to search for relevant pieces of information was popularized in the article As We May Think by Vannevar Bush in 1945. It would appear that Bush was inspired by patents for a 'statistical machine' – filed by Emanuel Goldberg in the 1920s and 1930s – that searched for documents stored on film. The first description of a computer searching for information was described by Holmstrom in 1948, detailing an early mention of the Univac computer. Automated information retrieval systems were introduced in the 1950s: one even featured in the 1957 romantic comedy Desk Set. In the 1960s, the first large information retrieval research group was formed by Gerard Salton at Cornell. By the 1970s several different retrieval techniques had been shown to perform well on small text corpora such as the Cranfield collection (several thousand documents). Large-scale retrieval systems, such as the Lockheed Dialog system, came into use early in the 1970s. In 1992, the US Department of Defense along with the National Institute of Standards and Technology (NIST), cosponsored the Text Retrieval Conference (TREC) as part of the TIPSTER text program. The aim of this was to look into t"
+        },
+        {
+          "id": "q07-c12",
+          "source": "wikipedia/information_retrieval_wikipedia.md",
+          "grade": 2,
+          "text": "== Overview == An information retrieval process begins when a user enters a query into the system. Queries are formal statements of information needs, for example search strings in web search engines. In information retrieval, a query does not uniquely identify a single object in the collection. Instead, several objects may match the query, perhaps with different degrees of relevance. An object is an entity that is represented by information in a content collection or database. User queries are matched against the database information. However, as opposed to classical SQL queries of a database, in information retrieval the results returned may or may not match the query, so results are typically ranked. This ranking of results is a key difference of information retrieval searching compared to database searching. Depending on the application the data objects may be, for example, text documents, images, audio, mind maps or videos. Often the documents themselves are not kept or stored directly in the IR system, but are instead represented in the system by document surrogates or metadata. Most IR systems compute a numeric score on how well each object in the database matches the query,"
+        }
+      ]
+    },
+    {
+      "id": "q08",
+      "query": "What is the semantic web?",
+      "gold_source": "wikipedia/semantic_web_wikipedia.md",
+      "related_source": "wikipedia/knowledge_graph_wikipedia.md",
+      "candidates": [
+        {
+          "id": "q08-c01",
+          "source": "wikipedia/transformer_deep_learning_wikipedia.md",
+          "grade": 0,
+          "text": "The idea of encoder–decoder sequence transduction had been developed in the early 2010s; commonly cited as the originators that produced seq2seq are two concurrently published papers from 2014. A 380M-parameter model for machine translation uses two long short-term memories (LSTM). Its architecture consists of two parts. The encoder is an LSTM that takes in a sequence of tokens and turns it into a vector. The decoder is another LSTM that converts the vector into a sequence of tokens. Similarly, another 130M-parameter model used gated recurrent units (GRU) instead of LSTM. Later research showed that GRUs are neither better nor worse than LSTMs for seq2seq. These early seq2seq models had no attention mechanism, and the state vector is accessible only after the last word of the source text was processed. Although in theory such a vector retains the information about the whole original sentence, in practice the information is poorly preserved. This is because the input is processed sequentially by one recurrent network into a fixed-size output vector, which is then processed by another recurrent network into an output. If the input is long, then the output vector would not be able to c"
+        },
+        {
+          "id": "q08-c02",
+          "source": "wikipedia/knowledge_graph_wikipedia.md",
+          "grade": 1,
+          "text": "== History == The term was coined as early as 1972 by the Austrian linguist Edgar W. Schneider, in a discussion of how to build modular instructional systems for courses. In the late 1980s, the University of Groningen and University of Twente jointly began a project called Knowledge Graphs, focusing on the design of semantic networks with edges restricted to a limited set of relations, to facilitate algebras on the graph. In subsequent decades, the distinction between semantic networks and knowledge graphs was blurred. Some early knowledge graphs were topic-specific. In 1985, Wordnet was founded, capturing semantic relationships between words and meanings – an application of this idea to language itself. In 2005, Marc Wirk founded Geonames to capture relationships between different geographic names and locales and associated entities. In 1998, Andrew Edmonds of Science in Finance Ltd in the UK created a system called ThinkBase that offered fuzzy-logic based reasoning in a graphical context. In 2007, both DBpedia and Freebase were founded as graph-based knowledge repositories for general-purpose knowledge. DBpedia focused exclusively on data extracted from Wikipedia, while Freebase "
+        },
+        {
+          "id": "q08-c03",
+          "source": "wikipedia/transformer_deep_learning_wikipedia.md",
+          "grade": 0,
+          "text": "=== Methods for stabilizing training === The plain transformer architecture had difficulty in converging. In the original paper, the authors recommended using learning rate warmup. That is, the learning rate should linearly scale up from 0 to maximal value for the first part of the training (usually recommended to be 2% of the total number of training steps), before decaying again. A 2020 paper found that using layer normalization before (instead of after) multihead attention and feedforward layers stabilizes training, not requiring learning rate warmup. This is the \"pre-LN Transformer\" and is more commonly used, compared to the original \"post-LN Transformer\"."
+        },
+        {
+          "id": "q08-c04",
+          "source": "wikipedia/transformer_deep_learning_wikipedia.md",
+          "grade": 0,
+          "text": "The original version of the transformer architecture was proposed in the 2017 paper \"Attention Is All You Need\" by researchers at Google. The predecessors of transformers were developed as an improvement over previous architectures for machine translation, but have found many applications since. They are used in large-scale natural language processing, computer vision (vision transformers), reinforcement learning, audio, multimodal learning, robotics, and playing chess. It has also led to the development of pre-trained systems, such as generative pre-trained transformers (GPTs) and BERT (bidirectional encoder representations from transformers)."
+        },
+        {
+          "id": "q08-c05",
+          "source": "wikipedia/knowledge_graph_wikipedia.md",
+          "grade": 1,
+          "text": "In knowledge representation and reasoning, a knowledge graph is a knowledge base that uses a graph-structured data model or topology to represent and operate on data. Knowledge graphs are often used to store interlinked descriptions of entities – objects, events, situations or abstract concepts – while also encoding the free-form semantics or relationships underlying these entities. Since the development of the Semantic Web, knowledge graphs have often been associated with linked open data projects, focusing on the connections between concepts and entities. They are also historically associated with and used by search engines such as Google, Bing, and Yahoo; knowledge engines and question-answering services such as WolframAlpha, Apple's Siri, and Amazon Alexa; and social networks such as LinkedIn and Facebook. Recent developments in data science and machine learning, particularly in graph neural networks and representation learning and also in machine learning, have broadened the scope of knowledge graphs beyond their traditional use in search engines and recommender systems. They are increasingly used in scientific research, with notable applications in fields such as genomics, pr"
+        },
+        {
+          "id": "q08-c06",
+          "source": "wikipedia/transformer_deep_learning_wikipedia.md",
+          "grade": 0,
+          "text": "Seq2seq models with attention (including self-attention) still suffered from the same issue with recurrent networks, which is that they are hard to parallelize, which prevented them from being accelerated on GPUs. In 2016, decomposable attention applied a self-attention mechanism to feedforward networks, which are easy to parallelize, and achieved SOTA result in textual entailment with an order of magnitude fewer parameters than LSTMs. One of its authors, Jakob Uszkoreit, suspected that attention without recurrence would be sufficient for language translation, thus the title \"attention is all you need\". That hypothesis was against conventional wisdom at the time, and even his father Hans Uszkoreit, a well-known computational linguist, was skeptical. In the same year, self-attention (called intra-attention or intra-sentence attention) was proposed for LSTMs. On 2017-06-12, the original (100M-parameter) encoder–decoder transformer model was published in the \"Attention is all you need\" paper. At the time, the focus of the research was on improving seq2seq for machine translation, by removing its recurrence to process all tokens in parallel, but preserving its dot-product attention mec"
+        },
+        {
+          "id": "q08-c07",
+          "source": "wikipedia/semantic_web_wikipedia.md",
+          "grade": 2,
+          "text": "I have a dream for the Web [in which computers] become capable of analyzing all the data on the Web – the content, links, and transactions between people and computers. A \"Semantic Web\", which makes this possible, has yet to emerge, but when it does, the day-to-day mechanisms of trade, bureaucracy and our daily lives will be handled by machines talking to machines. The \"intelligent agents\" people have touted for ages will finally materialize. The 2001 Scientific American article by Berners-Lee, Hendler, and Lassila described an expected evolution of the existing Web to a Semantic Web. In 2006, Berners-Lee and colleagues stated that: \"This simple idea…remains largely unrealized\". In 2013, more than four million Web domains (out of roughly 250 million total) contained Semantic Web markup."
+        },
+        {
+          "id": "q08-c08",
+          "source": "wikipedia/semantic_web_wikipedia.md",
+          "grade": 3,
+          "text": "The Semantic Web, sometimes known as Web 3.0, is an extension of the World Wide Web through standards set by the World Wide Web Consortium (W3C). The goal of the Semantic Web is to make Internet data machine-readable. To enable the encoding of semantics with the data, technologies such as Resource Description Framework (RDF) and Web Ontology Language (OWL) are used. These technologies are used to formally represent metadata. For example, ontology can describe concepts, relationships between entities, and categories of things. These embedded semantics offer significant advantages such as reasoning over data and operating with heterogeneous data sources. These standards promote common data formats and exchange protocols on the Web, fundamentally the RDF. According to the W3C, \"The Semantic Web provides a common framework that allows data to be shared and reused across application, enterprise, and community boundaries.\" The Semantic Web is therefore regarded as an integrator across different content and information applications and systems."
+        },
+        {
+          "id": "q08-c09",
+          "source": "wikipedia/semantic_web_wikipedia.md",
+          "grade": 2,
+          "text": "== History == The term was coined by Tim Berners-Lee for a web of data (or data web) that can be processed by machines—that is, one in which much of the meaning is machine-readable. While its critics have questioned its feasibility, proponents argue that applications in library and information science, industry, biology and human sciences research have already proven the validity of the original concept. The idea of adding semantics to the Web predates the term itself. Berners-Lee discussed the need for semantics in the Web at the first International World Wide Web Conference in 1994. In 1998, he published a design document titled \"Semantic Web Road map\", outlining the architecture for a web of machine-processable data. The first patent for the creation of a semantic web was filed by Amit Sheth et al. on 30 October 2001. Berners-Lee originally expressed his vision of the Semantic Web in 1999 as follows:"
+        },
+        {
+          "id": "q08-c10",
+          "source": "wikipedia/transformer_deep_learning_wikipedia.md",
+          "grade": 0,
+          "text": "=== AI boom era === As early as spring 2017, even before the \"Attention is all you need\" preprint was published, one of the co-authors applied the \"decoder-only\" variation of the architecture to generate fictitious Wikipedia articles. Transformer architecture is now used alongside many generative models that contribute to the ongoing AI boom. The \"reference implementation\" of the original Transformer was written in a TensorFlow library. In language modelling, ELMo (2018) was a bi-directional LSTM that produces contextualized word embeddings, improving upon the line of research from bag of words and word2vec. It was followed by BERT (2018), an encoder-only transformer model. In October 2019, Google started using BERT to process search queries. In 2020, Google Translate replaced the previous RNN-encoder–RNN-decoder model by a transformer-encoder–RNN-decoder model. Starting in 2018, the OpenAI GPT series of decoder-only transformers became state of the art in natural language generation. In the end of 2022, a chatbot based on GPT-3, ChatGPT, became unexpectedly popular, triggering a boom around large language models. Transformers have been applied in modalities beyond text. 4 days aft"
+        },
+        {
+          "id": "q08-c11",
+          "source": "wikipedia/transformer_deep_learning_wikipedia.md",
+          "grade": 0,
+          "text": "=== Predecessors === For many years, sequence modelling and generation was done by using plain recurrent neural networks (RNNs). A well-cited early example was the Elman network (1990). In theory, the information from one token can propagate arbitrarily far down the sequence, but in practice the vanishing-gradient problem leaves the model's state at the end of a long sentence without precise, extractable information about preceding tokens. A key breakthrough was LSTM (1995), an RNN which used various innovations to overcome the vanishing gradient problem, allowing efficient learning of long-sequence modelling. One key innovation was the use of an attention mechanism which used neurons that multiply the outputs of other neurons, so-called multiplicative units. Neural networks using multiplicative units were later called sigma-pi networks or higher-order networks. LSTM became the standard architecture for long sequence modelling until the 2017 publication of transformers. However, LSTM still used sequential processing, like most other RNNs. Specifically, RNNs operate one token at a time from first to last; they cannot operate in parallel over all tokens in a sequence. Modern transfor"
+        },
+        {
+          "id": "q08-c12",
+          "source": "wikipedia/transformer_deep_learning_wikipedia.md",
+          "grade": 0,
+          "text": "In deep learning, the transformer is a family of artificial neural network architectures based on the multi-head attention mechanism, in which text is converted to numerical representations called tokens, and each token is converted into a vector via lookup from a word embedding table. At each layer, each token is then contextualized within the scope of the context window with other (unmasked) tokens via a parallel multi-head attention mechanism, allowing the signal for key tokens to be amplified and less important tokens to be diminished. Transformers have the advantage of having no recurrent units, therefore requiring less training time than earlier recurrent neural architectures (RNNs) such as long short-term memory (LSTM). Later variations have been widely adopted for training large language models (LLMs) on large (language) datasets."
+        }
+      ]
+    },
+    {
+      "id": "q09",
+      "query": "How does the transformer architecture work in deep learning?",
+      "gold_source": "wikipedia/transformer_deep_learning_wikipedia.md",
+      "related_source": "wikipedia/large_language_model_wikipedia.md",
+      "candidates": [
+        {
+          "id": "q09-c01",
+          "source": "docs/relay_twin_standard.md",
+          "grade": 0,
+          "text": "RLY-STD-204 favors throughput over failover speed. The cumulative acknowledgement mode batches confirmations, which keeps the control channel quiet but delays loss detection by up to one full frame window. Rings that host latency-sensitive tenants should evaluate the extended profile instead of tuning RLY-STD-204 beyond its registered parameters."
+        },
+        {
+          "id": "q09-c02",
+          "source": "wikipedia/transformer_deep_learning_wikipedia.md",
+          "grade": 2,
+          "text": "The original version of the transformer architecture was proposed in the 2017 paper \"Attention Is All You Need\" by researchers at Google. The predecessors of transformers were developed as an improvement over previous architectures for machine translation, but have found many applications since. They are used in large-scale natural language processing, computer vision (vision transformers), reinforcement learning, audio, multimodal learning, robotics, and playing chess. It has also led to the development of pre-trained systems, such as generative pre-trained transformers (GPTs) and BERT (bidirectional encoder representations from transformers)."
+        },
+        {
+          "id": "q09-c03",
+          "source": "wikipedia/large_language_model_wikipedia.md",
+          "grade": 1,
+          "text": "Before the emergence of transformer-based models in 2017, some language models were considered large relative to the computational and data constraints of their time. In the early 1990s, IBM's statistical models pioneered word alignment techniques for machine translation, laying the groundwork for corpus-based language modeling. In 2001, a smoothed n-gram model, such as those employing Kneser–Ney smoothing, trained on 300 million words, achieved state-of-the-art perplexity on benchmark tests. During the 2000s, with the rise of widespread internet access, researchers began compiling massive text datasets from the web (\"web as corpus\") to train statistical language models."
+        },
+        {
+          "id": "q09-c04",
+          "source": "docs/fastapi_path_params.md",
+          "grade": 0,
+          "text": "Notice that the value your function received (and returned) is `3`, as a Python `int`, not a string `\"3\"`. So, with that type declaration, **FastAPI** gives you automatic request \"parsing\"."
+        },
+        {
+          "id": "q09-c05",
+          "source": "wikipedia/large_language_model_wikipedia.md",
+          "grade": 1,
+          "text": "A large language model (LLM) is a computational model trained on a vast amount of data, designed for natural language processing tasks, especially language generation. The largest and most capable LLMs are generative pre-trained transformers (GPTs) that provide the core capabilities of modern chatbots. LLMs use large numbers of artificial intelligence parameters to generate, summarize, translate and reason over text in a large variety of contexts. Models may be fine-tuned to perform specific tasks, or users can give them more specific prompts to refine their output. As LLMs are trained on collections of human-written text, they are able to reflect patterns in natural language. They may include inaccuracies and biases which the humans who produced the training data held. Compared to earlier statistical and recurrent neural network approaches to language modeling, LLMs use a transformer architecture. This allows for more efficient parallelization, longer context handling, and scalable training using higher data volumes. Models like GPT, BERT, and their successors used these advances to demonstrate emergent behaviors at scale, such as finding specific data from a large data set and co"
+        },
+        {
+          "id": "q09-c06",
+          "source": "docs/relay_twin_standard.md",
+          "grade": 0,
+          "text": "Changing the frame window of a registered profile is not permitted; a different window requires registering a new profile id."
+        },
+        {
+          "id": "q09-c07",
+          "source": "docs/fastapi_path_params.md",
+          "grade": 0,
+          "text": "In this case, `item_id` is declared to be an `int`. This will give you editor support inside of your function, with error checks, completion, etc."
+        },
+        {
+          "id": "q09-c08",
+          "source": "wikipedia/transformer_deep_learning_wikipedia.md",
+          "grade": 3,
+          "text": "In deep learning, the transformer is a family of artificial neural network architectures based on the multi-head attention mechanism, in which text is converted to numerical representations called tokens, and each token is converted into a vector via lookup from a word embedding table. At each layer, each token is then contextualized within the scope of the context window with other (unmasked) tokens via a parallel multi-head attention mechanism, allowing the signal for key tokens to be amplified and less important tokens to be diminished. Transformers have the advantage of having no recurrent units, therefore requiring less training time than earlier recurrent neural architectures (RNNs) such as long short-term memory (LSTM). Later variations have been widely adopted for training large language models (LLMs) on large (language) datasets."
+        },
+        {
+          "id": "q09-c09",
+          "source": "docs/relay_twin_standard.md",
+          "grade": 0,
+          "text": "The standard interconnect profile, registered as RLY-STD-204, is the default relay configuration for rings that carry mixed tenant traffic."
+        },
+        {
+          "id": "q09-c10",
+          "source": "docs/relay_twin_standard.md",
+          "grade": 0,
+          "text": "- Registration id: RLY-STD-204 - Frame window: 64 frames - Acknowledgement mode: cumulative - Redundancy: single spare relay per ring - Failover deadline: 800 ms"
+        },
+        {
+          "id": "q09-c11",
+          "source": "wikipedia/transformer_deep_learning_wikipedia.md",
+          "grade": 2,
+          "text": "=== Predecessors === For many years, sequence modelling and generation was done by using plain recurrent neural networks (RNNs). A well-cited early example was the Elman network (1990). In theory, the information from one token can propagate arbitrarily far down the sequence, but in practice the vanishing-gradient problem leaves the model's state at the end of a long sentence without precise, extractable information about preceding tokens. A key breakthrough was LSTM (1995), an RNN which used various innovations to overcome the vanishing gradient problem, allowing efficient learning of long-sequence modelling. One key innovation was the use of an attention mechanism which used neurons that multiply the outputs of other neurons, so-called multiplicative units. Neural networks using multiplicative units were later called sigma-pi networks or higher-order networks. LSTM became the standard architecture for long sequence modelling until the 2017 publication of transformers. However, LSTM still used sequential processing, like most other RNNs. Specifically, RNNs operate one token at a time from first to last; they cannot operate in parallel over all tokens in a sequence. Modern transfor"
+        },
+        {
+          "id": "q09-c12",
+          "source": "docs/fastapi_path_params.md",
+          "grade": 0,
+          "text": "```json { \"detail\": [ { \"type\": \"int_parsing\", \"loc\": [ \"path\", \"item_id\" ], \"msg\": \"Input should be a valid integer, unable to parse string as an integer\", \"input\": \"foo\" } ] } ```"
+        }
+      ]
+    },
+    {
+      "id": "q10",
+      "query": "What is a large language model?",
+      "gold_source": "wikipedia/large_language_model_wikipedia.md",
+      "related_source": "wikipedia/transformer_deep_learning_wikipedia.md",
+      "candidates": [
+        {
+          "id": "q10-c01",
+          "source": "docs/fastapi_request_body.md",
+          "grade": 0,
+          "text": "Your API almost always has to send a response body, but clients don't necessarily need to send request bodies all the time."
+        },
+        {
+          "id": "q10-c02",
+          "source": "wikipedia/transformer_deep_learning_wikipedia.md",
+          "grade": 1,
+          "text": "In deep learning, the transformer is a family of artificial neural network architectures based on the multi-head attention mechanism, in which text is converted to numerical representations called tokens, and each token is converted into a vector via lookup from a word embedding table. At each layer, each token is then contextualized within the scope of the context window with other (unmasked) tokens via a parallel multi-head attention mechanism, allowing the signal for key tokens to be amplified and less important tokens to be diminished. Transformers have the advantage of having no recurrent units, therefore requiring less training time than earlier recurrent neural architectures (RNNs) such as long short-term memory (LSTM). Later variations have been widely adopted for training large language models (LLMs) on large (language) datasets."
+        },
+        {
+          "id": "q10-c03",
+          "source": "docs/fastapi_request_body.md",
+          "grade": 0,
+          "text": "- Read the body of the request as JSON - Convert the corresponding types (if needed) - Validate the data (returning nice error messages if invalid) - Give you the received data in the parameter `item` - Provide editor support for all attributes and their types - Generate JSON Schema definitions for your model - Include those schemas in the generated OpenAPI schema and automatic documentation UIs"
+        },
+        {
+          "id": "q10-c04",
+          "source": "docs/fastapi_request_body.md",
+          "grade": 0,
+          "text": "In your editor, inside your function you get type hints and completion everywhere. You also get error checks for incorrect type operations. This works with Visual Studio Code, PyCharm, and most other Python editors."
+        },
+        {
+          "id": "q10-c05",
+          "source": "wikipedia/transformer_deep_learning_wikipedia.md",
+          "grade": 1,
+          "text": "The original version of the transformer architecture was proposed in the 2017 paper \"Attention Is All You Need\" by researchers at Google. The predecessors of transformers were developed as an improvement over previous architectures for machine translation, but have found many applications since. They are used in large-scale natural language processing, computer vision (vision transformers), reinforcement learning, audio, multimodal learning, robotics, and playing chess. It has also led to the development of pre-trained systems, such as generative pre-trained transformers (GPTs) and BERT (bidirectional encoder representations from transformers)."
+        },
+        {
+          "id": "q10-c06",
+          "source": "wikipedia/large_language_model_wikipedia.md",
+          "grade": 2,
+          "text": "Before the emergence of transformer-based models in 2017, some language models were considered large relative to the computational and data constraints of their time. In the early 1990s, IBM's statistical models pioneered word alignment techniques for machine translation, laying the groundwork for corpus-based language modeling. In 2001, a smoothed n-gram model, such as those employing Kneser–Ney smoothing, trained on 300 million words, achieved state-of-the-art perplexity on benchmark tests. During the 2000s, with the rise of widespread internet access, researchers began compiling massive text datasets from the web (\"web as corpus\") to train statistical language models."
+        },
+        {
+          "id": "q10-c07",
+          "source": "docs/fastapi_request_body.md",
+          "grade": 0,
+          "text": "> **Info**: To send data, use one of: `POST` (most common), `PUT`, `DELETE`, or `PATCH`. Sending a body with a `GET` request has undefined behavior in specifications and is discouraged."
+        },
+        {
+          "id": "q10-c08",
+          "source": "wikipedia/large_language_model_wikipedia.md",
+          "grade": 2,
+          "text": "Moving beyond n-gram models, researchers started in 2000 to use neural networks to learn language models. Following the breakthrough of deep neural networks in image classification around 2012, similar architectures were adapted for language tasks. This shift was marked by the development of word embeddings (e.g., Word2Vec by Mikolov in 2013) and sequence-to-sequence (seq2seq) models using LSTM. In 2016, Google transitioned its translation service to neural machine translation (NMT), replacing statistical phrase-based models with deep recurrent neural networks. These early NMT systems used LSTM-based encoder-decoder architectures, as they preceded the invention of transformers. At the 2017 NeurIPS conference, Google researchers introduced the transformer architecture in their landmark paper \"Attention Is All You Need\". This paper's goal was to improve upon 2014 seq2seq technology, and was based mainly on the attention mechanism developed by Bahdanau et al. in 2014. The following year in 2018, BERT was introduced and quickly became \"ubiquitous\". Though the original transformer has both encoder and decoder blocks, BERT is an encoder-only model. Academic and research usage of BERT beg"
+        },
+        {
+          "id": "q10-c09",
+          "source": "docs/fastapi_request_body.md",
+          "grade": 0,
+          "text": "```python @app.post(\"/items/\") async def create_item(item: Item): item_dict = item.model_dump() if item.tax is not None: price_with_tax = item.price + item.tax item_dict.update({\"price_with_tax\": price_with_tax}) return item_dict ```"
+        },
+        {
+          "id": "q10-c10",
+          "source": "docs/fastapi_request_body.md",
+          "grade": 0,
+          "text": "- A **request body** is data sent by the client to your API - A **response body** is the data your API sends to the client"
+        },
+        {
+          "id": "q10-c11",
+          "source": "wikipedia/large_language_model_wikipedia.md",
+          "grade": 3,
+          "text": "A large language model (LLM) is a computational model trained on a vast amount of data, designed for natural language processing tasks, especially language generation. The largest and most capable LLMs are generative pre-trained transformers (GPTs) that provide the core capabilities of modern chatbots. LLMs use large numbers of artificial intelligence parameters to generate, summarize, translate and reason over text in a large variety of contexts. Models may be fine-tuned to perform specific tasks, or users can give them more specific prompts to refine their output. As LLMs are trained on collections of human-written text, they are able to reflect patterns in natural language. They may include inaccuracies and biases which the humans who produced the training data held. Compared to earlier statistical and recurrent neural network approaches to language modeling, LLMs use a transformer architecture. This allows for more efficient parallelization, longer context handling, and scalable training using higher data volumes. Models like GPT, BERT, and their successors used these advances to demonstrate emergent behaviors at scale, such as finding specific data from a large data set and co"
+        },
+        {
+          "id": "q10-c12",
+          "source": "docs/fastapi_request_body.md",
+          "grade": 0,
+          "text": "When a model attribute has a default value, it is not required. Otherwise, it is required. Use `None` to make it optional."
+        }
+      ]
+    },
+    {
+      "id": "q11",
+      "query": "What is question answering in computer science?",
+      "gold_source": "wikipedia/question_answering_wikipedia.md",
+      "related_source": "wikipedia/information_retrieval_wikipedia.md",
+      "candidates": [
+        {
+          "id": "q11-c01",
+          "source": "wikipedia/information_retrieval_wikipedia.md",
+          "grade": 1,
+          "text": "Information retrieval (IR) in computing and information science is the task of identifying and retrieving information system resources that are relevant to an information need. The information need can be specified in the form of a search query. In the case of document retrieval, queries can be based on full-text or other content-based indexing. Information retrieval is the science of searching for information in a document, searching for documents themselves, and also searching for the metadata that describes data, and for databases of texts, images, or sounds. Cross-modal retrieval implies retrieval across modalities. Automated information retrieval systems are used to reduce what has been called information overload. An IR system is a software system that provides access to books, journals, and other documents, as well as storing and managing those documents. Web search engines are the most visible IR applications."
+        },
+        {
+          "id": "q11-c02",
+          "source": "wikipedia/information_retrieval_wikipedia.md",
+          "grade": 1,
+          "text": "== Overview == An information retrieval process begins when a user enters a query into the system. Queries are formal statements of information needs, for example search strings in web search engines. In information retrieval, a query does not uniquely identify a single object in the collection. Instead, several objects may match the query, perhaps with different degrees of relevance. An object is an entity that is represented by information in a content collection or database. User queries are matched against the database information. However, as opposed to classical SQL queries of a database, in information retrieval the results returned may or may not match the query, so results are typically ranked. This ranking of results is a key difference of information retrieval searching compared to database searching. Depending on the application the data objects may be, for example, text documents, images, audio, mind maps or videos. Often the documents themselves are not kept or stored directly in the IR system, but are instead represented in the system by document surrogates or metadata. Most IR systems compute a numeric score on how well each object in the database matches the query,"
+        },
+        {
+          "id": "q11-c03",
+          "source": "wikipedia/rust_programming_language_wikipedia.md",
+          "grade": 0,
+          "text": "The development of the Servo browser engine continued in parallel with Rust, jointly funded by Mozilla and Samsung. The teams behind the two projects worked in close collaboration; new features in Rust were tested out by the Servo team, and new features in Servo were used to give feedback back to the Rust team. The first version of Servo was released in 2016. The Firefox web browser shipped with Rust code as of 2016 (version 45), but components of Servo did not appear in Firefox until September 2017 (version 57) as part of the Gecko and Quantum projects. Improvements were made to the Rust toolchain ecosystem during the years following 1.0 including Rustfmt, integrated development environment integration, and a regular compiler testing and release cycle. Rust's community gained a code of conduct and an IRC chat for discussion. The earliest known adoption outside of Mozilla was by individual projects at Samsung, Facebook (now Meta Platforms), Dropbox, and Tilde, Inc., the company behind ember.js. Amazon Web Services followed in 2020. Engineers cited performance, lack of a garbage collector, safety, and pleasantness of working in the language as reasons for the adoption. Amazon develo"
+        },
+        {
+          "id": "q11-c04",
+          "source": "wikipedia/question_answering_wikipedia.md",
+          "grade": 3,
+          "text": "Question answering (QA) is a computer science discipline within the fields of information retrieval and natural language processing (NLP) that is concerned with building systems that automatically answer questions that are posed by humans in a natural language. A question-answering implementation, usually a computer program, may construct its answers by querying a structured database of knowledge or information, usually a knowledge base. More commonly, question-answering systems can pull answers from an unstructured collection of natural language documents. Some examples of natural language document collections used for question answering systems include reference texts, compiled newswire reports, Wikipedia pages and other World Wide Web pages."
+        },
+        {
+          "id": "q11-c05",
+          "source": "wikipedia/rust_programming_language_wikipedia.md",
+          "grade": 0,
+          "text": "Rust's syntax is similar to that of C and C++, although many of its features were influenced by functional programming languages such as OCaml. Hoare has described Rust as targeted at frustrated C++ developers."
+        },
+        {
+          "id": "q11-c06",
+          "source": "wikipedia/question_answering_wikipedia.md",
+          "grade": 2,
+          "text": "interactivity—clarification of questions or answers answer reuse or caching semantic parsing answer presentation knowledge representation and semantic entailment social media analysis with question answering systems sentiment analysis utilization of thematic roles Image captioning for visual question answering Embodied question answering In 2011, Watson, a question answering computer system developed by IBM, competed in two exhibition matches of Jeopardy! against Brad Rutter and Ken Jennings, winning by a significant margin. Facebook Research made their DrQA system available under an open source license. This system uses Wikipedia as knowledge source. The open source framework Haystack by deepset combines open-domain question answering with generative question answering and supports the domain adaptation of the underlying language models for industry use cases. Large Language Models (LLMs)[36] like GPT-4[37], Gemini[38] are examples of successful QA systems that are enabling more sophisticated understanding and generation of text. When coupled with Multimodal[39] QA Systems, which can process and understand information from various modalities like text, images, and audio, LLMs sign"
+        },
+        {
+          "id": "q11-c07",
+          "source": "wikipedia/rust_programming_language_wikipedia.md",
+          "grade": 0,
+          "text": "=== 2009–2012: Mozilla sponsorship === Mozilla officially sponsored the Rust project in 2009. Brendan Eich and other executives, intrigued by the possibility of using Rust for a safe web browser engine, placed engineers on the project including Patrick Walton, Niko Matsakis, Felix Klock, and Manish Goregaokar. A conference room taken by the project developers was dubbed \"the nerd cave,\" with a sign placed outside the door. During this time period, work had shifted from the initial OCaml compiler to a self-hosting compiler (i.e., written in Rust) targeting LLVM. The ownership system was in place by 2010. The Rust logo was developed in 2011 based on a bicycle chainring. Rust 0.1 became the first public release on January 20, 2012 for Windows, Linux, and MacOS. The early 2010s witnessed increasing involvement from full-time engineers at Mozilla, open source volunteers outside Mozilla, and open source volunteers outside the United States."
+        },
+        {
+          "id": "q11-c08",
+          "source": "wikipedia/question_answering_wikipedia.md",
+          "grade": 2,
+          "text": "== History == Two early question answering systems were BASEBALL and LUNAR. BASEBALL answered questions about Major League Baseball over a period of one year. LUNAR answered questions about the geological analysis of rocks returned by the Apollo Moon missions. Both question answering systems were very effective in their chosen domains. LUNAR was demonstrated at a lunar science convention in 1971 and it was able to answer 90% of the questions in its domain that were posed by people untrained on the system. Further restricted-domain question answering systems were developed in the following years. The common feature of all these systems is that they had a core database or knowledge system that was hand-written by experts of the chosen domain. The language abilities of BASEBALL and LUNAR used techniques similar to ELIZA and DOCTOR, the first chatterbot programs. SHRDLU was a successful question-answering program developed by Terry Winograd in the late 1960s and early 1970s. It simulated the operation of a robot in a toy world (the \"blocks world\"), and it offered the possibility of asking the robot questions about the state of the world. The strength of this system was the choice of a "
+        },
+        {
+          "id": "q11-c09",
+          "source": "wikipedia/rust_programming_language_wikipedia.md",
+          "grade": 0,
+          "text": "=== 2020–present: Mozilla layoffs and Rust Foundation === In August 2020, Mozilla laid off 250 of its 1,000 employees worldwide, as part of a corporate restructuring caused by the COVID-19 pandemic. The team behind Servo was disbanded. The event raised concerns about the future of Rust. In the following week, the Rust Core Team acknowledged the severe impact of the layoffs and announced that plans for a Rust foundation were underway. The first goal of the foundation would be to take ownership of all trademarks and domain names and to take financial responsibility for their costs. On February 8, 2021, the formation of the Rust Foundation was announced by five founding companies: Amazon Web Services, Google, Huawei, Microsoft, and Mozilla. The foundation would provide financial support for Rust developers in the form of grants and server funding. In a blog post published on April 6, 2021, Google announced support for Rust within the Android Open Source Project as an alternative to C/C++. On November 22, 2021, the Moderation Team, which was responsible for enforcing the community code of conduct, announced their resignation \"in protest of the Core Team placing themselves unaccountable"
+        },
+        {
+          "id": "q11-c10",
+          "source": "wikipedia/rust_programming_language_wikipedia.md",
+          "grade": 0,
+          "text": "=== 2012–2015: Evolution === The years from 2012 to 2015 were marked by substantial changes to the Rust type system. Memory management through the ownership system was gradually consolidated and expanded. By 2013, the garbage collector was rarely used, and was removed in favor of the ownership system. Other features were removed in order to simplify the language, including typestates, the pure keyword, various specialized pointer types, and syntax support for channels. According to Steve Klabnik, Rust was influenced during this period by developers coming from C++ (e.g., low-level performance of features), scripting languages (e.g., Cargo and package management), and functional programming (e.g., type systems development). Graydon Hoare stepped down from Rust in 2013. After Hoare's departure, it evolved organically under a federated governance structure, with a \"core team\" of initially six people, and around 30-40 developers total across various other teams. A Request for Comments (RFC) process for new language features was added in March 2014. The core team would grow to nine people by 2016 with over 1600 RFCs. According to Andrew Binstock for Dr. Dobb's Journal in January 2014, w"
+        },
+        {
+          "id": "q11-c11",
+          "source": "wikipedia/rust_programming_language_wikipedia.md",
+          "grade": 0,
+          "text": "Rust began as a personal project by Mozilla employee Graydon Hoare in 2006. According to MIT Technology Review, he started the project due to his frustration with a broken elevator in his apartment building whose software had crashed, and named the language after the group of fungi of the same name that is \"over-engineered for survival\". During the time period between 2006 and 2009, Rust was not publicized to others at Mozilla and was written in Hoare's free time; Hoare began speaking about the language around 2009 after a small group at Mozilla became interested in the project. Hoare cited languages from the 1970s, 1980s, and 1990s as influences — including CLU, BETA, Mesa, NIL, Erlang, Newsqueak, Napier, Hermes, Sather, Alef, and Limbo. He described the language as \"technology from the past come to save the future from itself.\" Early Rust developer Manish Goregaokar similarly described Rust as being based on \"mostly decades-old research.\" During the early years, the Rust compiler was written in about 38,000 lines of OCaml. Early Rust contained several features no longer present today, including explicit object-oriented programming via an obj keyword and a typestates system for va"
+        },
+        {
+          "id": "q11-c12",
+          "source": "wikipedia/rust_programming_language_wikipedia.md",
+          "grade": 0,
+          "text": "Rust is a general-purpose programming language. It is noted for its emphasis on performance, type safety, concurrency, and memory safety. Rust supports multiple programming paradigms. It was influenced by ideas from functional programming, including immutability, higher-order functions, algebraic data types, and pattern matching. It also supports object-oriented programming via structs, enums, traits, and methods. Rust is noted for enforcing memory safety (i.e., that all references point to valid memory) without a conventional garbage collector; instead, memory safety errors and data races are prevented by the \"borrow checker\", which tracks the object lifetime of references at compile time. Software developer Graydon Hoare created Rust in 2006 while working at Mozilla, which officially sponsored the project in 2009. The first stable release, Rust 1.0, was published in May 2015. Following a layoff of Mozilla employees in August 2020, four other companies joined Mozilla in sponsoring Rust through the creation of the Rust Foundation in February 2021. Rust has been adopted by many software projects, especially web services and system software. It has been studied academically and has a"
+        }
+      ]
+    },
+    {
+      "id": "q12",
+      "query": "How does Rust emphasise performance, type safety, concurrency and memory safety?",
+      "gold_source": "wikipedia/rust_programming_language_wikipedia.md",
+      "related_source": "wikipedia/large_language_model_wikipedia.md",
+      "candidates": [
+        {
+          "id": "q12-c01",
+          "source": "docs/ledger_quota_table.md",
+          "grade": 0,
+          "text": "| Plan code | Display name | Documents | Queries per day | Spool retention | Export size | |---|---|---|---|---|---| | LP-010 | Seed | 200 | 150 | 6 hours | 50 MB | | LP-020 | Sprout | 500 | 400 | 12 hours | 120 MB | | LP-030 | Grove | 1500 | 900 | 24 hours | 300 MB | | LP-040 | Orchard | 4000 | 2200 | 36 hours | 750 MB | | LP-050 | Forest | 9000 | 5000 | 48 hours | 1.5 GB | | LP-060 | Taiga | 20000 | 11000 | 72 hours | 4 GB | | LP-070 | Biome | 45000 | 24000 | 96 hours | 9 GB | | LP-080 | Sphere | 100000 | 52000 | 120 hours | 20 GB |"
+        },
+        {
+          "id": "q12-c02",
+          "source": "docs/checkout_runtime_contract.md",
+          "grade": 0,
+          "text": "- No `/graphql` endpoint is exposed for this library. - No GraphQL schema or GraphQL introspection contract is available. - The authoritative integration path for system information is the REST endpoint `GET /system/info`."
+        },
+        {
+          "id": "q12-c03",
+          "source": "wikipedia/rust_programming_language_wikipedia.md",
+          "grade": 2,
+          "text": "=== 2012–2015: Evolution === The years from 2012 to 2015 were marked by substantial changes to the Rust type system. Memory management through the ownership system was gradually consolidated and expanded. By 2013, the garbage collector was rarely used, and was removed in favor of the ownership system. Other features were removed in order to simplify the language, including typestates, the pure keyword, various specialized pointer types, and syntax support for channels. According to Steve Klabnik, Rust was influenced during this period by developers coming from C++ (e.g., low-level performance of features), scripting languages (e.g., Cargo and package management), and functional programming (e.g., type systems development). Graydon Hoare stepped down from Rust in 2013. After Hoare's departure, it evolved organically under a federated governance structure, with a \"core team\" of initially six people, and around 30-40 developers total across various other teams. A Request for Comments (RFC) process for new language features was added in March 2014. The core team would grow to nine people by 2016 with over 1600 RFCs. According to Andrew Binstock for Dr. Dobb's Journal in January 2014, w"
+        },
+        {
+          "id": "q12-c04",
+          "source": "wikipedia/large_language_model_wikipedia.md",
+          "grade": 1,
+          "text": "A large language model (LLM) is a computational model trained on a vast amount of data, designed for natural language processing tasks, especially language generation. The largest and most capable LLMs are generative pre-trained transformers (GPTs) that provide the core capabilities of modern chatbots. LLMs use large numbers of artificial intelligence parameters to generate, summarize, translate and reason over text in a large variety of contexts. Models may be fine-tuned to perform specific tasks, or users can give them more specific prompts to refine their output. As LLMs are trained on collections of human-written text, they are able to reflect patterns in natural language. They may include inaccuracies and biases which the humans who produced the training data held. Compared to earlier statistical and recurrent neural network approaches to language modeling, LLMs use a transformer architecture. This allows for more efficient parallelization, longer context handling, and scalable training using higher data volumes. Models like GPT, BERT, and their successors used these advances to demonstrate emergent behaviors at scale, such as finding specific data from a large data set and co"
+        },
+        {
+          "id": "q12-c05",
+          "source": "docs/ledger_quota_table.md",
+          "grade": 0,
+          "text": "Quotas below are enforced per billing month. The plan code is the only stable identifier; display names may be rebranded without notice."
+        },
+        {
+          "id": "q12-c06",
+          "source": "docs/orbita_runbook_ru.md",
+          "grade": 0,
+          "text": "1. Остановить приём новых сборок командой паузы оркестратора. 2. Дождаться, пока оркестратор подтвердит остановку — подтверждение обязано прийти в течение 90 секунд. 3. Перезапустить процесс службы Orbita. 4. Снять паузу оркестратора и убедиться, что очередь сборок пуста."
+        },
+        {
+          "id": "q12-c07",
+          "source": "docs/orbita_runbook_ru.md",
+          "grade": 0,
+          "text": "Этот регламент описывает единственный поддерживаемый способ перезапуска службы Orbita. Любой другой порядок действий приводит к рассинхронизации реестра поездов и требует ручного восстановления."
+        },
+        {
+          "id": "q12-c08",
+          "source": "wikipedia/rust_programming_language_wikipedia.md",
+          "grade": 2,
+          "text": "The development of the Servo browser engine continued in parallel with Rust, jointly funded by Mozilla and Samsung. The teams behind the two projects worked in close collaboration; new features in Rust were tested out by the Servo team, and new features in Servo were used to give feedback back to the Rust team. The first version of Servo was released in 2016. The Firefox web browser shipped with Rust code as of 2016 (version 45), but components of Servo did not appear in Firefox until September 2017 (version 57) as part of the Gecko and Quantum projects. Improvements were made to the Rust toolchain ecosystem during the years following 1.0 including Rustfmt, integrated development environment integration, and a regular compiler testing and release cycle. Rust's community gained a code of conduct and an IRC chat for discussion. The earliest known adoption outside of Mozilla was by individual projects at Samsung, Facebook (now Meta Platforms), Dropbox, and Tilde, Inc., the company behind ember.js. Amazon Web Services followed in 2020. Engineers cited performance, lack of a garbage collector, safety, and pleasantness of working in the language as reasons for the adoption. Amazon develo"
+        },
+        {
+          "id": "q12-c09",
+          "source": "docs/checkout_runtime_contract.md",
+          "grade": 0,
+          "text": "- Method: `GET` - Path: `/system/info` - Purpose: return the current checkout server system information, build metadata, and runtime status. - Transport contract: JSON over HTTP."
+        },
+        {
+          "id": "q12-c10",
+          "source": "wikipedia/large_language_model_wikipedia.md",
+          "grade": 1,
+          "text": "Before the emergence of transformer-based models in 2017, some language models were considered large relative to the computational and data constraints of their time. In the early 1990s, IBM's statistical models pioneered word alignment techniques for machine translation, laying the groundwork for corpus-based language modeling. In 2001, a smoothed n-gram model, such as those employing Kneser–Ney smoothing, trained on 300 million words, achieved state-of-the-art perplexity on benchmark tests. During the 2000s, with the rise of widespread internet access, researchers began compiling massive text datasets from the web (\"web as corpus\") to train statistical language models."
+        },
+        {
+          "id": "q12-c11",
+          "source": "docs/ledger_quota_table.md",
+          "grade": 0,
+          "text": "Quota checks run at admission time. A request that would exceed the queries-per-day quota is rejected with a retryable status and the reset timestamp; the counter resets at 00:00 UTC. The export size quota applies to a single export artifact, not to the monthly total. Only the LP-070 and LP-080 plans may request a temporary export size raise, and only once per billing month."
+        },
+        {
+          "id": "q12-c12",
+          "source": "wikipedia/rust_programming_language_wikipedia.md",
+          "grade": 3,
+          "text": "Rust is a general-purpose programming language. It is noted for its emphasis on performance, type safety, concurrency, and memory safety. Rust supports multiple programming paradigms. It was influenced by ideas from functional programming, including immutability, higher-order functions, algebraic data types, and pattern matching. It also supports object-oriented programming via structs, enums, traits, and methods. Rust is noted for enforcing memory safety (i.e., that all references point to valid memory) without a conventional garbage collector; instead, memory safety errors and data races are prevented by the \"borrow checker\", which tracks the object lifetime of references at compile time. Software developer Graydon Hoare created Rust in 2006 while working at Mozilla, which officially sponsored the project in 2009. The first stable release, Rust 1.0, was published in May 2015. Following a layoff of Mozilla employees in August 2020, four other companies joined Mozilla in sponsoring Rust through the creation of the Rust Foundation in February 2021. Rust has been adopted by many software projects, especially web services and system software. It has been studied academically and has a"
+        }
+      ]
+    },
+    {
+      "id": "q13",
+      "query": "What is a Kubernetes Pod?",
+      "gold_source": "docs/k8s_pods.md",
+      "related_source": "docs/k8s_deployments.md",
+      "candidates": [
+        {
+          "id": "q13-c01",
+          "source": "docs/fastapi_error_handling.md",
+          "grade": 0,
+          "text": "In these cases, you return an **HTTP status code** in the range of **400** (400-499), which indicates client errors (similar to how 200-299 indicates success)."
+        },
+        {
+          "id": "q13-c02",
+          "source": "docs/fastapi_error_handling.md",
+          "grade": 0,
+          "text": "@app.exception_handler(UnicornException) async def unicorn_exception_handler(request: Request, exc: UnicornException): return JSONResponse( status_code=418, content={\"message\": f\"Oops! {exc.name} did something. There goes a rainbow...\"}, )"
+        },
+        {
+          "id": "q13-c03",
+          "source": "docs/k8s_pods.md",
+          "grade": 2,
+          "text": "As well as application containers, a Pod can contain init containers that run during Pod startup. You can also inject ephemeral containers for debugging a running Pod."
+        },
+        {
+          "id": "q13-c04",
+          "source": "docs/fastapi_error_handling.md",
+          "grade": 0,
+          "text": "When raised inside a path operation function or utility function it calls, the exception terminates the request immediately and sends the HTTP error to the client without running remaining code."
+        },
+        {
+          "id": "q13-c05",
+          "source": "docs/k8s_deployments.md",
+          "grade": 1,
+          "text": "You describe a _desired state_ in a Deployment, and the Deployment Controller changes the actual state to the desired state at a controlled rate. You can define Deployments to create new ReplicaSets, or to remove existing Deployments and adopt all their resources with new Deployments."
+        },
+        {
+          "id": "q13-c06",
+          "source": "docs/fastapi_error_handling.md",
+          "grade": 0,
+          "text": "@app.get(\"/items/{item_id}\") async def read_item(item_id: str): if item_id not in items: raise HTTPException(status_code=404, detail=\"Item not found\") return {\"item\": items[item_id]} ```"
+        },
+        {
+          "id": "q13-c07",
+          "source": "docs/fastapi_error_handling.md",
+          "grade": 0,
+          "text": "**Tip:** You can pass any JSON-convertible value as the `detail` parameter -- not just strings. You can pass dicts, lists, etc., and they'll be automatically converted to JSON by FastAPI."
+        },
+        {
+          "id": "q13-c08",
+          "source": "docs/k8s_pods.md",
+          "grade": 2,
+          "text": "1. **Pods that run a single container**: The \"one-container-per-Pod\" model is the most common Kubernetes use case; in this case, you can think of a Pod as a wrapper around a single container; Kubernetes manages Pods rather than managing the containers directly."
+        },
+        {
+          "id": "q13-c09",
+          "source": "docs/fastapi_error_handling.md",
+          "grade": 0,
+          "text": "- The client doesn't have enough privileges for that operation - The client doesn't have access to that resource - The item the client was trying to access doesn't exist"
+        },
+        {
+          "id": "q13-c10",
+          "source": "docs/k8s_pods.md",
+          "grade": 3,
+          "text": "A _Pod_ (as in a pod of whales or pea pod) is a group of one or more containers, with shared storage and network resources, and a specification for how to run the containers. A Pod's contents are always co-located and co-scheduled, and run in a shared context. A Pod models an application-specific \"logical host\": it contains one or more application containers which are relatively tightly coupled."
+        },
+        {
+          "id": "q13-c11",
+          "source": "docs/fastapi_error_handling.md",
+          "grade": 0,
+          "text": "@app.get(\"/items-header/{item_id}\") async def read_item_header(item_id: str): if item_id not in items: raise HTTPException( status_code=404, detail=\"Item not found\", headers={\"X-Error\": \"There goes my error\"}, ) return {\"item\": items[item_id]} ```"
+        },
+        {
+          "id": "q13-c12",
+          "source": "docs/k8s_deployments.md",
+          "grade": 1,
+          "text": "> **Note:** Do not manage ReplicaSets owned by a Deployment. Consider opening an issue in the main Kubernetes repository if your use case is not covered below."
+        }
+      ]
+    },
+    {
+      "id": "q14",
+      "query": "What is a Kubernetes Service?",
+      "gold_source": "docs/k8s_services.md",
+      "related_source": "docs/k8s_overview.md",
+      "candidates": [
+        {
+          "id": "q14-c01",
+          "source": "docs/fastapi_nested_models.md",
+          "grade": 0,
+          "text": "@app.put(\"/items/{item_id}\") async def update_item(item_id: int, item: Item): results = {\"item_id\": item_id, \"item\": item} return results ```"
+        },
+        {
+          "id": "q14-c02",
+          "source": "docs/k8s_overview.md",
+          "grade": 1,
+          "text": "Kubernetes is a portable, extensible, open source platform for managing containerized workloads and services that facilitate both declarative configuration and automation. It has a large, rapidly growing ecosystem. Kubernetes services, support, and tools are widely available."
+        },
+        {
+          "id": "q14-c03",
+          "source": "docs/fastapi_nested_models.md",
+          "grade": 0,
+          "text": "Use that same standard syntax for model attributes with internal types. So, in our example, we can make `tags` be specifically a \"list of strings\":"
+        },
+        {
+          "id": "q14-c04",
+          "source": "docs/fastapi_nested_models.md",
+          "grade": 0,
+          "text": "class Item(BaseModel): name: str description: str | None = None price: float tax: float | None = None tags: list[str] = []"
+        },
+        {
+          "id": "q14-c05",
+          "source": "docs/k8s_overview.md",
+          "grade": 1,
+          "text": "The name Kubernetes originates from Greek, meaning helmsman or pilot. K8s as an abbreviation results from counting the eight letters between the \"K\" and the \"s\". Google open sourced the Kubernetes project in 2014. Kubernetes combines over 15 years of Google's experience running production workloads at scale with best-of-breed ideas and practices from the community."
+        },
+        {
+          "id": "q14-c06",
+          "source": "docs/k8s_services.md",
+          "grade": 3,
+          "text": "A **Service** in Kubernetes is an abstraction that exposes a network application running as one or more Pods in your cluster. It provides a single outward-facing endpoint even when the workload is split across multiple backends."
+        },
+        {
+          "id": "q14-c07",
+          "source": "docs/fastapi_nested_models.md",
+          "grade": 0,
+          "text": "class Item(BaseModel): name: str description: str | None = None price: float tax: float | None = None tags: set[str] = set() image: Image | None = None"
+        },
+        {
+          "id": "q14-c08",
+          "source": "docs/k8s_services.md",
+          "grade": 2,
+          "text": "```yaml apiVersion: v1 kind: Service metadata: name: my-service spec: selector: app.kubernetes.io/name: MyApp ports: - protocol: TCP port: 80 targetPort: 9376 ```"
+        },
+        {
+          "id": "q14-c09",
+          "source": "docs/rewards_accounts_api_contract.md",
+          "grade": 0,
+          "text": "| Parameter | Meaning | | --- | --- | | `pageNumber` | 1-based page number | | `pageSize` | number of accounts per page | | `withCards` | include linked card records in the response | | `numberStarting` | prefix filter for the account number |"
+        },
+        {
+          "id": "q14-c10",
+          "source": "docs/fastapi_nested_models.md",
+          "grade": 0,
+          "text": "To declare types that have type parameters (internal types), like `list`, `dict`, `tuple`, pass the internal type(s) as \"type parameters\" using square brackets: `[` and `]`"
+        },
+        {
+          "id": "q14-c11",
+          "source": "docs/k8s_services.md",
+          "grade": 2,
+          "text": "If your application can use Kubernetes APIs, you can query the API server for matching EndpointSlices. Kubernetes automatically updates EndpointSlices whenever the set of Pods in a Service changes."
+        },
+        {
+          "id": "q14-c12",
+          "source": "docs/fastapi_nested_models.md",
+          "grade": 0,
+          "text": "class Item(BaseModel): name: str description: str | None = None price: float tax: float | None = None tags: set[str] = set()"
+        }
+      ]
+    },
+    {
+      "id": "q15",
+      "query": "What is a Kubernetes ConfigMap used for?",
+      "gold_source": "docs/k8s_configmaps.md",
+      "related_source": "docs/k8s_secrets.md",
+      "candidates": [
+        {
+          "id": "q15-c01",
+          "source": "docs/k8s_configmaps.md",
+          "grade": 3,
+          "text": "A ConfigMap is an API object used to store non-confidential data in key-value pairs. Pods can consume ConfigMaps as environment variables, command-line arguments, or as configuration files in a volume."
+        },
+        {
+          "id": "q15-c02",
+          "source": "docs/k8s_secrets.md",
+          "grade": 1,
+          "text": "**Key Points:** - Secrets can be created independently of Pods that use them - Similar to ConfigMaps but specifically intended for confidential data - By default stored unencrypted in etcd"
+        },
+        {
+          "id": "q15-c03",
+          "source": "docs/fastapi_error_handling.md",
+          "grade": 0,
+          "text": "@app.get(\"/items-header/{item_id}\") async def read_item_header(item_id: str): if item_id not in items: raise HTTPException( status_code=404, detail=\"Item not found\", headers={\"X-Error\": \"There goes my error\"}, ) return {\"item\": items[item_id]} ```"
+        },
+        {
+          "id": "q15-c04",
+          "source": "docs/k8s_secrets.md",
+          "grade": 1,
+          "text": "A Secret is an object that contains a small amount of sensitive data such as a password, a token, or a key. Secrets allow you to store confidential information separately from Pod specifications and container images, reducing the risk of exposure during workflows."
+        },
+        {
+          "id": "q15-c05",
+          "source": "docs/fastapi_error_handling.md",
+          "grade": 0,
+          "text": "@app.exception_handler(UnicornException) async def unicorn_exception_handler(request: Request, exc: UnicornException): return JSONResponse( status_code=418, content={\"message\": f\"Oops! {exc.name} did something. There goes a rainbow...\"}, )"
+        },
+        {
+          "id": "q15-c06",
+          "source": "docs/fastapi_error_handling.md",
+          "grade": 0,
+          "text": "**Tip:** You can pass any JSON-convertible value as the `detail` parameter -- not just strings. You can pass dicts, lists, etc., and they'll be automatically converted to JSON by FastAPI."
+        },
+        {
+          "id": "q15-c07",
+          "source": "docs/fastapi_error_handling.md",
+          "grade": 0,
+          "text": "@app.get(\"/items/{item_id}\") async def read_item(item_id: str): if item_id not in items: raise HTTPException(status_code=404, detail=\"Item not found\") return {\"item\": items[item_id]} ```"
+        },
+        {
+          "id": "q15-c08",
+          "source": "docs/fastapi_error_handling.md",
+          "grade": 0,
+          "text": "When raised inside a path operation function or utility function it calls, the exception terminates the request immediately and sends the HTTP error to the client without running remaining code."
+        },
+        {
+          "id": "q15-c09",
+          "source": "docs/fastapi_error_handling.md",
+          "grade": 0,
+          "text": "In these cases, you return an **HTTP status code** in the range of **400** (400-499), which indicates client errors (similar to how 200-299 indicates success)."
+        },
+        {
+          "id": "q15-c10",
+          "source": "docs/k8s_configmaps.md",
+          "grade": 2,
+          "text": "ConfigMap does not provide secrecy or encryption. If the data you want to store are confidential, use a Secret rather than a ConfigMap, or use additional (third party) tools to keep your data private."
+        },
+        {
+          "id": "q15-c11",
+          "source": "docs/k8s_configmaps.md",
+          "grade": 2,
+          "text": "A ConfigMap allows you to decouple environment-specific configuration from your container images, so that your applications are easily portable."
+        },
+        {
+          "id": "q15-c12",
+          "source": "docs/fastapi_error_handling.md",
+          "grade": 0,
+          "text": "- The client doesn't have enough privileges for that operation - The client doesn't have access to that resource - The item the client was trying to access doesn't exist"
+        }
+      ]
+    },
+    {
+      "id": "q16",
+      "query": "How does a Kubernetes Deployment describe the desired state?",
+      "gold_source": "docs/k8s_deployments.md",
+      "related_source": "docs/k8s_pods.md",
+      "candidates": [
+        {
+          "id": "q16-c01",
+          "source": "docs/k8s_pods.md",
+          "grade": 1,
+          "text": "A _Pod_ (as in a pod of whales or pea pod) is a group of one or more containers, with shared storage and network resources, and a specification for how to run the containers. A Pod's contents are always co-located and co-scheduled, and run in a shared context. A Pod models an application-specific \"logical host\": it contains one or more application containers which are relatively tightly coupled."
+        },
+        {
+          "id": "q16-c02",
+          "source": "docs/k8s_deployments.md",
+          "grade": 3,
+          "text": "You describe a _desired state_ in a Deployment, and the Deployment Controller changes the actual state to the desired state at a controlled rate. You can define Deployments to create new ReplicaSets, or to remove existing Deployments and adopt all their resources with new Deployments."
+        },
+        {
+          "id": "q16-c03",
+          "source": "docs/k8s_overview.md",
+          "grade": 0,
+          "text": "- **Service discovery and load balancing** - Kubernetes can expose a container using a DNS name or its own IP address. If traffic to a container is high, Kubernetes is able to load balance and distribute the network traffic so that the deployment is stable."
+        },
+        {
+          "id": "q16-c04",
+          "source": "docs/k8s_overview.md",
+          "grade": 0,
+          "text": "Kubernetes is a portable, extensible, open source platform for managing containerized workloads and services that facilitate both declarative configuration and automation. It has a large, rapidly growing ecosystem. Kubernetes services, support, and tools are widely available."
+        },
+        {
+          "id": "q16-c05",
+          "source": "docs/k8s_deployments.md",
+          "grade": 2,
+          "text": "- Create a Deployment to rollout a ReplicaSet. The ReplicaSet creates Pods in the background. Check the status of the rollout to see if it succeeds or not. - Declare the new state of the Pods by updating the PodTemplateSpec of the Deployment. A new ReplicaSet is created, and the Deployment gradually scales it up while scaling down the old ReplicaSet, ensuring Pods are replaced at a controlled rate. Each new ReplicaSet updates the revision of the Deployment. - Rollback to an earlier Deployment revision if the current state of the Deployment is not stable. Each rollback updates the revision of the Deployment. - Scale up the Deployment to facilitate more load. - Pause the rollout of a Deployment to apply multiple fixes to its PodTemplateSpec and then resume it to start a new rollout. - Use the status of the Deployment as an indicator that a rollout has stuck. - Clean up older ReplicaSets that you don't need anymore."
+        },
+        {
+          "id": "q16-c06",
+          "source": "docs/k8s_pods.md",
+          "grade": 1,
+          "text": "As well as application containers, a Pod can contain init containers that run during Pod startup. You can also inject ephemeral containers for debugging a running Pod."
+        },
+        {
+          "id": "q16-c07",
+          "source": "docs/k8s_overview.md",
+          "grade": 0,
+          "text": "The name Kubernetes originates from Greek, meaning helmsman or pilot. K8s as an abbreviation results from counting the eight letters between the \"K\" and the \"s\". Google open sourced the Kubernetes project in 2014. Kubernetes combines over 15 years of Google's experience running production workloads at scale with best-of-breed ideas and practices from the community."
+        },
+        {
+          "id": "q16-c08",
+          "source": "docs/k8s_overview.md",
+          "grade": 0,
+          "text": "- **Automated rollouts and rollbacks** - You can describe the desired state for your deployed containers using Kubernetes, and it can change the actual state to the desired state at a controlled rate. For example, you can automate Kubernetes to create new containers for your deployment, remove existing containers and adopt all their resources to the new container."
+        },
+        {
+          "id": "q16-c09",
+          "source": "docs/k8s_overview.md",
+          "grade": 0,
+          "text": "- **Storage orchestration** - Kubernetes allows you to automatically mount a storage system of your choice, such as local storage, public cloud providers, and more."
+        },
+        {
+          "id": "q16-c10",
+          "source": "docs/k8s_deployments.md",
+          "grade": 2,
+          "text": "> **Note:** Do not manage ReplicaSets owned by a Deployment. Consider opening an issue in the main Kubernetes repository if your use case is not covered below."
+        },
+        {
+          "id": "q16-c11",
+          "source": "docs/k8s_overview.md",
+          "grade": 0,
+          "text": "Containers are a good way to bundle and run your applications. In a production environment, you need to manage the containers that run the applications and ensure that there is no downtime. For example, if a container goes down, another container needs to start. Wouldn't it be easier if this behavior was handled by a system?"
+        },
+        {
+          "id": "q16-c12",
+          "source": "docs/k8s_overview.md",
+          "grade": 0,
+          "text": "That's how Kubernetes comes to the rescue! Kubernetes provides you with a framework to run distributed systems resiliently. It takes care of scaling and failover for your application, provides deployment patterns, and more. For example: Kubernetes can easily manage a canary deployment for your system."
+        }
+      ]
+    },
+    {
+      "id": "q17",
+      "query": "What does Dependency Injection mean in FastAPI?",
+      "gold_source": "docs/fastapi_dependencies.md",
+      "related_source": "docs/fastapi_first_steps.md",
+      "candidates": [
+        {
+          "id": "q17-c01",
+          "source": "docs/fastapi_dependencies.md",
+          "grade": 2,
+          "text": "It is designed to be very simple to use, and to make it very easy for any developer to integrate other components with **FastAPI**."
+        },
+        {
+          "id": "q17-c02",
+          "source": "docs/fastapi_dependencies.md",
+          "grade": 3,
+          "text": "**\"Dependency Injection\"** means, in programming, that there is a way for your code (in this case, your _path operation functions_) to declare things that it requires to work and use: \"dependencies\"."
+        },
+        {
+          "id": "q17-c03",
+          "source": "docs/k8s_secrets.md",
+          "grade": 0,
+          "text": "- Set environment variables for containers - Provide credentials such as SSH keys or passwords to Pods - Allow the kubelet to pull container images from private registries - Bootstrap token Secrets for node registration automation"
+        },
+        {
+          "id": "q17-c04",
+          "source": "docs/k8s_secrets.md",
+          "grade": 0,
+          "text": "- **ServiceAccount tokens**: For authentication between applications within the same cluster - **Third-party tools**: External services that manage sensitive data and reveal Secrets upon proper authentication - **CertificateSigningRequests**: For X.509 certificate authentication - **Device plugins**: Expose node-local encryption hardware (e.g., Trusted Platform Module) to specific Pods - **Operators with external services**: Fetch short-lived session tokens and manage their lifecycle"
+        },
+        {
+          "id": "q17-c05",
+          "source": "docs/k8s_secrets.md",
+          "grade": 0,
+          "text": "A Secret is an object that contains a small amount of sensitive data such as a password, a token, or a key. Secrets allow you to store confidential information separately from Pod specifications and container images, reducing the risk of exposure during workflows."
+        },
+        {
+          "id": "q17-c06",
+          "source": "docs/fastapi_first_steps.md",
+          "grade": 1,
+          "text": "A \"schema\" is a definition or description of something. Not the code that implements it, but just an abstract description."
+        },
+        {
+          "id": "q17-c07",
+          "source": "docs/k8s_secrets.md",
+          "grade": 0,
+          "text": "```yaml apiVersion: v1 kind: Secret metadata: name: dotfile-secret data: .secret-file: REPLACE_ME --- apiVersion: v1 kind: Pod metadata: name: secret-dotfiles-pod spec: volumes: - name: secret-volume secret: secretName: dotfile-secret containers: - name: dotfile-test-container image: registry.k8s.io/busybox command: - ls - \"-l\" - \"/etc/secret-volume\" volumeMounts: - name: secret-volume readOnly: true mountPath: \"/etc/secret-volume\" ```"
+        },
+        {
+          "id": "q17-c08",
+          "source": "docs/k8s_secrets.md",
+          "grade": 0,
+          "text": "Divide complex applications into multiple containers with different privilege levels: - **Frontend container**: Handles user interaction and business logic (no access to private key) - **Signer container**: Can see the private key and responds to signing requests"
+        },
+        {
+          "id": "q17-c09",
+          "source": "docs/k8s_secrets.md",
+          "grade": 0,
+          "text": "**Key Points:** - Secrets can be created independently of Pods that use them - Similar to ConfigMaps but specifically intended for confidential data - By default stored unencrypted in etcd"
+        },
+        {
+          "id": "q17-c10",
+          "source": "docs/fastapi_dependencies.md",
+          "grade": 2,
+          "text": "And then, that system (in this case **FastAPI**) will take care of doing whatever is needed to provide your code with those needed dependencies (\"inject\" the dependencies)."
+        },
+        {
+          "id": "q17-c11",
+          "source": "docs/k8s_secrets.md",
+          "grade": 0,
+          "text": "1. Enable Encryption at Rest for Secrets 2. Enable or configure RBAC rules with least-privilege access 3. Restrict Secret access to specific containers 4. Consider using external Secret store providers"
+        },
+        {
+          "id": "q17-c12",
+          "source": "docs/fastapi_first_steps.md",
+          "grade": 1,
+          "text": "OpenAPI is a specification that dictates how to define a schema of your API. This schema definition includes your API paths, the possible parameters they take, etc."
+        }
+      ]
+    },
+    {
+      "id": "q18",
+      "query": "How does FastAPI handle errors?",
+      "gold_source": "docs/fastapi_error_handling.md",
+      "related_source": "docs/fastapi_middleware.md",
+      "candidates": [
+        {
+          "id": "q18-c01",
+          "source": "docs/fastapi_error_handling.md",
+          "grade": 2,
+          "text": "@app.get(\"/items/{item_id}\") async def read_item(item_id: str): if item_id not in items: raise HTTPException(status_code=404, detail=\"Item not found\") return {\"item\": items[item_id]} ```"
+        },
+        {
+          "id": "q18-c02",
+          "source": "docs/apache_kafka.md",
+          "grade": 0,
+          "text": "Jay Kreps, Neha Narkhede, and Jun Rao co-created Kafka at LinkedIn. Kreps selected the name after author Franz Kafka because the system was \"optimized for writing,\" and he admired Kafka's literary work."
+        },
+        {
+          "id": "q18-c03",
+          "source": "docs/apache_kafka.md",
+          "grade": 0,
+          "text": "Kafka functions as a distributed log-based messaging system guaranteeing ordering within individual partitions rather than across entire topics. Unlike queue-based systems, it retains messages in a durable, append-only log, enabling multiple consumers to read from different offsets."
+        },
+        {
+          "id": "q18-c04",
+          "source": "docs/apache_kafka.md",
+          "grade": 0,
+          "text": "Apache Kafka is a distributed event store and stream-processing platform developed by the Apache Software Foundation as open-source software written in Java and Scala. Originally created at LinkedIn, it was open-sourced in January 2011 and graduated from the Apache Incubator on October 23, 2012."
+        },
+        {
+          "id": "q18-c05",
+          "source": "docs/apache_kafka.md",
+          "grade": 0,
+          "text": "The system uses manual offset management, granting consumers authority over retries and failure handling. If message processing fails, consumers can delay offset commits, preventing partition progress while other partitions continue operating independently."
+        },
+        {
+          "id": "q18-c06",
+          "source": "docs/fastapi_middleware.md",
+          "grade": 1,
+          "text": "- It takes each **request** that comes to your application - It can perform operations on that request or run needed code - Then it passes the request to be processed by the rest of the application (by some path operation) - It then takes the **response** generated by the application - It can perform operations on that response or run needed code - Then it returns the response"
+        },
+        {
+          "id": "q18-c07",
+          "source": "docs/fastapi_error_handling.md",
+          "grade": 3,
+          "text": "In these cases, you return an **HTTP status code** in the range of **400** (400-499), which indicates client errors (similar to how 200-299 indicates success)."
+        },
+        {
+          "id": "q18-c08",
+          "source": "docs/rewards_accounts_api_contract.md",
+          "grade": 0,
+          "text": "| Parameter | Meaning | | --- | --- | | `pageNumber` | 1-based page number | | `pageSize` | number of accounts per page | | `withCards` | include linked card records in the response | | `numberStarting` | prefix filter for the account number |"
+        },
+        {
+          "id": "q18-c09",
+          "source": "docs/apache_kafka.md",
+          "grade": 0,
+          "text": "In 2025, Kafka introduced \"Queues for Kafka\" through share groups, offering queue-like semantics as an alternative to consumer groups. This allows consumers to cooperatively process records with individual message acknowledgment and delivery tracking, supporting scenarios where consumer counts exceed partition counts."
+        },
+        {
+          "id": "q18-c10",
+          "source": "docs/apache_kafka.md",
+          "grade": 0,
+          "text": "The platform aims to deliver a unified, high-throughput, low-latency platform for handling real-time data feeds. Kafka employs a binary TCP-based protocol optimized for efficiency, using message set abstractions that batch messages together. This design converts a bursty stream of random message writes into linear writes, improving performance through larger network packets and sequential disk operations."
+        },
+        {
+          "id": "q18-c11",
+          "source": "docs/fastapi_middleware.md",
+          "grade": 1,
+          "text": "A \"middleware\" is a function that works with every **request** before it is processed by any specific path operation, and also with every **response** before returning it."
+        },
+        {
+          "id": "q18-c12",
+          "source": "docs/fastapi_error_handling.md",
+          "grade": 2,
+          "text": "- The client doesn't have enough privileges for that operation - The client doesn't have access to that resource - The item the client was trying to access doesn't exist"
+        }
+      ]
+    },
+    {
+      "id": "q19",
+      "query": "How does FastAPI implement security?",
+      "gold_source": "docs/fastapi_security.md",
+      "related_source": "docs/jwt_standard.md",
+      "candidates": [
+        {
+          "id": "q19-c01",
+          "source": "docs/oauth_protocol.md",
+          "grade": 0,
+          "text": "OAuth originated in November 2006 when Blaine Cook developed an OpenID implementation for Twitter while Ma.gnolia needed a solution for OpenID members to authorize Mac OS X Dashboard widgets. Cook, Chris Messina, and Larry Halff from Magnolia collaborated with David Recordon to explore using OpenID with Twitter and Magnolia APIs for delegation authentication. They determined no open standards existed for API access delegation."
+        },
+        {
+          "id": "q19-c02",
+          "source": "docs/oauth_protocol.md",
+          "grade": 0,
+          "text": "At the 73rd Internet Engineering Task Force (IETF) meeting in Minneapolis in November 2008, an OAuth Birds of a Feather session occurred to discuss bringing the protocol into the IETF for standardization work. The well-attended event generated wide support for formally chartering an OAuth working group within the IETF."
+        },
+        {
+          "id": "q19-c03",
+          "source": "docs/oauth_protocol.md",
+          "grade": 0,
+          "text": "OAuth 2.0 emerged based on additional use cases and extensibility requirements from the broader IETF community. Though built on OAuth 1.0 deployment experience, OAuth 2.0 is not backwards compatible with its predecessor. Both RFC 6749 (OAuth 2.0 framework) and RFC 6750 (Bearer Token Usage specification) were published as standards track Requests for Comments in October 2012."
+        },
+        {
+          "id": "q19-c04",
+          "source": "docs/fastapi_security.md",
+          "grade": 3,
+          "text": "**FastAPI** provides several tools to help you deal with **Security** easily, rapidly, in a standard way, without having to study and learn all the security specifications."
+        },
+        {
+          "id": "q19-c05",
+          "source": "docs/oauth_protocol.md",
+          "grade": 0,
+          "text": "OAuth 1.0 was published as RFC 5849 (informational Request for Comments) in April 2010. From August 31, 2010 onward, all third-party Twitter applications required OAuth usage."
+        },
+        {
+          "id": "q19-c06",
+          "source": "docs/oauth_protocol.md",
+          "grade": 0,
+          "text": "**OAuth** (short for \"open authorization\") is an open standard for access delegation. It enables internet users to grant websites or applications access to their information on other platforms without sharing passwords. Major companies including Amazon, Google, Meta Platforms, Microsoft, and Twitter employ OAuth to allow users to share account information with third-party applications."
+        },
+        {
+          "id": "q19-c07",
+          "source": "docs/jwt_standard.md",
+          "grade": 1,
+          "text": "A server can generate a token asserting claims like \"logged in as administrator\" and provide it to a client for authentication proof. The tokens are designed to be compact, URL-safe, and particularly useful in web-browser single-sign-on (SSO) contexts. JWT claims typically pass authenticated user identity between an identity provider and service provider, or convey other business-required claims."
+        },
+        {
+          "id": "q19-c08",
+          "source": "docs/jwt_standard.md",
+          "grade": 1,
+          "text": "**JSON Web Token** (JWT) is an Internet standard for creating data with optional signature and/or encryption whose payload contains JSON assertions known as claims. The tokens are signed using a private secret or public/private key pair."
+        },
+        {
+          "id": "q19-c09",
+          "source": "docs/oauth_protocol.md",
+          "grade": 0,
+          "text": "An OAuth discussion group formed in April 2007 with implementers drafting an open protocol proposal. DeWitt Clinton from Google expressed interest in supporting the effort. By July 2007, the team produced an initial specification. Eran Hammer later coordinated contributions, creating a more formal specification. The OAuth Core 1.0 final draft released on October 3, 2007."
+        },
+        {
+          "id": "q19-c10",
+          "source": "docs/oauth_protocol.md",
+          "grade": 0,
+          "text": "The protocol provides resource owners with a method to authorize third-party clients for secure delegated access to server resources. Through HTTP, OAuth allows authorization servers to issue access tokens to third-party clients with resource owner approval. Third parties then use these tokens to access protected resources hosted by resource servers."
+        },
+        {
+          "id": "q19-c11",
+          "source": "docs/fastapi_security.md",
+          "grade": 2,
+          "text": "If you don't care about any of these terms and you just need to add security with authentication based on username and password _right now_, skip to the next chapters."
+        },
+        {
+          "id": "q19-c12",
+          "source": "docs/fastapi_security.md",
+          "grade": 2,
+          "text": "In many frameworks and systems just handling security and authentication takes a big amount of effort and code (in many cases it can be 50% or more of all the code written)."
+        }
+      ]
+    },
+    {
+      "id": "q20",
+      "query": "How does the OAuth 2.0 authorization protocol work?",
+      "gold_source": "docs/oauth_protocol.md",
+      "related_source": "docs/jwt_standard.md",
+      "candidates": [
+        {
+          "id": "q20-c01",
+          "source": "docs/jwt_standard.md",
+          "grade": 1,
+          "text": "A server can generate a token asserting claims like \"logged in as administrator\" and provide it to a client for authentication proof. The tokens are designed to be compact, URL-safe, and particularly useful in web-browser single-sign-on (SSO) contexts. JWT claims typically pass authenticated user identity between an identity provider and service provider, or convey other business-required claims."
+        },
+        {
+          "id": "q20-c02",
+          "source": "docs/fastapi_nested_models.md",
+          "grade": 0,
+          "text": "class Item(BaseModel): name: str description: str | None = None price: float tax: float | None = None tags: set[str] = set() image: Image | None = None"
+        },
+        {
+          "id": "q20-c03",
+          "source": "docs/oauth_protocol.md",
+          "grade": 2,
+          "text": "**OAuth** (short for \"open authorization\") is an open standard for access delegation. It enables internet users to grant websites or applications access to their information on other platforms without sharing passwords. Major companies including Amazon, Google, Meta Platforms, Microsoft, and Twitter employ OAuth to allow users to share account information with third-party applications."
+        },
+        {
+          "id": "q20-c04",
+          "source": "docs/oauth_protocol.md",
+          "grade": 3,
+          "text": "The protocol provides resource owners with a method to authorize third-party clients for secure delegated access to server resources. Through HTTP, OAuth allows authorization servers to issue access tokens to third-party clients with resource owner approval. Third parties then use these tokens to access protected resources hosted by resource servers."
+        },
+        {
+          "id": "q20-c05",
+          "source": "docs/fastapi_nested_models.md",
+          "grade": 0,
+          "text": "class Item(BaseModel): name: str description: str | None = None price: float tax: float | None = None tags: set[str] = set()"
+        },
+        {
+          "id": "q20-c06",
+          "source": "docs/fastapi_nested_models.md",
+          "grade": 0,
+          "text": "To declare types that have type parameters (internal types), like `list`, `dict`, `tuple`, pass the internal type(s) as \"type parameters\" using square brackets: `[` and `]`"
+        },
+        {
+          "id": "q20-c07",
+          "source": "docs/fastapi_nested_models.md",
+          "grade": 0,
+          "text": "```json { \"name\": \"Foo\", \"description\": \"The pretender\", \"price\": 42.0, \"tax\": 3.2, \"tags\": [\"rock\", \"metal\", \"bar\"], \"image\": { \"url\": \"http://example.com/baz.jpg\", \"name\": \"The Foo live\" } } ```"
+        },
+        {
+          "id": "q20-c08",
+          "source": "docs/fastapi_nested_models.md",
+          "grade": 0,
+          "text": "class Item(BaseModel): name: str description: str | None = None price: float tax: float | None = None tags: list[str] = []"
+        },
+        {
+          "id": "q20-c09",
+          "source": "docs/jwt_standard.md",
+          "grade": 1,
+          "text": "**JSON Web Token** (JWT) is an Internet standard for creating data with optional signature and/or encryption whose payload contains JSON assertions known as claims. The tokens are signed using a private secret or public/private key pair."
+        },
+        {
+          "id": "q20-c10",
+          "source": "docs/fastapi_nested_models.md",
+          "grade": 0,
+          "text": "Use that same standard syntax for model attributes with internal types. So, in our example, we can make `tags` be specifically a \"list of strings\":"
+        },
+        {
+          "id": "q20-c11",
+          "source": "docs/oauth_protocol.md",
+          "grade": 2,
+          "text": "An OAuth discussion group formed in April 2007 with implementers drafting an open protocol proposal. DeWitt Clinton from Google expressed interest in supporting the effort. By July 2007, the team produced an initial specification. Eran Hammer later coordinated contributions, creating a more formal specification. The OAuth Core 1.0 final draft released on October 3, 2007."
+        },
+        {
+          "id": "q20-c12",
+          "source": "docs/fastapi_nested_models.md",
+          "grade": 0,
+          "text": "@app.put(\"/items/{item_id}\") async def update_item(item_id: int, item: Item): results = {\"item_id\": item_id, \"item\": item} return results ```"
+        }
+      ]
+    },
+    {
+      "id": "q21",
+      "query": "How does the TLS protocol establish a secure connection?",
+      "gold_source": "docs/tls_protocol.md",
+      "related_source": "docs/http2_protocol.md",
+      "candidates": [
+        {
+          "id": "q21-c01",
+          "source": "docs/jwt_standard.md",
+          "grade": 0,
+          "text": "For unattended processes, clients can generate and sign their own JWT with a pre-shared secret, passing it to an OAuth-compliant service:"
+        },
+        {
+          "id": "q21-c02",
+          "source": "docs/jwt_standard.md",
+          "grade": 0,
+          "text": "A server can generate a token asserting claims like \"logged in as administrator\" and provide it to a client for authentication proof. The tokens are designed to be compact, URL-safe, and particularly useful in web-browser single-sign-on (SSO) contexts. JWT claims typically pass authenticated user identity between an identity provider and service provider, or convey other business-required claims."
+        },
+        {
+          "id": "q21-c03",
+          "source": "docs/jwt_standard.md",
+          "grade": 0,
+          "text": "```javascript fetch('https://api.example.com/data', { method: 'GET', credentials: 'include' }) .then(response => response.json()) .then(data => console.log(data)) .catch(error => console.error('Error:', error)); ```"
+        },
+        {
+          "id": "q21-c04",
+          "source": "docs/jwt_standard.md",
+          "grade": 0,
+          "text": "Upon successful login, a JWT should be returned to the client via a secure mechanism like an HTTP-only cookie. Storing JWTs in browser storage (localStorage or sessionStorage) is discouraged, as client-side JavaScript can access these mechanisms and expose the token."
+        },
+        {
+          "id": "q21-c05",
+          "source": "docs/tls_protocol.md",
+          "grade": 2,
+          "text": "Research into transport layer security began in 1986 when government agencies launched the Secure Data Network System (SDNS) project, which later produced SP4--subsequently renamed the Transport Layer Security Protocol (TLSP) and published as an international standard in 1995."
+        },
+        {
+          "id": "q21-c06",
+          "source": "docs/tls_protocol.md",
+          "grade": 3,
+          "text": "Transport Layer Security is a cryptographic protocol enabling secure communications across computer networks. TLS is a cryptographic protocol designed to provide communications security over a computer network, such as the Internet."
+        },
+        {
+          "id": "q21-c07",
+          "source": "docs/tls_protocol.md",
+          "grade": 2,
+          "text": "The protocol operates at the presentation layer and comprises two components: the TLS record protocol and the TLS handshake protocol. It's predominantly recognized for securing HTTPS connections, though applications extend to email, instant messaging, and VoIP systems."
+        },
+        {
+          "id": "q21-c08",
+          "source": "docs/http2_protocol.md",
+          "grade": 1,
+          "text": "- Create negotiation mechanisms allowing clients and servers to select HTTP versions - Maintain backward compatibility with HTTP/1.1 semantics (methods, status codes, URIs, headers) - Reduce latency to accelerate webpage loading through header compression, server push capabilities, request prioritization, and multiplexing over single TCP connections - Support existing HTTP use cases across browsers, mobile devices, web APIs, and various server architectures"
+        },
+        {
+          "id": "q21-c09",
+          "source": "docs/jwt_standard.md",
+          "grade": 0,
+          "text": "Contains a set of claims. The JWT specification defines seven registered claim names as standard fields. Custom claims are typically included based on token purpose:"
+        },
+        {
+          "id": "q21-c10",
+          "source": "docs/jwt_standard.md",
+          "grade": 0,
+          "text": "**JSON Web Token** (JWT) is an Internet standard for creating data with optional signature and/or encryption whose payload contains JSON assertions known as claims. The tokens are signed using a private secret or public/private key pair."
+        },
+        {
+          "id": "q21-c11",
+          "source": "docs/http2_protocol.md",
+          "grade": 1,
+          "text": "HTTP/2 is a substantial upgrade to the HTTP network protocol that powers the web. As the first major revision since HTTP/1.1 was standardized in 1997, HTTP/2 was officially published as RFC 7540 on May 14, 2015. The protocol emerged from Google's experimental SPDY project and was developed through the Internet Engineering Task Force's HTTP Working Group (httpbis)."
+        },
+        {
+          "id": "q21-c12",
+          "source": "docs/jwt_standard.md",
+          "grade": 0,
+          "text": "Securely validates the token. The signature is calculated by Base64url-encoding the header and payload, concatenating them with a period separator, then running them through the specified cryptographic algorithm:"
+        }
+      ]
+    },
+    {
+      "id": "q22",
+      "query": "How does the WebSocket protocol work?",
+      "gold_source": "docs/websocket_protocol.md",
+      "related_source": "docs/http2_protocol.md",
+      "candidates": [
+        {
+          "id": "q22-c01",
+          "source": "docs/websocket_protocol.md",
+          "grade": 2,
+          "text": "WebSocket enables full-duplex interaction between web browsers and servers with significantly lower overhead than alternatives like HTTP polling. The protocol allows:"
+        },
+        {
+          "id": "q22-c02",
+          "source": "docs/fastapi_request_body.md",
+          "grade": 0,
+          "text": "When a model attribute has a default value, it is not required. Otherwise, it is required. Use `None` to make it optional."
+        },
+        {
+          "id": "q22-c03",
+          "source": "docs/http2_protocol.md",
+          "grade": 1,
+          "text": "HTTP/2 is a substantial upgrade to the HTTP network protocol that powers the web. As the first major revision since HTTP/1.1 was standardized in 1997, HTTP/2 was officially published as RFC 7540 on May 14, 2015. The protocol emerged from Google's experimental SPDY project and was developed through the Internet Engineering Task Force's HTTP Working Group (httpbis)."
+        },
+        {
+          "id": "q22-c04",
+          "source": "docs/fastapi_request_body.md",
+          "grade": 0,
+          "text": "- Read the body of the request as JSON - Convert the corresponding types (if needed) - Validate the data (returning nice error messages if invalid) - Give you the received data in the parameter `item` - Provide editor support for all attributes and their types - Generate JSON Schema definitions for your model - Include those schemas in the generated OpenAPI schema and automatic documentation UIs"
+        },
+        {
+          "id": "q22-c05",
+          "source": "docs/websocket_protocol.md",
+          "grade": 2,
+          "text": "The protocol differs from HTTP, yet maintains compatibility through the HTTP Upgrade header during the handshake process. This design allows WebSocket to operate over standard HTTP ports (80 and 443) while supporting proxies and intermediaries."
+        },
+        {
+          "id": "q22-c06",
+          "source": "docs/fastapi_request_body.md",
+          "grade": 0,
+          "text": "> **Info**: To send data, use one of: `POST` (most common), `PUT`, `DELETE`, or `PATCH`. Sending a body with a `GET` request has undefined behavior in specifications and is discouraged."
+        },
+        {
+          "id": "q22-c07",
+          "source": "docs/websocket_protocol.md",
+          "grade": 3,
+          "text": "WebSocket is a communications protocol enabling bidirectional communication over a single TCP connection. The IETF standardized it as RFC 6455 in 2011, with the WHATWG maintaining the current living standard specification known as _WebSockets_."
+        },
+        {
+          "id": "q22-c08",
+          "source": "docs/inventory_soap_api_contract.md",
+          "grade": 0,
+          "text": "- WSDL URL: `http://demo.local:8080/inventory-api/ws/inventory.wsdl` - Transport contract: SOAP messages over HTTP, described by WSDL. - Contract style: RPC-style operations with XML envelopes."
+        },
+        {
+          "id": "q22-c09",
+          "source": "docs/inventory_soap_api_contract.md",
+          "grade": 0,
+          "text": "- This surface is not REST. - This surface is not GraphQL. - Agents that need the service description must use the WSDL URL `http://demo.local:8080/inventory-api/ws/inventory.wsdl`."
+        },
+        {
+          "id": "q22-c10",
+          "source": "docs/http2_protocol.md",
+          "grade": 1,
+          "text": "- Create negotiation mechanisms allowing clients and servers to select HTTP versions - Maintain backward compatibility with HTTP/1.1 semantics (methods, status codes, URIs, headers) - Reduce latency to accelerate webpage loading through header compression, server push capabilities, request prioritization, and multiplexing over single TCP connections - Support existing HTTP use cases across browsers, mobile devices, web APIs, and various server architectures"
+        },
+        {
+          "id": "q22-c11",
+          "source": "docs/fastapi_request_body.md",
+          "grade": 0,
+          "text": "- A **request body** is data sent by the client to your API - A **response body** is the data your API sends to the client"
+        },
+        {
+          "id": "q22-c12",
+          "source": "docs/fastapi_request_body.md",
+          "grade": 0,
+          "text": "Your API almost always has to send a response body, but clients don't necessarily need to send request bodies all the time."
+        }
+      ]
+    },
+    {
+      "id": "q23",
+      "query": "What are the stages of the release train?",
+      "gold_source": "docs/release_train_stages.md",
+      "related_source": "docs/release_train_owners.md",
+      "candidates": [
+        {
+          "id": "q23-c01",
+          "source": "docs/fastapi_path_params.md",
+          "grade": 0,
+          "text": "Notice that the value your function received (and returned) is `3`, as a Python `int`, not a string `\"3\"`. So, with that type declaration, **FastAPI** gives you automatic request \"parsing\"."
+        },
+        {
+          "id": "q23-c02",
+          "source": "docs/fastapi_path_params.md",
+          "grade": 0,
+          "text": "In this case, `item_id` is declared to be an `int`. This will give you editor support inside of your function, with error checks, completion, etc."
+        },
+        {
+          "id": "q23-c03",
+          "source": "docs/fastapi_path_params.md",
+          "grade": 0,
+          "text": "```json { \"detail\": [ { \"type\": \"int_parsing\", \"loc\": [ \"path\", \"item_id\" ], \"msg\": \"Input should be a valid integer, unable to parse string as an integer\", \"input\": \"foo\" } ] } ```"
+        },
+        {
+          "id": "q23-c04",
+          "source": "docs/release_train_owners.md",
+          "grade": 1,
+          "text": "Each stage of the Orbita release train has exactly one owning team. The owner is accountable for the stage gate decision and is the only team that may approve an exception."
+        },
+        {
+          "id": "q23-c05",
+          "source": "docs/release_train_stages.md",
+          "grade": 3,
+          "text": "The Orbita release train promotes every build through a fixed sequence of stages. A build may never skip a stage, and a stage may never be re-entered after the train has moved past it."
+        },
+        {
+          "id": "q23-c06",
+          "source": "docs/fastapi_path_params.md",
+          "grade": 0,
+          "text": "Because the path parameter `item_id` had a value of `\"foo\"`, which is not an `int`. So, with the same Python type declaration, **FastAPI** gives you data validation."
+        },
+        {
+          "id": "q23-c07",
+          "source": "docs/fastapi_path_params.md",
+          "grade": 0,
+          "text": "When you open your browser at `http://127.0.0.1:8000/docs`, you will see an automatic, interactive, API documentation. Again, just with that same Python type declaration, **FastAPI** gives you automatic, interactive documentation (integrating Swagger UI)."
+        },
+        {
+          "id": "q23-c08",
+          "source": "docs/release_train_owners.md",
+          "grade": 1,
+          "text": "| Stage | Owning team | Escalation window | |---|---|---| | compile-and-gate | Build Systems | 30 minutes | | sealed-rehearsal | Replay Guild | 2 hours | | canary-slice | Traffic Stewards | 45 minutes | | broad-rollout | Traffic Stewards | 45 minutes | | ledger-close | Release Registrars | 24 hours |"
+        },
+        {
+          "id": "q23-c09",
+          "source": "docs/release_train_stages.md",
+          "grade": 2,
+          "text": "The sealed-rehearsal stage replays the previous week of recorded traffic against the candidate build inside an isolated ring. Only after sealed-rehearsal succeeds does the train enter the canary-slice stage, which routes 4 percent of live traffic to the candidate."
+        },
+        {
+          "id": "q23-c10",
+          "source": "docs/fastapi_path_params.md",
+          "grade": 0,
+          "text": "All the data validation is performed under the hood by Pydantic. You can use the same type declarations with `str`, `float`, `bool` and many other complex data types."
+        },
+        {
+          "id": "q23-c11",
+          "source": "docs/fastapi_path_params.md",
+          "grade": 0,
+          "text": "Because the generated schema is from the OpenAPI standard, there are many compatible tools. **FastAPI** itself provides an alternative API documentation (using ReDoc), which you can access at `http://127.0.0.1:8000/redoc`."
+        },
+        {
+          "id": "q23-c12",
+          "source": "docs/release_train_stages.md",
+          "grade": 2,
+          "text": "A rollback is permitted only from the canary-slice and broad-rollout stages. Once ledger-close has completed, the train can move forward only: a defect found later requires a new train, never a rewind."
+        }
+      ]
+    },
+    {
+      "id": "q24",
+      "query": "What is the relay twin standard?",
+      "gold_source": "docs/relay_twin_standard.md",
+      "related_source": "docs/relay_twin_extended.md",
+      "candidates": [
+        {
+          "id": "q24-c01",
+          "source": "docs/relay_twin_standard.md",
+          "grade": 2,
+          "text": "RLY-STD-204 favors throughput over failover speed. The cumulative acknowledgement mode batches confirmations, which keeps the control channel quiet but delays loss detection by up to one full frame window. Rings that host latency-sensitive tenants should evaluate the extended profile instead of tuning RLY-STD-204 beyond its registered parameters."
+        },
+        {
+          "id": "q24-c02",
+          "source": "wikipedia/optical_character_recognition_wikipedia.md",
+          "grade": 0,
+          "text": "Entering data for business documents, e.g. checks, passports, invoices, bank statements and receipts Automatic number-plate recognition Passport recognition and information extraction in airports Automatically extracting key information from insurance documents Traffic-sign recognition Extracting business card information into a contact list Creating textual versions of printed documents, e.g. book scanning for Project Gutenberg Making electronic images of printed documents searchable, e.g. Google Books Converting handwriting in real-time to control a computer (pen computing) Defeating or testing the robustness of CAPTCHA anti-bot systems, though these are specifically designed to prevent OCR. Assistive technology for blind and visually impaired users Writing instructions for vehicles by identifying CAD images in a database that are appropriate to the vehicle design as it changes in real time Making scanned documents searchable by converting them to PDFs"
+        },
+        {
+          "id": "q24-c03",
+          "source": "wikipedia/optical_character_recognition_wikipedia.md",
+          "grade": 0,
+          "text": "=== Pre-processing === OCR software often pre-processes images to improve the chances of successful recognition. Techniques include:"
+        },
+        {
+          "id": "q24-c04",
+          "source": "wikipedia/optical_character_recognition_wikipedia.md",
+          "grade": 0,
+          "text": "Optical character recognition (OCR) or optical character reader is the electronic or mechanical conversion of images of typed, handwritten or printed text into machine-encoded text, whether from a scanned document, a photo of a document, a scene photo (for example the text on signs and billboards in a landscape photo) or from subtitle text superimposed on an image (for example: from a television broadcast). Widely used as a form of data entry from printed paper data records – whether passport documents, invoices, bank statements, computerized receipts, business cards, mail, printed data, or any suitable documentation – it is a common method of digitizing printed texts so that they can be electronically edited, searched, stored more compactly, displayed online, and used in machine processes such as cognitive computing, machine translation, (extracted) text-to-speech, key data and text mining. OCR is a field of research in pattern recognition, artificial intelligence and computer vision. Early versions needed to be trained with images of each character, and worked on one font at a time. Advanced systems capable of producing a high degree of accuracy for most fonts are now common, and"
+        },
+        {
+          "id": "q24-c05",
+          "source": "docs/relay_twin_extended.md",
+          "grade": 1,
+          "text": "The extended interconnect profile, registered as RLY-EXT-517, is the relay configuration for rings dedicated to latency-sensitive tenants."
+        },
+        {
+          "id": "q24-c06",
+          "source": "wikipedia/optical_character_recognition_wikipedia.md",
+          "grade": 0,
+          "text": "== Types == Optical character recognition (OCR) – targets typewritten text, one glyph or character at a time. Optical word recognition – targets typewritten text, one word at a time (for languages that use a space as a word divider). Usually just called \"OCR\". Intelligent character recognition (ICR) – also targets handwritten printscript or cursive text one glyph or character at a time, usually involving machine learning. Intelligent word recognition (IWR) – also targets handwritten printscript or cursive text, one word at a time. This is especially useful for languages where glyphs are not separated in cursive script. OCR is generally an offline process, which analyses a static document. There are cloud based services which provide an online OCR API service. Handwriting movement analysis can be used as input to handwriting recognition. Instead of merely using the shapes of glyphs and words, this technique is able to capture motion, such as the order in which segments are drawn, the direction, and the pattern of putting the pen down and lifting it. This additional information can make the process more accurate. This technology is also known as \"online character recognition\", \"dynam"
+        },
+        {
+          "id": "q24-c07",
+          "source": "wikipedia/optical_character_recognition_wikipedia.md",
+          "grade": 0,
+          "text": "== Applications == OCR engines have been developed into software applications specializing in various subjects such as receipts, invoices, checks, and legal billing documents. The software can be used for:"
+        },
+        {
+          "id": "q24-c08",
+          "source": "docs/relay_twin_standard.md",
+          "grade": 2,
+          "text": "- Registration id: RLY-STD-204 - Frame window: 64 frames - Acknowledgement mode: cumulative - Redundancy: single spare relay per ring - Failover deadline: 800 ms"
+        },
+        {
+          "id": "q24-c09",
+          "source": "wikipedia/optical_character_recognition_wikipedia.md",
+          "grade": 0,
+          "text": "Early optical character recognition may be traced to technologies involving telegraphy and creating reading devices for the blind. In 1914, Emanuel Goldberg developed a machine that read characters and converted them into standard telegraph code. Concurrently, Edmund Fournier d'Albe developed the Optophone, a handheld scanner that when moved across a printed page, produced tones that corresponded to specific letters or characters. In the late 1920s and into the 1930s, Emanuel Goldberg developed what he called a \"Statistical Machine\" for searching microfilm archives using an optical code recognition system. In 1931, he was granted US Patent number 1,838,389 for the invention. The patent was acquired by IBM."
+        },
+        {
+          "id": "q24-c10",
+          "source": "wikipedia/optical_character_recognition_wikipedia.md",
+          "grade": 0,
+          "text": "=== Visually impaired users === In 1974, Ray Kurzweil started the company Kurzweil Computer Products, Inc. and continued development of omni-font OCR, which could recognize text printed in virtually any font. (Kurzweil is often credited with inventing omni-font OCR, but it was in use by companies, including CompuScan, in the late 1960s and 1970s.) Kurzweil used the technology to create a reading machine for blind people to have a computer read text to them out loud. The device included a CCD-type flatbed scanner and a text-to-speech synthesizer. On January 13, 1976, the finished product was unveiled during a widely reported news conference headed by Kurzweil and the leaders of the National Federation of the Blind. In 1978, Kurzweil Computer Products began selling a commercial version of the optical character recognition computer program. LexisNexis was one of the first customers, and bought the program to upload legal paper and news documents onto its nascent online databases. Two years later, Kurzweil sold his company to Xerox, which eventually spun it off as Scansoft, which merged with Nuance Communications. In the 2000s, OCR was made available online as a service (WebOCR), in a "
+        },
+        {
+          "id": "q24-c11",
+          "source": "docs/relay_twin_standard.md",
+          "grade": 3,
+          "text": "The standard interconnect profile, registered as RLY-STD-204, is the default relay configuration for rings that carry mixed tenant traffic."
+        },
+        {
+          "id": "q24-c12",
+          "source": "docs/relay_twin_extended.md",
+          "grade": 1,
+          "text": "- Registration id: RLY-EXT-517 - Frame window: 16 frames - Acknowledgement mode: immediate - Redundancy: dual spare relays per ring - Failover deadline: 200 ms"
+        }
+      ]
+    }
+  ]
+}

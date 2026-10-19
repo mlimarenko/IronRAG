@@ -67,75 +67,6 @@ pub enum WebhookTargetFanoutOutcome {
     Cancelled,
 }
 
-/// Publish one outbound webhook event by fanning out to all matching
-/// subscriptions.
-///
-/// For each matching subscription a `webhook_delivery_attempt` row is created
-/// and a `webhook_delivery` ingest job is enqueued.  On any per-subscription
-/// error the error is logged and processing continues — partial fan-out is
-/// preferred over total failure.
-///
-/// # Errors
-/// Returns typed per-subscription failures so callers never infer semantics
-/// from diagnostic prose.
-/// Durable lifecycle producers use the outbox-specific targeted entry point;
-/// this function remains useful for explicit, immediate publication.
-pub async fn publish_webhook_event(
-    postgres: &PgPool,
-    event: &WebhookEvent,
-) -> Vec<WebhookFanoutFailure> {
-    let subs = match webhook_repository::list_active_webhook_subscription_targets_for_event(
-        postgres,
-        event.workspace_id,
-        event.library_id,
-        &event.event_type,
-    )
-    .await
-    {
-        Ok(s) => s,
-        Err(e) => {
-            warn!(
-                workspace_id = %event.workspace_id,
-                event_type = %event.event_type,
-                error = %e,
-                "webhook: failed to list active subscriptions for outbound event"
-            );
-            return vec![WebhookFanoutFailure::new(
-                WebhookFanoutFailureKind::SubscriptionLookup,
-                e.to_string(),
-            )];
-        }
-    };
-
-    publish_webhook_event_to_targets(postgres, event, &subs).await
-}
-
-/// Fans one event out to an explicit, already-authorized recipient set.
-///
-/// The lifecycle outbox uses this entry point with its event-time recipient
-/// snapshot. Keeping recipient selection outside this function prevents a
-/// retry from widening the audience when new subscriptions are created.
-pub async fn publish_webhook_event_to_targets(
-    postgres: &PgPool,
-    event: &WebhookEvent,
-    subscriptions: &[WebhookSubscriptionTargetRow],
-) -> Vec<WebhookFanoutFailure> {
-    match publish_webhook_event_to_targets_cancellable(
-        postgres,
-        event,
-        subscriptions,
-        &CancellationToken::new(),
-    )
-    .await
-    {
-        WebhookTargetFanoutOutcome::Completed(failures) => failures,
-        WebhookTargetFanoutOutcome::Cancelled => vec![WebhookFanoutFailure::new(
-            WebhookFanoutFailureKind::Cancelled,
-            "publication cancelled",
-        )],
-    }
-}
-
 /// Fenced targeted fanout used by the lifecycle-outbox relay.
 ///
 /// Cancellation is checked before each recipient and races every enqueue.
@@ -152,7 +83,7 @@ pub async fn publish_webhook_event_to_targets_cancellable(
         return WebhookTargetFanoutOutcome::Cancelled;
     }
     let mut failures = Vec::new();
-    let Some(canonical_payload) = event.canonical_delivery_payload() else {
+    let Some(persisted_payload) = event.persisted_delivery_payload() else {
         return WebhookTargetFanoutOutcome::Completed(vec![WebhookFanoutFailure::new(
             WebhookFanoutFailureKind::InvalidEventPayload,
             "expected a JSON object",
@@ -170,7 +101,7 @@ pub async fn publish_webhook_event_to_targets_cancellable(
             event_type: event.event_type.clone(),
             event_id: event.event_id.clone(),
             occurred_at: event.occurred_at,
-            payload_json: canonical_payload.clone(),
+            payload_json: persisted_payload.clone(),
             target_url: sub.target_url.clone(),
         };
         let job_input = NewIngestJob {

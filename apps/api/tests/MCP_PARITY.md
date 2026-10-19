@@ -4,7 +4,7 @@
 `grounded_answer` MCP tool wrapper.
 
 The live tool is intentionally DB-bound: it resolves library access, creates an
-ephemeral MCP conversation, and delegates to the canonical grounded-answer query
+ephemeral MCP conversation, and delegates to the authoritative grounded-answer query
 turn executor. The built-in UI assistant is a separate MCP-client-style agent
 over the answer tool surface; when it chooses `grounded_answer`, it reaches this
 same live tool through the in-process MCP dispatcher. The integration test

@@ -39,7 +39,7 @@ impl GraphQualityGuardService {
             .nodes
             .iter()
             .filter(|node| retained_node_ids.contains(&node.node_id))
-            .map(|node| (node.node_id, node.canonical_key.clone()))
+            .map(|node| (node.node_id, node.identity_key.clone()))
             .collect::<HashMap<_, _>>();
         let edges = projection
             .edges
@@ -161,7 +161,7 @@ mod tests {
     }
 
     #[test]
-    fn rejects_canonical_self_loops_without_typed_relation_metadata() {
+    fn rejects_normalized_self_loops_without_typed_relation_metadata() {
         let guard = GraphQualityGuardService::new(true, true);
 
         assert_eq!(
@@ -191,7 +191,7 @@ mod tests {
             nodes: vec![
                 GraphViewNodeWrite {
                     node_id: document_id,
-                    canonical_key: "document:1".to_string(),
+                    identity_key: "document:1".to_string(),
                     label: "Doc".to_string(),
                     node_type: "document".to_string(),
                     support_count: 1,
@@ -201,7 +201,7 @@ mod tests {
                 },
                 GraphViewNodeWrite {
                     node_id: entity_id,
-                    canonical_key: "entity:alpha".to_string(),
+                    identity_key: "entity:alpha".to_string(),
                     label: "Alpha".to_string(),
                     node_type: "entity".to_string(),
                     support_count: 1,
@@ -211,7 +211,7 @@ mod tests {
                 },
                 GraphViewNodeWrite {
                     node_id: literal_id,
-                    canonical_key: "attribute:false".to_string(),
+                    identity_key: "attribute:false".to_string(),
                     label: "false".to_string(),
                     node_type: "attribute".to_string(),
                     support_count: 1,
@@ -221,7 +221,7 @@ mod tests {
                 },
                 GraphViewNodeWrite {
                     node_id: orphan_id,
-                    canonical_key: "entity:orphan".to_string(),
+                    identity_key: "entity:orphan".to_string(),
                     label: "Orphan".to_string(),
                     node_type: "entity".to_string(),
                     support_count: 1,
@@ -236,7 +236,7 @@ mod tests {
                     from_node_id: document_id,
                     to_node_id: entity_id,
                     relation_type: "mentions".to_string(),
-                    canonical_key: "document:1--mentions--entity:alpha".to_string(),
+                    identity_key: "document:1--mentions--entity:alpha".to_string(),
                     support_count: 1,
                     summary: None,
                     weight: None,
@@ -247,7 +247,7 @@ mod tests {
                     from_node_id: document_id,
                     to_node_id: literal_id,
                     relation_type: "mentions".to_string(),
-                    canonical_key: "document:1--mentions--attribute:false".to_string(),
+                    identity_key: "document:1--mentions--attribute:false".to_string(),
                     support_count: 1,
                     summary: None,
                     weight: None,
@@ -258,7 +258,7 @@ mod tests {
                     from_node_id: orphan_id,
                     to_node_id: orphan_id,
                     relation_type: "mentions".to_string(),
-                    canonical_key: "entity:orphan--mentions--entity:orphan".to_string(),
+                    identity_key: "entity:orphan--mentions--entity:orphan".to_string(),
                     support_count: 1,
                     summary: None,
                     weight: None,

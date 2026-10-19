@@ -1,0 +1,108 @@
+# BookStack -> IronRAG routing configuration (complete schema reference).
+#
+# SCHEMA AND VALIDATION
+# ---------------------
+# Top-level keys:
+#   default  optional mapping or null; default: null. It is the fallback target
+#            when no rule matches. Without it, an unmatched item is recorded as
+#            `unrouted` and not pushed.
+#   rules    optional list of rule mappings; default: [].
+#   policies optional mapping keyed by adapter `kind`; default: {}.
+#
+# Unknown keys are rejected at the top level and inside `default`, every rule,
+# `target`, and every policy. The only open-ended names are keys inside `match`
+# (adapter facts) and keys directly below `policies` (adapter kinds).
+#
+# TARGETS
+# -------
+# `default.library` and `rules[].target.library` are required strings in the
+# canonical `<workspace-slug>/<library-slug>` form used by IronRAG and its MCP
+# catalog, for example `knowledge/wiki`. Exactly one `/` is required and both
+# slugs must be non-empty. UUIDs and a separate `workspace` field are invalid.
+# IronRAG resolves every configured reference and checks access when the
+# connector starts and whenever this file is hot-reloaded.
+#
+# RULES AND MATCHING
+# ------------------
+# A rule has exactly these keys:
+#   description optional string (or null); default: null; used in logs only.
+#   match       required non-empty mapping of fact name -> expected YAML value.
+#   target      required mapping containing only required string `library`.
+#
+# Rules run top-to-bottom; the first full match wins. Criteria in one `match`
+# are ANDed. Scalar facts use exact, case-sensitive equality. For list facts,
+# the expected scalar must be a member of the list. A missing/null fact fails
+# that rule. There is no regex, glob, coercion, OR, or substring matching.
+#
+# BookStack emits these facts for `page`; `attachment` and `image` dependents
+# inherit the facts of their parent page:
+#   page_id     integer                    e.g. 42
+#   page_slug   string or null             e.g. "incident-response"
+#   name        string or null             exact page title, e.g. "Runbook"
+#   book_id     integer or null            e.g. 7
+#   book        string or null             book slug, e.g. "operations"
+#   chapter_id  integer or null            e.g. 11
+#   chapter     string or null             chapter slug, e.g. "procedures"
+#   shelf_ids   list[integer]              e.g. [3, 9]
+#   shelf       list[string]               shelf slugs, e.g. ["engineering"]
+#   tag         list[string]               tag names, e.g. ["archive"]
+#
+# POLICIES
+# --------
+# BookStack emits `page`, `attachment`, and `image`; those are therefore the
+# useful keys below `policies`. Each kind mapping may contain any/all of the
+# four optional enum keys below. An omitted key or explicit null inherits its
+# DEFAULT_POLICY_* environment value; the framework fallback is shown in
+# parentheses:
+#   on_new               `create` | `skip`    (create)
+#   on_changed           `replace` | `skip`   (replace)
+#   on_missing           `delete` | `ignore`  (delete)
+#   on_duplicate_content `skip` | `fail`      (skip)
+
+default:
+  library: knowledge/wiki
+
+rules:
+  - description: "Engineering shelf"
+    match:
+      shelf: engineering
+    target:
+      library: engineering/handbook
+
+  - description: "Release notes book"
+    match:
+      book: release-notes
+    target:
+      library: product/releases
+
+  - description: "Archived support chapter (all criteria must match)"
+    match:
+      book: support
+      chapter: retired-procedures
+      tag: archive
+    target:
+      library: operations/archive
+
+  - description: "Exact page title; patterns are not supported"
+    match:
+      name: "Migration checklist"
+    target:
+      library: delivery/checklists
+
+policies:
+  page:
+    on_new: create
+    on_changed: replace
+    on_missing: delete
+    on_duplicate_content: skip
+  attachment:
+    on_new: create
+    on_changed: replace
+    on_missing: delete
+    on_duplicate_content: skip
+  image:
+    on_new: create
+    on_changed: replace
+    # Images are content-addressed and can be referenced by several pages.
+    on_missing: ignore
+    on_duplicate_content: skip

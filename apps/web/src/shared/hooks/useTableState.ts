@@ -2,7 +2,7 @@ import { useMemo, type Dispatch, type SetStateAction } from 'react'
 
 import { useLocalStorageState } from './useLocalStorageState'
 
-const TABLE_STATE_STORAGE_PREFIX = 'ironrag_table_state'
+const TABLE_STATE_STORAGE_PREFIX = 'ironrag.v1.table-state'
 
 type TableSortDirection = 'asc' | 'desc'
 

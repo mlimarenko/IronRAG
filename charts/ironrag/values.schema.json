@@ -5,6 +5,9 @@
     "runtimeSecret": {
       "$ref": "#/definitions/runtimeSecret"
     },
+    "bundledDependencySecret": {
+      "$ref": "#/definitions/bundledDependencySecret"
+    },
     "app": {
       "$ref": "#/definitions/app"
     },
@@ -19,9 +22,83 @@
     },
     "autoscaling": {
       "$ref": "#/definitions/autoscaling"
+    },
+    "dependencies": {
+      "$ref": "#/definitions/dependencies"
     }
   },
   "definitions": {
+    "dependencies": {
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "postgres": {
+          "$ref": "#/definitions/postgresDependency"
+        }
+      }
+    },
+    "postgresDependency": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["shmSize", "maxConnections", "sharedBuffers", "workMem"],
+      "properties": {
+        "shmSize": {
+          "description": "Memory-backed /dev/shm size for PostgreSQL",
+          "type": "string",
+          "pattern": "^[1-9][0-9]*(Mi|Gi)$"
+        },
+        "maxConnections": {
+          "description": "Maximum concurrent PostgreSQL connections",
+          "type": "integer",
+          "minimum": 20,
+          "maximum": 10000
+        },
+        "sharedBuffers": {
+          "description": "PostgreSQL shared_buffers value with an explicit binary unit",
+          "type": "string",
+          "pattern": "^[1-9][0-9]*(kB|MB|GB|TB)$"
+        },
+        "workMem": {
+          "description": "PostgreSQL work_mem value with an explicit binary unit",
+          "type": "string",
+          "pattern": "^[1-9][0-9]*(kB|MB|GB|TB)$"
+        }
+      }
+    },
+    "bundledDependencySecret": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["existingSecret", "restartNonce"],
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "existingSecret": {
+                "minLength": 1
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "restartNonce": {
+                "minLength": 1
+              }
+            }
+          }
+        }
+      ],
+      "properties": {
+        "existingSecret": {
+          "description": "Name of an operator-managed Secret for bundled stateful dependencies",
+          "type": "string"
+        },
+        "restartNonce": {
+          "description": "Operator-changed nonce that restarts bundled dependencies after Secret rotation",
+          "type": "string",
+          "maxLength": 128
+        }
+      }
+    },
     "runtimeSecret": {
       "type": "object",
       "additionalProperties": false,
@@ -61,12 +138,12 @@
       "additionalProperties": true,
       "properties": {
         "frontendOrigin": {
-          "description": "Canonical browser origin admitted by UI CORS and MCP Streamable HTTP",
+          "description": "Allowed browser origin admitted by UI CORS and MCP Streamable HTTP",
           "type": "string",
           "format": "uri"
         },
         "openapiPublicOrigin": {
-          "description": "Optional canonical public API origin advertised by OpenAPI and admitted by MCP",
+          "description": "Optional configured public API origin advertised by OpenAPI and admitted by MCP",
           "type": "string",
           "oneOf": [
             {
@@ -77,8 +154,47 @@
             }
           ]
         },
+        "oidc": {
+          "description": "Optional non-secret OIDC settings; client secret and bootstrap admin subject are supplied by the operator-managed runtime Secret, so enabling OIDC requires runtimeSecret.existingSecret",
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "issuerUrl": {
+              "description": "OIDC issuer URL; empty disables chart-side issuer configuration",
+              "type": "string",
+              "oneOf": [
+                {
+                  "const": ""
+                },
+                {
+                  "format": "uri"
+                }
+              ]
+            },
+            "clientId": {
+              "description": "OIDC confidential client ID",
+              "type": "string"
+            },
+            "redirectUrl": {
+              "description": "OIDC authorization-code callback URL",
+              "type": "string",
+              "oneOf": [
+                {
+                  "const": ""
+                },
+                {
+                  "format": "uri"
+                }
+              ]
+            },
+            "requiredGroup": {
+              "description": "Exact OIDC group required for sign-in",
+              "type": "string"
+            }
+          }
+        },
         "credentialMasterKey": {
-          "description": "Dedicated credential-encryption key: empty or canonical standard-base64 for exactly 32 bytes",
+          "description": "Dedicated credential-encryption key: empty or strict standard-base64 for exactly 32 bytes",
           "type": "string",
           "oneOf": [
             {
@@ -99,15 +215,23 @@
           "type": "string",
           "maxLength": 1024
         },
-        "credentialEncryptionWriteEnabled": {
-          "description": "Staged rollout gate for writing encrypted credential envelopes",
-          "type": "boolean"
+        "queryTurn": {
+          "$ref": "#/definitions/queryTurn"
+        },
+        "ingestion": {
+          "$ref": "#/definitions/ingestion"
         },
         "queryRerank": {
           "$ref": "#/definitions/queryRerank"
         },
         "providerConcurrency": {
           "$ref": "#/definitions/providerConcurrency"
+        },
+        "providerRateLimit": {
+          "$ref": "#/definitions/providerRateLimit"
+        },
+        "providerRetry": {
+          "$ref": "#/definitions/providerRetry"
         },
         "pgHnsw": {
           "$ref": "#/definitions/pgHnsw"
@@ -124,6 +248,77 @@
             "type": "string",
             "maxLength": 65536
           }
+        }
+      }
+    },
+    "positiveIntegerOrAuto": {
+      "oneOf": [
+        {
+          "type": "integer",
+          "minimum": 1
+        },
+        {
+          "const": "auto"
+        }
+      ]
+    },
+    "ingestion": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "maxParallelJobsGlobal",
+        "maxParallelJobsPerWorkspace",
+        "maxParallelJobsPerLibrary",
+        "doclingPageBatchSize",
+        "doclingPageStreamWindowPages",
+        "doclingMaxConcurrency",
+        "doclingAcquireTimeoutSecs",
+        "heavyPipelineParallelism",
+        "heavyAcquireTimeoutSecs",
+        "embeddingParallelism",
+        "graphExtractParallelismPerDocument"
+      ],
+      "properties": {
+        "maxParallelJobsGlobal": {"type": "integer", "minimum": 1},
+        "maxParallelJobsPerWorkspace": {"type": "integer", "minimum": 1},
+        "maxParallelJobsPerLibrary": {"type": "integer", "minimum": 1},
+        "doclingPageBatchSize": {"type": "integer", "minimum": 1},
+        "doclingPageStreamWindowPages": {"type": "integer", "minimum": 1},
+        "doclingMaxConcurrency": {"$ref": "#/definitions/positiveIntegerOrAuto"},
+        "doclingAcquireTimeoutSecs": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 86400
+        },
+        "heavyPipelineParallelism": {"$ref": "#/definitions/positiveIntegerOrAuto"},
+        "heavyAcquireTimeoutSecs": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 86400
+        },
+        "embeddingParallelism": {"type": "integer", "minimum": 1},
+        "graphExtractParallelismPerDocument": {"type": "integer", "minimum": 1}
+      }
+    },
+    "queryTurn": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["maxConcurrent", "admissionQueue", "admissionTimeoutMs"],
+      "properties": {
+        "maxConcurrent": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1024
+        },
+        "admissionQueue": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 4096
+        },
+        "admissionTimeoutMs": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 180000
         }
       }
     },
@@ -162,6 +357,52 @@
           "type": "integer",
           "minimum": 1,
           "maximum": 86400
+        }
+      }
+    },
+    "providerRateLimit": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "requestsPerSecond",
+        "burst"
+      ],
+      "properties": {
+        "requestsPerSecond": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 100000
+        },
+        "burst": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 100000
+        }
+      }
+    },
+    "providerRetry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "maxAttempts",
+        "initialBackoffMs",
+        "maxBackoffMs"
+      ],
+      "properties": {
+        "maxAttempts": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 10
+        },
+        "initialBackoffMs": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 300000
+        },
+        "maxBackoffMs": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 300000
         }
       }
     },
@@ -232,7 +473,7 @@
         "timeoutMs": {
           "type": "integer",
           "minimum": 1,
-          "maximum": 3000
+          "maximum": 5000
         },
         "candidateLimit": {
           "type": "integer",

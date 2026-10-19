@@ -390,48 +390,43 @@ mod tests {
         assert!(repaired.contains("mark +x /tmp/item.ext /tmp/item.ext"));
     }
 
+    fn line_hint(ordinal: i32, page_number: i32, text: &str) -> ExtractionLineHint {
+        ExtractionLineHint {
+            ordinal,
+            source_ordinals: vec![ordinal],
+            page_number: Some(page_number),
+            text: text.to_string(),
+            start_offset: None,
+            end_offset: None,
+            signals: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn normalize_for_structured_preparation_records_layout_repair_metadata() {
+        let normalized = normalize_for_structured_preparation(
+            "",
+            Some(&ExtractionStructureHints {
+                lines: vec![line_hint(0, 1, "pageNu"), line_hint(1, 1, "mber")],
+            }),
+        );
+
+        assert_eq!(normalized.normalization_profile, "pre_structuring_layout_repair_v1");
+        assert_eq!(normalized.structure_hints.lines[0].ordinal, 0);
+        assert_eq!(normalized.structure_hints.lines[0].start_offset, Some(0));
+        assert_eq!(normalized.structure_hints.lines[0].end_offset, Some(10));
+    }
+
     #[test]
     fn normalize_for_structured_preparation_preserves_page_boundaries() {
         let normalized = normalize_for_structured_preparation(
             "",
             Some(&ExtractionStructureHints {
                 lines: vec![
-                    ExtractionLineHint {
-                        ordinal: 0,
-                        source_ordinals: vec![0],
-                        page_number: Some(1),
-                        text: "pageNu".to_string(),
-                        start_offset: None,
-                        end_offset: None,
-                        signals: Vec::new(),
-                    },
-                    ExtractionLineHint {
-                        ordinal: 1,
-                        source_ordinals: vec![1],
-                        page_number: Some(1),
-                        text: "mber".to_string(),
-                        start_offset: None,
-                        end_offset: None,
-                        signals: Vec::new(),
-                    },
-                    ExtractionLineHint {
-                        ordinal: 2,
-                        source_ordinals: vec![2],
-                        page_number: Some(2),
-                        text: "withCar".to_string(),
-                        start_offset: None,
-                        end_offset: None,
-                        signals: Vec::new(),
-                    },
-                    ExtractionLineHint {
-                        ordinal: 3,
-                        source_ordinals: vec![3],
-                        page_number: Some(2),
-                        text: "ds".to_string(),
-                        start_offset: None,
-                        end_offset: None,
-                        signals: Vec::new(),
-                    },
+                    line_hint(0, 1, "pageNu"),
+                    line_hint(1, 1, "mber"),
+                    line_hint(2, 2, "withCar"),
+                    line_hint(3, 2, "ds"),
                 ],
             }),
         );

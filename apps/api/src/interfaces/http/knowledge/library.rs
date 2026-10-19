@@ -107,7 +107,7 @@ pub async fn get_library_summary(
     let library =
         load_library_and_authorize(&auth, &state, library_id, POLICY_KNOWLEDGE_READ).await?;
     let summary =
-        state.canonical_services.knowledge.get_library_summary(&state, library.id).await?;
+        state.application_services.knowledge.get_library_summary(&state, library.id).await?;
     Ok(Json(KnowledgeLibrarySummaryResponse {
         library_id: summary.library_id,
         document_counts_by_readiness: summary.document_counts_by_readiness,
@@ -222,7 +222,7 @@ pub async fn list_library_generations(
     let span = tracing::Span::current();
     let _ = load_library_and_authorize(&auth, &state, library_id, POLICY_KNOWLEDGE_READ).await?;
     let generations =
-        state.canonical_services.knowledge.list_library_generations(&state, library_id).await?;
+        state.application_services.knowledge.list_library_generations(&state, library_id).await?;
     span.record("item_count", generations.len());
     let total = generations.len() as i64;
     Ok(Json(KnowledgeLibraryGenerationListResponse {

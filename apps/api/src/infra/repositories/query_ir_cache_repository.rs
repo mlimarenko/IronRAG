@@ -26,20 +26,35 @@ pub struct QueryIrCacheRow {
     pub compiled_at: DateTime<Utc>,
 }
 
+/// Compiled result and provenance persisted under one library-scoped cache key.
+#[derive(Debug)]
+pub struct QueryIrCacheWrite<'a> {
+    pub library_id: Uuid,
+    pub question_hash: &'a str,
+    pub schema_version: i16,
+    pub query_ir_json: Value,
+    pub provider_kind: Option<&'a str>,
+    pub model_name: Option<&'a str>,
+    pub usage_json: Value,
+}
+
 /// Inserts or refreshes one cache row keyed by `(library_id, question_hash)`.
 ///
 /// # Errors
 /// Returns any `SQLx` error raised while persisting the cache row.
 pub async fn upsert_query_ir_cache(
     pool: &PgPool,
-    library_id: Uuid,
-    question_hash: &str,
-    schema_version: i16,
-    query_ir_json: Value,
-    provider_kind: Option<&str>,
-    model_name: Option<&str>,
-    usage_json: Value,
+    entry: QueryIrCacheWrite<'_>,
 ) -> Result<(), sqlx::Error> {
+    let QueryIrCacheWrite {
+        library_id,
+        question_hash,
+        schema_version,
+        query_ir_json,
+        provider_kind,
+        model_name,
+        usage_json,
+    } = entry;
     sqlx::query(
         "insert into query_ir_cache (
             library_id, question_hash, schema_version, query_ir_json,
@@ -98,7 +113,7 @@ pub async fn get_query_ir_cache(
 /// Purges expired `query_ir_cache` rows (older than
 /// `QUERY_IR_CACHE_MAX_AGE_DAYS`). Returns the number of rows deleted.
 ///
-/// Canonical helper — callers that want a periodic cleanup job wire it
+/// Shared helper — callers that want a periodic cleanup job wire it
 /// in explicitly (ops endpoint, scheduled task, or a database-side
 /// `pg_cron` hook). Reads are self-healing via the age gate in
 /// [`get_query_ir_cache`], so this helper is a storage-hygiene knob
@@ -123,7 +138,7 @@ mod tests {
     use crate::domains::query_ir::QUERY_IR_SCHEMA_VERSION;
 
     #[test]
-    fn query_ir_cache_ttl_and_schema_constants_are_canonical() {
+    fn query_ir_cache_ttl_and_schema_constants_are_aligned() {
         // Changing either of these without bumping the other is almost
         // always a bug: the TTL constant names the eviction horizon,
         // the schema version names the compile-contract. Pinning them

@@ -113,7 +113,7 @@ export default defineConfig(
       // Sprint 2d: server-state reads must flow through TanStack Query
       // (`useQuery(queries.*Options(...))`), never through ad-hoc
       // useEffect + fetch / *Api loops. The selectors below block the two
-      // canonical anti-patterns:
+      // authoritative anti-patterns:
       //   1. `useEffect(() => { fetch(...) })` — the literal browser fetch
       //      call inside any function nested under useEffect.
       //   2. `useEffect(() => { fooApi.bar() })` — calling any imperative

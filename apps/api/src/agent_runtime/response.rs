@@ -6,22 +6,22 @@ use crate::domains::agent_runtime::{
 
 const MAX_RUNTIME_FAILURE_PUBLIC_SUMMARY_CHARS: usize = 120;
 
-/// Returns a public-safe summary for a canonical typed failure code.
+/// Returns a public-safe summary for a validated typed failure code.
 ///
 /// Arbitrary diagnostics are intentionally not accepted. Failure codes are
 /// protocol identifiers and must use bounded ASCII `snake_case`.
 #[must_use]
-pub(crate) fn canonical_runtime_failure_summary(code: &str) -> Option<String> {
+pub(crate) fn ingest_failure_summary(code: &str) -> Option<String> {
     let bytes = code.as_bytes();
     let first = bytes.first().copied()?;
     let last = bytes.last().copied()?;
-    let is_canonical = bytes.len() <= MAX_RUNTIME_FAILURE_PUBLIC_SUMMARY_CHARS
+    let is_normalized = bytes.len() <= MAX_RUNTIME_FAILURE_PUBLIC_SUMMARY_CHARS
         && first.is_ascii_lowercase()
         && last.is_ascii_alphanumeric()
         && bytes
             .iter()
             .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || *byte == b'_');
-    is_canonical.then(|| code.to_string())
+    is_normalized.then(|| code.to_string())
 }
 
 /// Identifies protocol-level failures whose detail originates at the typed
@@ -49,7 +49,7 @@ pub(crate) fn bounded_redacted_runtime_policy_summary(summary_redacted: &str) ->
 ///
 /// The stored `failure_summary_redacted` column is deliberately not an input:
 /// old rows may contain truncate-only provider or user diagnostics. A public
-/// view may expose only the canonical failure code or a summary carried by a
+/// view may expose only the validated failure code or a summary carried by a
 /// matching typed runtime-policy decision.
 #[must_use]
 pub(crate) fn public_runtime_failure_summary(
@@ -65,7 +65,7 @@ pub(crate) fn public_runtime_failure_summary(
         .and_then(|decision| {
             bounded_redacted_runtime_policy_summary(&decision.reason_summary_redacted)
         })
-        .or_else(|| canonical_runtime_failure_summary(failure_code))
+        .or_else(|| ingest_failure_summary(failure_code))
 }
 
 fn policy_decision_owns_failure(
@@ -105,17 +105,17 @@ pub enum RuntimeTerminalOutcome<TSuccess, TFailure> {
 
 #[cfg(test)]
 mod tests {
-    use super::{canonical_runtime_failure_summary, public_runtime_failure_summary};
+    use super::{ingest_failure_summary, public_runtime_failure_summary};
     use crate::domains::agent_runtime::{
         RuntimeDecisionKind, RuntimeDecisionTargetKind, RuntimePolicyDecisionSummary,
         RuntimePolicySummary,
     };
 
     #[test]
-    fn canonical_runtime_failure_summary_rejects_diagnostic_text() {
+    fn ingest_failure_summary_rejects_diagnostic_text() {
         let private_diagnostic = "provider failure: runtime-code-sentinel-secret";
 
-        assert!(canonical_runtime_failure_summary(private_diagnostic).is_none());
+        assert!(ingest_failure_summary(private_diagnostic).is_none());
     }
 
     #[test]

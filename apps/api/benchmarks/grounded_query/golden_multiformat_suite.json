@@ -25,7 +25,7 @@
       "minTechnicalFactReferenceCount": 0,
       "minEntityReferenceCount": 0,
       "minRelationReferenceCount": 0,
-      "allowedVerificationStates": ["verified", "unverified"]
+      "allowedVerificationStates": ["verified", "partially_supported"]
     },
     {
       "id": "docx_api_pagination",
@@ -40,7 +40,7 @@
       "minTechnicalFactReferenceCount": 0,
       "minEntityReferenceCount": 0,
       "minRelationReferenceCount": 0,
-      "allowedVerificationStates": ["verified", "unverified"]
+      "allowedVerificationStates": ["verified", "partially_supported"]
     },
     {
       "id": "docx_api_rate_limiting",
@@ -56,7 +56,7 @@
       "minTechnicalFactReferenceCount": 0,
       "minEntityReferenceCount": 0,
       "minRelationReferenceCount": 0,
-      "allowedVerificationStates": ["verified", "unverified"]
+      "allowedVerificationStates": ["verified", "partially_supported"]
     },
     {
       "id": "docx_incident_severity",
@@ -72,7 +72,7 @@
       "minTechnicalFactReferenceCount": 0,
       "minEntityReferenceCount": 0,
       "minRelationReferenceCount": 0,
-      "allowedVerificationStates": ["verified", "unverified"]
+      "allowedVerificationStates": ["verified", "partially_supported"]
     },
     {
       "id": "docx_incident_database",
@@ -87,7 +87,7 @@
       "minTechnicalFactReferenceCount": 0,
       "minEntityReferenceCount": 0,
       "minRelationReferenceCount": 0,
-      "allowedVerificationStates": ["verified", "unverified"]
+      "allowedVerificationStates": ["verified", "partially_supported"]
     },
     {
       "id": "pptx_system_components",
@@ -95,14 +95,14 @@
       "searchQuery": "MicroShop architecture services ports API Gateway Auth Product Order Payment",
       "expectedDocumentsContains": ["system_architecture"],
       "searchRequiredAll": ["MicroShop"],
-      "answerRequiredAny": ["8000", "8001", "8002", "8003", "Kong", "Gateway"],
+      "answerRequiredAny": ["port 8000", "port 8001", "port 8002", "port 8003", "Kong", "Gateway"],
       "answerForbiddenAny": [],
       "minChunkReferenceCount": 1,
       "minPreparedSegmentReferenceCount": 0,
       "minTechnicalFactReferenceCount": 0,
       "minEntityReferenceCount": 0,
       "minRelationReferenceCount": 0,
-      "allowedVerificationStates": ["verified", "unverified"]
+      "allowedVerificationStates": ["verified", "partially_supported"]
     },
     {
       "id": "pptx_monitoring_stack",
@@ -117,7 +117,7 @@
       "minTechnicalFactReferenceCount": 0,
       "minEntityReferenceCount": 0,
       "minRelationReferenceCount": 0,
-      "allowedVerificationStates": ["verified", "unverified"]
+      "allowedVerificationStates": ["verified", "partially_supported"]
     },
     {
       "id": "pdf_schema_users_table",
@@ -133,7 +133,7 @@
       "minTechnicalFactReferenceCount": 0,
       "minEntityReferenceCount": 0,
       "minRelationReferenceCount": 0,
-      "allowedVerificationStates": ["verified", "unverified"]
+      "allowedVerificationStates": ["verified", "partially_supported"]
     },
     {
       "id": "pdf_schema_orders",
@@ -148,7 +148,7 @@
       "minTechnicalFactReferenceCount": 0,
       "minEntityReferenceCount": 0,
       "minRelationReferenceCount": 0,
-      "allowedVerificationStates": ["verified", "unverified"]
+      "allowedVerificationStates": ["verified", "partially_supported"]
     },
     {
       "id": "pdf_monitoring_alerts",
@@ -163,7 +163,7 @@
       "minTechnicalFactReferenceCount": 0,
       "minEntityReferenceCount": 0,
       "minRelationReferenceCount": 0,
-      "allowedVerificationStates": ["verified", "unverified"]
+      "allowedVerificationStates": ["verified", "partially_supported"]
     },
     {
       "id": "xlsx_revenue_central_region",
@@ -171,15 +171,15 @@
       "searchQuery": "Q3 143500 RevenueUSD Central risk flag Gamma Team",
       "expectedDocumentsContains": ["revenue_workbook"],
       "searchRequiredAll": ["143500"],
-      "answerRequiredAll": ["Central"],
-      "answerRequiredAny": ["high", "Gamma Team", "Q3"],
+      "answerRequiredAll": ["Central", "high"],
+      "answerRequiredAny": [],
       "answerForbiddenAny": [],
       "minChunkReferenceCount": 1,
       "minPreparedSegmentReferenceCount": 0,
       "minTechnicalFactReferenceCount": 0,
       "minEntityReferenceCount": 0,
       "minRelationReferenceCount": 0,
-      "allowedVerificationStates": ["verified", "unverified"]
+      "allowedVerificationStates": ["verified", "partially_supported"]
     },
     {
       "id": "xlsx_enterprise_renewal_policy",
@@ -187,15 +187,16 @@
       "searchQuery": "Enterprise renewal discount percent Finance Lead 45 days",
       "expectedDocumentsContains": ["revenue_workbook"],
       "searchRequiredAll": ["Enterprise"],
-      "answerRequiredAll": ["Enterprise"],
-      "answerRequiredAny": ["12", "Finance Lead", "45 days"],
+      "answerRequiredAll": ["Enterprise", "Finance Lead"],
+      "answerRequiredAny": [],
+      "answerRequiredRegexAny": ["\\b12\\s*(?:%(?!\\w)|percent\\b)"],
       "answerForbiddenAny": [],
       "minChunkReferenceCount": 1,
       "minPreparedSegmentReferenceCount": 0,
       "minTechnicalFactReferenceCount": 0,
       "minEntityReferenceCount": 0,
       "minRelationReferenceCount": 0,
-      "allowedVerificationStates": ["verified", "unverified"]
+      "allowedVerificationStates": ["verified", "partially_supported"]
     },
     {
       "id": "cross_format_auth_comparison",
@@ -210,7 +211,7 @@
       "minTechnicalFactReferenceCount": 0,
       "minEntityReferenceCount": 0,
       "minRelationReferenceCount": 0,
-      "allowedVerificationStates": ["verified", "unverified"]
+      "allowedVerificationStates": ["verified", "partially_supported"]
     },
     {
       "id": "cross_format_postgresql_usage",
@@ -219,14 +220,14 @@
       "expectedDocumentsContains": [],
       "searchRequiredAll": [],
       "answerRequiredAll": ["PostgreSQL"],
-      "answerRequiredAny": ["5432", "users", "schema", "table"],
+      "answerRequiredAny": ["port 5432", "users", "schema", "table"],
       "answerForbiddenAny": [],
       "minChunkReferenceCount": 2,
       "minPreparedSegmentReferenceCount": 0,
       "minTechnicalFactReferenceCount": 0,
       "minEntityReferenceCount": 0,
       "minRelationReferenceCount": 0,
-      "allowedVerificationStates": ["verified", "unverified"]
+      "allowedVerificationStates": ["verified", "partially_supported"]
     }
   ]
 }

@@ -156,8 +156,8 @@ fn optional_lane_failure_degrades_only_with_primary_evidence() {
 }
 
 #[test]
-fn absent_retrieval_config_defaults_but_invalid_stored_config_is_typed_error() {
-    assert_eq!(resolve_text_search_config(None).expect("absent config"), "simple");
+fn missing_or_invalid_retrieval_config_is_a_typed_error() {
+    assert_eq!(resolve_text_search_config(None), Err(RetrievalPlanningError::MissingStoredConfig));
     assert_eq!(
         resolve_text_search_config(Some(json!({ "lexical": { "textSearchConfig": 3 } }))),
         Err(RetrievalPlanningError::InvalidStoredConfig(

@@ -1,4 +1,4 @@
-import { Admin, Ai, Audit, Catalog, Iam, Ops } from './generated'
+import { Ai, Audit, Catalog, Iam, Ingest, Ops } from './generated'
 import { unwrap } from './runtime'
 import {
   resolveProviderBaseUrlPolicy,
@@ -14,11 +14,8 @@ import type {
   UpdateProviderRequest,
   CreateModelRequest,
   UpdateModelRequest,
-  CreatePriceOverrideRequest,
-  UpdatePriceOverrideRequest,
 } from '@/shared/types/api-requests'
 import type {
-  AdminSurface as AdminSurfaceResponse,
   AiAccountResponse,
   AiBindingResponse,
   BindingValidationResponse,
@@ -29,22 +26,18 @@ import type {
   BulkIngestQueueActionResponse,
   CreateModelCatalogRequest as GeneratedCreateModelRequest,
   CreateProviderCatalogRequest as GeneratedCreateProviderRequest,
-  CreateWorkspacePriceOverrideRequest as GeneratedCreatePriceOverrideRequest,
   IngestQueueMoveDirection,
   IngestQueueBulkAction,
   IngestQueueResponse,
   ModelAvailabilityState,
   ModelCatalogEntryResponse,
-  PriceCatalogEntryResponse,
   ProviderCatalogEntryResponse,
   UpdateAiAccountRequest as GeneratedUpdateAccountRequest,
   UpdateAiBindingRequest as GeneratedUpdateBindingRequest,
   UpdateModelCatalogRequest as GeneratedUpdateModelRequest,
   UpdateProviderCatalogRequest as GeneratedUpdateProviderRequest,
-  UpdateWorkspacePriceOverrideRequest as GeneratedUpdatePriceOverrideRequest,
   ListAiAccountsData,
   ListAiModelsData,
-  ListAiPricesData,
   ListAuditEventsData,
   ListIngestQueueData,
   UpdateLibraryRecognitionPolicyRequest,
@@ -66,7 +59,6 @@ type ListIngestQueueParams = NonNullable<ListIngestQueueData['query']>
 type AiScopeParams = NonNullable<ListAiAccountsData['query']>
 
 export type ListModelsParams = NonNullable<ListAiModelsData['query']>
-type ListPricesParams = NonNullable<ListAiPricesData['query']>
 export type { WebIngestPattern, WebIngestUrlFilter } from './generated'
 export type {
   CatalogLibraryResponse,
@@ -99,6 +91,18 @@ const MODEL_AVAILABILITY_STATE: Record<ModelAvailabilityState, true> = {
 }
 
 const PROVIDER_CAPABILITY_STATES = new Set(['supported', 'unsupported', 'unknown'])
+const MODEL_PRICING_RATE_FIELDS = [
+  'inputPricePer1m',
+  'cachedInputPricePer1m',
+  'cacheWriteInputPricePer1m',
+  'outputPricePer1m',
+] as const
+const MODEL_LONG_CONTEXT_RATE_FIELDS = [
+  'inputPricePer1m',
+  'cachedInputPricePer1m',
+  'outputPricePer1m',
+] as const
+const NON_NEGATIVE_DECIMAL = /^\d+(?:\.\d+)?$/
 
 function isModelAvailabilityState(value: unknown): value is ModelAvailabilityState {
   return typeof value === 'string' && value in MODEL_AVAILABILITY_STATE
@@ -115,7 +119,7 @@ function assertStringEnumField(
   allowedValues: Set<string>,
 ) {
   if (typeof value[fieldName] !== 'string' || !allowedValues.has(value[fieldName])) {
-    throw new Error(`Provider catalog entry ${policyName}.${fieldName} is not canonical`)
+    throw new Error(`Provider catalog entry ${policyName}.${fieldName} is not normalized`)
   }
 }
 
@@ -129,6 +133,46 @@ function assertRecordField(
     throw new Error(`Provider catalog entry ${providerId}.${fieldName} must be an object`)
   }
   return field
+}
+
+function assertPricingRate(pricing: Record<string, unknown>, fieldName: string, fieldPath: string) {
+  const value = pricing[fieldName]
+  if (
+    typeof value !== 'string' ||
+    !NON_NEGATIVE_DECIMAL.test(value) ||
+    !Number.isFinite(Number(value))
+  ) {
+    throw new TypeError(`${fieldPath}.${fieldName} must be a non-negative decimal string`)
+  }
+}
+
+function assertModelPricing(entry: Record<string, unknown>, modelId: string) {
+  const fieldPath = `Model catalog entry ${modelId}.pricing`
+  const pricing = entry.pricing
+  if (!isRecord(pricing)) {
+    throw new TypeError(`${fieldPath} must be an object`)
+  }
+
+  if (typeof pricing.currencyCode !== 'string' || !/^[A-Z]{3}$/.test(pricing.currencyCode)) {
+    throw new TypeError(`${fieldPath}.currencyCode must be a three-letter uppercase currency code`)
+  }
+  for (const fieldName of MODEL_PRICING_RATE_FIELDS) {
+    assertPricingRate(pricing, fieldName, fieldPath)
+  }
+
+  const longContext = pricing.longContext
+  if (longContext === undefined || longContext === null) {
+    return
+  }
+  if (!isRecord(longContext)) {
+    throw new TypeError(`${fieldPath}.longContext must be an object or null`)
+  }
+  if (!Number.isInteger(longContext.thresholdTokens) || Number(longContext.thresholdTokens) <= 0) {
+    throw new TypeError(`${fieldPath}.longContext.thresholdTokens must be a positive integer`)
+  }
+  for (const fieldName of MODEL_LONG_CONTEXT_RATE_FIELDS) {
+    assertPricingRate(longContext, fieldName, `${fieldPath}.longContext`)
+  }
 }
 
 export function parseModelCatalogResponse(payload: unknown): ModelCatalogEntryResponse[] {
@@ -149,6 +193,7 @@ export function parseModelCatalogResponse(payload: unknown): ModelCatalogEntryRe
     if (!Array.isArray(model.availableAccountIds)) {
       throw new TypeError(`Model catalog entry ${id} has invalid availableAccountIds`)
     }
+    assertModelPricing(entry as Record<string, unknown>, id)
   }
 
   return payload as ModelCatalogEntryResponse[]
@@ -192,19 +237,6 @@ export function parseProviderCatalogResponse(payload: unknown): ProviderCatalogE
   return payload as ProviderCatalogEntryResponse[]
 }
 
-export const ADMIN_MODEL_CATALOG_QUERY_KEY = ['admin', 'ai', 'models'] as const
-
-export function adminModelCatalogQueryKey(params: ListModelsParams = {}) {
-  return [...ADMIN_MODEL_CATALOG_QUERY_KEY, params] as const
-}
-
-export function adminModelCatalogOptions(params: ListModelsParams = {}) {
-  return {
-    queryKey: adminModelCatalogQueryKey(params),
-    queryFn: () => adminApi.listModels(params),
-  }
-}
-
 export type MintTokenRequest = GeneratedMintTokenRequest
 export type CreateUserRequest = GeneratedCreateUserRequest
 export type SetUserAccessRequest = GeneratedSetUserAccessRequest
@@ -216,26 +248,26 @@ export const adminApi = {
   createUser: (request: CreateUserRequest) =>
     Iam.createIamUser({ body: request }).then((result) => unwrap<UserResponse>(result)),
   setUserRole: (principalId: string, role: SystemRole) =>
-    Iam.setIamUserRole({
-      path: { principalId },
+    Iam.patchIamUser({
+      path: { userId: principalId },
       body: { role },
     }).then((result) => unwrap<UserResponse>(result)),
   getUserAccess: (principalId: string) =>
-    Iam.getIamUserAccess({ path: { principalId } }).then((result) =>
+    Iam.getIamUserAccess({ path: { userId: principalId } }).then((result) =>
       unwrap<UserAccessResponse>(result),
     ),
   setUserAccess: (principalId: string, request: SetUserAccessRequest) =>
-    Iam.setIamUserAccess({ path: { principalId }, body: request }).then((result) =>
+    Iam.setIamUserAccess({ path: { userId: principalId }, body: request }).then((result) =>
       unwrap<UserAccessResponse>(result),
     ),
   mintToken: (request: MintTokenRequest) =>
     Iam.mintIamToken({ body: request }).then((result) => unwrap<MintTokenResponse>(result)),
   revokeToken: (principalId: string) =>
-    Iam.revokeIamToken({ path: { tokenPrincipalId: principalId } }).then((result) => {
+    Iam.deleteIamToken({ path: { tokenId: principalId } }).then((result) => {
       unwrap(result)
     }),
   deleteToken: (principalId: string) =>
-    Iam.deleteIamToken({ path: { tokenPrincipalId: principalId } }).then((result) => {
+    Iam.deleteIamToken({ path: { tokenId: principalId } }).then((result) => {
       unwrap(result)
     }),
 
@@ -302,36 +334,15 @@ export const adminApi = {
       unwrap(result)
     }),
   validateBinding: (bindingId: string) =>
-    Ai.validateAiLibraryBinding({ path: { bindingId } }).then((result) =>
+    Ai.createAiBindingValidation({ path: { bindingId } }).then((result) =>
       unwrap<BindingValidationResponse>(result),
     ),
-  listPrices: (params: ListPricesParams = {}) =>
-    Ai.listAiPrices({ query: params }).then((result) =>
-      unwrap<PriceCatalogEntryResponse[]>(result),
-    ),
-  createPriceOverride: (data: CreatePriceOverrideRequest) =>
-    Ai.createAiPriceOverride({
-      body: toGeneratedRequest<GeneratedCreatePriceOverrideRequest>(data),
-    }).then((result) => unwrap<PriceCatalogEntryResponse>(result)),
-  updatePriceOverride: (priceId: string, data: UpdatePriceOverrideRequest) =>
-    Ai.updateAiPriceOverride({
-      path: { priceId },
-      body: toGeneratedRequest<GeneratedUpdatePriceOverrideRequest>(data),
-    }).then((result) => unwrap<PriceCatalogEntryResponse>(result)),
-  deletePriceOverride: (priceId: string) =>
-    Ai.deleteAiPriceOverride({ path: { priceId } }).then((result) => {
-      unwrap(result)
-    }),
-
-  getAdminSurface: () =>
-    Admin.getAdminSurface().then((result) => unwrap<AdminSurfaceResponse>(result)),
-
   listAuditEvents: (params: ListAuditEventsParams = {}) =>
     Audit.listAuditEvents({ query: params }).then((result) =>
       unwrap<AuditEventPageResponse>(result),
     ),
   listIngestQueue: (params: ListIngestQueueParams = {}) =>
-    Ops.listIngestQueue({ query: params }).then((result) => unwrap<IngestQueueResponse>(result)),
+    Ingest.listIngestQueue({ query: params }).then((result) => unwrap<IngestQueueResponse>(result)),
   moveIngestQueueJob: (jobId: string, direction: IngestQueueMoveDirection) =>
     Ops.moveIngestQueueJob({ path: { jobId }, body: { direction } }).then((result) =>
       unwrap<IngestQueueResponse>(result),
@@ -359,10 +370,6 @@ export const adminApi = {
 
   listWorkspaces: () =>
     Catalog.listCatalogWorkspaces().then((result) => unwrap<CatalogWorkspaceResponse[]>(result)),
-  listLibraries: (workspaceId: string) =>
-    Catalog.listCatalogLibraries({ path: { workspaceId } }).then((result) =>
-      unwrap<CatalogLibraryResponse[]>(result),
-    ),
   getLibrary: (libraryId: string) =>
     Catalog.getCatalogLibrary({ path: { libraryId } }).then((result) =>
       unwrap<CatalogLibraryResponse>(result),

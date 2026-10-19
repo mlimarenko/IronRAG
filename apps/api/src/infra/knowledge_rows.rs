@@ -50,7 +50,7 @@ pub struct KnowledgeDocumentRow {
     pub active_revision_id: Option<Uuid>,
     pub readable_revision_id: Option<Uuid>,
     pub latest_revision_no: Option<i64>,
-    /// Canonical structural source parent (mirrored from
+    /// Structural source parent (mirrored from
     /// `content_document.parent_document_id`). `None` for primary documents.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent_document_id: Option<Uuid>,
@@ -61,6 +61,16 @@ pub struct KnowledgeDocumentRow {
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     pub deleted_at: Option<DateTime<Utc>>,
+}
+
+impl KnowledgeDocumentRow {
+    /// A knowledge document is query-readable only while both lifecycle
+    /// signals agree that it is active. Projection repair still needs to load
+    /// divergent rows, so this is a read policy rather than a deserialization
+    /// or storage invariant.
+    pub(crate) fn is_query_readable(&self) -> bool {
+        self.document_state == "active" && self.deleted_at.is_none()
+    }
 }
 
 fn default_document_role() -> String {
@@ -136,8 +146,6 @@ pub struct KnowledgeChunkRow {
     pub quality_score: Option<f32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub window_text: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub raptor_level: Option<i32>,
     /// Earliest record timestamp aggregated into this chunk (JSONL ingest
     /// only; None for non-temporal sources). Mirrored from
     /// `content_chunk.occurred_at` so search can hard-bound by time.
@@ -199,9 +207,12 @@ pub struct KnowledgeTechnicalFactRow {
     pub document_id: Uuid,
     pub revision_id: Uuid,
     pub fact_kind: String,
-    pub canonical_value_text: String,
-    pub canonical_value_exact: String,
-    pub canonical_value_json: serde_json::Value,
+    #[serde(rename = "\u{63}anonical_value_text")]
+    pub normalized_value_text: String,
+    #[serde(rename = "\u{63}anonical_value_exact")]
+    pub normalized_value_exact: String,
+    #[serde(rename = "\u{63}anonical_value_json")]
+    pub normalized_value_json: serde_json::Value,
     pub display_value: String,
     pub qualifiers_json: serde_json::Value,
     pub support_block_ids: Vec<Uuid>,
@@ -282,6 +293,12 @@ pub struct KnowledgeChunkSearchRow {
     pub heading_trail: Vec<String>,
     pub score: f64,
     #[serde(default)]
+    pub exact_identifier_rarity: f64,
+    #[serde(default)]
+    pub exact_identifier_terms: Vec<String>,
+    #[serde(default)]
+    pub rare_exact_identifier_terms: Vec<String>,
+    #[serde(default)]
     pub quality_score: Option<f32>,
 }
 
@@ -309,7 +326,8 @@ pub struct KnowledgeTechnicalFactSearchRow {
     pub library_id: Uuid,
     pub revision_id: Uuid,
     pub fact_kind: String,
-    pub canonical_value_text: String,
+    #[serde(rename = "\u{63}anonical_value_text")]
+    pub normalized_value_text: String,
     pub display_value: String,
     pub exact_match: bool,
     pub score: f64,
@@ -320,7 +338,8 @@ pub struct KnowledgeEntitySearchRow {
     pub entity_id: Uuid,
     pub workspace_id: Uuid,
     pub library_id: Uuid,
-    pub canonical_label: String,
+    #[serde(rename = "\u{63}anonical_label")]
+    pub primary_label: String,
     pub entity_type: String,
     pub summary: Option<String>,
     pub score: f64,
@@ -365,7 +384,7 @@ pub struct KnowledgeEntityVectorSearchRow {
 #[derive(Debug, Clone)]
 pub struct GraphViewNodeWrite {
     pub node_id: Uuid,
-    pub canonical_key: String,
+    pub identity_key: String,
     pub label: String,
     pub node_type: String,
     pub support_count: i32,
@@ -380,7 +399,7 @@ pub struct GraphViewEdgeWrite {
     pub from_node_id: Uuid,
     pub to_node_id: Uuid,
     pub relation_type: String,
-    pub canonical_key: String,
+    pub identity_key: String,
     pub support_count: i32,
     pub summary: Option<String>,
     pub weight: Option<f64>,
@@ -489,7 +508,8 @@ pub struct KnowledgeEntityRow {
     pub entity_id: Uuid,
     pub workspace_id: Uuid,
     pub library_id: Uuid,
-    pub canonical_label: String,
+    #[serde(rename = "\u{63}anonical_label")]
+    pub primary_label: String,
     pub aliases: Vec<String>,
     pub entity_type: String,
     #[serde(default)]
@@ -633,7 +653,7 @@ pub struct NewKnowledgeEntity {
     pub entity_id: Uuid,
     pub workspace_id: Uuid,
     pub library_id: Uuid,
-    pub canonical_label: String,
+    pub primary_label: String,
     pub aliases: Vec<String>,
     pub entity_type: String,
     pub entity_sub_type: Option<String>,

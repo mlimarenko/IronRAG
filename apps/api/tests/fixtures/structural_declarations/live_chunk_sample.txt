@@ -1,0 +1,71 @@
+// ---------------------------------------------------------------------------
+
+// Error types
+
+// ---------------------------------------------------------------------------
+
+/// All possible errors that can occur during order processing.
+
+/// Each variant carries context about the failure for debugging and logging.
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+
+pub enum OrderError {
+
+/// The requested state transition is not allowed from the current state.
+
+InvalidTransition {
+
+from: OrderState,
+
+to: OrderState,
+
+reason: String,
+
+},
+
+/// A required field or condition was not met for the operation.
+
+ValidationError {
+
+field: String,
+
+message: String,
+
+},
+
+/// The payment processing step failed.
+
+PaymentFailed {
+
+order_id: String,
+
+gateway_code: String,
+
+message: String,
+
+},
+
+/// The inventory check or reservation failed.
+
+InventoryError {
+
+order_id: String,
+
+sku: String,
+
+requested: u32,
+
+available: u32,
+
+},
+
+/// A shipping or fulfillment operation failed.
+
+ShippingError {
+
+order_id: String,
+
+carrier: String,
+
+message: String,

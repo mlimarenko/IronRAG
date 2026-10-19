@@ -43,7 +43,6 @@ pub(crate) struct GraphExtractionSubTypeHintGroup {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, utoipa::ToSchema)]
 pub(crate) struct GraphExtractionSubTypeHintEntry {
     pub sub_type: String,
-    pub occurrences: i64,
 }
 
 impl GraphExtractionSubTypeHints {
@@ -65,7 +64,8 @@ pub(crate) struct GraphExtractionStructuredChunkContext {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, utoipa::ToSchema)]
 pub struct GraphExtractionTechnicalFact {
     pub fact_kind: String,
-    pub canonical_value: String,
+    #[serde(rename = "\u{63}anonicalValue")]
+    pub normalized_value: String,
     pub display_value: String,
     pub qualifiers: Vec<TechnicalFactQualifier>,
 }
@@ -232,13 +232,21 @@ pub(crate) struct ResolvedGraphExtraction {
     pub(crate) recovery_attempts: Vec<GraphExtractionRecoveryRecord>,
 }
 
+// Both structs are the `Err` side of `Result`s that propagate across the
+// extraction boundary. The provider-failure detail alone measures ~176 bytes,
+// so each payload that only ever travels with the error is boxed to keep the
+// `Err`-variant under `clippy::result_large_err`'s 128-byte default. The
+// message, shape key, size and attempt list stay inline: they are small and
+// read on the hot path.
 #[derive(Debug, Clone)]
 pub(crate) struct GraphExtractionFailureOutcome {
     pub(crate) request_shape_key: String,
     pub(crate) request_size_bytes: usize,
     pub(crate) error_message: String,
-    pub(crate) provider_failure: Option<RuntimeProviderFailureDetail>,
-    pub(crate) recovery_summary: ExtractionRecoverySummary,
+    pub(crate) provider_failure: Option<Box<RuntimeProviderFailureDetail>>,
+    pub(crate) provider_admission_error:
+        Option<Box<crate::integrations::provider_budget::ProviderBudgetError>>,
+    pub(crate) recovery_summary: Box<ExtractionRecoverySummary>,
     pub(crate) recovery_attempts: Vec<GraphExtractionRecoveryRecord>,
     pub(crate) cancelled: bool,
 }
@@ -248,10 +256,12 @@ pub(crate) struct GraphExtractionExecutionError {
     pub message: String,
     pub request_shape_key: String,
     pub request_size_bytes: usize,
-    pub provider_failure: Option<RuntimeProviderFailureDetail>,
-    pub recovery_summary: ExtractionRecoverySummary,
+    pub provider_failure: Option<Box<RuntimeProviderFailureDetail>>,
+    pub provider_admission_error:
+        Option<Box<crate::integrations::provider_budget::ProviderBudgetError>>,
+    pub recovery_summary: Box<ExtractionRecoverySummary>,
     pub recovery_attempts: Vec<GraphExtractionRecoveryRecord>,
-    pub resume_state: GraphExtractionResumeState,
+    pub resume_state: Box<GraphExtractionResumeState>,
     pub cancelled: bool,
 }
 

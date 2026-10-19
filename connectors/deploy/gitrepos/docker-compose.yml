@@ -1,0 +1,46 @@
+# IronRAG ↔ Git Repositories connector — deployment compose.
+#
+#   cp .env.example .env             # IRONRAG_* + ADMIN_BEARER_TOKEN
+#   cp repos.yaml.example repos.yaml       # repos + branches + include/exclude
+#   cp routing.yaml.example routing.yaml   # map files → workspace/library slugs
+#   docker compose up -d
+#   docker compose logs -f
+#
+# `image:` pulls the image published with the IronRAG release named by
+# IRONRAG_VERSION. Connectors ship on the stack version — there is no separate
+# connector release. To run a locally built image, comment `image:` and
+# uncomment `build:`.
+services:
+  gitrepos-connector:
+    image: pipingspace/ironrag.gitrepos:${IRONRAG_VERSION:?set IRONRAG_VERSION to the IronRAG release you are running}
+    # build:
+    #   context: ../..
+    #   target: gitrepos
+    #   args: { APP_VERSION: "${IRONRAG_VERSION:?set IRONRAG_VERSION}" }
+    container_name: ironrag-gitrepos-connector
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: [ALL]
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      # Tracked-repos + routing config (read-only).
+      - ./repos.yaml:/app/repos.yaml:ro
+      - ./routing.yaml:/app/routing.yaml:ro
+      # Bare clones (GITREPOS_CLONE_ROOT) + SQLite cursor (STATE_DB_PATH)
+      # both live under this volume, so restarts reuse the clone cache and
+      # ship only the diff.
+      - gitrepos-state:/var/lib/ironrag-connector
+      # Private repos over SSH: mount a read-only deploy key + known_hosts.
+      # The container runs as uid 10001 and its home is the state volume, so
+      # ssh looks in /var/lib/ironrag-connector/.ssh. The key must be readable
+      # by that uid — `chown 10001:10001 deploy_key && chmod 600 deploy_key` on
+      # the host — or ssh silently declines to use it.
+      # - ./deploy_key:/var/lib/ironrag-connector/.ssh/id_ed25519:ro
+      # - ./known_hosts:/var/lib/ironrag-connector/.ssh/known_hosts:ro
+    # Only needed for RUN_MODE=webhook/both. Bound to localhost.
+    ports:
+      - "127.0.0.1:8088:8088"
+
+volumes:
+  gitrepos-state:

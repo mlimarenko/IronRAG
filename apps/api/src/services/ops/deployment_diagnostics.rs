@@ -14,7 +14,7 @@ use tokio::sync::{Mutex, RwLock};
 use crate::{
     app::state::AppState,
     domains::deployment::{DependencyKind, DependencyMode, StartupAuthorityMode},
-    infra::persistence::{canonical_baseline_present, validate_postgres_migration_state},
+    infra::persistence::{required_baseline_present, validate_postgres_migration_state},
     services::content::storage::types::ContentStorageProbeStatus,
 };
 
@@ -376,7 +376,7 @@ impl DeploymentDiagnosticsService {
             .startup_authority_mode_kind()
             .unwrap_or(StartupAuthorityMode::NotRequired);
         let control_plane_postgres = &state.persistence.heartbeat_postgres;
-        if !canonical_baseline_present(control_plane_postgres).await.unwrap_or(false) {
+        if !required_baseline_present(control_plane_postgres).await.unwrap_or(false) {
             return StartupAuthorityStatus {
                 mode: mode.as_str().to_string(),
                 state: StartupAuthorityState::Pending,
@@ -512,10 +512,18 @@ fn configured_service_role(state: &AppState) -> String {
 
 fn log_dependency_statuses(dependencies: [(&str, &DependencyStatus); 3]) {
     for (name, status) in dependencies {
-        tracing::debug!(stage = "readiness", dependency = %name, status = ?status.status, "health check completed");
-        if !matches!(status.status, DependencyHealth::Ok) {
-            tracing::warn!(stage = "readiness", dependency = %name, status = ?status.status, "dependency degraded");
-        }
+        log_dependency_completed(name, status.status);
+        log_dependency_degraded_if_unhealthy(name, status.status);
+    }
+}
+
+fn log_dependency_completed(name: &str, status: DependencyHealth) {
+    tracing::debug!(stage = "readiness", dependency = %name, status = ?status, "health check completed");
+}
+
+fn log_dependency_degraded_if_unhealthy(name: &str, status: DependencyHealth) {
+    if !matches!(status, DependencyHealth::Ok) {
+        tracing::warn!(stage = "readiness", dependency = %name, status = ?status, "dependency degraded");
     }
 }
 
@@ -542,58 +550,64 @@ impl ReadinessAssessment {
             [inputs.postgres.status, inputs.redis.status, inputs.knowledge_plane.status]
                 .into_iter()
                 .all(|status| matches!(status, DependencyHealth::Ok));
-        let storage_ready = inputs.storage.status == StorageHealth::Ok;
-        let topology_supported = inputs.topology.status == TopologySupport::Supported;
-        let startup_ready = matches!(
-            inputs.startup_authority.state,
-            StartupAuthorityState::Succeeded | StartupAuthorityState::NotRequired
-        );
-        let worker_ready =
-            !inputs.runs_ingestion_workers || inputs.worker.status != WORKER_STATUS_ERROR;
-        let is_ready = dependencies_ready
-            && storage_ready
-            && topology_supported
-            && startup_ready
-            && worker_ready;
-        let message = readiness_message(
+        let checks = ReadinessChecks {
             dependencies_ready,
-            storage_ready,
-            topology_supported,
-            startup_ready,
-            worker_ready,
-            inputs.startup_authority,
-            inputs.worker,
-        );
-        let overall_status = overall_readiness_status(is_ready, topology_supported);
+            storage_ready: inputs.storage.status == StorageHealth::Ok,
+            topology_supported: inputs.topology.status == TopologySupport::Supported,
+            startup_ready: matches!(
+                inputs.startup_authority.state,
+                StartupAuthorityState::Succeeded | StartupAuthorityState::NotRequired
+            ),
+            worker_ready: !inputs.runs_ingestion_workers
+                || inputs.worker.status != WORKER_STATUS_ERROR,
+        };
+        let is_ready = checks.all_ready();
+        let message = readiness_message(checks, inputs.startup_authority, inputs.worker);
+        let overall_status = overall_readiness_status(is_ready, checks.topology_supported);
 
         Self { is_ready, overall_status, message }
     }
 }
 
-fn readiness_message(
+#[derive(Debug, Clone, Copy)]
+struct ReadinessChecks {
     dependencies_ready: bool,
     storage_ready: bool,
     topology_supported: bool,
     startup_ready: bool,
     worker_ready: bool,
+}
+
+impl ReadinessChecks {
+    const fn all_ready(self) -> bool {
+        self.dependencies_ready
+            && self.storage_ready
+            && self.topology_supported
+            && self.startup_ready
+            && self.worker_ready
+    }
+}
+
+fn readiness_message(
+    checks: ReadinessChecks,
     startup_authority: &StartupAuthorityStatus,
     worker: &WorkerRuntimeSnapshot,
 ) -> Option<String> {
-    if !dependencies_ready {
+    if !checks.dependencies_ready {
         return Some("one or more dependencies are unavailable".to_string());
     }
-    if !storage_ready {
+    if !checks.storage_ready {
         return Some("content storage provider is not ready".to_string());
     }
-    if !topology_supported {
+    if !checks.topology_supported {
         return Some(
             "deployment topology is unsupported for the selected storage provider".to_string(),
         );
     }
-    if !startup_ready {
+    if !checks.startup_ready {
         return startup_authority.message.clone();
     }
-    if !worker_ready {
+    if !checks.worker_ready {
         return worker.message.clone().or_else(|| Some("worker runtime is degraded".to_string()));
     }
     None
@@ -662,5 +676,24 @@ fn dependency_status(
             status: DependencyHealth::Misconfigured,
             message: Some(error),
         },
+    }
+}
+
+#[cfg(test)]
+mod readiness_checks_tests {
+    use super::ReadinessChecks;
+
+    #[test]
+    fn readiness_requires_every_dependency_storage_topology_startup_and_worker_check() {
+        for flags in 0_u8..32 {
+            let checks = ReadinessChecks {
+                dependencies_ready: flags & 1 != 0,
+                storage_ready: flags & 2 != 0,
+                topology_supported: flags & 4 != 0,
+                startup_ready: flags & 8 != 0,
+                worker_ready: flags & 16 != 0,
+            };
+            assert_eq!(checks.all_ready(), flags == 31, "flags={flags}");
+        }
     }
 }

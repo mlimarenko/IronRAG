@@ -1,4 +1,4 @@
-//! Canonical HTTP surface for library snapshot export and import.
+//! Primary HTTP surface for library snapshot export and import.
 //!
 //! Export: `GET /content/libraries/{id}/snapshot?include=library_data,blobs`
 //! streams an `application/zstd` tar.zst archive back to the caller. The
@@ -24,7 +24,7 @@ use axum::{
 use futures::TryStreamExt;
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, path::PathBuf};
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio_util::io::StreamReader;
 use tracing::Instrument;
 use uuid::Uuid;
@@ -38,10 +38,12 @@ use crate::{
         router_support::ApiError,
     },
     services::content::service::snapshot::{
-        IncludeKind, OverwriteMode, SnapshotImportReport, export_library_archive,
-        restore_library_archive,
+        IncludeKind, MAX_SNAPSHOT_ARCHIVE_BYTES, OverwriteMode, SnapshotImportError,
+        SnapshotImportReport, export_library_archive, restore_library_archive,
     },
-    services::ops::service::{CreateAsyncOperationCommand, UpdateAsyncOperationCommand},
+    services::ops::service::{
+        CreateAsyncOperationCommand, SettleAsyncOperationCommand, UpdateAsyncOperationCommand,
+    },
 };
 
 #[derive(Debug, Deserialize, utoipa::ToSchema)]
@@ -49,8 +51,8 @@ pub struct ExportQuery {
     /// Comma-separated include kinds. Valid values: `library_data`
     /// (content + runtime graph + knowledge tables), `blobs` (original
     /// source files, requires `library_data`), `workspace` (the owning
-    /// `catalog_workspace` row) and `ai_config` (portable canonical AI tables:
-    /// `ai_provider_catalog`, `ai_model_catalog`, `ai_price_catalog`,
+    /// `catalog_workspace` row) and `ai_config` (portable declared AI tables:
+    /// `ai_provider_catalog`, `ai_model_catalog` (pricing inline),
     /// `ai_account` without `api_key`, and `ai_binding`). Defaults to
     /// `library_data,blobs`; legacy AI table names are rejected on restore.
     include: Option<String>,
@@ -62,7 +64,9 @@ pub struct ImportQuery {
     overwrite: Option<String>,
 }
 
-#[derive(Debug, Serialize, utoipa::ToSchema)]
+// No `ToSchema`: this rides `resultJson`, which the contract types as a free
+// object, so a schema derive here would register a component nothing points at.
+#[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SnapshotImportReportResponse {
     pub library_id: Uuid,
@@ -70,6 +74,8 @@ pub struct SnapshotImportReportResponse {
     pub include_kinds: Vec<IncludeKind>,
     pub postgres_rows_by_table: BTreeMap<String, u64>,
     pub blobs_restored: u64,
+    pub blobs_verified: u64,
+    pub unverifiable_blobs: u64,
 }
 
 #[derive(Debug, Serialize, utoipa::ToSchema)]
@@ -90,6 +96,8 @@ impl From<SnapshotImportReport> for SnapshotImportReportResponse {
             include_kinds: report.include_kinds,
             postgres_rows_by_table: report.postgres_rows_by_table.into_iter().collect(),
             blobs_restored: report.blobs_restored,
+            blobs_verified: report.blobs_verified,
+            unverifiable_blobs: report.unverifiable_blobs,
         }
     }
 }
@@ -116,6 +124,14 @@ pub(crate) async fn spool_snapshot_body(
     body: Body,
     snapshot_kind: &'static str,
 ) -> Result<SnapshotBodySpool, ApiError> {
+    spool_snapshot_body_with_limit(body, snapshot_kind, MAX_SNAPSHOT_ARCHIVE_BYTES).await
+}
+
+async fn spool_snapshot_body_with_limit(
+    body: Body,
+    snapshot_kind: &'static str,
+    max_archive_bytes: u64,
+) -> Result<SnapshotBodySpool, ApiError> {
     let temp_file = tempfile::Builder::new()
         .prefix("ironrag-snapshot-import-")
         .tempfile()
@@ -129,10 +145,16 @@ pub(crate) async fn spool_snapshot_body(
     let body_stream = body
         .into_data_stream()
         .map_err(|error| std::io::Error::other(format!("body stream error: {error}")));
-    let mut reader = StreamReader::new(body_stream);
-    let bytes_written = tokio::io::copy(&mut reader, &mut writer)
+    let reader = StreamReader::new(body_stream);
+    let mut limited_reader = reader.take(max_archive_bytes + 1);
+    let bytes_written = tokio::io::copy(&mut limited_reader, &mut writer)
         .await
         .map_err(|error| ApiError::BadRequest(format!("failed to read snapshot body: {error}")))?;
+    if bytes_written > max_archive_bytes {
+        return Err(ApiError::BadRequest(format!(
+            "snapshot archive exceeds maximum size of {max_archive_bytes} bytes"
+        )));
+    }
     writer
         .flush()
         .await
@@ -148,39 +170,87 @@ pub(crate) async fn spool_snapshot_body(
     Ok(SnapshotBodySpool { _temp_file: temp_file, path, bytes_written })
 }
 
-/// Marks the async operation behind a snapshot-import worker `ready`,
-/// logging (with `operation_id` — the enclosing tracing span already carries
-/// the workspace/library id) if the status update itself fails. Shared by
-/// the library- and workspace-scoped snapshot import workers.
-pub(crate) async fn mark_snapshot_import_operation_ready(state: &AppState, operation_id: Uuid) {
-    if let Err(error) = state
-        .canonical_services
+/// Marks the async operation behind a snapshot-import worker `ready` and
+/// publishes what the restore actually wrote, logging (with `operation_id` —
+/// the enclosing tracing span already carries the workspace/library id) if the
+/// status update itself fails. Shared by the library- and workspace-scoped
+/// snapshot import workers, which pass their own already-serialized report.
+///
+/// The payload is the point. Before it, the only surface a client could poll
+/// settled to `ready` carrying nothing but a status, so a restore that moved
+/// every row and one that silently moved none were indistinguishable to the
+/// caller that asked for it — the counts existed, were logged once, and were
+/// dropped.
+pub(crate) async fn mark_snapshot_import_operation_ready(
+    state: &AppState,
+    operation_id: Uuid,
+    result_json: serde_json::Value,
+) {
+    match state
+        .application_services
         .ops
-        .update_async_operation(
+        .settle_async_operation_with_result(
             state,
-            UpdateAsyncOperationCommand {
+            SettleAsyncOperationCommand {
                 operation_id,
                 status: ASYNC_OP_STATUS_READY.to_string(),
                 completed_at: Some(chrono::Utc::now()),
                 failure_code: None,
+                result_json: Some(result_json),
             },
         )
         .await
     {
-        tracing::error!(
-            %operation_id,
-            error = ?error,
-            "failed to mark snapshot import operation ready",
-        );
+        Ok(Some(_)) => {}
+        // The settle is guarded on a still-in-flight status, so no row means
+        // something else already settled this operation. Overwriting it would
+        // replace a terminal state with a second one; saying so is the whole
+        // response.
+        Ok(None) => log_snapshot_import_already_settled(operation_id),
+        Err(error) => log_snapshot_import_settle_failed(operation_id, &error),
     }
+}
+
+fn log_snapshot_import_already_settled(operation_id: Uuid) {
+    tracing::warn!(
+        %operation_id,
+        "snapshot import finished on an operation that had already settled; \
+         its result was not published",
+    );
+}
+
+fn log_snapshot_import_settle_failed(operation_id: Uuid, error: &impl std::fmt::Debug) {
+    tracing::error!(
+        %operation_id,
+        error = ?error,
+        "failed to mark snapshot import operation ready",
+    );
+}
+
+/// Serializes a report into the operation's `result_json`, degrading to a
+/// payload that names the failure rather than dropping the counters silently.
+///
+/// Serialization of these reports cannot fail — every field is a string, a
+/// number or a uuid — but a `ready` operation carrying no explanation for its
+/// missing result is exactly the hole this issue closed, so the impossible case
+/// still says something.
+pub(crate) fn snapshot_result_payload<T: serde::Serialize>(report: &T) -> serde_json::Value {
+    serde_json::to_value(report).unwrap_or_else(|error| {
+        tracing::error!(error = ?error, "failed to serialize snapshot import report");
+        serde_json::json!({ "reportUnavailable": "serialization_failed" })
+    })
 }
 
 /// Marks the async operation behind a snapshot-import worker `failed`,
 /// logging if the status update itself fails. Shared by the library- and
 /// workspace-scoped snapshot import workers.
-pub(crate) async fn mark_snapshot_import_operation_failed(state: &AppState, operation_id: Uuid) {
+pub(crate) async fn mark_snapshot_import_operation_failed(
+    state: &AppState,
+    operation_id: Uuid,
+    failure_code: &str,
+) {
     if let Err(update_error) = state
-        .canonical_services
+        .application_services
         .ops
         .update_async_operation(
             state,
@@ -188,7 +258,7 @@ pub(crate) async fn mark_snapshot_import_operation_failed(state: &AppState, oper
                 operation_id,
                 status: ASYNC_OP_STATUS_FAILED.to_string(),
                 completed_at: Some(chrono::Utc::now()),
-                failure_code: Some("snapshot_import_failed".to_string()),
+                failure_code: Some(failure_code.to_string()),
             },
         )
         .await
@@ -212,10 +282,11 @@ fn spawn_library_snapshot_import_worker(
         async move {
             let archive_bytes = spooled.bytes_written;
             let result = Box::pin(async {
-                let reader = spooled.open().await?;
-                Box::pin(restore_library_archive(&state, library_id, reader, overwrite))
+                let reader = spooled
+                    .open()
                     .await
-                    .map_err(ApiError::from)
+                    .map_err(|error| SnapshotImportError::new(anyhow::Error::new(error)))?;
+                Box::pin(restore_library_archive(&state, library_id, reader, overwrite)).await
             })
             .await;
 
@@ -225,18 +296,40 @@ fn spawn_library_snapshot_import_worker(
                         library_id = %report.library_id,
                         operation_id = %operation_id,
                         archive_bytes,
+                        postgres_rows = ?report.postgres_rows_by_table,
+                        blobs_restored = report.blobs_restored,
+                        blobs_verified = report.blobs_verified,
+                        unverifiable_blobs = report.unverifiable_blobs,
                         "snapshot import restored from spooled request body",
                     );
-                    mark_snapshot_import_operation_ready(&state, operation_id).await;
+                    if report.unverifiable_blobs > 0 {
+                        tracing::warn!(
+                            library_id = %report.library_id,
+                            operation_id = %operation_id,
+                            unverifiable_blobs = report.unverifiable_blobs,
+                            blobs_verified = report.blobs_verified,
+                            "snapshot import accepted blobs whose bytes could not be proven against content_revision.checksum; \
+                             this check only proves the archive is internally consistent, not that it is authentic, \
+                             because substituting both a blob and its checksum would also pass it",
+                        );
+                    }
+                    let payload =
+                        snapshot_result_payload(&SnapshotImportReportResponse::from(report));
+                    mark_snapshot_import_operation_ready(&state, operation_id, payload).await;
                 }
-                Err(error) => {
+                Err(failure) => {
                     tracing::error!(
                         %operation_id,
                         %library_id,
-                        error = ?error,
+                        failure_code = failure.failure_code(),
                         "snapshot import worker failed",
                     );
-                    mark_snapshot_import_operation_failed(&state, operation_id).await;
+                    mark_snapshot_import_operation_failed(
+                        &state,
+                        operation_id,
+                        failure.failure_code(),
+                    )
+                    .await;
                 }
             }
         }
@@ -246,6 +339,12 @@ fn spawn_library_snapshot_import_worker(
             %library_id,
         )),
     );
+}
+
+/// Archives carry source-owned history, including denied and pending bytes.
+/// Ordinary scoped read/write grants must never turn this into a reader bypass.
+pub(crate) fn authorize_snapshot_history_export(auth: &AuthContext) -> Result<(), ApiError> {
+    if auth.is_system_admin { Ok(()) } else { Err(ApiError::Unauthorized) }
 }
 
 /// Streams a library snapshot as `application/zstd` (tar.zst).
@@ -274,6 +373,7 @@ pub async fn export_library_snapshot(
     Path(library_id): Path<Uuid>,
     Query(query): Query<ExportQuery>,
 ) -> Result<Response, ApiError> {
+    authorize_snapshot_history_export(&auth)?;
     let library =
         load_library_and_authorize(&auth, &state, library_id, POLICY_LIBRARY_READ).await?;
 
@@ -303,17 +403,15 @@ pub async fn export_library_snapshot(
     tokio::spawn(async move {
         match join.await {
             Ok(Ok(())) => {}
-            Ok(Err(error)) => {
+            Ok(Err(_error)) => {
                 tracing::error!(
                     library_id = %observer_lib_id,
-                    error = format!("{error:#}"),
                     "library snapshot export failed",
                 );
             }
-            Err(join_error) => {
+            Err(_join_error) => {
                 tracing::error!(
                     library_id = %observer_lib_id,
-                    error = format!("{join_error}"),
                     "library snapshot export task panicked or was cancelled",
                 );
             }
@@ -360,11 +458,11 @@ pub async fn export_library_snapshot(
         description = "tar.zst archive previously emitted by GET /v1/content/libraries/{libraryId}/snapshot",
     ),
     responses(
-        (status = 202, description = "Snapshot import accepted; poll /v1/ops/operations/{operationId}", body = SnapshotImportAcceptedResponse),
+        (status = 202, description = "Snapshot import accepted; poll /v1/ops/operations/{operationId} until it is terminal. The restore runs after this response, so every refusal — a populated target under overwrite=reject (`snapshot_target_populated`), an archive whose identities already live here (`snapshot_source_already_present`), an unsupported archive version (`snapshot_unsupported_schema_version`), a malformed archive (`snapshot_archive_invalid`) — surfaces as that operation's `failureCode`, never as a status on this request", body = SnapshotImportAcceptedResponse),
+        (status = 400, description = "Invalid overwrite mode"),
         (status = 401, description = "Caller is not authenticated"),
         (status = 403, description = "Caller is not authorized for the library"),
         (status = 404, description = "Library not found"),
-        (status = 409, description = "Library already populated and overwrite=reject"),
     ),
 )]
 pub async fn import_library_snapshot(
@@ -374,6 +472,7 @@ pub async fn import_library_snapshot(
     Query(query): Query<ImportQuery>,
     body: Body,
 ) -> Result<(StatusCode, Json<SnapshotImportAcceptedResponse>), ApiError> {
+    authorize_snapshot_history_export(&auth)?;
     let library =
         load_library_and_authorize(&auth, &state, library_id, POLICY_LIBRARY_WRITE).await?;
 
@@ -383,7 +482,7 @@ pub async fn import_library_snapshot(
     let spooled = spool_snapshot_body(body, "library").await?;
     let archive_bytes = spooled.bytes_written;
     let operation = state
-        .canonical_services
+        .application_services
         .ops
         .create_async_operation(
             &state,
@@ -433,4 +532,22 @@ pub(super) fn routes() -> Router<AppState> {
             .post(import_library_snapshot)
             .layer(DefaultBodyLimit::disable()),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use axum::body::Body;
+
+    use super::spool_snapshot_body_with_limit;
+
+    #[tokio::test]
+    async fn snapshot_body_spool_rejects_archives_above_the_ingress_limit() {
+        let result = spool_snapshot_body_with_limit(Body::from(vec![0_u8; 9]), "test", 8).await;
+        let error = match result {
+            Ok(_) => panic!("oversized snapshot request must fail before restore"),
+            Err(error) => error,
+        };
+
+        assert!(error.to_string().contains("snapshot archive exceeds maximum size of 8 bytes"));
+    }
 }

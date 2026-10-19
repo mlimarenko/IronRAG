@@ -16,7 +16,14 @@ export default defineConfig({
     environment: 'jsdom',
     globals: true,
     setupFiles: ['./src/shared/test/setup.ts'],
-    include: ['src/**/*.{test,spec}.{ts,tsx}'],
+    include: [
+      'src/**/*.{test,spec}.{ts,tsx}',
+      'visual-qa/**/*.test.ts',
+      // Gates that guard the build itself are tested here too: the e2e spec
+      // gate has to fail on a suite that quietly stopped running, and a gate
+      // nobody tests is the same trap one level up.
+      'scripts/**/*.test.mjs',
+    ],
     coverage: {
       provider: 'v8',
       reporter: [

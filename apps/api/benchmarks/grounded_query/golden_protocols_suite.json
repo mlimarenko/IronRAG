@@ -24,7 +24,7 @@
       "minTechnicalFactReferenceCount": 0,
       "minEntityReferenceCount": 0,
       "minRelationReferenceCount": 0,
-      "allowedVerificationStates": ["verified", "unverified"]
+      "allowedVerificationStates": ["verified", "partially_supported"]
     },
     {
       "id": "websocket_handshake",
@@ -32,14 +32,14 @@
       "searchQuery": "WebSocket handshake Upgrade Connection HTTP headers 101 Switching Protocols",
       "expectedDocumentsContains": ["websocket_protocol"],
       "searchRequiredAll": ["WebSocket"],
-      "answerRequiredAny": ["Upgrade", "101", "Switching Protocols", "handshake", "Connection"],
+      "answerRequiredAny": ["Upgrade", "HTTP 101 status", "Switching Protocols", "handshake", "Connection"],
       "answerForbiddenAny": [],
       "minChunkReferenceCount": 1,
       "minPreparedSegmentReferenceCount": 0,
       "minTechnicalFactReferenceCount": 0,
       "minEntityReferenceCount": 0,
       "minRelationReferenceCount": 0,
-      "allowedVerificationStates": ["verified", "unverified"]
+      "allowedVerificationStates": ["verified", "partially_supported"]
     },
     {
       "id": "oauth_grant_types",
@@ -55,7 +55,7 @@
       "minTechnicalFactReferenceCount": 0,
       "minEntityReferenceCount": 0,
       "minRelationReferenceCount": 0,
-      "allowedVerificationStates": ["verified", "unverified"]
+      "allowedVerificationStates": ["verified", "partially_supported"]
     },
     {
       "id": "jwt_structure_and_claims",
@@ -70,7 +70,7 @@
       "minTechnicalFactReferenceCount": 0,
       "minEntityReferenceCount": 0,
       "minRelationReferenceCount": 0,
-      "allowedVerificationStates": ["verified", "unverified"]
+      "allowedVerificationStates": ["verified", "partially_supported"]
     },
     {
       "id": "cross_protocol_security_comparison",
@@ -86,7 +86,7 @@
       "minTechnicalFactReferenceCount": 0,
       "minEntityReferenceCount": 0,
       "minRelationReferenceCount": 0,
-      "allowedVerificationStates": ["verified", "unverified"]
+      "allowedVerificationStates": ["verified", "partially_supported"]
     },
     {
       "id": "cross_protocol_realtime_comparison",
@@ -102,7 +102,7 @@
       "minTechnicalFactReferenceCount": 0,
       "minEntityReferenceCount": 0,
       "minRelationReferenceCount": 0,
-      "allowedVerificationStates": ["verified", "unverified"]
+      "allowedVerificationStates": ["verified", "partially_supported"]
     }
   ]
 }

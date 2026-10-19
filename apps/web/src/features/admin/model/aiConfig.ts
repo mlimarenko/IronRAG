@@ -1,16 +1,7 @@
 import type { TFunction } from 'i18next'
-import { z } from 'zod'
 
-import { nonEmptyString, optionalIntegerString, optionalNumberString } from '@/shared/forms'
 import type { AiBindingPurpose } from '@/shared/api/generated'
-import type {
-  AIAccount,
-  AIBinding,
-  AIModelOption,
-  AIProvider,
-  AIScopeKind,
-  PricingRule,
-} from '@/shared/types'
+import type { AIAccount, AIBinding, AIModelOption, AIProvider, AIScopeKind } from '@/shared/types'
 
 export type AiConfigSection = 'bindings' | 'accounts' | 'catalog'
 
@@ -26,14 +17,6 @@ export function isProviderCredentialValidationFailure(error: unknown): boolean {
   return (
     typeof errorKind === 'string' && /^provider_credential_validation_[a-z0-9_]+$/.test(errorKind)
   )
-}
-
-export type AiCatalogTab = 'providers' | 'models'
-
-export type AiConfigDataState<T> = {
-  isLoading: boolean
-  error: unknown
-  data: T | undefined
 }
 
 export type AiScopeContext = {
@@ -69,16 +52,11 @@ export type BindingResolution = {
   sourceKind: AIScopeKind | null
 }
 
-export type AccountModelLoadState = 'loading' | 'ready' | 'failed'
-
 export type AiReadinessSummary = {
   totalPurposes: number
   executableEffectiveBindings: number
   localBindingCount: number
   missingPurposes: AiBindingPurpose[]
-  /** Optional bindings that are not configured — the system falls back
-   *  to local CPU processing (lower quality / higher latency). */
-  missingOptionalPurposes: AiBindingPurpose[]
   totalAccountCount: number
   activeAccountCount: number
   localAccountCount: number
@@ -94,16 +72,22 @@ export type AiBindingSuggestion = {
   modelCatalogId: string
 }
 
-export const REQUIRED_BINDING_PURPOSES = [
+export const BINDING_PURPOSES = [
+  'extract_text',
   'extract_graph',
+  'graph_entity_type',
   'embed_chunk',
   'query_compile',
+  'query_rerank',
   'query_answer',
   'agent',
 ] as const satisfies readonly AiBindingPurpose[]
 
-export const OPTIONAL_BINDING_PURPOSES = [
-  'extract_text',
+const KNOWLEDGE_WORKFLOW_BINDING_PURPOSES = [
+  'extract_graph',
+  'embed_chunk',
+  'query_compile',
+  'query_answer',
 ] as const satisfies readonly AiBindingPurpose[]
 
 export function purposeLabel(value: AiBindingPurpose, t: TFunction) {
@@ -112,10 +96,6 @@ export function purposeLabel(value: AiBindingPurpose, t: TFunction) {
 
 export function purposeDescription(value: AiBindingPurpose, t: TFunction) {
   return t(`admin.aiPanel.purposeDescriptions.${value}`)
-}
-
-export function scopeLabel(value: AIScopeKind, t: TFunction) {
-  return t(`admin.aiPanel.scopeLabels.${value}`)
 }
 
 export function accountStateLabel(value: AIAccount['state'], t: TFunction) {
@@ -195,10 +175,10 @@ export function isBindingExecutable({
   if (model.providerCatalogId !== account.providerId) {
     return false
   }
-  if (!modelSupportsBindingPurpose(model, purpose)) {
+  if (!providerServesPurpose(account.provider, purpose)) {
     return false
   }
-  if (!providerSupportsBindingPurpose(account.provider, purpose)) {
+  if (!modelSupportsBindingPurpose(model, purpose)) {
     return false
   }
   if (model.availabilityState === 'unavailable') {
@@ -208,97 +188,36 @@ export function isBindingExecutable({
 }
 
 export function modelSupportsBindingPurpose(model: AIModelOption, purpose: AiBindingPurpose) {
-  const requiredCapabilityKind = purpose === 'embed_chunk' ? 'embedding' : 'chat'
-  return (
-    model.allowedBindingPurposes.includes(purpose) &&
-    model.capabilityKind === requiredCapabilityKind &&
-    (purpose !== 'extract_text' || model.modalityKind === 'multimodal')
-  )
+  return model.allowedBindingPurposes.includes(purpose)
 }
 
-export function providerSupportsBindingPurpose(
-  provider: AIProvider | null | undefined,
-  purpose: AiBindingPurpose,
-) {
-  if (!provider) {
-    return false
-  }
-  switch (purpose) {
-    case 'extract_text':
-      return (
-        provider.capabilities.chat === 'supported' && provider.capabilities.vision === 'supported'
-      )
-    case 'embed_chunk':
-      return provider.capabilities.embeddings === 'supported'
-    case 'agent':
-      return (
-        provider.capabilities.chat === 'supported' && provider.capabilities.tools === 'supported'
-      )
-    case 'extract_graph':
-    case 'query_compile':
-    case 'query_answer':
-      return provider.capabilities.chat === 'supported'
-  }
+/**
+ * The decision purposes a decision-only provider may serve (IRG-182). Mirrors
+ * `AiBindingPurpose::is_decision` on the backend: `query_rerank` and
+ * `graph_entity_type`. Every other purpose is generative.
+ */
+export function isDecisionBindingPurpose(purpose: AiBindingPurpose): boolean {
+  return purpose === 'query_rerank' || purpose === 'graph_entity_type'
 }
 
-export function formatModelLabel(model: AIModelOption, providers: AIProvider[]) {
-  const provider = providers.find((entry) => entry.id === model.providerCatalogId)
-  return provider ? `${provider.displayName} · ${model.modelName}` : model.modelName
-}
-
-export type ModelPriceSummary = {
-  inputPerMillion?: number
-  outputPerMillion?: number
-  currency: string
-}
-
-/** Effective per-model price, preferring a workspace override over the base catalog row. */
-export function resolveModelPriceSummary(
-  modelId: string,
-  prices: PricingRule[],
-): ModelPriceSummary | null {
-  const forModel = prices.filter((entry) => entry.modelCatalogId === modelId)
-  if (forModel.length === 0) {
-    return null
-  }
-  const pick = (unit: string) => {
-    const overrides = forModel.filter(
-      (entry) => entry.billingUnit === unit && entry.sourceOrigin === 'workspace_override',
-    )
-    const candidates =
-      overrides.length > 0 ? overrides : forModel.filter((entry) => entry.billingUnit === unit)
-    return candidates[0]
-  }
-  const input = pick('per_1m_input_tokens')
-  const output = pick('per_1m_output_tokens')
-  if (!input && !output) {
-    return null
-  }
-  return {
-    ...(input ? { inputPerMillion: input.unitPrice } : {}),
-    ...(output ? { outputPerMillion: output.unitPrice } : {}),
-    currency: input?.currency ?? output?.currency ?? 'USD',
-  }
-}
-
-/** Renders as `$0.15/$0.60`; missing sides fall back to an em dash. */
-export function formatModelPriceSuffix(summary: ModelPriceSummary | null): string {
-  if (!summary) {
-    return ''
-  }
-  const fmt = (value: number | undefined) => (value === undefined ? '—' : `$${value.toFixed(2)}`)
-  return `${fmt(summary.inputPerMillion)}/${fmt(summary.outputPerMillion)}`
-}
-
-export function matchesFilter(values: Array<string | undefined>, filter: string) {
-  const normalized = filter.trim().toLocaleLowerCase()
-  if (!normalized) {
+/**
+ * Whether a provider may be offered for a purpose. A provider that declares the
+ * typed `decision` capability is decision-only: the server rejects it for every
+ * generative purpose, so the account picker must not offer it there. A provider
+ * that does not declare the capability is unaffected, and a chat model stays
+ * eligible for a decision purpose through its own allowed purposes.
+ */
+export function providerServesPurpose(
+  provider: AIProvider | undefined,
+  purpose: AiBindingPurpose | null,
+): boolean {
+  if (provider?.capabilities?.decision !== 'supported') {
     return true
   }
-  return values.some((value) => value?.toLocaleLowerCase().includes(normalized))
+  return purpose !== null && isDecisionBindingPurpose(purpose)
 }
 
-export function compareByUpdatedAtDesc(
+function compareByUpdatedAtDesc(
   left: { updatedAt: string; id: string },
   right: { updatedAt: string; id: string },
 ) {
@@ -359,7 +278,7 @@ export function summarizeAiReadiness({
 }): AiReadinessSummary {
   const accountById = new Map(availableAccounts.map((entry) => [entry.id, entry]))
   const modelById = new Map(models.map((entry) => [entry.id, entry]))
-  const resolutions = REQUIRED_BINDING_PURPOSES.map((purpose) => ({
+  const resolutions = KNOWLEDGE_WORKFLOW_BINDING_PURPOSES.map((purpose) => ({
     purpose,
     resolution: resolveBindingForPurpose({
       purpose,
@@ -387,33 +306,13 @@ export function summarizeAiReadiness({
   })
   const configuredProviderIds = new Set(availableAccounts.map((entry) => entry.providerId))
 
-  // Optional bindings — check separately from required runtime purposes.
-  const missingOptionalPurposes = OPTIONAL_BINDING_PURPOSES.filter((purpose) => {
-    const resolution = resolveBindingForPurpose({
-      purpose,
-      selectedScope,
-      bindingsForScope,
-      instanceBindings,
-      workspaceBindings,
-    })
-    const binding = resolution.effectiveBinding
-    if (binding?.state !== 'active') return true
-    return !isBindingExecutable({
-      purpose,
-      account: accountById.get(binding.accountId),
-      model: modelById.get(binding.modelCatalogId),
-      modelsByAccountId: {},
-    })
-  })
-
   return {
-    totalPurposes: REQUIRED_BINDING_PURPOSES.length,
+    totalPurposes: KNOWLEDGE_WORKFLOW_BINDING_PURPOSES.length,
     executableEffectiveBindings: executablePurposeIds.size,
     localBindingCount: bindingsForScope.length,
-    missingPurposes: REQUIRED_BINDING_PURPOSES.filter(
+    missingPurposes: KNOWLEDGE_WORKFLOW_BINDING_PURPOSES.filter(
       (purpose) => !executablePurposeIds.has(purpose),
     ),
-    missingOptionalPurposes,
     totalAccountCount: availableAccounts.length,
     activeAccountCount: availableAccounts.filter((entry) => entry.state === 'active').length,
     localAccountCount: localAccounts.length,
@@ -450,7 +349,7 @@ export function suggestBindingSelection({
       modelSupportsBindingPurpose(entry, purpose) && entry.availabilityState !== 'unavailable',
   )
   const activeAccounts = availableAccounts
-    .filter((entry) => entry.state === 'active')
+    .filter((entry) => entry.state === 'active' && providerServesPurpose(entry.provider, purpose))
     .slice()
     .sort(compareByUpdatedAtDesc)
   const preferredAccount = preferredAccountId
@@ -490,52 +389,30 @@ export function suggestBindingSelection({
 }
 
 /**
- * Shared Zod shape for the binding "model + parameters" step, used both by
- * the inline per-purpose editor (BindingPurposeCard) and the guided wizard's
- * second step — both create/update the same `CreateAiBindingRequest` /
- * `UpdateAiBindingRequest` inline-parameter payload.
+ * The scope the AI configuration screen can actually show, given what the URL
+ * asked for and what is currently selected. A deep link to `?scope=library`
+ * arriving without an active library must not render an empty screen: it falls
+ * back to the nearest scope that exists, workspace before instance.
  */
-export function bindingParamsSchema(t: TFunction) {
-  return z.object({
-    accountId: nonEmptyString(t('admin.aiPanel.fields.account')),
-    modelCatalogId: nonEmptyString(t('admin.model')),
-    systemPrompt: z.string(),
-    temperature: optionalNumberString(t('admin.temperature')),
-    topP: optionalNumberString(t('admin.topP')),
-    maxOutputTokens: optionalIntegerString(t('admin.maxOutputTokens')),
-    extraParametersJson: z.string().superRefine((value, context) => {
-      const normalized = value.trim()
-      if (!normalized) {
-        return
-      }
-      try {
-        const parsed = JSON.parse(normalized) as unknown
-        if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-          throw new Error('not an object')
-        }
-      } catch {
-        context.addIssue({
-          code: 'custom',
-          message: t('admin.aiPanel.messages.invalidJson'),
-        })
-      }
-    }),
-  })
+export function reachableAiScope(
+  requested: AIScopeKind,
+  hasWorkspace: boolean,
+  hasLibrary: boolean,
+): AIScopeKind {
+  if (requested === 'library' && !hasLibrary) return hasWorkspace ? 'workspace' : 'instance'
+  if (requested === 'workspace' && !hasWorkspace) return 'instance'
+  return requested
 }
 
-export type BindingParamsFormValues = z.output<ReturnType<typeof bindingParamsSchema>>
+/**
+ * Which of the three things the AI readiness banner has to say. Accounts come
+ * first: without a credential no binding can work, so "no bindings" would be
+ * the wrong thing to put in front of an operator who has not connected a
+ * provider yet.
+ */
+export type AiReadinessStage = 'missingAccounts' | 'ready' | 'missingBindings'
 
-export function bindingParamsRequestBody(values: BindingParamsFormValues) {
-  const extraParametersJson = values.extraParametersJson.trim()
-    ? (JSON.parse(values.extraParametersJson) as Record<string, unknown>)
-    : undefined
-  return {
-    accountId: values.accountId,
-    modelCatalogId: values.modelCatalogId,
-    systemPrompt: values.systemPrompt.trim() || undefined,
-    temperature: values.temperature,
-    topP: values.topP,
-    maxOutputTokensOverride: values.maxOutputTokens,
-    ...(extraParametersJson !== undefined ? { extraParametersJson } : {}),
-  }
+export function aiReadinessStage(activeAccountCount: number, ready: boolean): AiReadinessStage {
+  if (activeAccountCount === 0) return 'missingAccounts'
+  return ready ? 'ready' : 'missingBindings'
 }

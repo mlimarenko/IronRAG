@@ -1,6 +1,6 @@
 # MSW mocks
 
-Single canonical source of HTTP mocks for the IronRAG frontend, generated
+Single authoritative source of HTTP mocks for the IronRAG frontend, generated
 from the OpenAPI contract.
 
 ## Layout

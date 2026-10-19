@@ -15,7 +15,7 @@ pub(crate) fn descriptor(name: &str) -> Option<McpToolDescriptor> {
     match name {
         "get_runtime_execution" => Some(McpToolDescriptor {
             name: "get_runtime_execution",
-            description: "Load the canonical runtime lifecycle summary for one runtime execution ID. Use this when a IronRAG payload already includes runtimeExecutionId and you need the authoritative lifecycle, active stage, or failure code.",
+            description: "Load the authoritative runtime lifecycle summary for one runtime execution ID. Use this when an IronRAG payload already includes runtimeExecutionId and you need its lifecycle state, active stage, or failure code.",
             input_schema: json!({
                 "type": "object",
                 "required": ["runtimeExecutionId"],
@@ -23,14 +23,14 @@ pub(crate) fn descriptor(name: &str) -> Option<McpToolDescriptor> {
                     "runtimeExecutionId": {
                         "type": "string",
                         "format": "uuid",
-                        "description": "Canonical runtime execution UUID."
+                        "description": "Runtime execution UUID."
                     }
                 }
             }),
         }),
         "get_runtime_execution_trace" => Some(McpToolDescriptor {
             name: "get_runtime_execution_trace",
-            description: "Load the canonical runtime stage, action, and policy trace for one runtime execution ID. Use this for debugging or automation that must inspect what the runtime actually did.",
+            description: "Load the active runtime stage, action, and policy trace for one runtime execution ID. Use this for debugging or automation that must inspect what the runtime actually did.",
             input_schema: json!({
                 "type": "object",
                 "required": ["runtimeExecutionId"],
@@ -38,7 +38,7 @@ pub(crate) fn descriptor(name: &str) -> Option<McpToolDescriptor> {
                     "runtimeExecutionId": {
                         "type": "string",
                         "format": "uuid",
-                        "description": "Canonical runtime execution UUID."
+                        "description": "Runtime execution UUID."
                     }
                 }
             }),
@@ -122,7 +122,7 @@ fn describe_runtime_execution_summary(execution: &McpRuntimeExecutionSummary) ->
             format!(
                 "Runtime execution {} is running in stage {}.{}",
                 execution.runtime_execution_id,
-                canonical_runtime_value(&active_stage),
+                serialized_runtime_value(&active_stage),
                 policy_suffix
             )
         }
@@ -133,14 +133,14 @@ fn describe_runtime_execution_summary(execution: &McpRuntimeExecutionSummary) ->
         ) => format!(
             "Runtime execution {} finished in state {} after stage {}.{}",
             execution.runtime_execution_id,
-            canonical_runtime_value(&execution.lifecycle_state),
-            canonical_runtime_value(&active_stage),
+            serialized_runtime_value(&execution.lifecycle_state),
+            serialized_runtime_value(&active_stage),
             policy_suffix
         ),
         _ => format!(
             "Runtime execution {} is {}.{}",
             execution.runtime_execution_id,
-            canonical_runtime_value(&execution.lifecycle_state),
+            serialized_runtime_value(&execution.lifecycle_state),
             policy_suffix
         ),
     }
@@ -156,7 +156,7 @@ fn describe_runtime_trace_summary(trace: &McpRuntimeExecutionTrace) -> String {
     )
 }
 
-fn canonical_runtime_value<T>(value: &T) -> String
+fn serialized_runtime_value<T>(value: &T) -> String
 where
     T: Serialize,
 {

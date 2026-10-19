@@ -14,16 +14,21 @@ pub async fn admit_web_run_with_failpoint(
     request: &WebRunAdmissionRequest,
     failpoint: Option<AdmissionFailpoint>,
 ) -> Result<AdmissionOutcome<WebRunAdmissionBundle>, AdmissionError> {
-    let request_fingerprint = web_fingerprint(request)?;
+    let request_identity = web_request_identity(request);
+    let request_fingerprint = fingerprint(&request_identity)?;
     let scope = idempotency_scope(request.workspace_id, request.requested_by_principal_id);
     let mut transaction = postgres.begin().await?;
     lock_library(&mut transaction, request.workspace_id, request.library_id).await?;
 
     if let Some(existing) = find_mutation_for_update(
         &mut transaction,
-        &scope,
-        &request.request_surface,
-        request.idempotency_key.as_deref(),
+        super::MutationKey {
+            workspace_id: request.workspace_id,
+            principal_id: request.requested_by_principal_id,
+            scope: &scope,
+            surface: &request.request_surface,
+            key: request.idempotency_key.as_deref(),
+        },
     )
     .await?
     {
@@ -31,19 +36,15 @@ pub async fn admit_web_run_with_failpoint(
             return Err(AdmissionError::IdempotencyConflict { mutation_id: existing.id });
         }
         let mutation = existing.into_row();
-        let (bundle, repaired) =
-            load_or_repair_web_bundle(&mut transaction, request, mutation, failpoint).await?;
+        let bundle = load_web_bundle(&mut transaction, mutation).await?;
         transaction.commit().await?;
-        return Ok(if repaired {
-            AdmissionOutcome::RepairedLegacy(bundle)
-        } else {
-            AdmissionOutcome::Replayed(bundle)
-        });
+        return Ok(AdmissionOutcome::Replayed(bundle));
     }
 
     let mutation = insert_mutation(
         &mut transaction,
         NewMutation {
+            request_identity: &request_identity,
             workspace_id: request.workspace_id,
             library_id: request.library_id,
             operation_kind: "web_capture",
@@ -114,12 +115,42 @@ pub async fn admit_web_run_with_failpoint(
     Ok(AdmissionOutcome::Created(bundle))
 }
 
-fn web_fingerprint(request: &WebRunAdmissionRequest) -> Result<String, AdmissionError> {
-    fingerprint(&serde_json::json!({
+#[cfg(test)]
+#[test]
+fn semantic_fingerprint_excludes_actor_surface_and_caller_key() -> Result<(), AdmissionError> {
+    let mut request = WebRunAdmissionRequest {
+        workspace_id: Uuid::now_v7(),
+        library_id: Uuid::now_v7(),
+        seed_url: "https://example.invalid/".to_owned(),
+        normalized_seed_url: "https://example.invalid/".to_owned(),
+        mode: "single_page".to_owned(),
+        boundary_policy: "same_host".to_owned(),
+        max_depth: 0,
+        max_pages: 1,
+        crawl_allow_patterns: serde_json::json!([]),
+        crawl_block_patterns: serde_json::json!([]),
+        materialization_allow_patterns: serde_json::json!([]),
+        materialization_block_patterns: serde_json::json!([]),
+        requested_by_principal_id: None,
+        request_surface: "rest".to_owned(),
+        idempotency_key: Some("first-key".to_owned()),
+        source_identity: Some("web-source".to_owned()),
+    };
+    let original = fingerprint(&web_request_identity(&request))?;
+    request.requested_by_principal_id = Some(Uuid::now_v7());
+    request.request_surface = "mcp".to_owned();
+    request.idempotency_key = Some("another-key".to_owned());
+    assert_eq!(fingerprint(&web_request_identity(&request))?, original);
+    request.max_pages = 2;
+    assert_ne!(fingerprint(&web_request_identity(&request))?, original);
+    Ok(())
+}
+fn web_request_identity(request: &WebRunAdmissionRequest) -> serde_json::Value {
+    serde_json::json!({
         "workspaceId": request.workspace_id,
         "libraryId": request.library_id,
-        "requestSurface": request.request_surface,
-        "sourceIdentity": request.source_identity,
+        "operationKind": "web_capture",
+        "sourceIdentity": request.source_identity.as_deref().unwrap_or(&request.normalized_seed_url),
         "seedUrl": request.seed_url,
         "normalizedSeedUrl": request.normalized_seed_url,
         "mode": request.mode,
@@ -130,7 +161,7 @@ fn web_fingerprint(request: &WebRunAdmissionRequest) -> Result<String, Admission
         "crawlBlockPatterns": request.crawl_block_patterns,
         "materializationAllowPatterns": request.materialization_allow_patterns,
         "materializationBlockPatterns": request.materialization_block_patterns,
-    }))
+    })
 }
 
 async fn insert_web_run(
@@ -189,7 +220,7 @@ async fn insert_web_seed(
     Ok(sqlx::query_as::<_, ingest_repository::WebDiscoveredPageRow>(
         "insert into content_web_discovered_page (
             id, run_id, discovered_url, normalized_url, final_url,
-            canonical_url, depth, referrer_candidate_id, host_classification,
+            \u{63}anonical_url, depth, referrer_candidate_id, host_classification,
             candidate_state, classification_reason, classification_detail,
             content_type, http_status, snapshot_storage_key,
             discovered_at, updated_at, document_id, result_revision_id,
@@ -201,7 +232,7 @@ async fn insert_web_seed(
          )
          returning
             id, run_id, discovered_url, normalized_url, final_url,
-            canonical_url, depth, referrer_candidate_id,
+            \u{63}anonical_url, depth, referrer_candidate_id,
             host_classification::text as host_classification,
             candidate_state::text as candidate_state, classification_reason,
             classification_detail, content_type, http_status,
@@ -216,12 +247,10 @@ async fn insert_web_seed(
     .await?)
 }
 
-async fn load_or_repair_web_bundle(
+async fn load_web_bundle(
     transaction: &mut Transaction<'_, Postgres>,
-    request: &WebRunAdmissionRequest,
-    mutation: crate::infra::repositories::content_repository::ContentMutationRow,
-    failpoint: Option<AdmissionFailpoint>,
-) -> Result<(WebRunAdmissionBundle, bool), AdmissionError> {
+    mutation: crate::infra::repositories::content_mutation_repository::ContentMutationRow,
+) -> Result<WebRunAdmissionBundle, AdmissionError> {
     let run = sqlx::query_as::<_, ingest_repository::WebIngestRunRow>(
         "select
             id, mutation_id, async_operation_id, workspace_id, library_id,
@@ -238,21 +267,14 @@ async fn load_or_repair_web_bundle(
     .bind(mutation.id)
     .fetch_optional(&mut **transaction)
     .await?
-    .ok_or(AdmissionError::IncompleteLegacy {
-        mutation_id: mutation.id,
-        reason: "web run is missing",
-    })?;
+    .ok_or(AdmissionError::InvariantViolation("web run is missing"))?;
     let operation = load_operation_by_subject(transaction, "content_web_ingest_run", run.id)
         .await?
-        .ok_or(AdmissionError::IncompleteLegacy {
-            mutation_id: mutation.id,
-            reason: "web async operation is missing",
-        })?;
-    let mut repaired = false;
-    let seed = if let Some(seed) = sqlx::query_as::<_, ingest_repository::WebDiscoveredPageRow>(
+        .ok_or(AdmissionError::InvariantViolation("web async operation is missing"))?;
+    let seed = sqlx::query_as::<_, ingest_repository::WebDiscoveredPageRow>(
         "select
             id, run_id, discovered_url, normalized_url, final_url,
-            canonical_url, depth, referrer_candidate_id,
+            \u{63}anonical_url, depth, referrer_candidate_id,
             host_classification::text as host_classification,
             candidate_state::text as candidate_state, classification_reason,
             classification_detail, content_type, http_status,
@@ -265,47 +287,17 @@ async fn load_or_repair_web_bundle(
          for update",
     )
     .bind(run.id)
-    .bind(&request.normalized_seed_url)
+    .bind(&run.normalized_seed_url)
     .fetch_optional(&mut **transaction)
     .await?
-    {
-        seed
-    } else {
-        repaired = true;
-        let seed = insert_web_seed(transaction, request, run.id).await?;
-        check_failpoint(failpoint, AdmissionFailpoint::AfterWebSeed)?;
-        seed
-    };
-    let mut job = load_job(transaction, mutation.id, "web_discovery").await?;
-    if job.is_none() {
-        let dedupe_key = format!("web-discovery:{}:{}", mutation.id, run.id);
-        job = Some(
-            insert_job(
-                transaction,
-                NewJob {
-                    workspace_id: request.workspace_id,
-                    library_id: request.library_id,
-                    mutation_id: mutation.id,
-                    mutation_item_id: None,
-                    async_operation_id: operation.id,
-                    knowledge_document_id: None,
-                    knowledge_revision_id: None,
-                    job_kind: "web_discovery",
-                    priority: 40,
-                    dedupe_key: &dedupe_key,
-                },
-            )
-            .await?,
-        );
-        repaired = true;
-        check_failpoint(failpoint, AdmissionFailpoint::AfterJob)?;
-    }
-    let bundle = WebRunAdmissionBundle { mutation, async_operation: operation, run, seed, job };
+    .ok_or(AdmissionError::InvariantViolation("web seed is missing"))?;
+    let job = load_job(transaction, mutation.id, "web_discovery")
+        .await?
+        .ok_or(AdmissionError::InvariantViolation("web discovery job is missing"))?;
+    let bundle =
+        WebRunAdmissionBundle { mutation, async_operation: operation, run, seed, job: Some(job) };
     if !bundle.is_complete() {
-        return Err(AdmissionError::IncompleteLegacy {
-            mutation_id: bundle.mutation.id,
-            reason: "web admission rows disagree on identity",
-        });
+        return Err(AdmissionError::InvariantViolation("web admission rows disagree on identity"));
     }
-    Ok((bundle, repaired))
+    Ok(bundle)
 }

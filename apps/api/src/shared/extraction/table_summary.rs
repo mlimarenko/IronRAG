@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use super::table_markdown::{canonicalize_table_headers, normalize_table_cell_text};
+use super::table_markdown::{normalize_table_cell_text, normalize_table_headers};
 
 pub const TABLE_SUMMARY_PREFIX: &str = "Table Summary";
 
@@ -76,7 +76,7 @@ pub fn build_table_column_summaries(
     }
 
     let width = headers.len().max(rows.iter().map(Vec::len).max().unwrap_or(0));
-    let headers = canonicalize_table_headers(headers, width);
+    let headers = normalize_table_headers(headers, width);
     let mut summaries = Vec::new();
 
     for (column_index, header) in headers.iter().enumerate() {

@@ -78,23 +78,28 @@ fn walk_json(value: &serde_json::Value, out: &mut Vec<String>) {
 }
 
 fn parse_yaml_keys(text: &str) -> Option<Vec<String>> {
-    let value: serde_yaml::Value = serde_yaml::from_str(text).ok()?;
+    let options = serde_saphyr::options! {
+        strict_booleans: true,
+        merge_keys: serde_saphyr::MergeKeyPolicy::AsOrdinary,
+        non_finite_float_policy: serde_saphyr::NonFiniteFloatPolicy::PassThrough,
+    };
+    let value: serde_value::Value = serde_saphyr::from_str_with_options(text, options).ok()?;
     let mut keys = Vec::new();
     walk_yaml(&value, &mut keys);
     Some(keys)
 }
 
-fn walk_yaml(value: &serde_yaml::Value, out: &mut Vec<String>) {
+fn walk_yaml(value: &serde_value::Value, out: &mut Vec<String>) {
     match value {
-        serde_yaml::Value::Mapping(map) => {
+        serde_value::Value::Map(map) => {
             for (k, v) in map {
-                if let Some(s) = k.as_str() {
+                if let serde_value::Value::String(s) = k {
                     out.push(s.to_string());
                 }
                 walk_yaml(v, out);
             }
         }
-        serde_yaml::Value::Sequence(arr) => {
+        serde_value::Value::Seq(arr) => {
             for v in arr {
                 walk_yaml(v, out);
             }
@@ -131,4 +136,27 @@ fn is_config_key_name(candidate: &str) -> bool {
         && candidate.len() <= 64
         && candidate.chars().all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.'))
         && candidate.chars().any(|ch| ch.is_ascii_alphabetic())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_yaml_keys;
+
+    #[test]
+    fn yaml_keys_preserve_scalar_types_and_nested_non_string_key_values() {
+        let keys =
+            parse_yaml_keys("on: literal\ntrue: {nested: value}\n? [one, two]\n: {deep: value}\n")
+                .expect("YAML keys");
+        assert!(keys.iter().any(|key| key == "on"));
+        assert!(keys.iter().any(|key| key == "nested"));
+        assert!(keys.iter().any(|key| key == "deep"));
+        assert!(!keys.iter().any(|key| key == "true"));
+    }
+
+    #[test]
+    fn refuses_excessive_depth_and_recursive_aliases() {
+        let nested = format!("value: {}0{}", "[".repeat(200), "]".repeat(200));
+        assert!(parse_yaml_keys(&nested).is_none());
+        assert!(parse_yaml_keys("value: &recursive [*recursive]\n").is_none());
+    }
 }

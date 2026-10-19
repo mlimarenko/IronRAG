@@ -6,9 +6,10 @@ use crate::domains::query_ir::{QueryIR, QueryScope};
 use super::concise_document_subject_label;
 use super::retrieve::focused_excerpt_for;
 use super::technical_literals::{
-    TechnicalLiteralIntent, detect_technical_literal_intent_from_query_ir,
-    extract_config_section_literals, extract_explicit_path_literals, extract_http_methods,
-    extract_parameter_literals, extract_prefix_literals, extract_url_literals, push_unique_limited,
+    DocumentBalancedChunkSelection, TechnicalLiteralIntent,
+    detect_technical_literal_intent_from_query_ir, extract_config_section_literals,
+    extract_explicit_path_literals, extract_http_methods, extract_parameter_literals,
+    extract_prefix_literals, extract_url_literals, push_unique_limited,
     select_document_balanced_chunks, technical_literal_focus_keywords,
 };
 use super::types::RuntimeMatchedChunk;
@@ -65,15 +66,15 @@ pub(super) fn collect_technical_literal_groups(
     let max_chunks_per_document = technical_literal_group_chunks_per_document(query_ir, intent);
 
     let max_total_chunks = technical_literal_group_total_chunks(query_ir, intent);
-    for chunk in select_document_balanced_chunks(
+    for chunk in select_document_balanced_chunks(DocumentBalancedChunkSelection {
         question,
-        Some(query_ir),
+        ir: Some(query_ir),
         chunks,
-        &literal_focus_keywords,
+        keywords: &literal_focus_keywords,
         pagination_requested,
         max_total_chunks,
         max_chunks_per_document,
-    ) {
+    }) {
         collect_technical_literals_from_chunk(&mut groups, chunk, &literal_focus_keywords, intent);
     }
 

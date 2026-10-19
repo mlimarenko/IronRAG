@@ -1,3 +1,4 @@
+use crate::shared::provider_failure::ProviderFailureKind;
 use thiserror::Error;
 
 use crate::{
@@ -117,8 +118,10 @@ impl From<IngestServiceError> for ContentServiceError {
             }
             IngestServiceError::BindingNotConfigured { message }
             | IngestServiceError::StateConflict { message } => Self::StateConflict { message },
-            IngestServiceError::ProviderUnavailable { message } => {
-                Self::ProviderUnavailable { message }
+            IngestServiceError::Provider(failure)
+                if failure.kind() == ProviderFailureKind::Unavailable =>
+            {
+                Self::ProviderUnavailable { message: failure.message().to_string() }
             }
             IngestServiceError::Cancelled => Self::Cancelled,
             IngestServiceError::Repository(error) => Self::Repository(error),

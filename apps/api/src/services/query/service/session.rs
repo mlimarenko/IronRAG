@@ -80,7 +80,21 @@ impl QueryService {
         )
         .await
         .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
-        Ok(rows.into_iter().map(map_turn_row).collect())
+        let mut turns = Vec::with_capacity(rows.len());
+        for row in rows {
+            if row.turn_kind == QueryTurnKind::Assistant {
+                let Some(execution_id) = row.execution_id else {
+                    continue;
+                };
+                match self.get_execution(state, execution_id).await {
+                    Ok(_) => {}
+                    Err(ApiError::NotFound(_)) => continue,
+                    Err(error) => return Err(error),
+                }
+            }
+            turns.push(map_turn_row(row));
+        }
+        Ok(turns)
     }
 
     /// Loads one turn, scoped to its owning conversation.
@@ -99,6 +113,12 @@ impl QueryService {
             .map_err(|e| ApiError::internal_with_log(e, "internal"))?
             .filter(|row| row.conversation_id == conversation_id)
             .ok_or_else(|| ApiError::resource_not_found("query_turn", turn_id))?;
+        if row.turn_kind == QueryTurnKind::Assistant {
+            let execution_id = row
+                .execution_id
+                .ok_or_else(|| ApiError::resource_not_found("query_turn", turn_id))?;
+            self.get_execution(state, execution_id).await?;
+        }
         Ok(map_turn_row(row))
     }
 
@@ -112,12 +132,7 @@ impl QueryService {
                 .await
                 .map_err(|e| ApiError::internal_with_log(e, "internal"))?
                 .ok_or_else(|| ApiError::resource_not_found("conversation", conversation_id))?;
-        let turns = query_repository::list_turns_by_conversation(
-            &state.persistence.postgres,
-            conversation.id,
-        )
-        .await
-        .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
+        let turns = self.list_turns(state, conversation.id).await?;
         let executions = query_repository::list_executions_by_conversation(
             &state.persistence.postgres,
             conversation.id,
@@ -126,7 +141,7 @@ impl QueryService {
         .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
         Ok(QueryConversationDetail {
             conversation: map_conversation_row(conversation),
-            turns: turns.into_iter().map(map_turn_row).collect(),
+            turns,
             executions: executions.into_iter().map(map_execution_row).collect(),
         })
     }
@@ -139,7 +154,7 @@ impl QueryService {
         let title =
             command.title.as_deref().map(normalize_explicit_conversation_title).transpose()?;
         let library =
-            state.canonical_services.catalog.get_library(state, command.library_id).await?;
+            state.application_services.catalog.get_library(state, command.library_id).await?;
         if library.workspace_id != command.workspace_id {
             return Err(ApiError::Conflict(format!(
                 "library {} does not belong to workspace {}",
@@ -166,7 +181,7 @@ impl QueryService {
         Ok(map_conversation_row(row))
     }
 
-    /// Persists an explicit title after applying the canonical title contract.
+    /// Persists an explicit title after applying the normalized title contract.
     ///
     /// # Errors
     /// Returns a request error for an invalid title or when the guarded row is unavailable.
@@ -282,13 +297,12 @@ pub(crate) fn map_execution_row(row: query_repository::QueryExecutionRow) -> Que
         request_turn_id: row.request_turn_id,
         response_turn_id: row.response_turn_id,
         binding_id: row.binding_id,
-        runtime_execution_id: Some(row.runtime_execution_id),
+        runtime_execution_id: row.runtime_execution_id,
         lifecycle_state: row.runtime_lifecycle_state,
         active_stage: row.runtime_active_stage,
         query_text: row.query_text,
         failure_code: row.failure_code,
         started_at: row.started_at,
-        completed_at: row.completed_at,
     }
 }
 
@@ -352,10 +366,14 @@ pub(crate) fn build_conversation_runtime_context(
     turns: &[query_repository::QueryTurnRow],
     current_turn_id: Uuid,
 ) -> ConversationRuntimeContext {
-    let current_index = turns
-        .iter()
-        .position(|turn| turn.id == current_turn_id)
-        .unwrap_or_else(|| turns.len().saturating_sub(1));
+    let current_index = turns.iter().position(|turn| turn.id == current_turn_id).unwrap_or_else(|| {
+        tracing::error!(
+            current_turn_id = %current_turn_id,
+            fetched_turn_count = turns.len(),
+            "current turn missing from fetched conversation turns; falling back to last fetched turn"
+        );
+        turns.len().saturating_sub(1)
+    });
     let relevant_turns = &turns[..=current_index.min(turns.len().saturating_sub(1))];
     let views = relevant_turns
         .iter()
@@ -372,10 +390,14 @@ pub(crate) fn build_conversation_runtime_context_with_external_history(
     current_turn_id: Uuid,
     external_prior_turns: &[ExternalConversationTurn],
 ) -> ConversationRuntimeContext {
-    let current_index = turns
-        .iter()
-        .position(|turn| turn.id == current_turn_id)
-        .unwrap_or_else(|| turns.len().saturating_sub(1));
+    let current_index = turns.iter().position(|turn| turn.id == current_turn_id).unwrap_or_else(|| {
+        tracing::error!(
+            current_turn_id = %current_turn_id,
+            fetched_turn_count = turns.len(),
+            "current turn missing from fetched conversation turns; falling back to last fetched turn"
+        );
+        turns.len().saturating_sub(1)
+    });
     let relevant_turns = &turns[..=current_index.min(turns.len().saturating_sub(1))];
     let mut views =
         Vec::with_capacity(relevant_turns.len().saturating_add(external_prior_turns.len()));
@@ -404,6 +426,27 @@ pub(crate) fn should_replay_prior_grounded_answer_context(
     context: &ConversationRuntimeContext,
 ) -> bool {
     context.has_prior_conversation && !context.prompt_history_messages.is_empty()
+}
+
+fn log_prior_replay_bundle_lookup_failed<E: std::fmt::Debug>(execution_id: Uuid, error: &E) {
+    tracing::warn!(
+        ?error,
+        execution_id = %execution_id,
+        "prior grounded-answer context replay skipped after context-bundle lookup failure"
+    );
+}
+
+fn log_prior_replay_chunk_hydration_failed<E: std::fmt::Debug>(
+    execution_id: Uuid,
+    chunk_count: usize,
+    error: &E,
+) {
+    tracing::warn!(
+        ?error,
+        execution_id = %execution_id,
+        chunk_count,
+        "prior grounded-answer context replay skipped after chunk hydration failure"
+    );
 }
 
 pub(crate) async fn load_prior_grounded_answer_context_messages(
@@ -438,11 +481,7 @@ pub(crate) async fn load_prior_grounded_answer_context_messages(
             Ok(Some(bundle)) => bundle,
             Ok(None) => continue,
             Err(error) => {
-                tracing::warn!(
-                    ?error,
-                    execution_id = %execution.id,
-                    "prior grounded-answer context replay skipped after context-bundle lookup failure"
-                );
+                log_prior_replay_bundle_lookup_failed(execution.id, &error);
                 continue;
             }
         };
@@ -461,12 +500,7 @@ pub(crate) async fn load_prior_grounded_answer_context_messages(
         let chunk_rows = match state.document_store.list_chunks_by_ids(&chunk_ids).await {
             Ok(rows) => rows,
             Err(error) => {
-                tracing::warn!(
-                    ?error,
-                    execution_id = %execution.id,
-                    chunk_count = chunk_ids.len(),
-                    "prior grounded-answer context replay skipped after chunk hydration failure"
-                );
+                log_prior_replay_chunk_hydration_failed(execution.id, chunk_ids.len(), &error);
                 continue;
             }
         };

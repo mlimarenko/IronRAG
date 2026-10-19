@@ -27,8 +27,7 @@ pub const DEFAULT_TEXT_SEARCH_CONFIG: &str = "simple";
 #[serde(rename_all = "camelCase")]
 #[serde(deny_unknown_fields)]
 pub struct RetrievalConfig {
-    /// Lexical (full-text-search) lane configuration.
-    #[serde(default)]
+    /// Persisted configuration must supply every field explicitly.
     pub lexical: RetrievalLexicalConfig,
 }
 
@@ -40,9 +39,7 @@ pub struct RetrievalConfig {
 pub struct RetrievalLexicalConfig {
     /// Name of the Postgres text-search configuration (`regconfig`) used by the
     /// `to_tsquery` / `websearch_to_tsquery` constructors in the lexical lane.
-    /// Validated against the live `pg_ts_config` catalog at write time; defaults
-    /// to [`DEFAULT_TEXT_SEARCH_CONFIG`].
-    #[serde(default = "default_text_search_config")]
+    /// Validated against the live `pg_ts_config` catalog at write time.
     pub text_search_config: String,
 }
 
@@ -57,18 +54,17 @@ fn default_text_search_config() -> String {
 }
 
 impl RetrievalConfig {
-    /// Builds a configuration from persisted JSON, applying defaults for absent
-    /// keys.
+    /// Builds a configuration from persisted normalized JSON.
     ///
     /// # Errors
-    /// Returns an error when the JSON is not the canonical retrieval-config shape
+    /// Returns an error when the JSON is not the normalized retrieval-config shape
     /// (for example unknown fields or wrong value types).
     pub fn from_json(value: serde_json::Value) -> Result<Self, String> {
         serde_json::from_value::<Self>(value)
             .map_err(|error| format!("invalid retrieval config: {error}"))
     }
 
-    /// Serializes the configuration into the canonical database/API JSON
+    /// Serializes the configuration into the stored database/API JSON
     /// representation.
     ///
     /// # Errors
@@ -105,17 +101,13 @@ mod tests {
     }
 
     #[test]
-    fn empty_object_resolves_to_defaults() {
-        let config = RetrievalConfig::from_json(serde_json::json!({}))
-            .expect("empty object should parse to defaults");
-        assert_eq!(config, RetrievalConfig::default());
+    fn empty_object_is_rejected_as_incomplete() {
+        assert!(RetrievalConfig::from_json(serde_json::json!({})).is_err());
     }
 
     #[test]
-    fn lexical_without_text_search_config_keeps_default() {
-        let config = RetrievalConfig::from_json(serde_json::json!({ "lexical": {} }))
-            .expect("partial lexical object should parse");
-        assert_eq!(config.lexical.text_search_config, "simple");
+    fn lexical_without_text_search_config_is_rejected_as_incomplete() {
+        assert!(RetrievalConfig::from_json(serde_json::json!({ "lexical": {} })).is_err());
     }
 
     #[test]

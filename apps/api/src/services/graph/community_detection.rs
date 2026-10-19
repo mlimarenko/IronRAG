@@ -38,7 +38,7 @@ impl CommunityDetectionService {
     ///
     /// Loads only the lean (id-only / triple-only) projections of nodes and
     /// edges. The earlier full-row variant pulled `summary` / `metadata_json`
-    /// / `canonical_key` / `relation_type` for every edge, which can produce
+    /// / `identity_key` / `relation_type` for every edge, which can produce
     /// excessive memory pressure on large libraries.
     #[instrument(skip(self, state), fields(library_id = %library_id))]
     pub async fn detect_communities(
@@ -153,6 +153,69 @@ pub async fn detect_after_ingestion(
     CommunityDetectionService.detect_communities(state, library_id).await
 }
 
+/// Reports whether the community pass (detection + summaries) has already
+/// converged on the library's live projection, so an idle maintenance tick
+/// can skip it instead of re-deriving identical rows.
+///
+/// Both phases are deterministic over `(library_id, projection_version)`
+/// inputs, so once `runtime_graph_community` holds rows for the snapshot's
+/// `projection_version` and every summary is filled, re-running the pass
+/// rewrites byte-identical state while paying a full node/edge scan, a
+/// DELETE+INSERT of every community row, and the library graph lock.
+pub async fn community_pass_converged(
+    state: &AppState,
+    library_id: Uuid,
+) -> Result<bool, GraphServiceError> {
+    let pool = &state.persistence.postgres;
+    let snapshot = repositories::get_runtime_graph_snapshot(pool, library_id).await?;
+    let (computed_version, missing_summaries) = sqlx::query_as::<_, (Option<i64>, i64)>(
+        "SELECT max(projection_version),
+                count(*) FILTER (WHERE summary_text IS NULL)
+         FROM runtime_graph_community
+         WHERE library_id = $1",
+    )
+    .bind(library_id)
+    .fetch_one(pool)
+    .await?;
+    let oversized =
+        snapshot.as_ref().is_some_and(|s| s.node_count as usize > COMMUNITY_DETECTION_NODE_LIMIT);
+    Ok(community_pass_is_converged(
+        snapshot.as_ref().map(|s| s.projection_version),
+        oversized,
+        computed_version,
+        missing_summaries,
+    ))
+}
+
+/// Pure convergence decision for one idle community-maintenance pass.
+///
+/// - No projection snapshot: the pass would no-op, so it is converged.
+/// - Library above [`COMMUNITY_DETECTION_NODE_LIMIT`]: detection would
+///   skip itself, and the summaries phase would only rewrite summaries
+///   over stale membership at full heavy-edge-scan cost every tick, so
+///   the pass is treated as converged (summaries freeze at their last
+///   computed text instead of drift-refreshing over an old projection).
+/// - Communities computed for the live projection with every summary
+///   filled: converged.
+/// - Communities missing, stale (older projection), or holding unfilled
+///   summaries (a previously interrupted summaries phase): not converged.
+#[must_use]
+fn community_pass_is_converged(
+    snapshot_projection_version: Option<i64>,
+    oversized: bool,
+    computed_projection_version: Option<i64>,
+    missing_summary_count: i64,
+) -> bool {
+    if oversized {
+        return true;
+    }
+    match (snapshot_projection_version, computed_projection_version) {
+        (None, _) => true,
+        (Some(snapshot), Some(computed)) => computed == snapshot && missing_summary_count == 0,
+        (Some(_), None) => false,
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Label propagation algorithm
 // ---------------------------------------------------------------------------
@@ -247,13 +310,16 @@ async fn persist_communities(
     community: &HashMap<Uuid, usize>,
     sizes: &HashMap<usize, usize>,
 ) -> anyhow::Result<()> {
+    let mut transaction =
+        repositories::acquire_runtime_library_graph_lock(pool, library_id).await?;
+
     sqlx::query(
         "DELETE FROM runtime_graph_community
          WHERE library_id = $1 AND projection_version = $2",
     )
     .bind(library_id)
     .bind(projection_version)
-    .execute(pool)
+    .execute(&mut *transaction)
     .await?;
 
     let mut members_by_community: HashMap<usize, Vec<Uuid>> = HashMap::new();
@@ -276,9 +342,11 @@ async fn persist_communities(
         .bind(library_id)
         .bind(projection_version)
         .bind(&member_node_ids)
-        .execute(pool)
+        .execute(&mut *transaction)
         .await?;
     }
+
+    repositories::release_runtime_library_graph_lock(transaction, library_id).await?;
 
     Ok(())
 }
@@ -457,5 +525,37 @@ mod tests {
     fn empty_graph_returns_empty() {
         let community = run_label_propagation(&[], &[]);
         assert!(community.is_empty());
+    }
+
+    #[test]
+    fn converged_pass_skips_when_versions_match_and_summaries_filled() {
+        assert!(community_pass_is_converged(Some(7), false, Some(7), 0));
+    }
+
+    #[test]
+    fn pass_runs_when_communities_are_stale() {
+        assert!(!community_pass_is_converged(Some(8), false, Some(7), 0));
+    }
+
+    #[test]
+    fn pass_runs_when_communities_were_never_computed() {
+        assert!(!community_pass_is_converged(Some(7), false, None, 0));
+    }
+
+    #[test]
+    fn pass_runs_when_summaries_were_interrupted() {
+        assert!(!community_pass_is_converged(Some(7), false, Some(7), 3));
+    }
+
+    #[test]
+    fn missing_snapshot_is_converged_noop() {
+        assert!(community_pass_is_converged(None, false, None, 0));
+        assert!(community_pass_is_converged(None, false, Some(7), 0));
+    }
+
+    #[test]
+    fn oversized_library_pass_is_skipped_even_when_stale() {
+        assert!(community_pass_is_converged(Some(8), true, Some(7), 0));
+        assert!(community_pass_is_converged(Some(8), true, None, 5));
     }
 }

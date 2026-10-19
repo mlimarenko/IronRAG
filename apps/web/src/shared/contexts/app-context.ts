@@ -13,8 +13,12 @@ interface AppState {
   isAuthenticated: boolean
   isBootstrapMode: boolean
   isBootstrapRequired: boolean
+  /** Whether this deployment has a complete server-side SSO configuration. */
+  ssoAvailable: boolean
   isLoading: boolean
   sessionError: string | null
+  /** The server stopped accepting the session while the app was open. */
+  isSessionExpired: boolean
 }
 
 export interface AppContextValue extends AppState {
@@ -26,7 +30,14 @@ export interface AppContextValue extends AppState {
   setLocale: (l: Locale) => void
   setIsBootstrapMode: (b: boolean) => void
   setIsBootstrapRequired: (b: boolean) => void
-  selectWorkspaceLibrary: (workspaceId: string, libraryId: string) => boolean
+  /**
+   * Land on a library named only by id, moving to the workspace that owns it.
+   *
+   * Takes no workspace: a library names its own, and a caller holding a bare id
+   * (a link, a stored preference) has no authority to say which one it is.
+   * Returns false only when that workspace is not one this viewer can see.
+   */
+  selectLibrary: (libraryId: string) => boolean
   login: (login: string, password: string) => Promise<void>
   logout: () => Promise<void>
   bootstrapSetup: (data: BootstrapSetup) => Promise<void>

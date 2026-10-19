@@ -1,0 +1,60 @@
+services:
+  mock-provider:
+    build:
+      context: ./mock_provider
+    image: ironrag-youtrack-mock-provider:full-e2e
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health', timeout=2)"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+    networks:
+      - ironrag
+
+  connector:
+    build:
+      # `../..` is the connectors/ root, which is the build context the shared
+      # Dockerfile expects. It resolved to the old single-connector repository
+      # root before the move; the arithmetic happens to be the same, which is
+      # why it is stated here rather than left to luck.
+      context: ../..
+      dockerfile: Dockerfile
+      target: youtrack
+      args:
+        APP_VERSION: ${IRONRAG_VERSION:-0.0.0-e2e}
+    image: ${CONNECTOR_E2E_IMAGE:-ironrag-youtrack:full-e2e}
+    env_file:
+      - ${CONNECTOR_E2E_ENV_FILE:-${CONNECTOR_E2E_TMP:-../../../tmp-connector-e2e}/connector.env}
+    ports:
+      - "127.0.0.1:${CONNECTOR_E2E_PORT:-18188}:8088"
+    volumes:
+      - ${CONNECTOR_E2E_ROUTING_FILE:-${CONNECTOR_E2E_TMP:-../../../tmp-connector-e2e}/routing.yaml}:/app/routing.yaml:ro
+      - connector-state:/var/lib/ironrag-connector
+    depends_on:
+      mock-provider:
+        condition: service_healthy
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    networks:
+      - ironrag
+      - youtrack
+
+volumes:
+  connector-state:
+
+networks:
+  ironrag:
+    external: true
+    name: ${IRONRAG_E2E_NETWORK:-ironrag-youtrack-full-e2e_default}
+  youtrack:
+    external: true
+    name: ${YOUTRACK_E2E_NETWORK:-ironrag-youtrack-e2e_default}

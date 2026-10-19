@@ -1,4 +1,4 @@
-use crate::domains::query_ir::QueryLanguage;
+use crate::domains::query_ir::{QueryIR, QueryLanguage};
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct DeterministicAnswerLabelSet {
@@ -30,6 +30,39 @@ pub(crate) struct GroundedRepairMessageSet {
     pub(crate) partial_answer_notice: &'static str,
     pub(crate) unverified_answer_notice: &'static str,
 }
+
+/// Deterministic statements about an explicit document reference that is not
+/// in the searchable index. Each template names only what the store row
+/// proves; `{document}` is the literal. An active row can still be absent
+/// from the index because it additionally requires a `prepared` structured
+/// revision, which `not_prepared` names instead of claiming no readable
+/// revision.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct DocumentPresenceMessageSet {
+    pub(crate) absent: &'static str,
+    pub(crate) not_active: &'static str,
+    pub(crate) not_readable_revision: &'static str,
+    pub(crate) not_active_and_not_readable: &'static str,
+    pub(crate) not_prepared: &'static str,
+}
+
+pub(crate) const EN_DOCUMENT_PRESENCE_MESSAGES: DocumentPresenceMessageSet =
+    DocumentPresenceMessageSet {
+        absent: "Document `{document}` is not present in the active library.",
+        not_active: "Document `{document}` is present in the library but is not active and cannot be searched yet.",
+        not_readable_revision: "Document `{document}` is present in the library but has no readable revision, so it cannot be searched.",
+        not_active_and_not_readable: "Document `{document}` is present in the library but is not active and has no readable revision, so it cannot be searched.",
+        not_prepared: "Document `{document}` is present in the library but its searchable content is not prepared yet.",
+    };
+
+pub(crate) const RU_DOCUMENT_PRESENCE_MESSAGES: DocumentPresenceMessageSet =
+    DocumentPresenceMessageSet {
+        absent: "Документ `{document}` отсутствует в активной библиотеке.",
+        not_active: "Документ `{document}` есть в библиотеке, но не активен и пока недоступен для поиска.",
+        not_readable_revision: "Документ `{document}` есть в библиотеке, но у него нет читаемой ревизии, поэтому поискать его нельзя.",
+        not_active_and_not_readable: "Документ `{document}` есть в библиотеке, но не активен и у него нет читаемой ревизии, поэтому поискать его нельзя.",
+        not_prepared: "Документ `{document}` есть в библиотеке, но его содержимое ещё не подготовлено к поиску.",
+    };
 
 pub(crate) const EN_DETERMINISTIC_ANSWER_LABELS: DeterministicAnswerLabelSet =
     DeterministicAnswerLabelSet {
@@ -88,6 +121,20 @@ pub(crate) fn deterministic_answer_labels(language: QueryLanguage) -> Determinis
     }
 }
 
+/// Resolves the language deterministic labels render in.
+///
+/// Labels are fixed strings, so an indeterminate compiler result still has to
+/// pick one; English is the product default. Provider-backed synthesis must
+/// NOT go through this resolver — it receives the raw typed language, so an
+/// indeterminate result leaves the model free to answer in the language of
+/// the question it can see.
+pub(crate) const fn deterministic_answer_language(query_ir: &QueryIR) -> QueryLanguage {
+    match query_ir.language {
+        QueryLanguage::Auto => QueryLanguage::En,
+        language => language,
+    }
+}
+
 pub(crate) fn deterministic_query_messages(
     language: QueryLanguage,
 ) -> DeterministicQueryMessageSet {
@@ -104,10 +151,17 @@ pub(crate) fn grounded_repair_messages(language: QueryLanguage) -> GroundedRepai
     }
 }
 
+pub(crate) fn document_presence_messages(language: QueryLanguage) -> DocumentPresenceMessageSet {
+    match language {
+        QueryLanguage::Ru => RU_DOCUMENT_PRESENCE_MESSAGES,
+        QueryLanguage::En | QueryLanguage::Auto => EN_DOCUMENT_PRESENCE_MESSAGES,
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::grounded_repair_messages;
-    use crate::domains::query_ir::QueryLanguage;
+    use super::{deterministic_answer_language, grounded_repair_messages};
+    use crate::domains::query_ir::{QueryAct, QueryIR, QueryLanguage, QueryScope};
 
     #[test]
     fn repair_catalog_uses_only_the_explicit_typed_language() {
@@ -119,5 +173,16 @@ mod tests {
             grounded_repair_messages(QueryLanguage::Ru).partial_answer_notice,
             grounded_repair_messages(QueryLanguage::En).partial_answer_notice,
         );
+    }
+
+    #[test]
+    fn answer_language_resolver_uses_typed_language_and_defaults_auto_to_english() {
+        let mut query_ir =
+            QueryIR::test_with_act_scope(QueryAct::Describe, QueryScope::SingleDocument);
+        query_ir.language = QueryLanguage::Ru;
+        assert_eq!(deterministic_answer_language(&query_ir), QueryLanguage::Ru);
+
+        query_ir.language = QueryLanguage::Auto;
+        assert_eq!(deterministic_answer_language(&query_ir), QueryLanguage::En);
     }
 }

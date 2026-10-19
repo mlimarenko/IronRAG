@@ -1,32 +1,162 @@
-use rand::RngExt as _;
-use std::{future::Future, time::Duration};
+use super::duration_millis;
+use std::{
+    future::Future,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
+    time::Duration,
+};
 use thiserror::Error;
+use tracing::Instrument as _;
 
-use crate::shared::outbound_http::PublicHttpUrlError;
+use crate::{
+    integrations::provider_budget::{
+        ProviderBudgetError, ProviderBudgetGuard, ProviderBudgetRegistry, ProviderIdentity,
+        current_lane,
+    },
+    shared::outbound_http::PublicHttpUrlError,
+};
 use reqwest::{
     StatusCode,
     header::{HeaderMap, RETRY_AFTER},
 };
 
+mod provider;
+
+pub use provider::{
+    ProviderCallError, ProviderRateLimit, provider_http_status_error,
+    provider_http_status_error_unread, provider_status_error_from_read,
+    sanitize_provider_error_detail,
+};
+use provider::{abort_retry, classify_provider_call_error, retry_delay};
+
+#[cfg(test)]
+mod tests;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RetryDecision {
     Retry,
+    /// Retry this failure at most once per whole call, independently of the
+    /// remaining attempt budget. Used for a proven-empty upstream 404: the
+    /// first blank retries, a second one aborts even when the policy would
+    /// otherwise allow more attempts.
+    RetryOnce,
     Abort,
     RetryAfter(Duration),
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ProviderRetryTelemetry {
+    pub provider_429_count: u64,
+    pub provider_retry_count: u64,
+    pub degraded_completion_count: u64,
+}
+
+#[derive(Debug, Default)]
+struct ProviderRetryMetrics {
+    provider_429_count: AtomicU64,
+    provider_retry_count: AtomicU64,
+    degraded_completion_count: AtomicU64,
+}
+
+impl ProviderRetryMetrics {
+    fn snapshot(&self) -> ProviderRetryTelemetry {
+        ProviderRetryTelemetry {
+            provider_429_count: self.provider_429_count.load(Ordering::Relaxed),
+            provider_retry_count: self.provider_retry_count.load(Ordering::Relaxed),
+            degraded_completion_count: self.degraded_completion_count.load(Ordering::Relaxed),
+        }
+    }
+}
+
+#[derive(Clone)]
+struct ProviderRetryExecution {
+    deadline: tokio::time::Instant,
+    metrics: Arc<ProviderRetryMetrics>,
+}
+
+tokio::task_local! {
+    static PROVIDER_RETRY_EXECUTION: ProviderRetryExecution;
+}
+
+/// Runs provider work under the caller's remaining execution budget.
+///
+/// Nested scopes retain the execution's counters and narrow, but never extend,
+/// its absolute deadline. Provider retries therefore follow the nearest real
+/// pipeline boundary while remaining attributable to one execution artifact.
+pub async fn with_provider_retry_execution<F, T>(deadline: Duration, future: F) -> T
+where
+    F: Future<Output = T>,
+{
+    let requested_deadline = tokio::time::Instant::now() + deadline;
+    let execution = PROVIDER_RETRY_EXECUTION
+        .try_with(|current| ProviderRetryExecution {
+            deadline: current.deadline.min(requested_deadline),
+            metrics: Arc::clone(&current.metrics),
+        })
+        .unwrap_or_else(|_| ProviderRetryExecution {
+            deadline: requested_deadline,
+            metrics: Arc::new(ProviderRetryMetrics::default()),
+        });
+    PROVIDER_RETRY_EXECUTION.scope(execution, future).await
+}
+
+#[must_use]
+pub fn current_provider_retry_telemetry() -> ProviderRetryTelemetry {
+    PROVIDER_RETRY_EXECUTION.try_with(|execution| execution.metrics.snapshot()).unwrap_or_default()
+}
+
+pub fn record_degraded_completion() {
+    let _ = PROVIDER_RETRY_EXECUTION.try_with(|execution| {
+        execution.metrics.degraded_completion_count.fetch_add(1, Ordering::Relaxed);
+    });
+}
+
+fn record_provider_429() {
+    // The typed 429 never reaches a billing capture point (only `failed`/
+    // `canceled` survive upstream), and this layer has neither call_kind nor
+    // model, so the rate limit is counted here with `unknown` labels (IRG-204).
+    crate::observability::metrics::record_provider_call(
+        "unknown",
+        "unknown",
+        crate::observability::metrics::ProviderCallStatus::RateLimited,
+    );
+    let _ = PROVIDER_RETRY_EXECUTION.try_with(|execution| {
+        execution.metrics.provider_429_count.fetch_add(1, Ordering::Relaxed);
+    });
+}
+
+fn record_provider_retry() {
+    let _ = PROVIDER_RETRY_EXECUTION.try_with(|execution| {
+        execution.metrics.provider_retry_count.fetch_add(1, Ordering::Relaxed);
+    });
+}
+
+fn current_provider_retry_deadline() -> Option<tokio::time::Instant> {
+    PROVIDER_RETRY_EXECUTION.try_with(|execution| execution.deadline).ok()
+}
+
+#[derive(Debug)]
 pub struct RetryPolicy<E = ProviderCallError> {
-    pub max_attempts: u32,
-    pub initial_backoff: Duration,
-    pub max_backoff: Duration,
-    pub jitter: bool,
-    pub classify: fn(&E) -> RetryDecision,
+    max_attempts: u32,
+    initial_backoff: Duration,
+    max_backoff: Duration,
+    jitter: bool,
+    classify: fn(&E) -> RetryDecision,
+}
+
+impl<E> Copy for RetryPolicy<E> {}
+
+impl<E> Clone for RetryPolicy<E> {
+    fn clone(&self) -> Self {
+        *self
+    }
 }
 
 impl<E> RetryPolicy<E> {
     #[must_use]
-    pub const fn new(
+    const fn new(
         max_attempts: u32,
         initial_backoff: Duration,
         max_backoff: Duration,
@@ -48,15 +178,16 @@ impl<E> RetryPolicy<E> {
     }
 }
 
-impl Default for RetryPolicy<ProviderCallError> {
-    fn default() -> Self {
-        Self {
-            max_attempts: 3,
-            initial_backoff: Duration::from_millis(200),
-            max_backoff: Duration::from_secs(5),
-            jitter: true,
-            classify: classify_provider_call_error,
-        }
+impl RetryPolicy<ProviderCallError> {
+    /// Builds a retry policy for provider operations whose repeated execution
+    /// has no externally visible mutation.
+    #[must_use]
+    pub const fn idempotent_provider_call(
+        max_attempts: u32,
+        initial_backoff: Duration,
+        max_backoff: Duration,
+    ) -> Self {
+        Self::new(max_attempts, initial_backoff, max_backoff, true, classify_provider_call_error)
     }
 }
 
@@ -67,373 +198,94 @@ where
 {
     let max_attempts = policy.max_attempts.max(1);
     let mut attempt = 1_u32;
+    // Tracks whether the single whole-call retry reserved for a
+    // `RetryDecision::RetryOnce` class has already been spent.
+    let mut once_retry_used = false;
 
     loop {
         match call().await {
             Ok(value) => return Ok(value),
             Err(error) => {
-                if attempt >= max_attempts {
+                let (decision, used) =
+                    apply_single_retry_budget((policy.classify)(&error), once_retry_used);
+                once_retry_used = used;
+                if matches!(decision, RetryDecision::Abort) {
                     return Err(error);
                 }
+                let deadline = current_provider_retry_deadline();
+                if deadline.is_none() && attempt >= max_attempts {
+                    return Err(error);
+                }
+                let delay = retry_delay_for_decision(&policy, attempt, decision);
+                if deadline.is_some_and(|deadline| {
+                    delay >= deadline.saturating_duration_since(tokio::time::Instant::now())
+                }) {
+                    return Err(error);
+                }
+                let retry_after_honored = matches!(decision, RetryDecision::RetryAfter(_));
 
-                let delay = match (policy.classify)(&error) {
-                    RetryDecision::Abort => return Err(error),
-                    RetryDecision::Retry => retry_delay(&policy, attempt),
-                    RetryDecision::RetryAfter(delay) => delay.min(policy.max_backoff),
-                };
-
-                tokio::time::sleep(delay).await;
+                let span = tracing::info_span!(
+                    "provider.retry_wait",
+                    attempt,
+                    next_attempt = attempt.saturating_add(1),
+                    max_attempts,
+                    deadline_bound = deadline.is_some(),
+                    delay_ms = duration_millis(delay),
+                    retry_after_honored,
+                );
+                tokio::time::sleep(delay).instrument(span).await;
+                record_provider_retry();
                 attempt = attempt.saturating_add(1);
             }
         }
     }
 }
 
-#[derive(Debug, Error)]
-pub enum ProviderCallError {
-    #[error("{context}: {source}")]
-    Transport {
-        context: String,
-        #[source]
-        source: reqwest::Error,
-    },
-    #[error("{context}: {source}")]
-    ResponseBody {
-        context: String,
-        #[source]
-        source: reqwest::Error,
-    },
-    #[error("{context}: {source}")]
-    ResponsePolicy {
-        context: String,
-        #[source]
-        source: PublicHttpUrlError,
-    },
-    #[error("{context}: {source}")]
-    ResponseJson {
-        context: String,
-        #[source]
-        source: reqwest::Error,
-    },
-    #[error("{context}: {source}")]
-    Json {
-        context: String,
-        #[source]
-        source: serde_json::Error,
-    },
-    #[error("provider request failed: provider={provider_kind} status={status} detail={detail}")]
-    HttpStatus {
-        provider_kind: String,
-        status: StatusCode,
-        retry_after: Option<Duration>,
-        detail: String,
-    },
-    #[error("{message}")]
-    Protocol { message: String },
+fn apply_single_retry_budget(decision: RetryDecision, used: bool) -> (RetryDecision, bool) {
+    match (decision, used) {
+        (RetryDecision::RetryOnce, false) => (RetryDecision::Retry, true),
+        (RetryDecision::RetryOnce, true) => (RetryDecision::Abort, true),
+        _ => (decision, used),
+    }
 }
 
-impl ProviderCallError {
-    #[must_use]
-    pub fn transport(context: impl Into<String>, source: reqwest::Error) -> Self {
-        Self::Transport { context: context.into(), source }
-    }
-
-    #[must_use]
-    pub fn response_body(context: impl Into<String>, source: reqwest::Error) -> Self {
-        Self::ResponseBody { context: context.into(), source }
-    }
-
-    #[must_use]
-    pub fn response_policy(context: impl Into<String>, source: PublicHttpUrlError) -> Self {
-        Self::ResponsePolicy { context: context.into(), source }
-    }
-
-    #[must_use]
-    pub fn response_json(context: impl Into<String>, source: reqwest::Error) -> Self {
-        Self::ResponseJson { context: context.into(), source }
-    }
-
-    #[must_use]
-    pub fn json(context: impl Into<String>, source: serde_json::Error) -> Self {
-        Self::Json { context: context.into(), source }
-    }
-
-    #[must_use]
-    pub fn http_status(
-        provider_kind: impl Into<String>,
-        status: StatusCode,
-        headers: &HeaderMap,
-        detail: impl Into<String>,
-    ) -> Self {
-        Self::HttpStatus {
-            provider_kind: provider_kind.into(),
-            status,
-            retry_after: retry_after_from_headers(headers),
-            detail: detail.into(),
+/// Takes one provider attempt permit after reserving a rate token.
+///
+/// Every provider integration that guards an outbound attempt shares this one
+/// implementation so the throttle/acquire/commit ordering cannot diverge between
+/// the LLM gateway and the SystemOne client. The rate reservation is RAII: it is
+/// committed only once the concurrency permit is held, so a rejected admission —
+/// or an execution deadline that drops this future mid-acquire — refunds the
+/// token synchronously instead of leaking it.
+pub async fn acquire_provider_budget(
+    registry: &ProviderBudgetRegistry,
+    identity: &ProviderIdentity,
+) -> Result<ProviderBudgetGuard, ProviderCallError> {
+    let rate_token = registry.throttle(identity).await.map_err(|error| {
+        ProviderCallError::protocol(format!("provider request throttling failed: {error}"))
+    })?;
+    match registry.acquire(identity, current_lane()).await {
+        Ok(guard) => {
+            // The attempt now holds its concurrency permit, so the token is spent
+            // rather than provisional and must not be refunded.
+            rate_token.commit();
+            Ok(guard)
         }
-    }
-
-    #[must_use]
-    pub fn protocol(message: impl Into<String>) -> Self {
-        Self::Protocol { message: message.into() }
-    }
-}
-
-#[must_use]
-pub fn provider_http_status_error(
-    provider_kind: &str,
-    status: StatusCode,
-    headers: &HeaderMap,
-    body_text: &str,
-) -> ProviderCallError {
-    let detail = serde_json::from_str::<serde_json::Value>(body_text)
-        .map_or_else(|_| body_text.to_string(), |body| body.to_string());
-    ProviderCallError::http_status(
-        provider_kind,
-        status,
-        headers,
-        sanitize_provider_error_detail(&detail),
-    )
-}
-
-#[must_use]
-pub fn sanitize_provider_error_detail(message: &str) -> String {
-    if message.is_empty() {
-        "upstream provider request failed; response body was empty".to_string()
-    } else {
-        "upstream provider request failed; response details were redacted".to_string()
+        // Dropping the reservation returns the token. Reaching this arm by a
+        // rejected admission and reaching it by the future being dropped while
+        // the concurrency acquire is pending are the same refund path.
+        Err(admission_error) => Err(ProviderCallError::admission(admission_error)),
     }
 }
 
-const fn abort_retry<E>(_error: &E) -> RetryDecision {
-    RetryDecision::Abort
-}
-
-fn classify_provider_call_error(error: &ProviderCallError) -> RetryDecision {
-    match error {
-        ProviderCallError::Transport { source, .. }
-        | ProviderCallError::ResponseBody { source, .. } => {
-            if is_retryable_transport_error(source) {
-                RetryDecision::Retry
-            } else {
-                RetryDecision::Abort
-            }
-        }
-        ProviderCallError::ResponsePolicy { source, .. } => {
-            if matches!(source, PublicHttpUrlError::BodyReadFailed(_)) {
-                RetryDecision::Retry
-            } else {
-                RetryDecision::Abort
-            }
-        }
-        ProviderCallError::HttpStatus { status, retry_after, .. } => {
-            if *status == StatusCode::TOO_MANY_REQUESTS {
-                retry_after.map_or(RetryDecision::Retry, RetryDecision::RetryAfter)
-            } else if *status == StatusCode::REQUEST_TIMEOUT || status.is_server_error() {
-                RetryDecision::Retry
-            } else {
-                RetryDecision::Abort
-            }
-        }
-        ProviderCallError::ResponseJson { .. }
-        | ProviderCallError::Json { .. }
-        | ProviderCallError::Protocol { .. } => RetryDecision::Abort,
-    }
-}
-
-fn retry_delay<E>(policy: &RetryPolicy<E>, attempt: u32) -> Duration {
-    let exponent = attempt.saturating_sub(1).min(31);
-    let multiplier = 1_u128 << exponent;
-    let millis = policy.initial_backoff.as_millis().saturating_mul(multiplier);
-    let capped_millis = millis.min(policy.max_backoff.as_millis()).min(u128::from(u64::MAX));
-    let delay = Duration::from_millis(capped_millis as u64);
-    if !policy.jitter || delay.is_zero() {
-        return delay;
-    }
-
-    let max_millis = delay.as_millis().min(u128::from(u64::MAX)) as u64;
-    Duration::from_millis(rand::rng().random_range(0..=max_millis))
-}
-
-fn retry_after_from_headers(headers: &HeaderMap) -> Option<Duration> {
-    let value = headers.get(RETRY_AFTER)?.to_str().ok()?.trim();
-    if let Ok(seconds) = value.parse::<u64>() {
-        return Some(Duration::from_secs(seconds));
-    }
-
-    let retry_at = chrono::DateTime::parse_from_rfc2822(value).ok()?.with_timezone(&chrono::Utc);
-    let now = chrono::Utc::now();
-    if retry_at <= now {
-        return Some(Duration::ZERO);
-    }
-    retry_at.signed_duration_since(now).to_std().ok()
-}
-
-fn is_retryable_transport_error(error: &reqwest::Error) -> bool {
-    error.is_timeout() || error.is_connect() || error.is_body()
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::sync::{
-        Arc,
-        atomic::{AtomicU32, Ordering},
-    };
-    use std::time::Instant;
-
-    #[tokio::test]
-    async fn succeeds_on_first_attempt_without_retry() {
-        let attempts = Arc::new(AtomicU32::new(0));
-        let attempts_for_call = Arc::clone(&attempts);
-
-        let value = with_retry(
-            || {
-                let attempts_for_call = Arc::clone(&attempts_for_call);
-                async move {
-                    attempts_for_call.fetch_add(1, Ordering::SeqCst);
-                    Ok::<_, ProviderCallError>("ok")
-                }
-            },
-            RetryPolicy::default(),
-        )
-        .await
-        .expect("first call should succeed");
-
-        assert_eq!(value, "ok");
-        assert_eq!(attempts.load(Ordering::SeqCst), 1);
-    }
-
-    #[tokio::test]
-    async fn retries_429_once_after_retry_after_header() {
-        let attempts = Arc::new(AtomicU32::new(0));
-        let attempts_for_call = Arc::clone(&attempts);
-        let mut headers = HeaderMap::new();
-        headers.insert(RETRY_AFTER, "1".parse().expect("retry-after header should parse"));
-        let started = Instant::now();
-
-        let value = with_retry(
-            || {
-                let attempts_for_call = Arc::clone(&attempts_for_call);
-                let headers = headers.clone();
-                async move {
-                    if attempts_for_call.fetch_add(1, Ordering::SeqCst) == 0 {
-                        Err(ProviderCallError::http_status(
-                            "provider-alpha",
-                            StatusCode::TOO_MANY_REQUESTS,
-                            &headers,
-                            "rate limited",
-                        ))
-                    } else {
-                        Ok("ok")
-                    }
-                }
-            },
-            RetryPolicy {
-                max_attempts: 2,
-                initial_backoff: Duration::ZERO,
-                max_backoff: Duration::from_secs(5),
-                jitter: false,
-                classify: classify_provider_call_error,
-            },
-        )
-        .await
-        .expect("second call should succeed");
-
-        assert_eq!(value, "ok");
-        assert_eq!(attempts.load(Ordering::SeqCst), 2);
-        assert!(started.elapsed() >= Duration::from_secs(1));
-    }
-
-    #[tokio::test]
-    async fn retries_5xx_until_max_attempts_then_bubbles_error() {
-        let attempts = Arc::new(AtomicU32::new(0));
-        let attempts_for_call = Arc::clone(&attempts);
-        let headers = HeaderMap::new();
-
-        let error = with_retry(
-            || {
-                let attempts_for_call = Arc::clone(&attempts_for_call);
-                let headers = headers.clone();
-                async move {
-                    attempts_for_call.fetch_add(1, Ordering::SeqCst);
-                    Err::<(), _>(ProviderCallError::http_status(
-                        "provider-alpha",
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        &headers,
-                        "server error",
-                    ))
-                }
-            },
-            RetryPolicy {
-                max_attempts: 3,
-                initial_backoff: Duration::ZERO,
-                max_backoff: Duration::ZERO,
-                jitter: false,
-                classify: classify_provider_call_error,
-            },
-        )
-        .await
-        .expect_err("third failed attempt should bubble");
-
-        assert_eq!(attempts.load(Ordering::SeqCst), 3);
-        assert!(matches!(
-            error,
-            ProviderCallError::HttpStatus { status: StatusCode::INTERNAL_SERVER_ERROR, .. }
-        ));
-    }
-
-    #[tokio::test]
-    async fn aborts_4xx_without_retry() {
-        let attempts = Arc::new(AtomicU32::new(0));
-        let attempts_for_call = Arc::clone(&attempts);
-        let headers = HeaderMap::new();
-
-        let error = with_retry(
-            || {
-                let attempts_for_call = Arc::clone(&attempts_for_call);
-                let headers = headers.clone();
-                async move {
-                    attempts_for_call.fetch_add(1, Ordering::SeqCst);
-                    Err::<(), _>(ProviderCallError::http_status(
-                        "provider-alpha",
-                        StatusCode::BAD_REQUEST,
-                        &headers,
-                        "bad request",
-                    ))
-                }
-            },
-            RetryPolicy {
-                max_attempts: 3,
-                initial_backoff: Duration::ZERO,
-                max_backoff: Duration::ZERO,
-                jitter: false,
-                classify: classify_provider_call_error,
-            },
-        )
-        .await
-        .expect_err("bad request should not retry");
-
-        assert_eq!(attempts.load(Ordering::SeqCst), 1);
-        assert!(matches!(
-            error,
-            ProviderCallError::HttpStatus { status: StatusCode::BAD_REQUEST, .. }
-        ));
-    }
-
-    #[test]
-    fn protocol_message_text_never_controls_retryability() {
-        let error = ProviderCallError::protocol(
-            "connection reset unexpected eof http2 sendrequest error sending request",
-        );
-
-        assert_eq!(classify_provider_call_error(&error), RetryDecision::Abort);
-    }
-
-    #[test]
-    fn provider_error_detail_is_redacted_without_a_marker_dictionary() {
-        let detail = sanitize_provider_error_detail("arbitrary upstream response payload");
-
-        assert!(!detail.contains("arbitrary upstream response payload"));
+fn retry_delay_for_decision<E>(
+    policy: &RetryPolicy<E>,
+    attempt: u32,
+    decision: RetryDecision,
+) -> Duration {
+    match decision {
+        RetryDecision::Retry | RetryDecision::RetryOnce => retry_delay(policy, attempt),
+        RetryDecision::RetryAfter(delay) => delay,
+        RetryDecision::Abort => Duration::ZERO,
     }
 }

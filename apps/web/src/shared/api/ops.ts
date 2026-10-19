@@ -1,7 +1,7 @@
 import type { AsyncOperationDetailResponse, OpsAsyncOperationStatus } from './generated'
 
 /**
- * Canonical async-operation polling payload returned by
+ * Shared async-operation polling payload returned by
  * `GET /v1/ops/operations/{id}`. Any batch endpoint (batch rerun, batch
  * delete, future batch annotate …) creates a parent `ops_async_operation`
  * row and spawns per-subject children linked via `parentAsyncOperationId`.

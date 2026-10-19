@@ -1,5 +1,6 @@
 import { Query } from './generated'
 import { ApiError, unwrap } from './runtime'
+import { reportUnauthorizedResponse } from './sessionLifecycle'
 import type {
   AssistantExecutionDetail,
   AssistantHydratedConversation,
@@ -20,14 +21,23 @@ const STREAM_RECOVERY_INTERVAL_MS = 1_000
 type AssistantTurnStreamEvent =
   | { type: 'activity'; event: AssistantAgentActivityEvent }
   | { type: 'completed'; detail: AssistantTurnExecutionResponse }
-  | { type: 'failed'; message: string }
+  | { type: 'failed'; code?: string; message: string }
 
 type AssistantTurnActivityHandler = (event: AssistantAgentActivityEvent) => void
 
-class AssistantTurnFailedEventError extends Error {
-  constructor(message: string) {
+/**
+ * A turn the server ended deliberately, with the same stable code its problem
+ * responses carry. Without the code the screen had only prose to work with and
+ * fell back to a generic apology telling the reader to try again — wrong advice
+ * for a library that is still indexing, and for most other reasons a turn ends.
+ */
+export class AssistantTurnFailedEventError extends Error {
+  readonly code: string | null
+
+  constructor(message: string, code?: string) {
     super(message)
     this.name = 'AssistantTurnFailedEventError'
+    this.code = code ?? null
   }
 }
 
@@ -52,7 +62,7 @@ function handleStreamEvent(
     return null
   }
   if (event.type === 'completed') return event.detail
-  throw new AssistantTurnFailedEventError(event.message)
+  throw new AssistantTurnFailedEventError(event.message, event.code)
 }
 
 async function getStreamErrorBody(response: Response): Promise<Record<string, unknown>> {
@@ -66,22 +76,26 @@ async function getStreamErrorBody(response: Response): Promise<Record<string, un
   }
 }
 
-async function ensureAssistantTurnStreamResponse(response: Response): Promise<void> {
+async function requireAssistantTurnStreamBody(
+  response: Response,
+): Promise<ReadableStream<Uint8Array>> {
   if (!response.ok) {
+    // A dead session must end the stream here, not leave the assistant
+    // retrying against a door that is closed.
+    reportUnauthorizedResponse(response.status)
     throw new ApiError(response.status, await getStreamErrorBody(response))
   }
   if (!response.body) {
     throw new Error('Assistant stream response has no body')
   }
+  return response.body
 }
 
 async function readAssistantTurnStream(
   response: Response,
   onActivity?: AssistantTurnActivityHandler,
 ): Promise<AssistantTurnExecutionResponse> {
-  await ensureAssistantTurnStreamResponse(response)
-
-  const reader = response.body.getReader()
+  const reader = (await requireAssistantTurnStreamBody(response)).getReader()
   const decoder = new TextDecoder()
   let buffer = ''
 
@@ -101,7 +115,8 @@ async function readAssistantTurnStream(
 
   const trailing = parseSseBlock(buffer)
   if (trailing?.type === 'completed') return trailing.detail
-  if (trailing?.type === 'failed') throw new AssistantTurnFailedEventError(trailing.message)
+  if (trailing?.type === 'failed')
+    throw new AssistantTurnFailedEventError(trailing.message, trailing.code)
   throw new Error('Assistant stream ended before completion')
 }
 
@@ -205,12 +220,6 @@ export const queryApi = {
     Query.getQuerySession({ path: { sessionId } }).then((result): AssistantHydratedConversation =>
       unwrap(result),
     ),
-  createTurn: (sessionId: string, contentText: string) =>
-    Query.createQuerySessionTurn({
-      body: { contentText },
-      path: { sessionId },
-      signal: AbortSignal.timeout(TURN_TIMEOUT_MS),
-    }).then((result): AssistantTurnExecutionResponse => unwrap(result)),
   createTurnStream: async (
     sessionId: string,
     contentText: string,

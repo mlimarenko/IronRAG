@@ -1,0 +1,91 @@
+# Confluence -> IronRAG routing configuration (complete schema reference).
+#
+# SCHEMA AND VALIDATION
+# ---------------------
+# Top-level keys:
+#   default  optional mapping or null; default: null. It is the fallback target
+#            when no rule matches. Without it, an unmatched item is recorded as
+#            `unrouted` and not pushed.
+#   rules    optional list of rule mappings; default: [].
+#   policies optional mapping keyed by adapter `kind`; default: {}.
+#
+# Unknown keys are rejected at the top level and inside `default`, every rule,
+# `target`, and every policy. The only open-ended names are keys inside `match`
+# (adapter facts) and keys directly below `policies` (adapter kinds).
+#
+# TARGETS
+# -------
+# `default.library` and `rules[].target.library` are required strings in the
+# canonical `<workspace-slug>/<library-slug>` form used by IronRAG and its MCP
+# catalog, for example `knowledge/wiki`. Exactly one `/` is required and both
+# slugs must be non-empty. UUIDs and a separate `workspace` field are invalid.
+# IronRAG resolves every configured reference and checks access when the
+# connector starts and whenever this file is hot-reloaded.
+#
+# RULES AND MATCHING
+# ------------------
+# A rule has exactly these keys:
+#   description optional string (or null); default: null; used in logs only.
+#   match       required non-empty mapping of fact name -> expected YAML value.
+#   target      required mapping containing only required string `library`.
+#
+# Rules run top-to-bottom; the first full match wins. Criteria in one `match`
+# are ANDed. Scalar facts use exact, case-sensitive equality. For list facts,
+# the expected scalar must be a member of the list. A missing/null fact fails
+# that rule. There is no regex, glob, coercion, OR, or substring matching.
+#
+# Confluence emits these facts for `page`; `attachment` dependents inherit the
+# facts of their parent page:
+#   space          string or null       alias of `space_key`, e.g. "ENG"
+#   space_key      string or null       Confluence space key, e.g. "ENG"
+#   space_name     string or null       exact display name, e.g. "Engineering"
+#   ancestor_id    list[string]         ancestor content IDs, e.g. ["10001"]
+#   ancestor_title list[string]         exact titles, e.g. ["Runbooks"]
+#   status         string or null       vendor status, e.g. "current"; this is
+#                                       an exact fact, not a connector-side enum
+#
+# POLICIES
+# --------
+# Confluence emits `page` and `attachment`; those are therefore the useful keys
+# below `policies`. Each kind mapping may contain any/all of the four optional
+# enum keys below. An omitted key or explicit null inherits its DEFAULT_POLICY_*
+# environment value; the framework fallback is shown in parentheses:
+#   on_new               `create` | `skip`    (create)
+#   on_changed           `replace` | `skip`   (replace)
+#   on_missing           `delete` | `ignore`  (delete)
+#   on_duplicate_content `skip` | `fail`      (skip)
+
+default:
+  library: knowledge/wiki
+
+rules:
+  - description: "Engineering space"
+    match:
+      space_key: ENG
+    target:
+      library: engineering/handbook
+
+  - description: "Current pages below the Runbooks ancestor"
+    match:
+      ancestor_title: Runbooks
+      status: current
+    target:
+      library: operations/runbooks
+
+  - description: "Partner space in another workspace"
+    match:
+      space: PARTNER
+    target:
+      library: partners/portal-docs
+
+policies:
+  page:
+    on_new: create
+    on_changed: replace
+    on_missing: delete
+    on_duplicate_content: skip
+  attachment:
+    on_new: create
+    on_changed: replace
+    on_missing: delete
+    on_duplicate_content: skip

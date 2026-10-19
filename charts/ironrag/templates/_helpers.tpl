@@ -96,7 +96,21 @@ disabled
 {{- $root := .root -}}
 {{- $image := .image -}}
 {{- $repository := required "image.repository is required" $image.repository -}}
+{{- if $image.digest -}}
+{{- printf "%s@%s" $repository $image.digest -}}
+{{- else -}}
 {{- printf "%s:%s" $repository (default (printf "v%s" $root.Chart.AppVersion) $image.tag) -}}
+{{- end -}}
+{{- end -}}
+
+{{- define "ironrag.image" -}}
+{{- $image := .image -}}
+{{- $repository := required "image.repository is required" $image.repository -}}
+{{- if $image.digest -}}
+{{- printf "%s@%s" $repository $image.digest -}}
+{{- else -}}
+{{- printf "%s:%s" $repository (required "image.tag is required when image.digest is empty" $image.tag) -}}
+{{- end -}}
 {{- end -}}
 
 {{- define "ironrag.runtimeSecretName" -}}
@@ -108,7 +122,31 @@ disabled
 {{- end -}}
 
 {{- define "ironrag.bundledDependencySecretName" -}}
+{{- if .Values.bundledDependencySecret.existingSecret -}}
+{{ .Values.bundledDependencySecret.existingSecret }}
+{{- else -}}
 {{ include "ironrag.fullname" . }}-bundled-dependencies
+{{- end -}}
+{{- end -}}
+
+{{- define "ironrag.bundledDependencyPodAnnotations" -}}
+{{- if .Values.bundledDependencySecret.existingSecret -}}
+ironrag-bundled-secret-restart-nonce: {{ .Values.bundledDependencySecret.restartNonce | quote }}
+{{- else -}}
+checksum/bundled-dependency-secret: {{ include (print $.Template.BasePath "/bundled-dependency-secret.yaml") . | sha256sum }}
+{{- end -}}
+{{- end -}}
+
+{{- define "ironrag.postgresClaimName" -}}
+{{- default (printf "%s-postgres" (include "ironrag.fullname" .)) .Values.dependencies.postgres.persistence.existingClaim -}}
+{{- end -}}
+
+{{- define "ironrag.contentStorageClaimName" -}}
+{{- default (printf "%s-content-storage" (include "ironrag.fullname" .)) .Values.storage.filesystem.existingClaim -}}
+{{- end -}}
+
+{{- define "ironrag.s4ClaimName" -}}
+{{- default (printf "%s-s4core" (include "ironrag.fullname" .)) .Values.storage.s3.persistence.existingClaim -}}
 {{- end -}}
 
 {{- define "ironrag.runtimePodAnnotations" -}}
@@ -175,7 +213,7 @@ disabled
 {{- define "ironrag.startupDependencyWaitInitContainer" -}}
 {{- if eq .Values.dependencies.postgres.mode "bundled" }}
 - name: wait-for-bundled-postgres
-  image: "{{ .Values.startup.wait.image.repository }}:{{ .Values.startup.wait.image.tag }}"
+  image: "{{ include "ironrag.image" (dict "image" .Values.startup.wait.image) }}"
   imagePullPolicy: {{ .Values.startup.wait.image.pullPolicy }}
   volumeMounts:
     {{- include "ironrag.startupWaitKubeApiVolumeMount" . | nindent 4 }}
@@ -188,6 +226,8 @@ disabled
     capabilities:
       drop:
         - ALL
+  resources:
+    {{- toYaml .Values.startup.wait.resources | nindent 4 }}
   command:
     - kubectl
   args:
@@ -199,7 +239,7 @@ disabled
 {{- end }}
 {{- if eq .Values.dependencies.redis.mode "bundled" }}
 - name: wait-for-bundled-redis
-  image: "{{ .Values.startup.wait.image.repository }}:{{ .Values.startup.wait.image.tag }}"
+  image: "{{ include "ironrag.image" (dict "image" .Values.startup.wait.image) }}"
   imagePullPolicy: {{ .Values.startup.wait.image.pullPolicy }}
   volumeMounts:
     {{- include "ironrag.startupWaitKubeApiVolumeMount" . | nindent 4 }}
@@ -212,6 +252,8 @@ disabled
     capabilities:
       drop:
         - ALL
+  resources:
+    {{- toYaml .Values.startup.wait.resources | nindent 4 }}
   command:
     - kubectl
   args:
@@ -223,7 +265,7 @@ disabled
 {{- end }}
 {{- if and (eq .Values.storage.provider "s3") (eq .Values.storage.s3.mode "bundled") }}
 - name: wait-for-bundled-s4core
-  image: "{{ .Values.startup.wait.image.repository }}:{{ .Values.startup.wait.image.tag }}"
+  image: "{{ include "ironrag.image" (dict "image" .Values.startup.wait.image) }}"
   imagePullPolicy: {{ .Values.startup.wait.image.pullPolicy }}
   volumeMounts:
     {{- include "ironrag.startupWaitKubeApiVolumeMount" . | nindent 4 }}
@@ -236,6 +278,8 @@ disabled
     capabilities:
       drop:
         - ALL
+  resources:
+    {{- toYaml .Values.startup.wait.resources | nindent 4 }}
   command:
     - kubectl
   args:
@@ -250,7 +294,7 @@ disabled
 {{- define "ironrag.startupWaitInitContainer" -}}
 {{- if eq .Values.startup.mode "startup_job" }}
 - name: wait-for-startup
-  image: "{{ .Values.startup.wait.image.repository }}:{{ .Values.startup.wait.image.tag }}"
+  image: "{{ include "ironrag.image" (dict "image" .Values.startup.wait.image) }}"
   imagePullPolicy: {{ .Values.startup.wait.image.pullPolicy }}
   volumeMounts:
     {{- include "ironrag.startupWaitKubeApiVolumeMount" . | nindent 4 }}
@@ -263,6 +307,8 @@ disabled
     capabilities:
       drop:
         - ALL
+  resources:
+    {{- toYaml .Values.startup.wait.resources | nindent 4 }}
   command:
     - kubectl
   args:
@@ -275,6 +321,16 @@ disabled
 {{- end -}}
 
 {{- define "ironrag.validate" -}}
+{{- range $component, $image := dict "api" .Values.api.image "worker" .Values.worker.image "web" .Values.web.image -}}
+{{- if and $image.digest (not (regexMatch "^sha256:[a-f0-9]{64}$" $image.digest)) -}}
+{{- fail (printf "%s.image.digest must be an exact sha256 digest" $component) -}}
+{{- end -}}
+{{- end -}}
+{{- range $component, $image := dict "postgres" .Values.dependencies.postgres.image "redis" .Values.dependencies.redis.image "startup.wait" .Values.startup.wait.image "s4core" .Values.storage.s3.image -}}
+{{- if and $image.digest (not (regexMatch "^sha256:[a-f0-9]{64}$" $image.digest)) -}}
+{{- fail (printf "%s.image.digest must be an exact sha256 digest" $component) -}}
+{{- end -}}
+{{- end -}}
 {{- if and (eq .Values.storage.provider "filesystem") (ne .Values.storage.topology "single_node") -}}
 {{- fail "storage.topology must be single_node when storage.provider=filesystem" -}}
 {{- end -}}
@@ -326,20 +382,41 @@ disabled
 {{- if and (empty .Values.app.credentialMasterKey) (or (not (empty .Values.app.credentialMasterKeyId)) (not (empty .Values.app.credentialPreviousMasterKeys))) -}}
 {{- fail "app.credentialMasterKey is required when an inline credential key ID or previous-key map is configured" -}}
 {{- end -}}
-{{- if and .Values.app.credentialEncryptionWriteEnabled (empty .Values.runtimeSecret.existingSecret) (empty .Values.app.credentialMasterKey) -}}
-{{- fail "app.credentialMasterKey is required when app.credentialEncryptionWriteEnabled=true and runtimeSecret.existingSecret is empty" -}}
-{{- end -}}
 {{- if and (empty .Values.runtimeSecret.existingSecret) $hasInlineProviderSecret (empty .Values.app.credentialMasterKey) -}}
 {{- fail "app.credentialMasterKey is required when app.providerSecrets contains an inline provider credential" -}}
 {{- end -}}
 {{- if and (not (empty .Values.runtimeSecret.existingSecret)) (or $hasInlineProviderSecret $hasInlineCredentialKeyring) -}}
 {{- fail "app credential keyring and app.providerSecrets must stay empty when runtimeSecret.existingSecret is used because inline secret values would be ignored" -}}
 {{- end -}}
+{{- $oidcRawValues := list
+  (toString .Values.app.oidc.issuerUrl)
+  (toString .Values.app.oidc.clientId)
+  (toString .Values.app.oidc.redirectUrl)
+  (toString .Values.app.oidc.requiredGroup)
+-}}
+{{- $oidcTrimmedValues := list
+  (trim (toString .Values.app.oidc.issuerUrl))
+  (trim (toString .Values.app.oidc.clientId))
+  (trim (toString .Values.app.oidc.redirectUrl))
+  (trim (toString .Values.app.oidc.requiredGroup))
+-}}
+{{- if and (gt (len (compact $oidcRawValues)) 0) (ne (len (compact $oidcTrimmedValues)) 4) -}}
+{{- fail "app.oidc.issuerUrl, app.oidc.clientId, app.oidc.redirectUrl, and app.oidc.requiredGroup must either all be nonblank or all be empty" -}}
+{{- end -}}
+{{- if and (gt (len (compact $oidcRawValues)) 0) (empty .Values.runtimeSecret.existingSecret) -}}
+{{- fail "app.oidc requires runtimeSecret.existingSecret: the chart-managed runtime Secret has no field for IRONRAG_OIDC_CLIENT_SECRET, so OIDC needs an operator-managed Secret carrying it" -}}
+{{- end -}}
 {{- if and .Values.observability.enabled (empty .Values.observability.otlpEndpoint) -}}
 {{- fail "observability.otlpEndpoint is required when observability.enabled=true" -}}
 {{- end -}}
 {{- if and (not .Values.app.queryRerank.enabled) (ne .Values.app.queryRerank.semantic.mode "off") -}}
 {{- fail "app.queryRerank.enabled must be true when app.queryRerank.semantic.mode is shadow or active" -}}
+{{- end -}}
+{{- if gt (int .Values.app.ingestion.maxParallelJobsPerWorkspace) (int .Values.app.ingestion.maxParallelJobsGlobal) -}}
+{{- fail "app.ingestion.maxParallelJobsPerWorkspace must be less than or equal to maxParallelJobsGlobal" -}}
+{{- end -}}
+{{- if gt (int .Values.app.ingestion.maxParallelJobsPerLibrary) (int .Values.app.ingestion.maxParallelJobsPerWorkspace) -}}
+{{- fail "app.ingestion.maxParallelJobsPerLibrary must be less than or equal to maxParallelJobsPerWorkspace" -}}
 {{- end -}}
 {{- if .Values.podDisruptionBudget.enabled -}}
 {{- range $component := list "api" "worker" "web" -}}

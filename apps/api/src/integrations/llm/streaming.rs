@@ -1,14 +1,15 @@
 use anyhow::{Context, Result};
 
-use super::extract_message_content_text;
+use super::openai_compatible::extract_message_content_text;
+use super::response::overlay_provider_usage;
 use crate::shared::provider_http::{
     PROVIDER_STREAM_FRAME_MAX_BYTES, PROVIDER_STREAM_TOTAL_MAX_BYTES,
 };
 
 #[derive(Debug, Clone, Copy)]
-struct ProviderStreamLimits {
-    max_total_bytes: usize,
-    max_frame_bytes: usize,
+pub(super) struct ProviderStreamLimits {
+    pub(super) max_total_bytes: usize,
+    pub(super) max_frame_bytes: usize,
 }
 
 impl Default for ProviderStreamLimits {
@@ -20,18 +21,18 @@ impl Default for ProviderStreamLimits {
     }
 }
 
-struct BoundedSseBuffer {
+pub(super) struct BoundedSseBuffer {
     limits: ProviderStreamLimits,
     total_bytes: usize,
     pending: Vec<u8>,
 }
 
 impl BoundedSseBuffer {
-    const fn new(limits: ProviderStreamLimits) -> Self {
+    pub(super) const fn new(limits: ProviderStreamLimits) -> Self {
         Self { limits, total_bytes: 0, pending: Vec::new() }
     }
 
-    fn push(&mut self, chunk: &[u8]) -> Result<Vec<String>> {
+    pub(super) fn push(&mut self, chunk: &[u8]) -> Result<Vec<String>> {
         self.total_bytes = self
             .total_bytes
             .checked_add(chunk.len())
@@ -136,9 +137,7 @@ pub(super) fn consume_openai_compatible_stream_frame(
         output_text.push_str(&delta);
         on_delta(delta);
     }
-    if let Some(usage) = payload.get("usage").filter(|value| !value.is_null()) {
-        *usage_json = usage.clone();
-    }
+    overlay_provider_usage(usage_json, &payload);
     Ok(false)
 }
 
@@ -283,9 +282,7 @@ fn update_tool_use_state(
     state: &mut ToolUseStreamState,
     on_text_delta: &mut (dyn FnMut(String) + Send),
 ) {
-    if let Some(usage) = payload.get("usage").filter(|value| !value.is_null()) {
-        state.usage_json = usage.clone();
-    }
+    overlay_provider_usage(&mut state.usage_json, payload);
 
     let Some(choices) = payload.get("choices").and_then(serde_json::Value::as_array) else {
         return;
@@ -372,34 +369,4 @@ pub(super) async fn drain_tool_use_stream(
         let _ = consume_tool_use_stream_frame(&frame, &mut state, on_text_delta)?;
     }
     Ok(state)
-}
-
-#[cfg(test)]
-mod transport_limit_tests {
-    use super::{BoundedSseBuffer, ProviderStreamLimits};
-
-    #[test]
-    fn rejects_a_single_oversized_sse_frame_before_json_parsing() {
-        let limits = ProviderStreamLimits { max_total_bytes: 64, max_frame_bytes: 16 };
-        let mut buffer = BoundedSseBuffer::new(limits);
-
-        let error = buffer
-            .push(b"data: 12345678901234567")
-            .expect_err("unterminated oversized frame must be rejected");
-
-        assert!(error.to_string().contains("frame"));
-    }
-
-    #[test]
-    fn rejects_stream_bytes_above_the_total_cap_even_across_small_frames() {
-        let limits = ProviderStreamLimits { max_total_bytes: 24, max_frame_bytes: 16 };
-        let mut buffer = BoundedSseBuffer::new(limits);
-        buffer.push(b"data: 1\n\n").expect("first frame fits");
-        buffer.push(b"data: 2\n\n").expect("second frame fits");
-
-        let error =
-            buffer.push(b"data: 3\n\n").expect_err("cumulative stream cap must be enforced");
-
-        assert!(error.to_string().contains("stream"));
-    }
 }

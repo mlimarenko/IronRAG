@@ -14,7 +14,7 @@ describe('web ingest boundary helpers', () => {
     )
   })
 
-  it('recognizes the canonical subdomain boundary policy', () => {
+  it('recognizes the supported subdomain boundary policy', () => {
     expect(isWebBoundaryPolicy('same_host_and_subdomains')).toBe(true)
     expect(isWebBoundaryPolicy('same_domain')).toBe(false)
   })

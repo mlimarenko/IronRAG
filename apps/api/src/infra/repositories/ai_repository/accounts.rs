@@ -343,19 +343,26 @@ pub async fn get_account_by_id(
     .await
 }
 
+/// Row identity and descriptive fields for [`create_account`]; the encrypted
+/// credential stays a separate parameter because its lifetime is independent.
+#[derive(Debug, Clone)]
+pub struct NewAiAccount<'a> {
+    pub account_id: Uuid,
+    pub scope_kind: &'a str,
+    pub workspace_id: Option<Uuid>,
+    pub library_id: Option<Uuid>,
+    pub provider_catalog_id: Uuid,
+    pub label: &'a str,
+    pub base_url: Option<&'a str>,
+    pub created_by_principal_id: Option<Uuid>,
+}
+
 pub async fn create_account(
     postgres: &PgPool,
-    account_id: Uuid,
-    scope_kind: &str,
-    workspace_id: Option<Uuid>,
-    library_id: Option<Uuid>,
-    provider_catalog_id: Uuid,
-    label: &str,
+    account: NewAiAccount<'_>,
     api_key: Option<&EncryptedSecret>,
-    base_url: Option<&str>,
-    created_by_principal_id: Option<Uuid>,
 ) -> Result<AiAccountRow, sqlx::Error> {
-    validate_encrypted_api_key_context(account_id, api_key)?;
+    validate_encrypted_api_key_context(account.account_id, api_key)?;
     sqlx::query_as::<_, AiAccountRow>(
         "insert into ai_account (
             id,
@@ -386,28 +393,36 @@ pub async fn create_account(
             created_at,
             updated_at",
     )
-    .bind(account_id)
-    .bind(scope_kind)
-    .bind(workspace_id)
-    .bind(library_id)
-    .bind(provider_catalog_id)
-    .bind(label)
+    .bind(account.account_id)
+    .bind(account.scope_kind)
+    .bind(account.workspace_id)
+    .bind(account.library_id)
+    .bind(account.provider_catalog_id)
+    .bind(account.label)
     .bind(api_key.map(EncryptedSecret::as_str))
-    .bind(base_url)
-    .bind(created_by_principal_id)
+    .bind(account.base_url)
+    .bind(account.created_by_principal_id)
     .fetch_one(postgres)
     .await
 }
 
+/// Row identity and mutable fields for [`update_account`]; the encrypted
+/// credential stays a separate parameter because its lifetime is independent.
+#[derive(Debug, Clone)]
+pub struct AiAccountUpdate<'a> {
+    pub account_id: Uuid,
+    pub label: &'a str,
+    pub base_url: Option<&'a str>,
+    pub credential_state: &'a str,
+    pub expected_updated_at: DateTime<Utc>,
+}
+
 pub async fn update_account(
     postgres: &PgPool,
-    account_id: Uuid,
-    label: &str,
+    account: AiAccountUpdate<'_>,
     api_key: Option<&EncryptedSecret>,
-    base_url: Option<&str>,
-    credential_state: &str,
 ) -> Result<Option<AiAccountRow>, sqlx::Error> {
-    validate_encrypted_api_key_context(account_id, api_key)?;
+    validate_encrypted_api_key_context(account.account_id, api_key)?;
     sqlx::query_as::<_, AiAccountRow>(
         "update ai_account
          set label = $2,
@@ -416,6 +431,7 @@ pub async fn update_account(
              credential_state = $5::ai_account_state,
              updated_at = now()
          where id = $1
+           and updated_at = $6
          returning
             id,
             scope_kind::text as scope_kind,
@@ -430,11 +446,12 @@ pub async fn update_account(
             created_at,
             updated_at",
     )
-    .bind(account_id)
-    .bind(label)
+    .bind(account.account_id)
+    .bind(account.label)
     .bind(api_key.map(EncryptedSecret::as_str))
-    .bind(base_url)
-    .bind(credential_state)
+    .bind(account.base_url)
+    .bind(account.credential_state)
+    .bind(account.expected_updated_at)
     .fetch_optional(postgres)
     .await
 }
@@ -464,22 +481,24 @@ mod tests {
             .connect_lazy("postgresql://127.0.0.1:9/ironrag_unreachable")
             .expect("lazy pool configuration should parse");
         let encoded_key = STANDARD.encode([73_u8; 32]);
-        let cipher = CredentialCipher::from_optional_base64(Some(&encoded_key)).expect("valid key");
+        let cipher = CredentialCipher::from_base64(&encoded_key).expect("valid key");
         let encrypted_for_another_row = cipher
             .encrypt(SecretPurpose::AiAccountApiKey, Uuid::now_v7(), "synthetic-value")
             .expect("encrypt synthetic value");
 
         let error = create_account(
             &pool,
-            Uuid::now_v7(),
-            "instance",
-            None,
-            None,
-            Uuid::now_v7(),
-            "synthetic",
+            NewAiAccount {
+                account_id: Uuid::now_v7(),
+                scope_kind: "instance",
+                workspace_id: None,
+                library_id: None,
+                provider_catalog_id: Uuid::now_v7(),
+                label: "synthetic",
+                base_url: None,
+                created_by_principal_id: None,
+            },
             Some(&encrypted_for_another_row),
-            None,
-            None,
         )
         .await
         .expect_err("mismatched row-bound ciphertext must fail before database access");

@@ -7,8 +7,8 @@ mod types;
 
 pub(crate) use self::{
     catalog::{
-        create_library, create_workspace, update_library, update_workspace, visible_catalog,
-        visible_libraries, visible_workspaces,
+        create_library, create_workspace, update_library, update_workspace,
+        visible_catalog_summary, visible_libraries, visible_workspaces,
     },
     documents::{
         authorize_library_for_mcp, delete_document, list_documents, read_document, search_documents,
@@ -17,10 +17,7 @@ pub(crate) use self::{
     runtime::{get_runtime_execution, get_runtime_execution_trace},
 };
 
-pub(crate) use self::{
-    catalog::{
-        library_catalog_ref, load_library_by_catalog_ref, load_sole_query_authorized_library,
-        load_workspace_by_catalog_ref_for_discovery,
-    },
-    documents::resolve_document_state,
+pub(crate) use self::catalog::{
+    library_catalog_ref, load_library_by_catalog_ref, load_sole_query_authorized_library,
+    load_workspace_by_catalog_ref_for_discovery,
 };

@@ -1,652 +1,240 @@
-import { act } from 'react'
-import { fireEvent } from '@testing-library/react'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { createRoot, type Root } from 'react-dom/client'
-import { MemoryRouter, Route, Routes, useLocation } from 'react-router-dom'
+import { fireEvent, render, screen, waitFor } from '@testing-library/react'
+import type { ReactNode } from 'react'
+import { MemoryRouter } from 'react-router-dom'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { ScopeSwitcherContext } from '@/app/scope-switcher-context'
+import GraphPage from './GraphPage'
 
-import GraphPage from '@/features/graph/GraphPage'
-import { GRAPH_LAYOUT_OPTIONS } from '@/features/graph/model/config'
-import i18n from '@/shared/i18n'
-
-const { useAppMock, documentsApiMock, knowledgeApiMock } = vi.hoisted(() => ({
-  useAppMock: vi.fn(),
-  documentsApiMock: {
-    get: vi.fn(),
+const mocks = vi.hoisted(() => ({
+  app: {
+    activeLibrary: { id: 'library-1', name: 'Library' },
+    libraries: [{ id: 'library-1', name: 'Library' }],
+    locale: 'en',
   },
-  knowledgeApiMock: {
-    listDocuments: vi.fn(),
-    getGraphTopology: vi.fn(),
-    getEntity: vi.fn(),
-  },
+  getGraphTopology: vi.fn(),
+  getSummary: vi.fn(),
+  getEntity: vi.fn(),
+  getDocument: vi.fn(),
 }))
 
 vi.mock('@/shared/contexts/app-context', () => ({
-  useApp: () => useAppMock(),
+  useApp: () => mocks.app,
+}))
+
+// Rendered without the shell, so the preferences bridge has to be stood up for
+// the empty-state picker that reads the admission role.
+vi.mock('@/app/preferences-context', () => ({
+  usePreferences: () => ({ role: 'admin' }),
 }))
 
 vi.mock('@/shared/api', () => ({
-  knowledgeApi: knowledgeApiMock,
+  knowledgeApi: { getGraphTopology: mocks.getGraphTopology },
   queries: {
-    getContentDocumentOptions: (input: { path: { documentId: string } }) => ({
-      queryKey: ['mockedContentDocument', input.path.documentId],
-      queryFn: async () => documentsApiMock.get(input.path.documentId),
+    getKnowledgeLibrarySummaryOptions: ({ path }: { path: { libraryId: string } }) => ({
+      queryKey: ['graph-summary', path.libraryId],
+      queryFn: mocks.getSummary,
     }),
-    getKnowledgeEntityOptions: (input: { path: { libraryId: string; entityId: string } }) => ({
-      queryKey: ['mockedKnowledgeEntity', input.path.libraryId, input.path.entityId],
-      queryFn: async () => knowledgeApiMock.getEntity(input.path.libraryId, input.path.entityId),
+    getKnowledgeEntityOptions: ({ path }: { path: { libraryId: string; entityId: string } }) => ({
+      queryKey: ['graph-entity', path.libraryId, path.entityId],
+      queryFn: () => mocks.getEntity(path.entityId),
+    }),
+    getContentDocumentOptions: ({ path }: { path: { documentId: string } }) => ({
+      queryKey: ['graph-document', path.documentId],
+      queryFn: () => mocks.getDocument(path.documentId),
     }),
   },
 }))
 
-vi.mock('@/features/graph/components/SigmaGraph', () => ({
-  // The real SigmaGraph receives the full topology and a `hiddenIds` set —
-  // it applies the filter through Sigma's reducer pipeline without rebuilding
-  // the Graphology instance. The test mock mirrors that contract so the
-  // observable "how many nodes does the user see" still matches the old
-  // filteredNodes assertion.
-  default: (props: {
+vi.mock('./GraphCanvas', () => ({
+  GraphCanvas: ({
+    nodes,
+    layout,
+  }: {
     nodes: Array<{ id: string; label: string }>
-    hiddenIds?: Set<string>
     layout: string
-    onSelect: (id: string | null) => void
-  }) => {
-    const hidden = props.hiddenIds ?? new Set<string>()
-    const visible = props.nodes.filter((node) => !hidden.has(node.id))
-    return (
-      <div data-testid="sigma-graph">
-        <div data-testid="active-layout">{props.layout}</div>
-        <div data-testid="visible-node-count">{visible.length}</div>
-        <div data-testid="topology-node-count">{props.nodes.length}</div>
-        {visible.map((node) => (
-          <button key={node.id} onClick={() => props.onSelect(node.id)} type="button">
-            {node.label}
-          </button>
-        ))}
-      </div>
-    )
-  },
+  }) => (
+    <div data-testid="graph-canvas" data-layout={layout}>
+      {nodes.map((node) => node.label).join(', ')}
+    </div>
+  ),
 }))
 
-function DocumentsLocationProbe() {
-  const location = useLocation()
+function renderGraph(initialEntry = '/graph') {
+  const queryClient = new QueryClient({
+    defaultOptions: { queries: { retry: false, refetchOnWindowFocus: false } },
+  })
 
-  return <div data-testid="documents-location">{`${location.pathname}${location.search}`}</div>
+  function Wrapper({ children }: Readonly<{ children: ReactNode }>) {
+    return (
+      <QueryClientProvider client={queryClient}>
+        <MemoryRouter initialEntries={[initialEntry]}>{children}</MemoryRouter>
+      </QueryClientProvider>
+    )
+  }
+
+  return render(<GraphPage />, { wrapper: Wrapper })
+}
+
+const readySummary = {
+  documentCountsByReadiness: {},
+  edgeCount: 1,
+  graphReadyDocumentCount: 1,
+  graphSparseDocumentCount: 0,
+  latestGeneration: {
+    id: 'generation-1',
+    library_id: 'library-1',
+    generation_kind: 'library',
+    generation_state: 'graph_ready',
+    created_at: '2026-08-09T00:00:00Z',
+  },
+  libraryId: 'library-1',
+  nodeCount: 2,
+  typedFactDocumentCount: 1,
+  updatedAt: '2026-08-09T00:00:00Z',
+}
+
+const topology = {
+  documents: [{ documentId: 'document-1', title: 'Runbook' }],
+  entities: [
+    {
+      entityId: 'entity-1',
+      canonicalLabel: 'Pipeline',
+      entityType: 'concept',
+      supportCount: 2,
+      entityState: 'active',
+      aliases: [],
+    },
+  ],
+  relations: [],
+  documentLinks: [{ documentId: 'document-1', targetNodeId: 'entity-1', supportCount: 1 }],
 }
 
 describe('GraphPage', () => {
-  let container: HTMLDivElement
-  let root: Root | null
-
-  beforeEach(async () => {
+  beforeEach(() => {
     vi.clearAllMocks()
-    ;(
-      globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean }
-    ).IS_REACT_ACT_ENVIRONMENT = true
-    localStorage.setItem('ironrag_locale', 'en')
-    await i18n.changeLanguage('en')
-    Object.defineProperty(window, 'matchMedia', {
-      writable: true,
-      value: (query: string) => ({
-        matches: query.includes('min-width: 768px'),
-        media: query,
-        onchange: null,
-        addListener: () => {},
-        removeListener: () => {},
-        addEventListener: () => {},
-        removeEventListener: () => {},
-        dispatchEvent: () => false,
-      }),
-    })
-    Object.assign(window.HTMLElement.prototype, {
-      hasPointerCapture: window.HTMLElement.prototype.hasPointerCapture ?? (() => false),
-      setPointerCapture: window.HTMLElement.prototype.setPointerCapture ?? (() => {}),
-      releasePointerCapture: window.HTMLElement.prototype.releasePointerCapture ?? (() => {}),
-      scrollIntoView: window.HTMLElement.prototype.scrollIntoView ?? (() => {}),
-    })
-
-    container = document.createElement('div')
-    document.body.appendChild(container)
-    root = null
-
-    useAppMock.mockReturnValue({
-      activeLibrary: { id: 'library-1', name: 'Graph Library' },
-      locale: 'en',
-    })
-
-    knowledgeApiMock.getGraphTopology.mockResolvedValue({
-      entities: [
-        {
-          entityId: 'entity-1',
-          canonicalLabel: 'Pipeline Stage',
-          entityType: 'concept',
-          supportCount: 2,
-        },
-      ],
-      relations: [],
-      documents: [
-        {
-          document_id: 'doc-1',
-          title: 'data_pipeline.py',
-          document_state: 'graph_ready',
-        },
-        {
-          document_id: 'doc-2',
-          title: 'etl_service.py',
-          document_state: 'graph_ready',
-        },
-      ],
-      documentLinks: [
-        { documentId: 'doc-1', targetNodeId: 'entity-1', supportCount: 1 },
-        { documentId: 'doc-2', targetNodeId: 'entity-1', supportCount: 1 },
-      ],
-    })
-    knowledgeApiMock.getEntity.mockResolvedValue({
+    mocks.app.activeLibrary = { id: 'library-1', name: 'Library' }
+    mocks.getSummary.mockResolvedValue(readySummary)
+    mocks.getGraphTopology.mockResolvedValue(topology)
+    mocks.getEntity.mockResolvedValue({
       entity: {
         entityId: 'entity-1',
-        canonicalLabel: 'Pipeline Stage',
+        canonicalLabel: 'Pipeline',
         entityType: 'concept',
+        entityState: 'active',
         supportCount: 2,
         aliases: [],
-        createdAt: '2026-04-10T10:00:00Z',
-        entityState: 'active',
-        freshnessGeneration: 1,
-        key: 'entity-1',
-        libraryId: 'library-1',
-        updatedAt: '2026-04-10T10:00:00Z',
-        workspaceId: 'ws-1',
       },
       supportingEvidence: [],
     })
-    documentsApiMock.get.mockResolvedValue({
-      fileName: 'data_pipeline.py',
-      head: {
-        document_summary: 'Canonical summary for the selected document.',
+    mocks.getDocument.mockResolvedValue({})
+  })
+
+  it('shows node progress reported from the stream meta frame', async () => {
+    mocks.getSummary.mockResolvedValue({ ...readySummary, nodeCount: 0, latestGeneration: null })
+    mocks.getGraphTopology.mockImplementation(
+      async (_libraryId: string, options: { onProgress?: (progress: unknown) => void }) => {
+        options.onProgress?.({
+          nodesLoaded: 3,
+          edgesLoaded: 1,
+          expectedNodes: 10,
+          expectedEdges: 4,
+        })
+        return await new Promise(() => undefined)
       },
-      readinessSummary: {
-        readinessKind: 'graph_ready',
-        activityStatus: 'ready',
-        graphCoverageKind: 'graph_ready',
-      },
-      activeRevision: {
-        mime_type: 'application/octet-stream',
-        byte_size: 4096,
-        revision_number: 1,
-      },
+    )
+
+    renderGraph()
+
+    expect(await screen.findByText(/3 \/ 10 nodes/)).toBeInTheDocument()
+  })
+
+  it('opens a deep-linked entity and fetches its real detail', async () => {
+    renderGraph('/graph?nodeId=entity-1')
+
+    expect(await screen.findByTestId('graph-canvas')).toHaveTextContent('Pipeline')
+    await waitFor(() => expect(mocks.getEntity).toHaveBeenCalledWith('entity-1'))
+    expect(await screen.findByRole('complementary', { name: 'Selected node' })).toHaveTextContent(
+      'Pipeline',
+    )
+  })
+
+  it('closes the selected-node inspector with Escape without a dimming dialog', async () => {
+    renderGraph('/graph?nodeId=entity-1')
+
+    expect(await screen.findByRole('complementary', { name: 'Selected node' })).toBeInTheDocument()
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }))
+    await waitFor(() => {
+      expect(screen.queryByRole('complementary', { name: 'Selected node' })).toBeNull()
     })
   })
 
-  afterEach(async () => {
-    if (root) {
-      await act(async () => {
-        root?.unmount()
-      })
-    }
-    container.remove()
+  it('uses the force-directed layout by default and allows a manual override', async () => {
+    renderGraph()
+
+    const canvas = await screen.findByTestId('graph-canvas')
+    expect(canvas).toHaveAttribute('data-layout', 'force')
+
+    fireEvent.change(screen.getByRole('combobox'), { target: { value: 'hubs' } })
+    expect(canvas).toHaveAttribute('data-layout', 'hubs')
   })
 
-  async function flushUi() {
-    await act(async () => {
-      await new Promise((resolve) => setTimeout(resolve, 0))
-    })
-  }
-
-  // The graph search input is debounced by 250 ms before it lands in the
-  // hiddenIds set the SigmaGraph mock observes. Tests that exercise the
-  // search filter must wait at least one debounce tick.
-  async function flushSearchDebounce() {
-    await act(async () => {
-      await new Promise((resolve) => setTimeout(resolve, 280))
-    })
-  }
-
-  async function renderPage(initialEntry = '/graph') {
-    const queryClient = new QueryClient({
-      defaultOptions: { queries: { retry: false, staleTime: 0, refetchOnWindowFocus: false } },
-    })
-
-    await act(async () => {
-      root = createRoot(container)
-      root.render(
-        <QueryClientProvider client={queryClient}>
-          <MemoryRouter initialEntries={[initialEntry]}>
-            <Routes>
-              <Route path="/graph" element={<GraphPage />} />
-              <Route path="/documents" element={<DocumentsLocationProbe />} />
-            </Routes>
-          </MemoryRouter>
-        </QueryClientProvider>,
-      )
-    })
-
-    await flushUi()
-    await flushUi()
-  }
-
-  function findButton(text: string) {
-    return Array.from(container.querySelectorAll('button')).find(
-      (button) => button.textContent?.trim() === text,
-    )
-  }
-
-  function setInputValue(input: HTMLInputElement, value: string) {
-    const descriptor = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')
-    descriptor?.set?.call(input, value)
-    input.dispatchEvent(new Event('input', { bubbles: true }))
-  }
-
-  async function selectGraphLayout(label: string) {
-    const trigger = container.querySelector(
-      `button[aria-label="${i18n.t('graph.layoutControls')}"]`,
-    )
-    expect(trigger).toBeTruthy()
-
-    await act(async () => {
-      fireEvent.click(trigger!)
-    })
-    await flushUi()
-
-    const option = Array.from(document.body.querySelectorAll('button')).find((candidate) =>
-      candidate.textContent?.trim().includes(label),
-    )
-    expect(option).toBeTruthy()
-
-    await act(async () => {
-      fireEvent.click(option!)
-    })
-    await flushUi()
-  }
-
-  it('does not render a global reset action and clears selection by closing the inspector', async () => {
-    await renderPage()
-
-    const visibleNodeCount = () =>
-      container.querySelector('[data-testid="visible-node-count"]')?.textContent
-    const searchInput = container.querySelector('input')
-
-    expect(searchInput).toBeTruthy()
-    expect(knowledgeApiMock.getGraphTopology).toHaveBeenCalledTimes(1)
-    expect(visibleNodeCount()).toBe('3')
-
-    const documentNodeButton = findButton('data_pipeline.py')
-    expect(documentNodeButton).toBeTruthy()
-
-    await act(async () => {
-      documentNodeButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
-    })
-    await flushUi()
-
-    expect(container.textContent).not.toContain('Find Similar')
-
-    await act(async () => {
-      if (searchInput) setInputValue(searchInput, 'data_pipeline.py')
-    })
-    await flushSearchDebounce()
-    await flushUi()
-
-    expect(visibleNodeCount()).toBe('1')
-    expect(findButton('Clear')).toBeUndefined()
-
-    await flushUi()
-    expect(container.textContent).toContain('Canonical summary for the selected document.')
-
-    const closeButton = Array.from(container.querySelectorAll('button')).find(
-      (button) => button.getAttribute('aria-label') === i18n.t('common.close'),
-    )
-    expect(closeButton).toBeTruthy()
-
-    await act(async () => {
-      closeButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
-    })
-    await flushUi()
-
-    expect(container.textContent).not.toContain('Canonical summary for the selected document.')
-    expect(searchInput).toHaveValue('data_pipeline.py')
-    expect(visibleNodeCount()).toBe('1')
-    expect(findButton('Clear')).toBeUndefined()
-  })
-
-  it('does not refetch topology or rebuild node identity when search filter changes', async () => {
-    // Regression guard for the wave-3 perf fix: filters must be applied
-    // via SigmaGraph's reducer pipeline, so typing in the search box must
-    // NOT trigger a topology refetch AND must keep the `nodes` prop stable
-    // (same length = full topology). This is what makes the filter cheap
-    // at 100k-node scale.
-    await renderPage()
-
-    const topologyCount = () =>
-      container.querySelector('[data-testid="topology-node-count"]')?.textContent
-    const visibleNodeCount = () =>
-      container.querySelector('[data-testid="visible-node-count"]')?.textContent
-    const searchInput = container.querySelector('input')
-
-    expect(knowledgeApiMock.getGraphTopology).toHaveBeenCalledTimes(1)
-    expect(topologyCount()).toBe('3')
-    expect(visibleNodeCount()).toBe('3')
-
-    await act(async () => {
-      if (searchInput) setInputValue(searchInput, 'data_pipeline.py')
-    })
-    await flushSearchDebounce()
-    await flushUi()
-
-    // Filter narrows what the user sees, but topology stays whole and the
-    // backend is not re-hit.
-    expect(visibleNodeCount()).toBe('1')
-    expect(topologyCount()).toBe('3')
-    expect(knowledgeApiMock.getGraphTopology).toHaveBeenCalledTimes(1)
-  })
-
-  it('expands and collapses overflowing subtype groups with explicit controls', async () => {
-    knowledgeApiMock.getGraphTopology.mockResolvedValue({
-      entities: [
-        ...Array.from({ length: 14 }, (_, index) => ({
-          entityId: `artifact-${index + 1}`,
-          canonicalLabel: `Artifact ${index + 1}`,
-          entityType: 'artifact',
-          entitySubType: `artifact_sub_${index + 1}`,
-          supportCount: 1,
-        })),
-      ],
-      relations: [],
+  it('does not mark an empty memory with a success tick', async () => {
+    mocks.getSummary.mockResolvedValue({ ...readySummary, nodeCount: 0, edgeCount: 0 })
+    mocks.getGraphTopology.mockResolvedValue({
       documents: [],
+      entities: [],
+      relations: [],
       documentLinks: [],
     })
 
-    await renderPage()
+    const { container } = renderGraph()
 
-    expect(container.textContent).toContain('Show all (+2)')
-    expect(container.textContent).not.toContain('artifact_sub_14 1')
+    expect(await screen.findByText('No connections yet')).toBeInTheDocument()
+    // A checkmark beside "nothing here yet" reads as "all good" on a screen
+    // that has nothing to show.
+    const card = container.querySelector('.state-card')
+    expect(card?.querySelector('svg.lucide-check')).toBeNull()
+    expect(card?.querySelector('svg')).not.toBeNull()
+  })
+})
 
-    const showAllSubtypesButton = findButton('Show all (+2)')
-    expect(showAllSubtypesButton).toBeTruthy()
-
-    await act(async () => {
-      showAllSubtypesButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
-    })
-    await flushUi()
-
-    expect(container.textContent).toContain('artifact_sub_14 1')
-
-    const hideSubtypesButton = findButton('Hide')
-    expect(hideSubtypesButton).toBeTruthy()
-
-    await act(async () => {
-      hideSubtypesButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
-    })
-    await flushUi()
-
-    expect(container.textContent).toContain('Show all (+2)')
-    expect(container.textContent).not.toContain('artifact_sub_14 1')
+describe('GraphPage without a selected library', () => {
+  beforeEach(() => {
+    mocks.app.activeLibrary = null as unknown as { id: string; name: string }
   })
 
-  it('shows the recommended layout as a toolbar action after switching away from it', async () => {
-    await renderPage()
+  afterEach(() => {
+    mocks.app.activeLibrary = { id: 'library-1', name: 'Library' }
+  })
 
-    expect(container.textContent).not.toContain(i18n.t('graph.layoutDescriptions.sectors'))
+  it('offers the picker that resolves the state instead of only naming it', () => {
+    const opener = vi.fn()
 
-    await selectGraphLayout(i18n.t('graph.layouts.bands'))
-    await flushUi()
-
-    const recommendedLabel = i18n.t('graph.recommended')
-    const sectorsLabel = i18n.t('graph.layouts.sectors')
-    const recommendedButton = Array.from(container.querySelectorAll('button')).find(
-      (button) =>
-        button.textContent?.includes(recommendedLabel) && button.textContent.includes(sectorsLabel),
+    render(
+      <MemoryRouter>
+        <ScopeSwitcherContext.Provider value={{ openScopeSwitcher: opener }}>
+          <GraphPage />
+        </ScopeSwitcherContext.Provider>
+      </MemoryRouter>,
     )
-    expect(recommendedButton).toBeTruthy()
 
-    await act(async () => {
-      recommendedButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
-    })
-    await flushUi()
-
-    expect(
-      Array.from(container.querySelectorAll('button')).find((button) =>
-        button.textContent?.includes(recommendedLabel),
-      ),
-    ).toBeUndefined()
+    // Telling a first-time reader to "select a library" while showing nothing
+    // that selects one is a dead end: the picker lives in the shell top bar,
+    // and this screen could not reach it.
+    const choose = screen.getByRole('button', { name: 'Choose a library' })
+    fireEvent.click(choose)
+    expect(opener).toHaveBeenCalledTimes(1)
   })
 
-  it('switches every configured graph layout action without refetching topology', async () => {
-    await renderPage()
-
-    const activeLayout = () => container.querySelector('[data-testid="active-layout"]')?.textContent
-
-    for (const option of GRAPH_LAYOUT_OPTIONS) {
-      const label = i18n.t(option.labelKey)
-      await selectGraphLayout(label)
-
-      expect(activeLayout()).toBe(option.id)
-    }
-
-    expect(knowledgeApiMock.getGraphTopology).toHaveBeenCalledTimes(1)
-  })
-
-  it('shows the selected entity subtype in the detail panel', async () => {
-    knowledgeApiMock.getEntity.mockResolvedValue({
-      entity: {
-        entityId: 'entity-1',
-        canonicalLabel: 'Pipeline Stage',
-        entityType: 'concept',
-        entitySubType: 'pipeline_stage',
-        supportCount: 2,
-        aliases: [],
-        createdAt: '2026-04-10T10:00:00Z',
-        entityState: 'active',
-        freshnessGeneration: 1,
-        key: 'entity-1',
-        libraryId: 'library-1',
-        updatedAt: '2026-04-10T10:00:00Z',
-        workspaceId: 'ws-1',
-      },
-      supportingEvidence: [],
-    })
-
-    await renderPage()
-
-    const entityNodeButton = findButton('Pipeline Stage')
-    expect(entityNodeButton).toBeTruthy()
-
-    await act(async () => {
-      entityNodeButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
-    })
-    await flushUi()
-    await flushUi()
-
-    const detailsButton = findButton('Details')
-    expect(detailsButton).toBeTruthy()
-    await act(async () => {
-      detailsButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
-    })
-    await flushUi()
-
-    expect(container.textContent).toContain('pipeline_stage')
-    expect(container.textContent).toContain('Sub-type')
-  })
-
-  it('opens the document inspector from a graph node id in the URL', async () => {
-    await renderPage('/graph?nodeId=doc-1')
-    await flushUi()
-    await flushUi()
-
-    expect(documentsApiMock.get).toHaveBeenCalledWith('doc-1')
-    expect(container.textContent).toContain('data_pipeline.py')
-    expect(container.textContent).toContain('Canonical summary for the selected document.')
-    expect(container.textContent).toContain('View Document')
-  })
-
-  it('shows and filters the no-sub-type legend bucket only when the type also has real sub-types', async () => {
-    knowledgeApiMock.getGraphTopology.mockResolvedValue({
-      entities: [
-        {
-          entityId: 'entity-1',
-          canonicalLabel: 'Pipeline Stage',
-          entityType: 'concept',
-          entitySubType: 'pipeline_stage',
-          supportCount: 1,
-        },
-        {
-          entityId: 'entity-2',
-          canonicalLabel: 'Untyped Concept',
-          entityType: 'concept',
-          supportCount: 1,
-        },
-      ],
-      relations: [],
-      documents: [
-        {
-          document_id: 'doc-1',
-          title: 'data_pipeline.py',
-          document_state: 'graph_ready',
-        },
-        {
-          document_id: 'doc-2',
-          title: 'etl_service.py',
-          document_state: 'graph_ready',
-        },
-      ],
-      documentLinks: [],
-    })
-
-    await renderPage()
-
-    expect(container.textContent).toContain('No sub-type 1')
-    expect(container.textContent).not.toContain('No sub-type 2')
-
-    const noSubtypeButton = Array.from(container.querySelectorAll('button')).find((button) =>
-      button.textContent?.includes('No sub-type 1'),
+  it('offers no picker it cannot open when rendered outside the shell', () => {
+    render(
+      <MemoryRouter>
+        <GraphPage />
+      </MemoryRouter>,
     )
-    expect(noSubtypeButton).toBeTruthy()
 
-    await act(async () => {
-      noSubtypeButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
-    })
-    await flushUi()
-
-    expect(container.querySelector('[data-testid="visible-node-count"]')?.textContent).toBe('3')
-  })
-
-  it('uses a wrapping property layout for long document values', async () => {
-    documentsApiMock.get.mockResolvedValue({
-      fileName: 'Week 1.docx',
-      readinessSummary: {
-        readinessKind: 'graph_sparse',
-        activityStatus: 'ready',
-        graphCoverageKind: 'graph_sparse',
-      },
-      activeRevision: {
-        mime_type: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-        byte_size: 4096,
-        revision_number: 1,
-      },
-    })
-
-    await renderPage()
-
-    const documentNodeButton = findButton('data_pipeline.py')
-    expect(documentNodeButton).toBeTruthy()
-
-    await act(async () => {
-      documentNodeButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
-    })
-    await flushUi()
-    await flushUi()
-
-    const formatValue = Array.from(container.querySelectorAll('span')).find(
-      (span) =>
-        span.textContent ===
-        'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-    )
-    expect(formatValue).toBeTruthy()
-    expect(formatValue?.className).toContain('[overflow-wrap:anywhere]')
-    expect(formatValue?.parentElement?.className).toContain('grid')
-  })
-
-  it('opens the documents page with the selected document id', async () => {
-    await renderPage()
-
-    const documentNodeButton = findButton('data_pipeline.py')
-    expect(documentNodeButton).toBeTruthy()
-
-    await act(async () => {
-      documentNodeButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
-    })
-    await flushUi()
-    await flushUi()
-
-    const viewDocumentButton = Array.from(container.querySelectorAll('button')).find((button) =>
-      button.textContent?.includes('View Document'),
-    )
-    expect(viewDocumentButton).toBeTruthy()
-
-    await act(async () => {
-      viewDocumentButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
-    })
-    await flushUi()
-
-    expect(container.querySelector('[data-testid="documents-location"]')?.textContent).toBe(
-      '/documents?documentId=doc-1',
-    )
-  })
-
-  it('shows the canonical document summary instead of readiness state', async () => {
-    await renderPage()
-
-    const documentNodeButton = findButton('data_pipeline.py')
-    expect(documentNodeButton).toBeTruthy()
-
-    await act(async () => {
-      documentNodeButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
-    })
-    await flushUi()
-    await flushUi()
-
-    expect(container.textContent).toContain('Canonical summary for the selected document.')
-  })
-
-  it('groups neighbours of the selected entity into documents and concepts via the adjacency index', async () => {
-    // Topology with one concept entity connected to two documents via the
-    // document-link projection. The inspector must walk the adjacency index
-    // and surface both documents under "Source documents" without re-scanning
-    // every edge per render.
-    knowledgeApiMock.getGraphTopology.mockResolvedValue({
-      entities: [
-        {
-          entityId: 'entity-1',
-          canonicalLabel: 'Pipeline Stage',
-          entityType: 'concept',
-          supportCount: 2,
-        },
-      ],
-      relations: [],
-      documents: [
-        { document_id: 'doc-1', title: 'data_pipeline.py', document_state: 'graph_ready' },
-        { document_id: 'doc-2', title: 'etl_service.py', document_state: 'graph_ready' },
-      ],
-      documentLinks: [
-        { documentId: 'doc-1', targetNodeId: 'entity-1', supportCount: 1 },
-        { documentId: 'doc-2', targetNodeId: 'entity-1', supportCount: 1 },
-      ],
-    })
-
-    await renderPage()
-
-    const entityButton = findButton('Pipeline Stage')
-    expect(entityButton).toBeTruthy()
-
-    await act(async () => {
-      entityButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
-    })
-    await flushUi()
-    await flushUi()
-
-    // Both source documents must appear in the inspector as clickable
-    // neighbor rows. The connection counter in the header must also show
-    // the full neighbour count (2), not a truncated projection.
-    expect(container.textContent).toContain('Source Documents')
-    expect(container.textContent).toContain('data_pipeline.py')
-    expect(container.textContent).toContain('etl_service.py')
-    expect(container.textContent).toContain('connections')
+    expect(screen.getByText('No library selected')).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Choose a library' })).not.toBeInTheDocument()
   })
 })

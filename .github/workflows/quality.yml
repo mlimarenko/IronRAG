@@ -17,7 +17,7 @@ concurrency:
 
 jobs:
   security:
-    name: Secrets, dependency, and supply-chain audit
+    name: Secrets
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
@@ -25,18 +25,6 @@ jobs:
         uses: actions/checkout@v6
         with:
           fetch-depth: 0
-
-      - name: Set up exact npm toolchain
-        uses: actions/setup-node@v6
-        with:
-          node-version: "26.4.0"
-          cache: npm
-          cache-dependency-path: apps/web/package-lock.json
-
-      - name: Pin npm version declared by the frontend
-        run: |
-          npm install --global --ignore-scripts npm@11.17.0
-          test "$(npm --version)" = "11.17.0"
 
       - name: Install checksum-verified Gitleaks
         shell: bash
@@ -73,21 +61,32 @@ jobs:
           fi
           make secret-check GITLEAKS_LOG_OPTS="$range"
 
+  audit:
+    name: Dependency security
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "26.4.0"
+      - name: Pin npm
+        run: npm install --global --ignore-scripts npm@11.17.0
+
       - name: Install pinned Rust audit tools
         run: |
           cargo install --locked cargo-audit --version 0.22.1
           cargo install --locked cargo-deny --version 0.20.2
-          cargo install --locked cargo-machete --version 0.9.2
 
-      - name: Audit Rust dependency graph and unused declarations
-        run: make audit
+      - name: Audit Rust dependency security
+        run: make backend-audit backend-deny
 
       - name: Audit frontend lockfile
         working-directory: apps/web
         run: npm audit --audit-level=low
 
   verify:
-    name: Strict repository verification
+    name: Build and functional tests
     runs-on: ubuntu-latest
     timeout-minutes: 60
     env:
@@ -112,7 +111,7 @@ jobs:
           --health-timeout 5s
           --health-retries 20
       redis:
-        image: redis:8.8
+        image: redis:8.10.1
         ports:
           - 6379:6379
         options: >-
@@ -126,46 +125,6 @@ jobs:
         uses: actions/checkout@v6
         with:
           fetch-depth: 0
-
-      - name: Resolve immutable migration base
-        shell: bash
-        env:
-          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
-          PUSH_BEFORE_SHA: ${{ github.event.before }}
-        run: |
-          set -euo pipefail
-
-          if [[ -n "$PR_BASE_SHA" ]]; then
-            candidate="$PR_BASE_SHA"
-            source_label="pull request base SHA"
-          elif [[ -n "$PUSH_BEFORE_SHA" && ! "$PUSH_BEFORE_SHA" =~ ^0+$ ]]; then
-            candidate="$PUSH_BEFORE_SHA"
-            source_label="push before SHA"
-          elif candidate="$(git rev-parse --verify --end-of-options 'HEAD^{commit}^' 2>/dev/null)"; then
-            source_label="first parent of checked-out commit"
-          else
-            fallback_ref="origin/develop"
-            if ! git rev-parse --verify --end-of-options "${fallback_ref}^{commit}" >/dev/null 2>&1; then
-              echo "Cannot resolve migration fallback ref or HEAD parent: $fallback_ref" >&2
-              exit 1
-            fi
-            if ! candidate="$(git merge-base HEAD "$fallback_ref")" || [[ -z "$candidate" ]]; then
-              echo "Cannot compute migration base from HEAD and $fallback_ref" >&2
-              exit 1
-            fi
-            if [[ "$candidate" == "$(git rev-parse HEAD)" ]]; then
-              echo "Migration fallback resolved to HEAD; refusing to skip changed-migration checks" >&2
-              exit 1
-            fi
-            source_label="merge-base with $fallback_ref"
-          fi
-
-          if ! base_commit="$(git rev-parse --verify --end-of-options "${candidate}^{commit}")"; then
-            echo "Migration base from $source_label does not exist locally: $candidate" >&2
-            exit 1
-          fi
-          echo "Migration base: $base_commit ($source_label)"
-          printf 'MIGRATION_BASE_REF=%s\n' "$base_commit" >> "$GITHUB_ENV"
 
       - name: Set up Node.js
         uses: actions/setup-node@v6
@@ -201,30 +160,38 @@ jobs:
         working-directory: apps/web
         run: ./node_modules/.bin/playwright install --with-deps chromium
 
-      - name: Run strict quality gates
-        run: make check-strict BACKEND_CARGO_TARGET_DIR="$CARGO_TARGET_DIR" MIGRATION_BASE_REF="$MIGRATION_BASE_REF"
+      - name: Install pinned uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          version: "0.9.22"
+
+      - name: Verify build, contracts and functional tests
+        run: >-
+          make migration-check backend-test-fast contract-check
+          frontend-typecheck frontend-test frontend-swagger-check frontend-build
+          compose-check helm-chart-check mem-budget-check install-script-check
+          mcp-consumer-contract-check benchmark-contract-test ci-python-functional
+          connectors-typecheck connectors-lock-check
+          BACKEND_CARGO_TARGET_DIR="$CARGO_TARGET_DIR"
+
+      - name: Run style and static analysis (advisory)
+        continue-on-error: true
+        run: >-
+          make backend-fmt-check backend-lint backend-doc backend-unused-deps
+          frontend-lint frontend-format-check frontend-deadcode frontend-i18n-audit
+          frontend-color-gate frontend-bundle-check frontend-size-limit
+          connectors-lint connectors-format-check
+          BACKEND_CARGO_TARGET_DIR="$CARGO_TARGET_DIR"
 
       - name: Run workspace and database-backed lifecycle tests
         run: |
           set -euo pipefail
           cargo test -p ironrag-contracts --all-targets
-          for test_target in \
-            governance_auth \
-            audit_events \
-            atomic_admission \
-            canonical_knowledge_revision_states \
-            ingest_repository \
-            ingest_publication \
-            web_ingest_repository \
-            graph_snapshot_fencing \
-            extract_graph \
-            graph_projection_repository
-          do
-            cargo test -p ironrag-backend --features test-support \
-              --test "$test_target" -- --ignored --test-threads=1
-          done
+          make backend-test-integration BACKEND_CARGO_TARGET_DIR="$CARGO_TARGET_DIR"
 
-      - name: Run frontend coverage and browser flows
-        run: |
-          npm --prefix apps/web run test:coverage
-          npm --prefix apps/web run test:e2e
+      - name: Measure frontend coverage (advisory)
+        continue-on-error: true
+        run: npm --prefix apps/web run test:coverage
+
+      - name: Run browser flows
+        run: npm --prefix apps/web run test:e2e

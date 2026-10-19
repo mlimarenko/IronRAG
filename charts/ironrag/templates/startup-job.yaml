@@ -3,12 +3,18 @@ apiVersion: batch/v1
 kind: Job
 metadata:
   name: {{ include "ironrag.startupJobName" . }}
+  {{- with .Values.startup.jobAnnotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
   labels:
     {{- include "ironrag.labels" . | nindent 4 }}
     app.kubernetes.io/component: startup
 spec:
   backoffLimit: {{ .Values.startup.backoffLimit }}
+  {{- if .Values.startup.ttlSecondsAfterFinished }}
   ttlSecondsAfterFinished: {{ .Values.startup.ttlSecondsAfterFinished }}
+  {{- end }}
   template:
     metadata:
       labels:
@@ -74,7 +80,7 @@ spec:
         {{- if eq .Values.storage.provider "filesystem" }}
         - name: content-storage
           persistentVolumeClaim:
-            claimName: {{ include "ironrag.fullname" . }}-content-storage
+            claimName: {{ include "ironrag.contentStorageClaimName" . }}
         {{- end }}
       {{- with .Values.imagePullSecrets }}
       imagePullSecrets:

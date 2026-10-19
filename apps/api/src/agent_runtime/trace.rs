@@ -6,19 +6,6 @@ use crate::domains::agent_runtime::{
 const MAX_RUNTIME_POLICY_SUMMARY_DECISIONS: usize = 8;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RuntimeStageTraceSummary {
-    pub stage_kind: crate::domains::agent_runtime::RuntimeStageKind,
-    pub stage_state: crate::domains::agent_runtime::RuntimeStageState,
-    pub failure_code: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RuntimeActionTraceSummary {
-    pub action_kind: crate::domains::agent_runtime::RuntimeActionKind,
-    pub action_state: crate::domains::agent_runtime::RuntimeActionState,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RuntimeExecutionTraceView {
     pub execution: RuntimeExecution,
     pub stages: Vec<RuntimeStageRecord>,
@@ -41,40 +28,6 @@ pub const fn build_trace_view(
     policy_decisions: Vec<RuntimePolicyDecision>,
 ) -> RuntimeExecutionTraceView {
     RuntimeExecutionTraceView { execution, stages, actions, policy_decisions }
-}
-
-#[must_use]
-pub fn stage_summaries(trace: &RuntimeExecutionTraceView) -> Vec<RuntimeStageTraceSummary> {
-    trace
-        .stages
-        .iter()
-        .map(|record| RuntimeStageTraceSummary {
-            stage_kind: record.stage_kind,
-            stage_state: record.stage_state,
-            failure_code: record.failure_code.clone(),
-        })
-        .collect()
-}
-
-#[must_use]
-pub fn action_summaries(trace: &RuntimeExecutionTraceView) -> Vec<RuntimeActionTraceSummary> {
-    trace
-        .actions
-        .iter()
-        .map(|record| RuntimeActionTraceSummary {
-            action_kind: record.action_kind,
-            action_state: record.action_state,
-        })
-        .collect()
-}
-
-#[must_use]
-pub fn redacted_failure_summary(trace: &RuntimeExecutionTraceView) -> Option<String> {
-    trace
-        .execution
-        .failure_summary_redacted
-        .clone()
-        .or_else(|| trace.stages.iter().find_map(|record| record.failure_summary_redacted.clone()))
 }
 
 #[must_use]

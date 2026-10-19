@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::{
-    domains::billing::{BillingCharge, BillingProviderCall},
+    domains::billing::{BillingCharge, BillingProviderCall, CostRollupFreshness},
     interfaces::http::router_support::ApiError,
     services::ops::billing::DocumentCostSummary,
 };
@@ -67,6 +67,10 @@ pub struct BillingChargePage {
 #[derive(Debug, Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct DocumentCostPage {
+    /// Freshness of the owning library rollup. While `reconciling` `items` is
+    /// empty, `nextCursor` is absent and `total` is absent: a per-document
+    /// cost is never ordered, paginated or counted from a stale aggregate.
+    pub cost_rollup_freshness: CostRollupFreshness,
     pub items: Vec<DocumentCostSummary>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub next_cursor: Option<String>,

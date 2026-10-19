@@ -14,6 +14,12 @@ pub fn mint_plaintext_api_token() -> String {
 }
 
 #[must_use]
+pub fn is_well_formed_api_token(raw: &str) -> bool {
+    raw.len() == 37
+        && raw.starts_with("inrg_")
+        && raw.as_bytes()[5..].iter().all(u8::is_ascii_hexdigit)
+}
+
 pub fn preview_api_token(raw: &str) -> String {
     if raw.len() <= 10 {
         return raw.to_string();
@@ -45,4 +51,16 @@ pub fn build_session_cookie_value(session_id: Uuid, secret: &str) -> String {
 pub fn parse_session_cookie_value(raw: &str) -> Option<(Uuid, String)> {
     let (session_id, secret) = raw.trim().split_once('.')?;
     Some((Uuid::parse_str(session_id).ok()?, secret.to_string()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn accepts_only_well_formed_inrg_tokens() {
+        assert!(is_well_formed_api_token(&mint_plaintext_api_token()));
+        assert!(!is_well_formed_api_token("legacy_0123456789abcdef0123456789abcdef"));
+        assert!(!is_well_formed_api_token("inrg_not-a-token"));
+    }
 }

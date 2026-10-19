@@ -30,6 +30,14 @@ encode_provider_map() {
 IRONRAG_INSTALL_SOURCE_ONLY=1 source "$INSTALL_SH"
 set +eu  # install.sh enables `set -euo pipefail`; relax it for assertions.
 setup_colors  # define C_* (no colour when piped)
+echo "── normalized installer has no migration checksum repair path ──"
+for obsolete in checksum-drift _sqlx_migrations sha384sum 'UPDATE _sqlx_migrations' '/app/migrations/'; do
+  if grep -Fq -- "$obsolete" "$INSTALL_SH"; then
+    fail "installer still contains obsolete migration repair token: $obsolete"
+  else
+    pass
+  fi
+done
 
 echo "── distribution contract: every documented root env key is consumed by Compose ──"
 missing_compose_keys=""
@@ -158,25 +166,25 @@ rm -f "$TMP_ENV"
 echo "── provider key JSON map: exact kinds, stable order, fail-closed validation ──"
 PROVIDER_JSON_A='{"zeta-gateway":"  value$#\"\\юникод  ","alpha.7":"alpha-secret","zeta_gateway":"underscore-secret"}' # pragma: allowlist secret
 PROVIDER_JSON_B='{"zeta_gateway":"underscore-secret","zeta-gateway":"  value$#\"\\юникод  ","alpha.7":"alpha-secret"}' # pragma: allowlist secret
-CANONICAL_A="$(canonicalize_provider_api_keys_b64 "$(encode_provider_map "$PROVIDER_JSON_A")")"
-CANONICAL_B="$(canonicalize_provider_api_keys_b64 "$(encode_provider_map "$PROVIDER_JSON_B")")"
+NORMALIZED_A="$(normalize_provider_api_keys_b64 "$(encode_provider_map "$PROVIDER_JSON_A")")"
+NORMALIZED_B="$(normalize_provider_api_keys_b64 "$(encode_provider_map "$PROVIDER_JSON_B")")"
 check "provider JSON accepts arbitrary exact kinds" "$?" "0"
-check "provider JSON canonical ordering is stable" \
-  "$( [ "$CANONICAL_A" = "$CANONICAL_B" ] && echo yes || echo no )" "yes"
+check "provider JSON normalized ordering is stable" \
+  "$( [ "$NORMALIZED_A" = "$NORMALIZED_B" ] && echo yes || echo no )" "yes"
 check "hyphen/dot/underscore kinds stay distinct" \
-  "$(printf '%s' "$CANONICAL_A" | base64 -d | python3 -c 'import json,sys; value=json.load(sys.stdin); print("yes" if len(value)==3 and set(value)=={"zeta-gateway","alpha.7","zeta_gateway"} else "no")')" "yes"
+  "$(printf '%s' "$NORMALIZED_A" | base64 -d | python3 -c 'import json,sys; value=json.load(sys.stdin); print("yes" if len(value)==3 and set(value)=={"zeta-gateway","alpha.7","zeta_gateway"} else "no")')" "yes"
 check "credential leading/trailing whitespace stays byte-exact" \
-  "$(printf '%s' "$CANONICAL_A" | base64 -d | python3 -c 'import json,sys; value=json.load(sys.stdin); print("yes" if value["zeta-gateway"] == "  value$#\"\\юникод  " else "no")')" "yes"
-canonicalize_provider_api_keys_b64 " $(encode_provider_map "$PROVIDER_JSON_A")" >/dev/null 2>&1
+  "$(printf '%s' "$NORMALIZED_A" | base64 -d | python3 -c 'import json,sys; value=json.load(sys.stdin); print("yes" if value["zeta-gateway"] == "  value$#\"\\юникод  " else "no")')" "yes"
+normalize_provider_api_keys_b64 " $(encode_provider_map "$PROVIDER_JSON_A")" >/dev/null 2>&1
 check "surrounding base64 whitespace rejected" "$?" "2"
-canonicalize_provider_api_keys_b64 \
+normalize_provider_api_keys_b64 \
   "$(encode_provider_map '{"duplicate":"first-secret","duplicate":"second-secret"}')" >/dev/null 2>&1 # pragma: allowlist secret
 check "duplicate provider kind rejected" "$?" "2"
-canonicalize_provider_api_keys_b64 \
+normalize_provider_api_keys_b64 \
   "$(encode_provider_map '{"invalid kind":"secret-value"}')" >/dev/null 2>&1 # pragma: allowlist secret
 check "whitespace provider kind rejected" "$?" "2"
 TOO_MANY_PROVIDER_ENTRIES="$(python3 -c 'import json; print(json.dumps({f"provider-{index}": "value" for index in range(257)}, separators=(",", ":")))')"
-canonicalize_provider_api_keys_b64 "$(encode_provider_map "$TOO_MANY_PROVIDER_ENTRIES")" >/dev/null 2>&1
+normalize_provider_api_keys_b64 "$(encode_provider_map "$TOO_MANY_PROVIDER_ENTRIES")" >/dev/null 2>&1
 check "provider entry count is bounded" "$?" "2"
 check "removed convention detected structurally" \
   "$(is_removed_provider_api_key_env_name IRONRAG_ANYTHING_API_KEY; echo $?)" "0"
@@ -199,13 +207,13 @@ TMP_ENV="$(mktemp)"
 {
   printf 'IRONRAG_BACKEND_IMAGE=ironrag-backend:local\n'
   printf 'IRONRAG_FRONTEND_IMAGE=registry.example.invalid/ironrag-frontend:v0.5.1\n'
-  printf 'IRONRAG_REDIS_IMAGE=redis:8.8\n'
+  printf 'IRONRAG_REDIS_IMAGE=redis:8.10.1\n'
 } >"$TMP_ENV"
 IRONRAG_IMAGE_PINS_UPDATED=0
 sync_release_image_pins "$TMP_ENV" "v0.5.2"
 check "custom backend override kept"  "$(env_get IRONRAG_BACKEND_IMAGE "$TMP_ENV")" "ironrag-backend:local"
 check "custom frontend override kept" "$(env_get IRONRAG_FRONTEND_IMAGE "$TMP_ENV")" "registry.example.invalid/ironrag-frontend:v0.5.1"
-check "unrelated image kept"          "$(env_get IRONRAG_REDIS_IMAGE "$TMP_ENV")" "redis:8.8"
+check "unrelated image kept"          "$(env_get IRONRAG_REDIS_IMAGE "$TMP_ENV")" "redis:8.10.1"
 check "pin update flag clear"         "$IRONRAG_IMAGE_PINS_UPDATED" "0"
 rm -f "$TMP_ENV"
 
@@ -231,6 +239,28 @@ run_install_version() { # run_install_version <version> <dir> [extra args...]
     bash "$INSTALL_SH" "$version" "$dir" "$@" </dev/null >/dev/null 2>&1
 }
 
+# The API's admin-bootstrap contract (validate_ui_bootstrap_admin_settings):
+# login, email and password are all set or all unset. Report the .env state as
+# three digits so a partial trio is visible rather than merely "not 111".
+admin_trio_state() { # admin_trio_state <env-file> -> e.g. 110
+  local key state=""
+  for key in \
+    IRONRAG_UI_BOOTSTRAP_ADMIN_LOGIN \
+    IRONRAG_UI_BOOTSTRAP_ADMIN_EMAIL \
+    IRONRAG_UI_BOOTSTRAP_ADMIN_PASSWORD
+  do
+    if [ -n "$(env_get "$key" "$1")" ]; then state="${state}1"; else state="${state}0"; fi
+  done
+  printf '%s' "$state"
+}
+
+# Synthetic admin-bootstrap values, distinct per case so every assertion proves
+# the value it supplied was the one written. Never real credentials.
+ENV_ADMIN_EMAIL='ops.admin+env@example.com'     # synthetic
+ENV_ADMIN_PW='pw&with|specials'                 # pragma: allowlist secret (synthetic)
+PTY_ADMIN_EMAIL='interactive.admin@example.com' # synthetic
+PTY_ADMIN_PW='pty-admin-pw-0007'                # pragma: allowlist secret (synthetic)
+
 echo "── integration: removed provider-specific env convention fails fast ──"
 WORK="$(mktemp -d)"
 cp "${ROOT_DIR}/docker-compose.yml" "${WORK}/docker-compose.yml"
@@ -252,7 +282,6 @@ LIVE_PROVIDER_MAP_B64="$(encode_provider_map '{"alpha7":"sk-live-secret-0001","z
   printf 'IRONRAG_POSTGRES_PASSWORD=pg-live-pw-0003\n'     # pragma: allowlist secret
   printf 'IRONRAG_BOOTSTRAP_TOKEN=boot-0004\n'             # pragma: allowlist secret
   printf 'IRONRAG_CREDENTIAL_MASTER_KEY=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\n' # pragma: allowlist secret
-  printf 'IRONRAG_CREDENTIAL_ENCRYPTION_WRITE_ENABLED=false\n'
 } >"${WORK}/.env"
 
 run_install "$WORK"
@@ -264,7 +293,6 @@ check "provider JSON intact" \
 check "pg password intact"  "$(env_get IRONRAG_POSTGRES_PASSWORD "${WORK}/.env")" "pg-live-pw-0003"
 check "boot token intact"   "$(env_get IRONRAG_BOOTSTRAP_TOKEN "${WORK}/.env")"  "boot-0004"
 check "credential key intact" "$(env_get IRONRAG_CREDENTIAL_MASTER_KEY "${WORK}/.env")" "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
-check "credential write gate preserved" "$(env_get IRONRAG_CREDENTIAL_ENCRYPTION_WRITE_ENABLED "${WORK}/.env")" "false"
 # Caps were absent -> filled in.
 check "caps filled on update" "$([ -n "$(env_get IRONRAG_DB_MEMORY_LIMIT "${WORK}/.env")" ] && echo yes)" "yes"
 check "provider cap filled on update" "$(env_get IRONRAG_PROVIDER_CONCURRENCY_MAX_OUTBOUND "${WORK}/.env")" "16"
@@ -357,7 +385,6 @@ check "minted pg password" "$([ -n "$(env_get IRONRAG_POSTGRES_PASSWORD "${WORK}
 check "minted boot token"  "$([ -n "$(env_get IRONRAG_BOOTSTRAP_TOKEN "${WORK}/.env")" ] && echo yes)" "yes"
 credential_key="$(env_get IRONRAG_CREDENTIAL_MASTER_KEY "${WORK}/.env")"
 check "minted credential key" "$([ "${#credential_key}" -eq 44 ] && echo yes)" "yes"
-check "fresh install enables credential writes" "$(env_get IRONRAG_CREDENTIAL_ENCRYPTION_WRITE_ENABLED "${WORK}/.env")" "true"
 check "caps written fresh"  "$([ -n "$(env_get IRONRAG_DB_MEMORY_LIMIT "${WORK}/.env")" ] && echo yes)" "yes"
 rm -rf "$WORK"
 
@@ -394,6 +421,38 @@ if command -v script >/dev/null 2>&1; then
   rm -rf "$IWORK"
 else
   echo "  SKIP: util-linux 'script' not available — interactive path not exercised"
+fi
+
+echo "── integration: interactive wizard collects the admin trio (pseudo-tty) ──"
+# Same pty layer: the operator answers login, email and password at the wizard
+# and the generated .env must hold all three. Blank answers skip the optional
+# bootstrap entirely (covered by the pty case above), so a partial trio cannot
+# come from the interactive path either.
+if command -v script >/dev/null 2>&1; then
+  IWORK="$(mktemp -d)"
+  cp "${ROOT_DIR}/docker-compose.yml" "${IWORK}/"
+  cp "${ROOT_DIR}/.env.example"      "${IWORK}/"
+  # Prompts, in order: profile, port, admin login, admin email, admin password,
+  # review confirmation. Blank answers keep the default (review defaults to yes).
+  printf '\n\nops-admin\n%s\n%s\n\n' "$PTY_ADMIN_EMAIL" "$PTY_ADMIN_PW" >"${IWORK}/answers.txt"
+  if script -qec \
+       "IRONRAG_INSTALL_SKIP_DEPLOY=1 IRONRAG_INSTALL_SKIP_DOWNLOAD=1 bash ${INSTALL_SH} --interactive local ${IWORK}" \
+       /dev/null <"${IWORK}/answers.txt" >"${IWORK}/session.log" 2>&1; then
+    check "interactive: admin trio complete" \
+      "$(admin_trio_state "${IWORK}/.env")" "111"
+    check "interactive: admin email verbatim" \
+      "$(env_get IRONRAG_UI_BOOTSTRAP_ADMIN_EMAIL "${IWORK}/.env")" "$PTY_ADMIN_EMAIL"
+    check "interactive: admin password verbatim" \
+      "$(env_get IRONRAG_UI_BOOTSTRAP_ADMIN_PASSWORD "${IWORK}/.env")" "$PTY_ADMIN_PW"
+    if grep -aq 'install.sh:' "${IWORK}/session.log"; then
+      fail "interactive admin: shell error in session ($(grep -am1 'install.sh:' "${IWORK}/session.log"))"
+    else pass; fi
+  else
+    echo "  SKIP: pty harness (script) failed to run on this host"
+  fi
+  rm -rf "$IWORK"
+else
+  echo "  SKIP: util-linux 'script' not available — interactive admin path not exercised"
 fi
 
 # ── require_resolved: the non-interactive fail-fast contract (sourced). ──────
@@ -438,8 +497,10 @@ echo "── --help: exits 0 and lists every option ──"
 HELP_OUT="$(bash "$INSTALL_SH" --help 2>&1)"; check "--help exit 0" "$?" "0"
 for tok in \
   "--non-interactive" "--interactive" "--port" "--profile" "--admin-login" \
+  "--admin-email" \
   "--plan-only" "--recompute-resources" "--reset-volumes" "--help" \
-  "IRONRAG_PORT" "IRONRAG_PROFILE" "IRONRAG_ADMIN_LOGIN" "IRONRAG_ADMIN_PASSWORD" \
+  "IRONRAG_PORT" "IRONRAG_PROFILE" "IRONRAG_ADMIN_LOGIN" "IRONRAG_ADMIN_EMAIL" \
+  "IRONRAG_ADMIN_PASSWORD" \
   "IRONRAG_AI_PROVIDER_API_KEYS_JSON_B64" \
   "precedence"
 do
@@ -448,6 +509,10 @@ do
     *) fail "--help omits ${tok}" ;;
   esac
 done
+
+# ── Undocumented aliases are rejected rather than silently retained. ─────────
+echo "── removed aliases are rejected ──"
+bash "$INSTALL_SH" --dry-run </dev/null >/dev/null 2>&1; check "--dry-run -> 2" "$?" "2"
 
 # ── A value-taking flag with no operand must error (exit 2), not eat the next flag. ──
 echo "── flag-needs-value guard ──"
@@ -461,7 +526,6 @@ cp "${ROOT_DIR}/docker-compose.yml" "${WORK}/docker-compose.yml"
 cp "${ROOT_DIR}/.env.example"      "${WORK}/.env.example"
 # Fresh .env; every answer is supplied via env (no flags), with no TTY. The
 # synthetic values exercise the verbatim atomic .env write and log redaction.
-ENV_ADMIN_PW='pw&with|specials'         # pragma: allowlist secret  (synthetic)
 ENV_PROVIDER_PLAINTEXT='plaintext-$#-leak-marker' # pragma: allowlist secret  (synthetic)
 ENV_PROVIDER_KEYS_JSON_B64="$(encode_provider_map "{\"unseen-gateway7\":\"${ENV_PROVIDER_PLAINTEXT}\"}")" # pragma: allowlist secret  (synthetic)
 IRONRAG_NONINTERACTIVE=1 \
@@ -470,6 +534,7 @@ IRONRAG_INSTALL_SKIP_DEPLOY=1 \
 IRONRAG_PORT=18123 \
 IRONRAG_PROFILE=small \
 IRONRAG_ADMIN_LOGIN=root \
+IRONRAG_ADMIN_EMAIL="$ENV_ADMIN_EMAIL" \
 IRONRAG_ADMIN_PASSWORD="$ENV_ADMIN_PW" \
 IRONRAG_AI_PROVIDER_API_KEYS_JSON_B64="$ENV_PROVIDER_KEYS_JSON_B64" \
   bash "$INSTALL_SH" local "$WORK" </dev/null >"${WORK}/install.log" 2>&1
@@ -484,12 +549,74 @@ check "env profile applied"   "$(env_get IRONRAG_DB_MEMORY_LIMIT "${WORK}/.env")
 check "env provider cap applied" "$(env_get IRONRAG_PROVIDER_CONCURRENCY_MAX_OUTBOUND "${WORK}/.env")" "12"
 check "env provider reserve applied" "$(env_get IRONRAG_PROVIDER_CONCURRENCY_QUERY_RESERVED "${WORK}/.env")" "3"
 check "env admin login"       "$(env_get IRONRAG_UI_BOOTSTRAP_ADMIN_LOGIN "${WORK}/.env")" "root"
+check "env admin email"       "$(env_get IRONRAG_UI_BOOTSTRAP_ADMIN_EMAIL "${WORK}/.env")" "$ENV_ADMIN_EMAIL"
 check "env admin password"    "$(env_get IRONRAG_UI_BOOTSTRAP_ADMIN_PASSWORD "${WORK}/.env")" "$ENV_ADMIN_PW"
+check "generated .env carries the complete admin trio" "$(admin_trio_state "${WORK}/.env")" "111"
+check "installer never prints admin password" \
+  "$(grep -Fq -- "$ENV_ADMIN_PW" "${WORK}/install.log" && echo leaked || echo clean)" "clean"
 check "env arbitrary provider key" \
   "$(env_get IRONRAG_AI_PROVIDER_API_KEYS_JSON_B64 "${WORK}/.env")" "$ENV_PROVIDER_KEYS_JSON_B64"
 check "frontend origin synced to port" \
   "$(env_get IRONRAG_FRONTEND_ORIGIN "${WORK}/.env")" \
   "http://127.0.0.1:18123,http://localhost:18123"
+rm -rf "$WORK"
+
+# ── Admin bootstrap: the wizard writes the API's complete triple, or nothing. ─
+#
+# `validate_ui_bootstrap_admin_settings` accepts login + email + password only
+# as all-set or all-unset, and every role loads it, so a login written without
+# its email leaves `startup` exiting non-zero and `wait_for_startup_authority`
+# stopping the whole stack: the generated .env, not the prompt, is what the app
+# later validates. A partial triple must therefore be refused before the staged
+# .env is promoted.
+echo "── integration: a partial admin triple is refused before .env is promoted ──"
+WORK="$(mktemp -d)"
+cp "${ROOT_DIR}/docker-compose.yml" "${WORK}/docker-compose.yml"
+cp "${ROOT_DIR}/.env.example"      "${WORK}/.env.example"
+# Pre-existing .env with its secrets already present, so the refusal must leave
+# it byte-identical: the credential master key is back-filled into the LIVE file
+# (not the stage), so it is seeded here and only the staged admin write differs.
+{
+  printf 'IRONRAG_POSTGRES_PASSWORD=pg-keep-0009\n' # pragma: allowlist secret (synthetic)
+  printf 'IRONRAG_CREDENTIAL_MASTER_KEY=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\n' # pragma: allowlist secret (synthetic)
+} >"${WORK}/.env"
+ENV_BEFORE="$(cat "${WORK}/.env")"
+IRONRAG_NONINTERACTIVE=1 \
+IRONRAG_INSTALL_SKIP_DOWNLOAD=1 \
+IRONRAG_INSTALL_SKIP_DEPLOY=1 \
+IRONRAG_ADMIN_LOGIN=ops-admin \
+IRONRAG_ADMIN_PASSWORD="$ENV_ADMIN_PW" \
+  bash "$INSTALL_SH" local "$WORK" </dev/null >"${WORK}/install.log" 2>&1
+check "login+password without email exits 3" "$?" "3"
+check "refused partial trio keeps .env byte-identical" "$(cat "${WORK}/.env")" "$ENV_BEFORE"
+check "no admin trio written" "$(admin_trio_state "${WORK}/.env")" "000"
+case "$(cat "${WORK}/install.log")" in
+  *IRONRAG_UI_BOOTSTRAP_ADMIN_EMAIL*) pass ;;
+  *) fail "the refusal must name the missing bootstrap field; got [$(cat "${WORK}/install.log")]" ;;
+esac
+rm -rf "$WORK"
+
+# A re-run that re-enters only the login keeps the stored email/password and the
+# resulting .env is still a complete trio, so it must not be refused.
+echo "── integration: re-entering the login keeps a complete stored trio ──"
+WORK="$(mktemp -d)"
+cp "${ROOT_DIR}/docker-compose.yml" "${WORK}/docker-compose.yml"
+cp "${ROOT_DIR}/.env.example"      "${WORK}/.env.example"
+{
+  printf 'IRONRAG_UI_BOOTSTRAP_ADMIN_LOGIN=ops-admin\n'
+  printf 'IRONRAG_UI_BOOTSTRAP_ADMIN_EMAIL=%s\n' "$ENV_ADMIN_EMAIL"
+  printf 'IRONRAG_UI_BOOTSTRAP_ADMIN_PASSWORD=%s\n' "$ENV_ADMIN_PW"
+} >"${WORK}/.env" # pragma: allowlist secret (synthetic)
+IRONRAG_NONINTERACTIVE=1 \
+IRONRAG_INSTALL_SKIP_DOWNLOAD=1 \
+IRONRAG_INSTALL_SKIP_DEPLOY=1 \
+IRONRAG_ADMIN_LOGIN=ops-admin-renamed \
+  bash "$INSTALL_SH" local "$WORK" </dev/null >"${WORK}/install.log" 2>&1
+check "login-only re-run exit 0" "$?" "0"
+check "login re-entered"      "$(env_get IRONRAG_UI_BOOTSTRAP_ADMIN_LOGIN "${WORK}/.env")" "ops-admin-renamed"
+check "stored email kept"     "$(env_get IRONRAG_UI_BOOTSTRAP_ADMIN_EMAIL "${WORK}/.env")" "$ENV_ADMIN_EMAIL"
+check "stored password kept"  "$(env_get IRONRAG_UI_BOOTSTRAP_ADMIN_PASSWORD "${WORK}/.env")" "$ENV_ADMIN_PW"
+check "re-run keeps a complete trio" "$(admin_trio_state "${WORK}/.env")" "111"
 rm -rf "$WORK"
 
 # ── Flag tier beats env tier for non-secret values. ─────────────────────────
@@ -523,6 +650,30 @@ case "$(cat "${WORK}/out.log")" in
 esac
 check "non-TTY wrote default port" "$(env_get IRONRAG_PORT "${WORK}/.env")" "19000"
 rm -rf "$WORK"
+
+# ── A different install must not trip over the default project's volumes. ──
+#
+# The guard that refuses to mint fresh secrets next to surviving Postgres
+# volumes checked two hardcoded names — `ironrag_postgres_data` and
+# `ironrag_content_storage_data` — no matter what the install was called. On a
+# host already running one IronRAG stack, a second install into its own
+# directory therefore refused, and the remedy it offered (`--reset-volumes`)
+# would have deleted the first one's database.
+echo "── volume guard: names only the project being installed ──"
+GUARD_BLOCK="$(
+  awk '/stale Docker volumes survive/,0' "$INSTALL_SH" | head -1
+  awk '/for vol in ironrag_postgres_data/{found=1} END{if(!found) print "MISSING"}' "$INSTALL_SH"
+)"
+case "$(awk '/^ *if \[ "\$compose_project" = "ironrag" \]; then/{print "guarded"}' "$INSTALL_SH")" in
+  *guarded*) pass ;;
+  *) fail "the legacy volume names are checked for every project, not only ironrag" ;;
+esac
+# The generic, label-based lookup must still be there: it is what actually
+# protects an install from its own leftovers.
+case "$(grep -c 'com.docker.compose.project=\${compose_project}' "$INSTALL_SH")" in
+  0) fail "the project-scoped volume lookup is gone" ;;
+  *) pass ;;
+esac
 
 # ── Report ──
 echo ""

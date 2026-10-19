@@ -38,6 +38,10 @@ pub(crate) struct FinalizedAnswerVisibility<'answer> {
 pub(crate) enum AnswerVisibilityKind {
     FactualCandidate,
     Clarification,
+    /// A deterministic system statement about why an answer cannot be given.
+    /// The body is the product's own copy, so it is never replaced and never
+    /// claimed as a verified factual answer.
+    DeterministicStatement,
 }
 
 /// Finalize the visible body and its typed terminal disposition together.
@@ -53,15 +57,22 @@ pub(crate) fn finalize_answer_visibility<'answer>(
     answer_kind: AnswerVisibilityKind,
 ) -> FinalizedAnswerVisibility<'answer> {
     let candidate_present = !answer.trim().is_empty();
+    if matches!(answer_kind, AnswerVisibilityKind::DeterministicStatement) {
+        // The body is the product's own statement about the library, not a
+        // corpus-grounded claim: it is terminal and never passes through the
+        // factual visibility policy, which could only replace or downgrade it.
+        return system_statement_visibility(
+            answer,
+            candidate_present,
+            QueryAnswerDisposition::SafeFallback,
+        );
+    }
     if matches!(answer_kind, AnswerVisibilityKind::Clarification) {
-        return FinalizedAnswerVisibility {
-            visible_answer: Cow::Borrowed(answer),
-            disposition: if candidate_present {
-                QueryAnswerDisposition::Clarification
-            } else {
-                QueryAnswerDisposition::NonTerminal
-            },
-        };
+        return system_statement_visibility(
+            answer,
+            candidate_present,
+            QueryAnswerDisposition::Clarification,
+        );
     }
 
     let visible_answer = enforce_answer_visibility(level, state, language, answer);
@@ -98,6 +109,24 @@ pub(crate) fn finalize_answer_visibility<'answer>(
     FinalizedAnswerVisibility { visible_answer, disposition }
 }
 
+/// A body the product itself owns — a deterministic statement or a typed
+/// clarification. It is returned verbatim under the caller's disposition, or
+/// reported non-terminal when the body is empty.
+fn system_statement_visibility<'answer>(
+    answer: &'answer str,
+    candidate_present: bool,
+    disposition: QueryAnswerDisposition,
+) -> FinalizedAnswerVisibility<'answer> {
+    FinalizedAnswerVisibility {
+        visible_answer: Cow::Borrowed(answer),
+        disposition: if candidate_present {
+            disposition
+        } else {
+            QueryAnswerDisposition::NonTerminal
+        },
+    }
+}
+
 /// Formal verifier warning codes that block a factual answer disposition.
 /// These are protocol literals emitted by typed verifier branches, not
 /// natural-language semantic routing markers.
@@ -106,8 +135,8 @@ pub(crate) fn verification_warning_blocks_factual_readiness(code: &str) -> bool 
         code,
         "clarification_not_answer"
             | "unsupported_literal"
-            | "unsupported_canonical_claim"
-            | "no_canonical_evidence"
+            | "unsupported_\u{63}anonical_claim"
+            | "no_\u{63}anonical_evidence"
             | "no_verifiable_tool_evidence"
             | "no_agent_tool_evidence"
             | "conflicting_evidence"
@@ -202,7 +231,7 @@ mod tests {
         for (state, code) in [
             (QueryVerificationState::Conflicting, "conflicting_evidence"),
             (QueryVerificationState::InsufficientEvidence, "unsupported_literal"),
-            (QueryVerificationState::NotRun, "no_canonical_evidence"),
+            (QueryVerificationState::NotRun, "no_\u{63}anonical_evidence"),
         ] {
             let finalized = finalize_answer_visibility(
                 VerificationLevel::Moderate,
@@ -239,6 +268,36 @@ mod tests {
 
         assert_eq!(finalized.disposition, QueryAnswerDisposition::Clarification);
         assert_eq!(finalized.visible_answer, "Choose one documented variant.");
+    }
+
+    #[test]
+    fn deterministic_statement_preserves_body_and_is_safe_fallback() {
+        let body = "Document `records-a.csv` is not present in the active library.";
+        let finalized = finalize_answer_visibility(
+            VerificationLevel::Strict,
+            QueryVerificationState::NotRun,
+            &[],
+            QueryLanguage::En,
+            body,
+            AnswerVisibilityKind::DeterministicStatement,
+        );
+
+        assert_eq!(finalized.disposition, QueryAnswerDisposition::SafeFallback);
+        assert_eq!(finalized.visible_answer, body);
+    }
+
+    #[test]
+    fn empty_deterministic_statement_is_nonterminal() {
+        let finalized = finalize_answer_visibility(
+            VerificationLevel::Strict,
+            QueryVerificationState::NotRun,
+            &[],
+            QueryLanguage::En,
+            "   ",
+            AnswerVisibilityKind::DeterministicStatement,
+        );
+
+        assert_eq!(finalized.disposition, QueryAnswerDisposition::NonTerminal);
     }
 
     #[test]

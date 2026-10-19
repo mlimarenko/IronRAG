@@ -6,7 +6,6 @@ pub mod persistence;
 pub mod pipeline;
 pub mod policy;
 pub mod registry;
-pub mod request;
 pub mod response;
 pub mod task;
 pub mod tasks;
@@ -64,7 +63,7 @@ impl AgentRuntime {
 
     /// # Errors
     /// Returns an error when the runtime request is invalid or the seeded execution cannot be
-    /// persisted as the canonical runtime owner record.
+    /// persisted as the active runtime owner record.
     pub async fn seed_and_persist_session<T>(
         &self,
         pool: &PgPool,

@@ -3,7 +3,10 @@ use sqlx::FromRow;
 use thiserror::Error;
 use uuid::Uuid;
 
-use super::super::{content_repository, ingest_repository, ops_repository};
+use super::super::{
+    content_document_repository, content_mutation_repository, content_revision_repository,
+    ingest_repository, ops_repository,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AdmissionFailpoint {
@@ -29,43 +32,54 @@ pub enum AdmissionError {
     TargetDocumentDeleted { document_id: Uuid },
     #[error("target document {document_id} no longer belongs to the requested scope")]
     TargetDocumentScopeConflict { document_id: Uuid },
-    #[error("target document {document_id} head references violate canonical ownership")]
+    #[error("target document {document_id} head references violate single ownership")]
     TargetDocumentHeadIntegrity { document_id: Uuid },
-    #[error("legacy admission {mutation_id} is incomplete and cannot be repaired safely: {reason}")]
-    IncompleteLegacy { mutation_id: Uuid, reason: &'static str },
     #[error("admission invariant failed: {0}")]
     InvariantViolation(&'static str),
+    #[error("library {library_id} is not active")]
+    LibraryArchived { library_id: Uuid },
     #[error("document {document_id} is still processing another mutation")]
     ConflictingActiveMutation { document_id: Uuid },
     #[error("an active document with this external key already exists: {existing_document_id}")]
     DuplicateExternalKey { existing_document_id: Uuid },
+    #[error("an active document with identical content already exists: {existing_document_id}")]
+    DuplicateChecksum { existing_document_id: Uuid },
+    #[error("document {document_id} has an incomplete admission that cannot be completed safely")]
+    DocumentAdmissionIncomplete { document_id: Uuid },
     #[error("admission failpoint triggered after {0:?}")]
     InjectedFailure(AdmissionFailpoint),
     #[error("admission database operation failed")]
     Database(#[from] sqlx::Error),
     #[error("admission request fingerprint could not be encoded")]
     FingerprintEncoding(#[from] serde_json::Error),
+    #[error("invalid replacement identity: {0}")]
+    InvalidReplacementIdentity(#[from] ironrag_contracts::documents::ReplacementIdentityError),
+    #[error("document {document_id} requires an accepted visibility intent")]
+    VisibilityIntentRequired { document_id: Uuid },
+    #[error("visibility intent is not current for document {document_id}")]
+    VisibilityIntentSuperseded { document_id: Uuid },
+    #[error("replacement does not match visibility intent for document {document_id}")]
+    VisibilityBindingConflict { document_id: Uuid },
 }
 
 #[derive(Debug, Clone)]
 pub enum AdmissionOutcome<T> {
     Created(T),
     Replayed(T),
-    RepairedLegacy(T),
 }
 
 impl<T> AdmissionOutcome<T> {
     #[must_use]
     pub const fn bundle(&self) -> &T {
         match self {
-            Self::Created(bundle) | Self::Replayed(bundle) | Self::RepairedLegacy(bundle) => bundle,
+            Self::Created(bundle) | Self::Replayed(bundle) => bundle,
         }
     }
 
     #[must_use]
     pub fn into_bundle(self) -> T {
         match self {
-            Self::Created(bundle) | Self::Replayed(bundle) | Self::RepairedLegacy(bundle) => bundle,
+            Self::Created(bundle) | Self::Replayed(bundle) => bundle,
         }
     }
 }
@@ -85,13 +99,9 @@ pub enum ContentAdmissionTarget {
 #[derive(Debug, Clone)]
 pub struct RevisionAdmission {
     pub content_source_kind: String,
-    pub checksum: String,
-    pub mime_type: String,
-    pub byte_size: i64,
-    pub title: Option<String>,
-    pub language_code: Option<String>,
-    pub source_uri: Option<String>,
-    pub document_hint: Option<String>,
+    pub replacement: ironrag_contracts::documents::ReplacementIdentity,
+    pub visibility_intent_id: Option<Uuid>,
+    pub base_revision_id: Option<Uuid>,
     pub storage_key: Option<String>,
 }
 
@@ -108,6 +118,27 @@ pub struct ContentAdmissionRequest {
     pub revision: Option<RevisionAdmission>,
     pub parent_async_operation_id: Option<Uuid>,
     pub priority: i32,
+}
+
+/// Authenticated scope for a complete visibility admission; no revision/job input.
+#[derive(Debug, Clone)]
+pub struct VisibilityAdmissionRequest {
+    pub workspace_id: Uuid,
+    pub library_id: Uuid,
+    pub document_id: Uuid,
+    pub requested_by_principal_id: Option<Uuid>,
+    pub request_surface: String,
+    pub intent: ironrag_contracts::documents::CreateVisibilityIntentRequest,
+}
+
+/// A visibility receipt proves its own complete applied, no-job bundle.
+#[derive(Debug, Clone)]
+pub struct VisibilityAdmissionBundle {
+    pub mutation: content_mutation_repository::ContentMutationRow,
+    pub document: content_document_repository::ContentDocumentRow,
+    pub item: content_mutation_repository::ContentMutationItemRow,
+    pub async_operation: ops_repository::OpsAsyncOperationRow,
+    pub receipt: ironrag_contracts::documents::VisibilityIntentReceipt,
 }
 
 #[derive(Debug, Clone)]
@@ -130,17 +161,15 @@ pub struct WebRunAdmissionRequest {
     pub source_identity: Option<String>,
 }
 
-/// Existing canonical identities required to admit one fetched web revision
-/// into the content-ingest queue. Document/revision creation deliberately
-/// remains outside this short transaction; every lifecycle row that makes the
-/// revision runnable is committed by the materialization admission `UoW`.
+/// Snapshot metadata for an atomic, independently owned page admission.
 #[derive(Debug, Clone)]
 pub struct WebCaptureMaterializationAdmissionRequest {
     pub workspace_id: Uuid,
     pub library_id: Uuid,
     pub mutation_id: Uuid,
-    pub document_id: Uuid,
-    pub revision_id: Uuid,
+    pub final_url: String,
+    pub replacement: ironrag_contracts::documents::ReplacementIdentity,
+    pub storage_key: String,
     pub requested_by_principal_id: Option<Uuid>,
     pub priority: i32,
 }
@@ -159,10 +188,10 @@ pub struct AdmissionIngestJobRow {
 
 #[derive(Debug, Clone)]
 pub struct ContentAdmissionBundle {
-    pub mutation: content_repository::ContentMutationRow,
-    pub document: content_repository::ContentDocumentRow,
-    pub revision: Option<content_repository::ContentRevisionRow>,
-    pub item: Option<content_repository::ContentMutationItemRow>,
+    pub mutation: content_mutation_repository::ContentMutationRow,
+    pub document: content_document_repository::ContentDocumentRow,
+    pub revision: Option<content_revision_repository::ContentRevisionRow>,
+    pub item: Option<content_mutation_repository::ContentMutationItemRow>,
     pub job: Option<AdmissionIngestJobRow>,
     pub async_operation: ops_repository::OpsAsyncOperationRow,
 }
@@ -197,43 +226,17 @@ impl ContentAdmissionBundle {
 }
 
 #[derive(Debug, Clone)]
-pub struct WebCaptureMaterializationAdmissionBundle {
-    pub mutation: content_repository::ContentMutationRow,
-    pub document: content_repository::ContentDocumentRow,
-    pub revision: content_repository::ContentRevisionRow,
-    pub item: content_repository::ContentMutationItemRow,
-    pub job: ingest_repository::IngestJobRow,
-    pub head: content_repository::ContentDocumentHeadRow,
-}
-
-impl WebCaptureMaterializationAdmissionBundle {
-    #[must_use]
-    pub fn is_complete(&self) -> bool {
-        self.mutation.operation_kind == "web_capture"
-            && self.document.workspace_id == self.mutation.workspace_id
-            && self.document.library_id == self.mutation.library_id
-            && self.revision.document_id == self.document.id
-            && self.revision.workspace_id == self.document.workspace_id
-            && self.revision.library_id == self.document.library_id
-            && self.item.mutation_id == self.mutation.id
-            && self.item.document_id == Some(self.document.id)
-            && self.item.result_revision_id == Some(self.revision.id)
-            && self.job.mutation_id == Some(self.mutation.id)
-            && self.job.mutation_item_id == Some(self.item.id)
-            && self.job.workspace_id == self.mutation.workspace_id
-            && self.job.library_id == self.mutation.library_id
-            && self.job.connector_id.is_none()
-            && self.job.async_operation_id.is_none()
-            && self.job.knowledge_document_id == Some(self.document.id)
-            && self.job.knowledge_revision_id == Some(self.revision.id)
-            && self.job.job_kind == "content_mutation"
-            && self.head.document_id == self.document.id
-    }
+pub enum WebCaptureMaterializationAdmissionBundle {
+    Ingested(Box<ContentAdmissionBundle>),
+    DuplicateContent {
+        existing_document_id: Uuid,
+        item: content_mutation_repository::ContentMutationItemRow,
+    },
 }
 
 #[derive(Debug, Clone)]
 pub struct WebRunAdmissionBundle {
-    pub mutation: content_repository::ContentMutationRow,
+    pub mutation: content_mutation_repository::ContentMutationRow,
     pub async_operation: ops_repository::OpsAsyncOperationRow,
     pub run: ingest_repository::WebIngestRunRow,
     pub seed: ingest_repository::WebDiscoveredPageRow,
@@ -244,7 +247,14 @@ impl WebRunAdmissionBundle {
     #[must_use]
     pub fn is_complete(&self) -> bool {
         self.run.mutation_id == self.mutation.id
+            && self.run.workspace_id == self.mutation.workspace_id
+            && self.run.library_id == self.mutation.library_id
+            && self.run.requested_by_principal_id == self.mutation.requested_by_principal_id
             && self.run.async_operation_id == Some(self.async_operation.id)
+            && self.async_operation.workspace_id == self.mutation.workspace_id
+            && self.async_operation.library_id == Some(self.mutation.library_id)
+            && self.async_operation.parent_async_operation_id.is_none()
+            && self.async_operation.surface_kind == self.mutation.request_surface
             && self.async_operation.subject_kind == "content_web_ingest_run"
             && self.async_operation.subject_id == Some(self.run.id)
             && self.seed.run_id == self.run.id
@@ -276,8 +286,8 @@ pub(super) struct MutationIdentityRow {
 }
 
 impl MutationIdentityRow {
-    pub(super) fn into_row(self) -> content_repository::ContentMutationRow {
-        content_repository::ContentMutationRow {
+    pub(super) fn into_row(self) -> content_mutation_repository::ContentMutationRow {
+        content_mutation_repository::ContentMutationRow {
             id: self.id,
             workspace_id: self.workspace_id,
             library_id: self.library_id,
@@ -291,6 +301,7 @@ impl MutationIdentityRow {
             completed_at: self.completed_at,
             failure_code: self.failure_code,
             conflict_code: self.conflict_code,
+            request_fingerprint: self.request_fingerprint,
         }
     }
 }

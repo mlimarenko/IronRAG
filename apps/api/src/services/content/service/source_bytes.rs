@@ -1,12 +1,9 @@
 use sha2::{Digest, Sha256};
-use uuid::Uuid;
 
 #[derive(Debug, Clone)]
 pub(super) struct AppendableDocumentSource {
     pub(super) raw_bytes: Vec<u8>,
-    pub(super) mime_type: String,
-    pub(super) title: Option<String>,
-    pub(super) language_code: Option<String>,
+    pub(super) replacement: ironrag_contracts::documents::ReplacementIdentity,
 }
 
 /// Returns true when `mime_type` is safe for source-format append.
@@ -46,6 +43,34 @@ pub(super) fn source_uri_for_inline_payload(
     }
 }
 
+/// Canonical MIME type for a lowercased file extension, or `None` when the
+/// extension is not one the inline surfaces recognise. Pure: the fallback
+/// kind decision below stays separate from the extension table.
+fn canonical_mime_for_extension(extension: &str) -> Option<&'static str> {
+    Some(match extension {
+        "pdf" => "application/pdf",
+        "docx" => "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        "xls" => "application/vnd.ms-excel",
+        "xlsx" => "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        "xlsb" => "application/vnd.ms-excel.sheet.binary.macroenabled.12",
+        "ods" => "application/vnd.oasis.opendocument.spreadsheet",
+        "csv" => "text/csv",
+        "tsv" => "text/tab-separated-values",
+        "pptx" => "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+        "md" => "text/markdown",
+        "txt" => "text/plain",
+        "json" => "application/json",
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "bmp" => "image/bmp",
+        "webp" => "image/webp",
+        "svg" => "image/svg+xml",
+        "tif" | "tiff" => "image/tiff",
+        _ => return None,
+    })
+}
+
 pub(super) fn infer_inline_mime_type(
     requested_mime_type: Option<&str>,
     file_name: Option<&str>,
@@ -59,38 +84,16 @@ pub(super) fn infer_inline_mime_type(
         return mime_type.to_string();
     }
 
-    match file_name.and_then(file_extension) {
-        Some(extension) if extension == "pdf" => "application/pdf".to_string(),
-        Some(extension) if extension == "docx" => {
-            "application/vnd.openxmlformats-officedocument.wordprocessingml.document".to_string()
-        }
-        Some(extension) if extension == "xls" => "application/vnd.ms-excel".to_string(),
-        Some(extension) if extension == "xlsx" => {
-            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet".to_string()
-        }
-        Some(extension) if extension == "xlsb" => {
-            "application/vnd.ms-excel.sheet.binary.macroenabled.12".to_string()
-        }
-        Some(extension) if extension == "ods" => {
-            "application/vnd.oasis.opendocument.spreadsheet".to_string()
-        }
-        Some(extension) if extension == "csv" => "text/csv".to_string(),
-        Some(extension) if extension == "tsv" => "text/tab-separated-values".to_string(),
-        Some(extension) if extension == "pptx" => {
-            "application/vnd.openxmlformats-officedocument.presentationml.presentation".to_string()
-        }
-        Some(extension) if extension == "md" => "text/markdown".to_string(),
-        Some(extension) if extension == "txt" => "text/plain".to_string(),
-        Some(extension) if extension == "json" => "application/json".to_string(),
-        Some(extension) if extension == "png" => "image/png".to_string(),
-        Some(extension) if extension == "jpg" || extension == "jpeg" => "image/jpeg".to_string(),
-        Some(extension) if extension == "gif" => "image/gif".to_string(),
-        Some(extension) if extension == "bmp" => "image/bmp".to_string(),
-        Some(extension) if extension == "webp" => "image/webp".to_string(),
-        Some(extension) if extension == "svg" => "image/svg+xml".to_string(),
-        Some(extension) if extension == "tif" || extension == "tiff" => "image/tiff".to_string(),
-        _ if fallback_kind == "append" => "text/plain".to_string(),
-        _ if fallback_kind == "edit" => "text/markdown".to_string(),
+    if let Some(mime_type) = file_name
+        .and_then(file_extension)
+        .and_then(|extension| canonical_mime_for_extension(&extension))
+    {
+        return mime_type.to_string();
+    }
+
+    match fallback_kind {
+        "append" => "text/plain".to_string(),
+        "edit" => "text/markdown".to_string(),
         _ => "application/octet-stream".to_string(),
     }
 }
@@ -98,14 +101,6 @@ pub(super) fn infer_inline_mime_type(
 fn file_extension(file_name: &str) -> Option<String> {
     let (_, extension) = file_name.rsplit_once('.')?;
     Some(extension.trim().to_ascii_lowercase())
-}
-
-pub(super) fn edited_markdown_file_name(title: Option<&str>, document_id: Uuid) -> String {
-    let base = title.map(str::trim).filter(|value| !value.is_empty()).unwrap_or("document");
-    let stem = base.rsplit_once('.').map_or(base, |(stem, _)| stem.trim());
-    let normalized_stem =
-        if stem.is_empty() { format!("document-{document_id}") } else { stem.to_string() };
-    format!("{normalized_stem}.md")
 }
 
 pub(super) fn sha256_hex_text(value: &str) -> String {
@@ -118,7 +113,7 @@ pub(super) fn sha256_hex_bytes(value: &[u8]) -> String {
     hex::encode(hasher.finalize())
 }
 
-/// Canonical byte-level merge for append.
+/// Byte-level merge for append.
 pub(super) fn merge_appended_bytes(
     existing_bytes: &[u8],
     appended_text: &str,
@@ -145,13 +140,20 @@ pub(super) fn merge_appended_bytes(
 
 #[cfg(test)]
 mod tests {
-    use uuid::Uuid;
-
     use super::{
-        edited_markdown_file_name, infer_inline_mime_type, is_appendable_text_mime,
+        canonical_mime_for_extension, infer_inline_mime_type, is_appendable_text_mime,
         merge_appended_bytes, source_uri_for_inline_payload,
     };
     use crate::shared::extraction::record_jsonl::extract_record_jsonl;
+
+    #[test]
+    fn canonical_mime_table_covers_aliases_and_unknowns() {
+        assert_eq!(canonical_mime_for_extension("jpeg"), Some("image/jpeg"));
+        assert_eq!(canonical_mime_for_extension("jpg"), Some("image/jpeg"));
+        assert_eq!(canonical_mime_for_extension("tiff"), Some("image/tiff"));
+        assert_eq!(canonical_mime_for_extension("bin"), None);
+        assert_eq!(canonical_mime_for_extension(""), None);
+    }
 
     #[test]
     fn infers_spreadsheet_inline_mime_type_from_file_name() {
@@ -175,16 +177,25 @@ mod tests {
     }
 
     #[test]
-    fn builds_canonical_markdown_file_name_for_edited_sources() {
-        assert_eq!(edited_markdown_file_name(Some("Inventory.xlsx"), Uuid::nil()), "Inventory.md");
-        assert_eq!(
-            edited_markdown_file_name(Some("Quarterly report"), Uuid::nil()),
-            "Quarterly report.md"
-        );
+    fn replacement_filename_is_explicit_not_derived_from_title() {
+        let replacement = ironrag_contracts::documents::ReplacementIdentity {
+            checksum: format!("sha256:{}", "a".repeat(64)),
+            byte_size: 4,
+            mime_type: "text/markdown".to_owned(),
+            file_name: "replacement.md".to_owned(),
+            title: Some("Inventory.xlsx".to_owned()),
+            language_code: None,
+            source_uri: None,
+            document_hint: None,
+        }
+        .normalize()
+        .expect("valid explicit replacement");
+        assert_eq!(replacement.file_name, "replacement.md");
+        assert_eq!(replacement.title.as_deref(), Some("Inventory.xlsx"));
     }
 
     #[test]
-    fn edit_inline_sources_use_canonical_inline_uri() {
+    fn edit_inline_sources_use_normalized_inline_uri() {
         assert_eq!(source_uri_for_inline_payload("edit", None, None), "edit://inline");
     }
 

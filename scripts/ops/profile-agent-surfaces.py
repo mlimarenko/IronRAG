@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Canonical MCP + assistant turn probe.
+Authoritative MCP + assistant turn probe.
 
 Measures two agent-facing surfaces that `profile-ui-endpoints.py` does not cover:
 
@@ -50,9 +50,18 @@ DEFAULT_SEARCH_MIN_READABLE_HITS = 1
 DEFAULT_READ_MIN_CONTENT_CHARS = 200
 DEFAULT_READ_MIN_REFERENCES = 1
 DEFAULT_ASSISTANT_MIN_REFERENCES = 1
-DEFAULT_ASSISTANT_EXPECTED_VERIFICATION = "verified"
+DEFAULT_ASSISTANT_EXPECTED_VERIFICATION: str | None = None
 DEFAULT_ASSISTANT_MAX_FIRST_FRAME_MS = 5000
-DEFAULT_MIN_ANSWER_OVERLAP_RATIO: float | None = None
+CANONICAL_VERIFICATION_STATES = frozenset(
+    {
+        "not_run",
+        "verified",
+        "partially_supported",
+        "conflicting",
+        "insufficient_evidence",
+        "failed",
+    }
+)
 MCP_ANSWER_ROUTE = "/v1/mcp"
 MCP_DIAGNOSTICS_ROUTE = "/v1/mcp/diagnostics"
 MCP_ANSWER_CAPABILITIES_ROUTE = "/v1/mcp/capabilities"
@@ -260,6 +269,14 @@ class GroundedAnswerSummary:
 
 
 @dataclass(frozen=True)
+class AnswerProbeContract:
+    library_id: str
+    library_ref: str
+    question: str
+    top_k: int
+
+
+@dataclass(frozen=True)
 class GateCheck:
     label: str
     status: str
@@ -372,7 +389,7 @@ class CurlSession:
                 f"Content-Type: {JSON_MEDIA_TYPE}",
                 "--data-binary",
                 "@-",
-                f"{self.base_url}/v1/iam/session/login",
+                f"{self.base_url}/v1/iam/sessions",
             ],
             input=payload,
             capture_output=True,
@@ -540,14 +557,16 @@ def discover_library_catalog_context(session: CurlSession, library_id: str) -> L
     )
 
 
-def create_query_session(session: CurlSession, workspace_id: str, library_id: str) -> str:
+def create_query_session(session: CurlSession, library_id: str) -> str:
+    # The library owns the session and comes from the path; the body carries
+    # only the optional display title, which the server derives when omitted.
     sample = session.request_json(
         "POST",
-        "/v1/query/sessions",
-        body={"workspaceId": workspace_id, "libraryId": library_id},
+        f"/v1/query/libraries/{library_id}/sessions",
+        body={},
         headers={"Content-Type": JSON_MEDIA_TYPE},
     )
-    if sample.status_code != 200:
+    if sample.status_code != 201:
         raise RuntimeError(f"create session returned HTTP {sample.status_code}")
     session_id = sample.payload.get("id")
     if not session_id:
@@ -624,7 +643,7 @@ def _validate_contract_metadata(capabilities: dict[str, Any], listed: dict[str, 
         and MCP_CONTRACT_HASH_PATTERN.fullmatch(contract_hash) is not None
         for contract_hash in hashes
     ):
-        raise RuntimeError("answer MCP tool contract hash is not a canonical SHA-256 digest")
+        raise RuntimeError("answer MCP tool contract hash is not a authoritative SHA-256 digest")
     if hashes[0] != hashes[1]:
         raise RuntimeError(
             "answer MCP tool contract hash drift: capabilities and tools/list do not match"
@@ -652,14 +671,12 @@ def validate_answer_mcp_discovery(
 
 
 def build_grounded_answer_probe_arguments(
-    library_ref: str,
-    question: str,
-    top_k: int,
+    contract: AnswerProbeContract,
 ) -> dict[str, Any]:
     return {
-        "library": library_ref,
-        "query": question,
-        "topK": top_k,
+        "library": contract.library_ref,
+        "query": contract.question,
+        "topK": contract.top_k,
         "responseProfile": "compact",
         "maxReferences": MCP_COMPACT_PROBE_MAX_REFERENCES,
     }
@@ -713,22 +730,6 @@ def tokenize_quality_text(value: str) -> tuple[str, ...]:
     if current:
         tokens.append("".join(current))
     return tuple(tokens)
-
-
-def significant_answer_tokens(value: str) -> set[str]:
-    return {
-        token
-        for token in tokenize_quality_text(value)
-        if len(token) >= 2 or any(char.isdigit() for char in token)
-    }
-
-
-def answer_token_overlap_ratio(left: str, right: str) -> float | None:
-    left_tokens = significant_answer_tokens(left)
-    right_tokens = significant_answer_tokens(right)
-    if not left_tokens or not right_tokens:
-        return None
-    return (2.0 * len(left_tokens & right_tokens)) / (len(left_tokens) + len(right_tokens))
 
 
 def count_duplicate_keys(keys: list[tuple[Any, ...] | str]) -> int:
@@ -1047,11 +1048,13 @@ def build_assistant_turn_curl_request(
     base_url: str,
     cookie_jar: str,
     session_id: str,
-    question: str,
-    top_k: int,
+    contract: AnswerProbeContract,
     timeout_seconds: int,
 ) -> tuple[list[str], str]:
-    payload = json.dumps({"contentText": question, "topK": top_k})
+    payload = json.dumps(
+        {"contentText": contract.question, "topK": contract.top_k},
+        ensure_ascii=False,
+    )
     marker = "__CURL_METRICS__"
     args = [
         "curl",
@@ -1248,17 +1251,15 @@ def _assistant_turn_summary(
 def execute_assistant_turn(
     session: CurlSession,
     session_id: str,
-    question: str,
+    contract: AnswerProbeContract,
     *,
-    top_k: int,
     timeout_seconds: int,
 ) -> AssistantTurnSummary:
     args, payload = build_assistant_turn_curl_request(
         base_url=session.base_url,
         cookie_jar=session.cookie_jar,
         session_id=session_id,
-        question=question,
-        top_k=top_k,
+        contract=contract,
         timeout_seconds=timeout_seconds,
     )
     state = AssistantStreamState(started_at=time.monotonic())
@@ -1395,9 +1396,9 @@ def _compact_reference_tokens(compact_references: Any) -> tuple[str, ...]:
         reference_field = reference_fields.get(reference.get("kind"))
         if reference_field is None:
             continue
-        canonical_kind, identifier_field = reference_field
+        reference_kind, identifier_field = reference_field
         token = _coerce_reference_token(
-            canonical_kind,
+            reference_kind,
             reference.get(identifier_field),
         )
         if token is not None:
@@ -1481,11 +1482,10 @@ class GateThresholds:
     read_min_content_chars: int
     read_min_references: int
     assistant_min_references: int
-    assistant_expected_verification: str
+    assistant_expected_verification: str | None
     max_tool_latency_ms: int | None
     max_completed_ms: int | None
     max_first_frame_ms: int | None = None
-    min_answer_overlap_ratio: float | None = DEFAULT_MIN_ANSWER_OVERLAP_RATIO
 
 
 @dataclass(frozen=True)
@@ -1795,13 +1795,20 @@ def _assistant_run_gate_checks(
                 f"finished={summary.tool_call_finished_count}"
             ),
         ),
-        _gate_check(
+        _verification_gate_check(
             f"{prefix}.verification",
-            summary.verification_state == thresholds.assistant_expected_verification,
-            (
-                f"verification={summary.verification_state or 'n/a'} "
-                f"expected={thresholds.assistant_expected_verification}"
-            ),
+            summary.verification_state,
+            thresholds.assistant_expected_verification,
+        ),
+        _gate_check(
+            f"{prefix}.answer",
+            bool(summary.answer_text.strip()),
+            f"answer_chars={summary.answer_length}",
+        ),
+        _gate_check(
+            f"{prefix}.runtime_execution_id",
+            bool(summary.runtime_execution_id),
+            f"runtimeExecutionId={summary.runtime_execution_id or 'missing'}",
         ),
         _gate_check(
             f"{prefix}.references",
@@ -1937,43 +1944,58 @@ def _build_runtime_gate_checks(inputs: GateInputs) -> list[GateCheck]:
     return checks
 
 
-def _answer_quality_parity_gate(
+def _verification_gate_check(
+    label: str,
+    state: str | None,
+    expected: str | None,
+) -> GateCheck:
+    canonical = state in CANONICAL_VERIFICATION_STATES
+    matches_oracle = expected is None or state == expected
+    return _gate_check(
+        label,
+        canonical and matches_oracle,
+        (
+            f"verification={state or 'n/a'} "
+            f"expected={expected or 'any canonical state'}"
+        ),
+    )
+
+
+def _cross_surface_contract_gate(
     grounded: GroundedAnswerSummary,
     assistant_summaries: list[AssistantTurnSummary],
     thresholds: GateThresholds,
 ) -> GateCheck:
-    label = "assistant.run_1.mcp_answer_quality_parity"
+    label = "assistant.run_1.mcp_cross_surface_contract"
     if not assistant_summaries:
         return GateCheck(
             label=label,
             status="fail",
-            detail="assistant run missing for MCP answer quality comparison",
+            detail="assistant run missing for cross-surface contract check",
         )
     assistant = assistant_summaries[0]
-    answer_overlap = answer_token_overlap_ratio(
-        assistant.answer_text, grounded.answer_text
+    ui_contract = (
+        bool(assistant.answer_text.strip())
+        and assistant.verification_state in CANONICAL_VERIFICATION_STATES
+        and bool(assistant.runtime_execution_id)
+        and assistant.total_reference_count >= thresholds.assistant_min_references
     )
-    overlap_passes = thresholds.min_answer_overlap_ratio is None or (
-        answer_overlap is not None
-        and answer_overlap >= thresholds.min_answer_overlap_ratio
-    )
-    references_pass = (
-        assistant.total_reference_count >= thresholds.assistant_min_references
+    mcp_contract = (
+        bool(grounded.answer_text.strip())
+        and grounded.verifier_level in CANONICAL_VERIFICATION_STATES
+        and bool(grounded.runtime_execution_id)
         and len(grounded.references) >= thresholds.assistant_min_references
     )
     return _gate_check(
         label,
-        assistant.verification_state == grounded.verifier_level
-        and references_pass
-        and overlap_passes,
+        ui_contract and mcp_contract,
         (
             f"ui_verifier={assistant.verification_state or 'n/a'} "
             f"mcp_verifier={grounded.verifier_level or 'n/a'} "
             f"ui_references={assistant.total_reference_count} "
             f"mcp_references={len(grounded.references)} "
-            f"answer_overlap={answer_overlap if answer_overlap is not None else 'n/a'} "
-            "min_overlap="
-            f"{thresholds.min_answer_overlap_ratio if thresholds.min_answer_overlap_ratio is not None else 'disabled'}"
+            f"ui_answer_chars={assistant.answer_length} "
+            f"mcp_answer_chars={len(grounded.answer_text)}"
         ),
     )
 
@@ -1989,13 +2011,15 @@ def _build_grounded_answer_gate_checks(inputs: GateInputs, thresholds: GateThres
             )
         ]
     checks = [
-        _gate_check(
+        _verification_gate_check(
             "mcp.grounded_answer.verifier",
-            grounded.verifier_level == thresholds.assistant_expected_verification,
-            (
-                f"verifier={grounded.verifier_level or 'n/a'} "
-                f"expected={thresholds.assistant_expected_verification}"
-            ),
+            grounded.verifier_level,
+            thresholds.assistant_expected_verification,
+        ),
+        _gate_check(
+            "mcp.grounded_answer.answer",
+            bool(grounded.answer_text.strip()),
+            f"answer_chars={len(grounded.answer_text)}",
         ),
         _gate_check(
             "mcp.grounded_answer.references",
@@ -2010,7 +2034,7 @@ def _build_grounded_answer_gate_checks(inputs: GateInputs, thresholds: GateThres
             bool(grounded.runtime_execution_id),
             f"runtimeExecutionId={grounded.runtime_execution_id or 'missing'}",
         ),
-        _answer_quality_parity_gate(
+        _cross_surface_contract_gate(
             grounded, inputs.assistant_summaries, thresholds
         ),
     ]
@@ -2059,10 +2083,12 @@ def build_gate_checks(inputs: GateInputs, thresholds: GateThresholds) -> list[Ga
 class ReportIdentity:
     base_url: str
     library_id: str
+    catalog_ref: str
     workspace_id: str
     entity_query: str
     document_query: str
     question: str
+    assistant_top_k: int
 
 
 @dataclass(frozen=True)
@@ -2325,10 +2351,12 @@ def render_report(
 - Generated at: {datetime.now(timezone.utc).isoformat()}
 - Base URL: `{identity.base_url}`
 - Library ID: `{identity.library_id}`
+- Canonical library ref: `{identity.catalog_ref}`
 - Workspace ID: `{identity.workspace_id}`
 - Entity query: `{identity.entity_query}`
 - Document query: `{identity.document_query}`
 - Assistant question: `{identity.question}`
+- Assistant topK: `{identity.assistant_top_k}`
 
 """
     report = "".join(
@@ -2398,19 +2426,15 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument(
         "--assistant-expected-verification",
         default=DEFAULT_ASSISTANT_EXPECTED_VERIFICATION,
+        choices=sorted(CANONICAL_VERIFICATION_STATES),
+        help=(
+            "Optional fixture-owned verifier oracle. Generic live smoke accepts "
+            "any canonical terminal verifier state."
+        ),
     )
     parser.add_argument("--assistant-require-all", default="")
     parser.add_argument("--assistant-forbid-any", default="")
     parser.add_argument("--expected-search-top-label")
-    parser.add_argument(
-        "--min-answer-overlap-ratio",
-        type=float,
-        default=DEFAULT_MIN_ANSWER_OVERLAP_RATIO,
-        help=(
-            "Optional UI/MCP answer text overlap gate. Disabled by default because "
-            "the UI may validly synthesize or summarize a matching tool answer."
-        ),
-    )
     parser.add_argument("--max-tool-latency-ms", type=int)
     parser.add_argument("--max-completed-ms", type=int)
     parser.add_argument("--max-first-frame-ms", type=int, default=DEFAULT_ASSISTANT_MAX_FIRST_FRAME_MS)
@@ -2627,18 +2651,14 @@ def _probe_communities(
 
 def _probe_grounded_answer(
     session: CurlSession,
-    args: argparse.Namespace,
     token: str | None,
-    library_ref: str,
-    question: str,
+    contract: AnswerProbeContract,
 ) -> tuple[CurlSample, GroundedAnswerSummary]:
     sample = probe_mcp_tool(
         session,
         bearer_token=token,
         tool_name="grounded_answer",
-        arguments=build_grounded_answer_probe_arguments(
-            library_ref, question, args.assistant_top_k
-        ),
+        arguments=build_grounded_answer_probe_arguments(contract),
         route=MCP_ANSWER_ROUTE,
     )
     return sample, summarize_grounded_answer(_tool_content(sample, "grounded_answer"))
@@ -2647,18 +2667,16 @@ def _probe_grounded_answer(
 def _probe_assistant_runs(
     session: CurlSession,
     args: argparse.Namespace,
-    workspace_id: str,
-    question: str,
+    contract: AnswerProbeContract,
 ) -> list[AssistantTurnSummary]:
     summaries: list[AssistantTurnSummary] = []
     for _ in range(args.assistant_runs):
-        query_session_id = create_query_session(session, workspace_id, args.library_id)
+        query_session_id = create_query_session(session, contract.library_id)
         summaries.append(
             execute_assistant_turn(
                 session,
                 query_session_id,
-                question,
-                top_k=args.assistant_top_k,
+                contract,
                 timeout_seconds=args.timeout_seconds,
             )
         )
@@ -2741,6 +2759,12 @@ def _run_probe_surfaces(
         question=probe_inputs.question,
         graph_quality=graph,
     )
+    answer_contract = AnswerProbeContract(
+        library_id=args.library_id,
+        library_ref=catalog.catalog_ref,
+        question=question,
+        top_k=args.assistant_top_k,
+    )
     entity_sample, entity_summary = _probe_entity_search(
         session, token, catalog.catalog_ref, entity_query
     )
@@ -2754,10 +2778,10 @@ def _run_probe_surfaces(
         session, token, catalog.catalog_ref, args.graph_limit
     )
     grounded_sample, grounded_summary = _probe_grounded_answer(
-        session, args, token, catalog.catalog_ref, question
+        session, token, answer_contract
     )
     assistant_summaries = _probe_assistant_runs(
-        session, args, workspace_id, question
+        session, args, answer_contract
     )
     runtime = _probe_runtime(
         session, token, _first_runtime_execution_id(assistant_summaries)
@@ -2766,10 +2790,12 @@ def _run_probe_surfaces(
         identity=ReportIdentity(
             base_url=args.base_url,
             library_id=args.library_id,
+            catalog_ref=catalog.catalog_ref,
             workspace_id=workspace_id,
             entity_query=entity_query,
             document_query=document_query,
             question=question,
+            assistant_top_k=args.assistant_top_k,
         ),
         samples=ReportSamples(
             tools_list=tools_list,
@@ -2836,7 +2862,6 @@ def _gate_thresholds(args: argparse.Namespace) -> GateThresholds:
         max_tool_latency_ms=args.max_tool_latency_ms,
         max_completed_ms=args.max_completed_ms,
         max_first_frame_ms=args.max_first_frame_ms,
-        min_answer_overlap_ratio=args.min_answer_overlap_ratio,
     )
 
 

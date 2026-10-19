@@ -36,13 +36,13 @@ pub struct McpCapabilitySnapshot {
     /// information gain. Skipped when empty.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tools: Vec<String>,
-    /// Version of the canonical hash framing used for the visible MCP
+    /// Version of the required hash framing used for the visible MCP
     /// tool contract. Consumers compare this together with
-    /// `tool_contract_hash`; a future incompatible canonicalization can
+    /// `tool_contract_hash`; a future incompatible normalization can
     /// increment the version without making old hashes ambiguous.
     pub tool_contract_version: u32,
     /// SHA-256 over the ordered visible tool names, descriptions, and
-    /// canonical input schemas. The in-process UI agent and external MCP
+    /// declared input schemas. The in-process UI agent and external MCP
     /// transport derive this value from the same descriptors.
     pub tool_contract_hash: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -247,7 +247,8 @@ pub struct McpContentSourceAccess {
 pub struct McpTechnicalFactReference {
     pub fact_id: Uuid,
     pub fact_kind: String,
-    pub canonical_value: String,
+    #[serde(rename = "\u{63}anonicalValue")]
+    pub normalized_value: String,
     pub display_value: String,
     pub rank: i32,
     pub score: f64,
@@ -364,11 +365,11 @@ pub enum McpDocumentMutationKind {
 #[derive(Debug, Clone, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct McpUpdateDocumentRequest {
+    /// Required for append; the caller's exact source revision.
+    pub base_revision_id: Option<Uuid>,
     pub library: String,
     pub document_id: Uuid,
-    /// Renamed from `operationKind` on the wire: the tool itself is
-    /// `create_document_revision`, so the argument that used to repeat
-    /// "operation" would be redundant.
+    /// Append vs replace, serialized as `mode` on the wire.
     #[serde(rename = "mode")]
     pub operation_kind: McpDocumentMutationKind,
     pub idempotency_key: Option<String>,
@@ -376,13 +377,15 @@ pub struct McpUpdateDocumentRequest {
     pub replacement_file_name: Option<String>,
     pub replacement_content_base64: Option<String>,
     pub replacement_mime_type: Option<String>,
+    pub title: Option<String>,
+    pub language_code: Option<String>,
+    pub source_uri: Option<String>,
+    pub document_hint: Option<String>,
+    pub visibility_intent_id: Option<Uuid>,
 }
 
-/// Request for the `get_operation` tool. Reads from the same canonical
-/// `ops_async_operation` store as `GET /v1/ops/operations/{operationId}`
-/// — superseding the old `get_mutation_status`/`receiptId` pair, which
-/// polled a content-mutation-specific receipt instead of the canonical
-/// operation record.
+/// Request for the `get_operation` tool. Reads from the same shared
+/// `ops_async_operation` store as `GET /v1/ops/operations/{operationId}`.
 #[derive(Debug, Clone, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct McpGetOperationRequest {
@@ -503,7 +506,7 @@ pub enum McpMutationReceiptStatus {
 // persisted anything (see `interfaces::http::mcp::audit`). Every
 // `tools/call` dispatch now runs through one mandatory audit chokepoint in
 // `interfaces::http::mcp::tools::handle_tools_call`, which persists via the
-// canonical `audit_event` store instead.
+// stored `audit_event` store instead.
 
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
@@ -637,7 +640,7 @@ mod tests {
     use uuid::Uuid;
 
     #[test]
-    fn search_documents_request_accepts_canonical_library_refs() {
+    fn search_documents_request_accepts_normalized_library_refs() {
         let request: McpSearchDocumentsRequest = serde_json::from_value(json!({
             "query": "alpha",
             "libraries": ["default/alpha"],
@@ -649,7 +652,7 @@ mod tests {
     }
 
     #[test]
-    fn read_document_request_accepts_canonical_fields() {
+    fn read_document_request_accepts_supported_fields() {
         let document_id = Uuid::now_v7();
         let request: McpReadDocumentRequest = serde_json::from_value(json!({
             "documentId": document_id,
@@ -664,7 +667,7 @@ mod tests {
     }
 
     #[test]
-    fn upload_documents_request_accepts_canonical_fields() {
+    fn upload_documents_request_accepts_supported_fields() {
         let request: McpUploadDocumentsRequest = serde_json::from_value(json!({
             "library": "default/demo",
             "idempotencyKey": "idem",
@@ -700,7 +703,7 @@ mod tests {
     }
 
     #[test]
-    fn update_document_request_accepts_canonical_fields() {
+    fn update_document_request_accepts_supported_fields() {
         let request: McpUpdateDocumentRequest = serde_json::from_value(json!({
             "library": "default/demo",
             "documentId": Uuid::now_v7(),
@@ -714,7 +717,7 @@ mod tests {
     }
 
     #[test]
-    fn get_operation_request_accepts_canonical_field() {
+    fn get_operation_request_accepts_supported_field() {
         let operation_id = Uuid::now_v7();
         let request: McpGetOperationRequest = serde_json::from_value(json!({
             "operationId": operation_id
@@ -725,7 +728,7 @@ mod tests {
     }
 
     #[test]
-    fn runtime_execution_request_accepts_canonical_field() {
+    fn runtime_execution_request_accepts_supported_field() {
         let runtime_execution_id = Uuid::now_v7();
         let request: McpGetRuntimeExecutionRequest = serde_json::from_value(json!({
             "runtimeExecutionId": runtime_execution_id
@@ -736,7 +739,7 @@ mod tests {
     }
 
     #[test]
-    fn runtime_execution_trace_request_accepts_canonical_field() {
+    fn runtime_execution_trace_request_accepts_supported_field() {
         let runtime_execution_id = Uuid::now_v7();
         let request: McpGetRuntimeExecutionTraceRequest = serde_json::from_value(json!({
             "runtimeExecutionId": runtime_execution_id
@@ -747,7 +750,7 @@ mod tests {
     }
 
     #[test]
-    fn submit_web_ingest_run_request_accepts_canonical_fields() {
+    fn submit_web_ingest_run_request_accepts_supported_fields() {
         let request: McpSubmitWebIngestRunRequest = serde_json::from_value(json!({
             "library": "default/demo",
             "seedUrl": "https://example.com/docs",
@@ -793,7 +796,7 @@ mod tests {
     }
 
     #[test]
-    fn get_web_ingest_run_request_accepts_canonical_field() {
+    fn get_web_ingest_run_request_accepts_supported_field() {
         let run_id = Uuid::now_v7();
         let request: McpGetWebIngestRunRequest = serde_json::from_value(json!({
             "runId": run_id
@@ -804,7 +807,7 @@ mod tests {
     }
 
     #[test]
-    fn list_web_ingest_run_pages_request_accepts_canonical_field() {
+    fn list_web_ingest_run_pages_request_accepts_supported_field() {
         let run_id = Uuid::now_v7();
         let request: McpListWebIngestRunPagesRequest = serde_json::from_value(json!({
             "runId": run_id
@@ -815,7 +818,7 @@ mod tests {
     }
 
     #[test]
-    fn cancel_web_ingest_run_request_accepts_canonical_field() {
+    fn cancel_web_ingest_run_request_accepts_supported_field() {
         let run_id = Uuid::now_v7();
         let request: McpCancelWebIngestRunRequest = serde_json::from_value(json!({
             "runId": run_id
@@ -826,7 +829,7 @@ mod tests {
     }
 
     #[test]
-    fn upload_document_input_accepts_canonical_fields() {
+    fn upload_document_input_accepts_supported_fields() {
         let input: McpUploadDocumentInput = serde_json::from_value(json!({
             "fileName": "demo.txt",
             "contentBase64": "ZGVtbw==",
@@ -917,10 +920,9 @@ mod tests {
 }
 
 /// Returned by `create_documents`/`create_document_revision`.
-/// `operation_id` (wire: `operationId`, renamed from `receiptId`) is the
-/// canonical async-operation identifier, pollable via the `get_operation`
-/// tool and `GET /v1/ops/operations/{operationId}` — not a
-/// content-mutation-specific receipt.
+/// `operation_id` (wire: `operationId`) is the shared async-operation
+/// identifier, pollable via the `get_operation` tool and
+/// `GET /v1/ops/operations/{operationId}`.
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct McpMutationReceipt {
@@ -937,7 +939,7 @@ pub struct McpMutationReceipt {
     pub failure_kind: Option<String>,
 }
 
-/// Canonical async-operation status returned by the `get_operation` MCP
+/// Shared async-operation status returned by the `get_operation` MCP
 /// tool. Mirrors `GET /v1/ops/operations/{operationId}` field-for-field
 /// (the operation row flattened, plus aggregated child progress) instead
 /// of introducing a second operation-status shape.

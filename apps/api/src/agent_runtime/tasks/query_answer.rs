@@ -30,7 +30,7 @@ pub struct QueryAnswerTaskInput {
     pub grounded_context_text: String,
 }
 
-/// Canonical billing classification for one concrete query provider response.
+/// Pipeline billing classification for one concrete query provider response.
 /// Each value represents one network response, never an aggregate of several
 /// agent iterations or answer revisions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
@@ -200,7 +200,6 @@ pub struct QueryAnswerTaskSuccess {
     pub answer_text: String,
     /// One immutable record per actual provider response. Billing must iterate
     /// this ledger and must not infer calls from aggregate usage.
-    #[serde(default)]
     pub provider_calls: Vec<QueryProviderCall>,
 }
 
@@ -209,22 +208,37 @@ pub struct QueryAnswerTaskSuccess {
 pub struct QueryAnswerTaskFailure {
     pub code: String,
     pub summary: String,
-    /// Provider responses completed before the terminal failure. Canonical
+    /// Value-free failure classification derived from typed error metadata —
+    /// variant names, status codes, provider kinds. Unlike `summary`, which is
+    /// a private diagnostic, this is safe for operator-facing redacted
+    /// storage and never contains upstream response text.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail_redacted: Option<String>,
+    /// Provider responses completed before the terminal failure. Provider-call
     /// usage was already committed when each entry was created; this ledger is
     /// diagnostic provenance rather than a post-terminal billing projection.
-    #[serde(default)]
     pub provider_calls: Vec<QueryProviderCall>,
 }
 
 impl QueryAnswerTaskFailure {
     #[must_use]
     pub fn new(code: impl Into<String>, summary: impl Into<String>) -> Self {
-        Self { code: code.into(), summary: summary.into(), provider_calls: Vec::new() }
+        Self {
+            code: code.into(),
+            summary: summary.into(),
+            detail_redacted: None,
+            provider_calls: Vec::new(),
+        }
     }
 
     #[must_use]
     pub fn with_provider_calls(self, provider_calls: Vec<QueryProviderCall>) -> Self {
         Self { provider_calls, ..self }
+    }
+
+    #[must_use]
+    pub fn with_detail_redacted(self, detail_redacted: Option<String>) -> Self {
+        Self { detail_redacted, ..self }
     }
 }
 
@@ -236,7 +250,7 @@ impl RuntimeTask for QueryAnswerTask {
     type Failure = QueryAnswerTaskFailure;
 
     const CONTRACT_NAME: &'static str = "query_answer";
-    const CONTRACT_VERSION: &'static str = "2";
+    const CONTRACT_VERSION: &'static str = "1";
 
     fn spec() -> RuntimeTaskSpec {
         RuntimeTaskSpec {
@@ -285,7 +299,7 @@ mod tests {
         assert!(
             spec.stage_catalog.contains(&crate::domains::agent_runtime::RuntimeStageKind::Persist)
         );
-        assert_eq!(QueryAnswerTask::CONTRACT_VERSION, "2");
+        assert_eq!(QueryAnswerTask::CONTRACT_VERSION, "1");
     }
 
     #[test]
@@ -295,7 +309,9 @@ mod tests {
             provider_calls: Vec::new(),
         };
 
-        let serialized = serde_json::to_value(success).expect("serialize task success");
+        let serialized = serde_json::to_value(success).unwrap_or_else(|error| {
+            panic!("serialize task success: {error}");
+        });
 
         assert_eq!(serialized["providerCalls"], serde_json::json!([]));
         assert!(serialized.get("providerCallPerformed").is_none());
@@ -307,9 +323,20 @@ mod tests {
     fn deterministic_failure_serializes_an_explicit_empty_provider_call_ledger() {
         let failure = QueryAnswerTaskFailure::new("neutral_failure", "Neutral failure summary");
 
-        let serialized = serde_json::to_value(failure).expect("serialize task failure");
+        let serialized = serde_json::to_value(failure).unwrap_or_else(|error| {
+            panic!("serialize task failure: {error}");
+        });
 
         assert_eq!(serialized["providerCalls"], serde_json::json!([]));
+    }
+
+    #[test]
+    fn task_outcomes_require_the_provider_call_ledger() {
+        let success = serde_json::json!({"answerText": "Neutral answer"});
+        let failure = serde_json::json!({"code": "failed", "summary": "Neutral failure"});
+
+        assert!(serde_json::from_value::<QueryAnswerTaskSuccess>(success).is_err());
+        assert!(serde_json::from_value::<QueryAnswerTaskFailure>(failure).is_err());
     }
 
     #[test]

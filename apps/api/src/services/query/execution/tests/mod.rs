@@ -1,10 +1,10 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 
 use super::*;
 use serde_json::json;
 
 use super::context::build_grouped_reference_candidates;
-use super::preflight::select_technical_literal_chunks;
+use super::preflight::{TechnicalLiteralSelection, select_technical_literal_chunks};
 use super::retrieve::expanded_candidate_limit;
 use super::technical_literals::{TechnicalLiteralIntent, technical_literal_candidate_limit};
 use super::types::QueryExecutionEnrichment;
@@ -13,7 +13,7 @@ use crate::domains::query_ir::{
     QueryIR, QueryLanguage, QueryScope, QueryTargetKind, TemporalConstraint,
 };
 use crate::infra::knowledge_rows::{
-    KnowledgeChunkRow, KnowledgeDocumentRow, KnowledgeEvidenceRow, KnowledgeLibraryGenerationRow,
+    KnowledgeChunkRow, KnowledgeEvidenceRow, KnowledgeLibraryGenerationRow,
     KnowledgeStructuredBlockRow, KnowledgeTechnicalFactRow,
 };
 use crate::services::query::execution::technical_literals::{
@@ -117,27 +117,5 @@ fn query_ir_with_scope_literals_and_target_types<const L: usize, const T: usize>
             .collect(),
         scope,
         ..generic_query_ir()
-    }
-}
-
-fn sample_document_row_for_preflight(document_id: Uuid, file_name: &str) -> KnowledgeDocumentRow {
-    KnowledgeDocumentRow {
-        document_id,
-        workspace_id: Uuid::now_v7(),
-        library_id: Uuid::now_v7(),
-        external_key: document_id.to_string(),
-        file_name: Some(file_name.to_string()),
-        title: Some(file_name.to_string()),
-        source_uri: None,
-        document_hint: None,
-        document_state: "active".to_string(),
-        active_revision_id: Some(Uuid::now_v7()),
-        readable_revision_id: Some(Uuid::now_v7()),
-        latest_revision_no: Some(1),
-        parent_document_id: None,
-        document_role: crate::domains::content::DOCUMENT_ROLE_PRIMARY.to_string(),
-        created_at: chrono::Utc::now(),
-        updated_at: chrono::Utc::now(),
-        deleted_at: None,
     }
 }

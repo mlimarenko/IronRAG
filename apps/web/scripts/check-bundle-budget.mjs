@@ -30,6 +30,9 @@ const BUDGETS = [
   // keep this surface near 80 KB gzip; 150 KB leaves ample release headroom
   // while still catching an accidentally eager heavy route or vendor bundle.
   { source: 'html-entry', gzipKbCeiling: 150, label: 'main entry' },
+  // Runtime branding is read before App evaluates. Its required bootstrap chunk
+  // is still first-paint code, not an optional lazy feature.
+  { source: 'app-shell', gzipKbCeiling: 150, label: 'application bootstrap' },
 ]
 
 async function listBundleFiles() {
@@ -53,7 +56,10 @@ const lines = []
 const files = await listBundleFiles()
 const htmlEntryFiles = await listHtmlEntryFiles()
 for (const budget of BUDGETS) {
-  const candidates = budget.source === 'html-entry' ? htmlEntryFiles : files
+  const candidates =
+    budget.source === 'html-entry'
+      ? htmlEntryFiles
+      : files.filter((name) => /^App-.*\.js$/.test(name))
   const matches = candidates.filter((name) => files.includes(name))
   if (matches.length === 0) {
     failures.push(`Bundle budget: no files matched "${budget.source}" for "${budget.label}"`)

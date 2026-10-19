@@ -1,226 +1,130 @@
 import { describe, expect, it } from 'vitest'
-import type { AssistantMessage } from '@/shared/types'
+
 import type { AssistantTurnExecutionResponse } from '@/shared/api/query'
+
 import {
   applyTurnResultToMessages,
+  ASSISTANT_IN_PROGRESS_LIMIT_MS,
   createPendingAssistantMessage,
   createUserMessage,
+  isInProgressAssistantTurn,
+  sessionMessagesHydrationKey,
   serverTurnDurationMs,
 } from './assistantPageState'
 
-type TurnResultOverrides = {
-  startedAt?: string | null
-  completedAt?: string | null
-  requestCreatedAt?: string | null
-  responseCreatedAt?: string | null
-  answerText?: string
-  withResponseTurn?: boolean
-}
-
-/**
- * Minimal `AssistantExecutionDetail` shaped to exercise the fields
- * `applyTurnResultToMessages` / `serverTurnDurationMs` actually read.
- */
-function buildTurnResult(overrides: TurnResultOverrides = {}): AssistantTurnExecutionResponse {
-  const {
-    startedAt = '2026-06-06T21:41:33.000Z',
-    completedAt = '2026-06-06T21:41:53.000Z',
-    requestCreatedAt = '2026-06-06T21:41:33.000Z',
-    responseCreatedAt = '2026-06-06T21:41:53.000Z',
-    answerText = 'Answer body',
-    withResponseTurn = true,
-  } = overrides
-
+function turnResult(): AssistantTurnExecutionResponse {
   return {
     chunkReferences: [],
-    contextBundleId: 'bundle-1',
     entityReferences: [],
-    execution: {
-      contextBundleId: 'bundle-1',
-      conversationId: 'session-1',
-      id: 'execution-1',
-      libraryId: 'library-1',
-      lifecycleState: 'succeeded',
-      queryText: 'Question',
-      startedAt: startedAt as string,
-      completedAt,
-      workspaceId: 'workspace-1',
-    },
     preparedSegmentReferences: [],
     relationReferences: [],
-    requestTurn: requestCreatedAt
-      ? {
-          authorPrincipalId: null,
-          contentText: 'Question',
-          conversationId: 'session-1',
-          createdAt: requestCreatedAt,
-          executionId: 'execution-1',
-          id: 'turn-user',
-          turnIndex: 1,
-          turnKind: 'user',
-        }
-      : null,
-    responseTurn: withResponseTurn
-      ? {
-          authorPrincipalId: null,
-          contentText: answerText,
-          conversationId: 'session-1',
-          createdAt: responseCreatedAt as string,
-          executionId: 'execution-1',
-          id: 'turn-assistant',
-          turnIndex: 2,
-          turnKind: 'assistant',
-        }
-      : null,
-    runtimeStageSummaries: [],
-    runtimeSummary: {
-      acceptedAt: startedAt as string,
-      lifecycleState: 'succeeded',
-      parallelActionLimit: 1,
-      policySummary: {
-        allowCount: 0,
-        recentDecisions: [],
-        rejectCount: 0,
-        terminateCount: 0,
-      },
-      runtimeExecutionId: 'runtime-1',
-      turnBudget: 1,
-      turnCount: 1,
-    },
     technicalFactReferences: [],
+    runtimeStageSummaries: [],
     verificationState: 'verified',
     verificationWarnings: [],
+    responseTurn: {
+      contentText: 'Durable answer',
+      conversationId: 'session-1',
+      createdAt: '2026-08-09T10:00:04Z',
+      executionId: 'execution-1',
+      id: 'answer-1',
+      turnIndex: 2,
+      turnKind: 'assistant',
+    },
+    runtimeSummary: {
+      acceptedAt: '2026-08-09T10:00:01Z',
+      completedAt: '2026-08-09T10:00:04Z',
+    },
   } as unknown as AssistantTurnExecutionResponse
 }
 
-describe('serverTurnDurationMs', () => {
-  it('measures the execution window on the single server clock', () => {
-    // 20 s server window — note the absolute timestamps are ~73 s ahead of a
-    // browser clock, but that offset must not leak into the duration.
-    expect(serverTurnDurationMs(buildTurnResult())).toBe(20_000)
-  })
+describe('assistant page turn state', () => {
+  it('uses the server runtime clock for the displayed answer duration', () => {
+    const result = turnResult()
+    expect(serverTurnDurationMs(result)).toBe(3_000)
 
-  it('falls back to request → response turn timestamps when completedAt is null', () => {
-    const result = buildTurnResult({
-      completedAt: null,
-      requestCreatedAt: '2026-06-06T21:41:33.000Z',
-      responseCreatedAt: '2026-06-06T21:41:45.500Z',
-    })
-    expect(serverTurnDurationMs(result)).toBe(12_500)
-  })
+    const user = createUserMessage('Question', Date.parse('2026-08-09T09:58:00Z'))
+    const pending = createPendingAssistantMessage(Date.parse('2026-08-09T09:58:00Z'))
+    const messages = applyTurnResultToMessages([user, pending], pending.id, result, 'No answer')
 
-  it('returns undefined when no consistent server pair is available', () => {
-    const result = buildTurnResult({
-      completedAt: null,
-      requestCreatedAt: null,
-      withResponseTurn: false,
-    })
-    expect(serverTurnDurationMs(result)).toBeUndefined()
+    expect(messages[0]?.timestamp).toBe('2026-08-09T10:00:01Z')
+    expect(messages[1]?.timestamp).toBe('2026-08-09T10:00:04Z')
+    expect(messages[1]?.durationMs).toBe(3_000)
   })
 })
 
-describe('applyTurnResultToMessages', () => {
-  // The user message is stamped on the browser clock (here 73 s behind the
-  // server), the canonical clock-skew scenario that previously inflated the
-  // displayed latency to ~93 s.
-  const userBrowserTs = '2026-06-06T21:40:20.000Z'
-
-  function seedMessages(): { messages: AssistantMessage[]; pendingId: string } {
-    const sendMs = Date.parse(userBrowserTs)
-    const user = { ...createUserMessage('Question', sendMs) }
-    const pending = createPendingAssistantMessage(sendMs)
-    return { messages: [user, pending], pendingId: pending.id }
-  }
-
-  it('uses the server-authoritative duration, not the cross-clock delta', () => {
-    const { messages, pendingId } = seedMessages()
-    const result = buildTurnResult()
-
-    const next = applyTurnResultToMessages(messages, pendingId, result, 'No answer')
-    const answer = next.find((m) => m.role === 'assistant')
-
-    // 20 s server window, NOT completedAt − browser-userTimestamp (~93 s).
-    expect(answer?.durationMs).toBe(20_000)
-    const crossClockDelta = Date.parse('2026-06-06T21:41:53.000Z') - Date.parse(userBrowserTs)
-    expect(answer?.durationMs).not.toBe(crossClockDelta)
+describe('isInProgressAssistantTurn', () => {
+  it('treats the optimistic local placeholder as in progress', () => {
+    expect(isInProgressAssistantTurn(createPendingAssistantMessage(1))).toBe(true)
   })
 
-  it('restamps both visible timestamps from the server so they share one clock', () => {
-    const { messages, pendingId } = seedMessages()
-    const result = buildTurnResult()
-
-    const next = applyTurnResultToMessages(messages, pendingId, result, 'No answer')
-    const user = next.find((m) => m.role === 'user')
-    const answer = next.find((m) => m.role === 'assistant')
-
-    expect(user?.timestamp).toBe('2026-06-06T21:41:33.000Z') // requestTurn.createdAt
-    expect(answer?.timestamp).toBe('2026-06-06T21:41:53.000Z') // execution.completedAt
-    // Visible gap now equals the reported duration.
-    const gap = Date.parse(answer!.timestamp) - Date.parse(user!.timestamp)
-    expect(gap).toBe(answer?.durationMs)
+  it('treats a server pending placeholder with elapsed time as in progress', () => {
+    expect(
+      isInProgressAssistantTurn({
+        id: 'execution-1',
+        role: 'assistant',
+        content: '',
+        timestamp: '2026-08-19T00:00:00Z',
+        elapsedMs: 12_345,
+        executionId: 'execution-1',
+      }),
+    ).toBe(true)
   })
 
-  it('keeps both timestamps server-stamped even with no requestTurn and no duration', () => {
-    // Degenerate response: no requestTurn, completedAt null → durationMs is
-    // undefined, so the UI uses the reload-style timestamp-delta fallback. The
-    // user message must NOT be left on the browser clock, or that delta would
-    // re-introduce the skew (serverAnswerTs − browserUserTs).
-    const { messages, pendingId } = seedMessages()
-    const result = buildTurnResult({
-      completedAt: null,
-      requestCreatedAt: null,
-      responseCreatedAt: '2026-06-06T21:41:53.000Z',
-    })
-
-    const next = applyTurnResultToMessages(messages, pendingId, result, 'No answer')
-    const user = next.find((m) => m.role === 'user')
-    const answer = next.find((m) => m.role === 'assistant')
-
-    expect(answer?.durationMs).toBeUndefined()
-    // User restamped to the server execution start, not left at the browser ts.
-    expect(user?.timestamp).toBe('2026-06-06T21:41:33.000Z') // execution.startedAt
-    expect(user?.timestamp).not.toBe(userBrowserTs)
-    expect(answer?.timestamp).toBe('2026-06-06T21:41:53.000Z') // responseTurn.createdAt
-    // Fallback delta is now a single-clock (server) measurement.
-    const fallbackDelta = Date.parse(answer!.timestamp) - Date.parse(user!.timestamp)
-    expect(fallbackDelta).toBe(20_000)
+  it('does not treat a finished empty assistant turn as in progress', () => {
+    expect(
+      isInProgressAssistantTurn({
+        id: 'answer-1',
+        role: 'assistant',
+        content: '',
+        timestamp: '2026-08-19T00:00:00Z',
+        executionId: 'execution-1',
+      }),
+    ).toBe(false)
   })
 
-  it('replaces the pending answer content and execution metadata', () => {
-    const { messages, pendingId } = seedMessages()
-    const result = buildTurnResult({ answerText: 'Grounded reply' })
-
-    const next = applyTurnResultToMessages(messages, pendingId, result, 'No answer')
-    const answer = next.find((m) => m.role === 'assistant')
-
-    expect(answer?.content).toBe('Grounded reply')
-    expect(answer?.id).toBe('turn-assistant')
-    expect(answer?.executionId).toBe('execution-1')
+  it('does not treat a stale pending placeholder as still running', () => {
+    expect(
+      isInProgressAssistantTurn({
+        id: 'execution-1',
+        role: 'assistant',
+        content: '',
+        timestamp: '2026-08-19T00:00:00Z',
+        elapsedMs: ASSISTANT_IN_PROGRESS_LIMIT_MS,
+        executionId: 'execution-1',
+      }),
+    ).toBe(false)
   })
+})
 
-  it('replaces a server-hydrated pending execution when the local pending id is gone', () => {
-    const sendMs = Date.parse(userBrowserTs)
-    const user = { ...createUserMessage('Question', sendMs), id: 'turn-user' }
-    const serverPending: AssistantMessage = {
+describe('sessionMessagesHydrationKey', () => {
+  it('ignores ticking elapsedMs so a pending poll does not look like a new conversation', () => {
+    const first = {
       id: 'execution-1',
-      role: 'assistant',
+      role: 'assistant' as const,
       content: '',
-      timestamp: '2026-06-06T21:41:33.000Z',
+      timestamp: '2026-08-19T00:00:00Z',
+      elapsedMs: 1_000,
       executionId: 'execution-1',
     }
-    const result = buildTurnResult({ answerText: 'Hydrated pending resolved' })
-
-    const next = applyTurnResultToMessages(
-      [user, serverPending],
-      'm-pending-lost',
-      result,
-      'No answer',
+    const later = { ...first, elapsedMs: 2_000 }
+    expect(sessionMessagesHydrationKey('session-1', [first])).toBe(
+      sessionMessagesHydrationKey('session-1', [later]),
     )
-    const answer = next.find((m) => m.role === 'assistant')
+  })
 
-    expect(answer?.content).toBe('Hydrated pending resolved')
-    expect(answer?.id).toBe('turn-assistant')
-    expect(answer?.executionId).toBe('execution-1')
-    expect(next).toHaveLength(2)
+  it('changes when a pending placeholder goes stale', () => {
+    const pending = {
+      id: 'execution-1',
+      role: 'assistant' as const,
+      content: '',
+      timestamp: '2026-08-19T00:00:00Z',
+      elapsedMs: 1_000,
+      executionId: 'execution-1',
+    }
+    const stale = { ...pending, elapsedMs: ASSISTANT_IN_PROGRESS_LIMIT_MS }
+    expect(sessionMessagesHydrationKey('session-1', [pending])).not.toBe(
+      sessionMessagesHydrationKey('session-1', [stale]),
+    )
   })
 })

@@ -9,8 +9,9 @@ use std::{
 use async_trait::async_trait;
 use reqwest::{Client, Method, RequestBuilder, Url};
 use thiserror::Error;
+use tracing::Instrument as _;
 
-use super::outbound_http::is_non_public_ip;
+use super::outbound_http::{PublicHttpUrlError, is_non_public_ip};
 
 pub const PROVIDER_SUCCESS_BODY_MAX_BYTES: u64 = 32 * 1024 * 1024;
 pub const PROVIDER_ERROR_BODY_MAX_BYTES: u64 = 64 * 1024;
@@ -86,6 +87,21 @@ pub enum ProviderHttpError {
     OriginMismatch,
 }
 
+impl ProviderHttpError {
+    /// The typed public resolution failure this is, if any. DNS resolution
+    /// failures are transient upstream conditions; every other variant is a URL,
+    /// address or origin policy rejection that no retry can fix.
+    #[must_use]
+    pub fn resolution_failure(&self) -> Option<PublicHttpUrlError> {
+        match self {
+            Self::ResolveTimedOut => Some(PublicHttpUrlError::ResolveTimedOut),
+            Self::ResolveFailed => Some(PublicHttpUrlError::ResolveFailed),
+            Self::NoAddresses => Some(PublicHttpUrlError::NoAddresses),
+            _ => None,
+        }
+    }
+}
+
 #[async_trait]
 trait ProviderHostResolver: Send + Sync {
     async fn resolve(&self, host: &str, port: u16) -> Result<Vec<SocketAddr>, ProviderHttpError>;
@@ -103,6 +119,41 @@ impl ProviderHostResolver for SystemProviderHostResolver {
             .map_err(|_| ProviderHttpError::ResolveTimedOut)?
             .map_err(|_| ProviderHttpError::ResolveFailed)?;
         Ok(lookup.collect())
+    }
+}
+
+/// Test-only resolver that records its call and then never completes, so a
+/// bounded caller can prove its deadline cancels target preparation without
+/// real DNS. It asserts the host it was asked for, tying the pending
+/// resolution to one named host.
+#[cfg(test)]
+struct PendingProviderHostResolver {
+    expected_host: String,
+    calls: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+#[cfg(test)]
+#[async_trait]
+impl ProviderHostResolver for PendingProviderHostResolver {
+    async fn resolve(&self, host: &str, _port: u16) -> Result<Vec<SocketAddr>, ProviderHttpError> {
+        assert_eq!(host, self.expected_host, "pending resolver is bound to one host");
+        self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        std::future::pending::<Result<Vec<SocketAddr>, ProviderHttpError>>().await
+    }
+}
+
+/// Test-only resolver that fails every lookup with one fixed error, so a caller
+/// can prove how a DNS failure surfaces without touching real DNS.
+#[cfg(test)]
+struct FailingProviderHostResolver {
+    error: ProviderHttpError,
+}
+
+#[cfg(test)]
+#[async_trait]
+impl ProviderHostResolver for FailingProviderHostResolver {
+    async fn resolve(&self, _host: &str, _port: u16) -> Result<Vec<SocketAddr>, ProviderHttpError> {
+        Err(self.error.clone())
     }
 }
 
@@ -190,6 +241,42 @@ impl ProviderHttpTransport {
         client_factory: Arc<dyn ProviderHttpClientFactory>,
     ) -> Result<Self, ProviderHttpError> {
         Self::try_new_from_dependencies(config, resolver, client_factory)
+    }
+
+    /// Test-only transport built on a resolver that never completes for
+    /// `expected_host`, so a bounded caller can prove its deadline cancels
+    /// target preparation before any request is built. Returns the transport
+    /// and the resolver call counter so a test can assert the DNS path ran
+    /// without touching real DNS.
+    #[cfg(test)]
+    pub(crate) fn try_new_with_pending_resolver(
+        config: ProviderHttpTransportConfig,
+        expected_host: &str,
+    ) -> Result<(Self, Arc<std::sync::atomic::AtomicUsize>), ProviderHttpError> {
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let resolver = Arc::new(PendingProviderHostResolver {
+            expected_host: expected_host.to_owned(),
+            calls: Arc::clone(&calls),
+        });
+        let transport = Self::try_new_from_dependencies(
+            config,
+            resolver,
+            Arc::new(SystemProviderHttpClientFactory),
+        )?;
+        Ok((transport, calls))
+    }
+
+    /// Test-only transport whose every host resolution fails with `error`.
+    #[cfg(test)]
+    pub(crate) fn try_new_with_failing_resolver(
+        config: ProviderHttpTransportConfig,
+        error: ProviderHttpError,
+    ) -> Result<Self, ProviderHttpError> {
+        Self::try_new_from_dependencies(
+            config,
+            Arc::new(FailingProviderHostResolver { error }),
+            Arc::new(SystemProviderHttpClientFactory),
+        )
     }
 
     fn try_new_from_dependencies(
@@ -348,6 +435,49 @@ impl PreparedProviderTarget {
     }
 }
 
+/// Sends a prepared provider request under the canonical provider HTTP span.
+///
+/// This is the shared dispatch path for the provider integration requests that
+/// call it — the LLM gateway's chat, embedding and tool-use requests and the
+/// SystemOne decision request — so their tracing attributes
+/// (`provider.http.request`, `provider.operation`,
+/// `http.response.status_code`, trace-context injection) cannot drift apart.
+/// The caller supplies `method`, so a non-POST caller is labelled with its real
+/// HTTP method instead of a hardcoded one. Callers keep their own error mapping;
+/// this function returns the raw transport result.
+///
+/// It is not the only provider HTTP path: the AI-catalog credential-validation
+/// model-list probe dispatches its own `GET` directly, because it maps failures
+/// to credential-validation outcomes rather than provider call errors, so it
+/// deliberately does not route here.
+pub async fn send_provider_http_request(
+    request: RequestBuilder,
+    endpoint: &Url,
+    method: &Method,
+    provider_kind: &str,
+    operation: &str,
+) -> Result<reqwest::Response, reqwest::Error> {
+    let server_address = endpoint.host_str().unwrap_or("unknown");
+    let provider_call_id = crate::observability::current_provider_call_id().unwrap_or_default();
+    let span = tracing::info_span!(
+        "provider.http.request",
+        otel.kind = "client",
+        "http.request.method" = method.as_str(),
+        "server.address" = server_address,
+        "provider.kind" = provider_kind,
+        "provider.operation" = operation,
+        "provider.call.id" = provider_call_id,
+        "http.response.status_code" = tracing::field::Empty,
+    );
+    let response = async move { crate::observability::inject_trace_context(request).send().await }
+        .instrument(span.clone())
+        .await;
+    if let Ok(response) = &response {
+        span.record("http.response.status_code", response.status().as_u16());
+    }
+    response
+}
+
 #[cfg(test)]
 mod tests {
     use std::{
@@ -364,7 +494,7 @@ mod tests {
 
     use super::{
         ProviderHostResolver, ProviderHttpClientFactory, ProviderHttpError, ProviderHttpTransport,
-        ProviderHttpTransportConfig,
+        ProviderHttpTransportConfig, send_provider_http_request,
     };
 
     struct StaticResolver {
@@ -491,5 +621,73 @@ mod tests {
             .expect_err("cross-origin request must fail before request builder creation");
 
         assert_eq!(error, ProviderHttpError::OriginMismatch);
+    }
+
+    /// Write end that appends every formatted span event to a shared buffer, so
+    /// a test can assert the dispatch span's method label.
+    #[derive(Clone)]
+    struct CapturingWriter(Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl std::io::Write for CapturingWriter {
+        fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().expect("capture lock").extend_from_slice(buffer);
+            Ok(buffer.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl tracing_subscriber::fmt::MakeWriter<'_> for CapturingWriter {
+        type Writer = CapturingWriter;
+
+        fn make_writer(&self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    #[test]
+    fn provider_dispatch_span_records_the_callers_http_method() {
+        use tracing_subscriber::layer::SubscriberExt as _;
+
+        let captured = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let subscriber = tracing_subscriber::registry().with(
+            tracing_subscriber::fmt::layer()
+                .with_writer(CapturingWriter(Arc::clone(&captured)))
+                .with_target(false)
+                .with_ansi(false)
+                .with_span_events(tracing_subscriber::fmt::format::FmtSpan::NEW),
+        );
+        let endpoint = Url::parse("http://127.0.0.1:9/v1/models").expect("test URL");
+        let request = Client::new().get(endpoint.clone());
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("build current-thread runtime");
+
+        tracing::subscriber::with_default(subscriber, || {
+            runtime.block_on(async {
+                let _ = send_provider_http_request(
+                    request,
+                    &endpoint,
+                    &Method::GET,
+                    "provider-alpha",
+                    "model-list",
+                )
+                .await;
+            });
+        });
+
+        let output = String::from_utf8(captured.lock().expect("capture lock").clone())
+            .expect("span output is utf8");
+        assert!(
+            output.contains("http.request.method=\"GET\""),
+            "the dispatch span must label the caller's method, got: {output}"
+        );
+        assert!(
+            !output.contains("http.request.method=\"POST\""),
+            "the dispatch span must not hardcode POST, got: {output}"
+        );
     }
 }

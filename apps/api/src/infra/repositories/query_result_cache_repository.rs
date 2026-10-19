@@ -4,6 +4,112 @@ use uuid::Uuid;
 
 use super::query_repository;
 
+/// Checks every retained source reference, not merely the existence of one
+/// grounding row. Missing execution/bundle provenance, missing children, and
+/// cross-tenant children fail closed, including sources expanded during hydration.
+pub async fn execution_sources_are_current<'e, E>(
+    executor: E,
+    execution_id: Uuid,
+    workspace_id: Uuid,
+    library_id: Uuid,
+) -> Result<bool, sqlx::Error>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+{
+    sqlx::query_scalar(
+        "with bundle as (
+            select context.bundle_id as id
+            from query_execution execution
+            join knowledge_context_bundle context
+              on context.bundle_id = execution.context_bundle_id
+             and context.query_execution_id = execution.id
+             and context.workspace_id = execution.workspace_id
+             and context.library_id = execution.library_id
+            where execution.id = $1 and execution.workspace_id = $2 and execution.library_id = $3
+         ), retained_chunk_ids as (
+            select chunk_id as id from query_chunk_reference where execution_id = $1
+            union
+            select chunk_id from knowledge_bundle_chunk where bundle_id in (select id from bundle)
+         ), retained_chunks as (
+            select chunk.* from retained_chunk_ids reference
+            left join knowledge_chunk chunk on chunk.chunk_id = reference.id
+         ), retained_fact_ids as (
+            select unnest(context.selected_fact_ids) as id
+            from knowledge_context_bundle context where context.bundle_id in (select id from bundle)
+            union
+            select evidence.fact_id from knowledge_bundle_evidence reference
+            join knowledge_evidence evidence on evidence.evidence_id = reference.evidence_id
+            where reference.bundle_id in (select id from bundle) and evidence.fact_id is not null
+            union
+            select fact.fact_id from knowledge_technical_fact fact
+            where fact.support_chunk_ids && array(select id from retained_chunk_ids)
+         ), retained_facts as (
+            select fact.* from retained_fact_ids reference
+            left join knowledge_technical_fact fact on fact.fact_id = reference.id
+         ), retained_block_ids as (
+            select unnest(support_block_ids) as id from retained_chunks
+            union
+            select unnest(support_block_ids) from retained_facts
+            union
+            select evidence.block_id from knowledge_bundle_evidence reference
+            join knowledge_evidence evidence on evidence.evidence_id = reference.evidence_id
+            where reference.bundle_id in (select id from bundle) and evidence.block_id is not null
+         ), sources as (
+            select document_id, revision_id, workspace_id, library_id from retained_chunks
+            union all
+            select evidence.document_id, evidence.revision_id, document.workspace_id, evidence.library_id
+            from knowledge_bundle_evidence reference
+            left join runtime_graph_evidence evidence on evidence.id = reference.evidence_id
+            left join content_document document on document.id = evidence.document_id
+            where reference.bundle_id in (select id from bundle)
+            union all
+            select (reference.value->>'documentId')::uuid,
+                   (reference.value->>'revisionId')::uuid, context.workspace_id, context.library_id
+            from knowledge_context_bundle context
+            cross join lateral jsonb_array_elements(coalesce(
+                context.assembly_diagnostics #> '{assistantGrounding,documentReferences}',
+                '[]'::jsonb)) reference(value)
+            where context.bundle_id in (select id from bundle)
+            union all
+            select document_id, revision_id, workspace_id, library_id from retained_facts
+            union all
+            select block.document_id, block.revision_id, block.workspace_id, block.library_id
+            from retained_block_ids reference
+            left join knowledge_structured_block block on block.block_id = reference.id
+            union all
+            select evidence.document_id, evidence.revision_id, document.workspace_id, evidence.library_id
+            from knowledge_bundle_entity reference
+            left join runtime_graph_evidence evidence on evidence.target_id = reference.entity_id
+             and evidence.target_kind = 'node' and evidence.library_id = reference.library_id
+            left join content_document document on document.id = evidence.document_id
+            where reference.bundle_id in (select id from bundle)
+            union all
+            select evidence.document_id, evidence.revision_id, document.workspace_id, evidence.library_id
+            from knowledge_bundle_relation reference
+            left join runtime_graph_evidence evidence on evidence.target_id = reference.relation_id
+             and evidence.target_kind = 'edge' and evidence.library_id = reference.library_id
+            left join content_document document on document.id = evidence.document_id
+            where reference.bundle_id in (select id from bundle)
+         )
+          select exists (select 1 from bundle) and not exists (
+            select 1 from sources source
+            left join content_current_revision current_revision
+              on current_revision.document_id = source.document_id
+             and current_revision.revision_id = source.revision_id
+             and current_revision.workspace_id = $2
+             and current_revision.library_id = $3
+            where current_revision.revision_id is null
+               or source.workspace_id is distinct from $2
+               or source.library_id is distinct from $3
+         )",
+    )
+    .bind(execution_id)
+    .bind(workspace_id)
+    .bind(library_id)
+    .fetch_one(executor)
+    .await
+}
+
 #[derive(Debug, Clone, FromRow)]
 pub struct QueryResultCacheRow {
     pub cache_key: String,
@@ -262,13 +368,33 @@ pub async fn create_query_execution_replay(
     postgres: &PgPool,
     input: &CreateQueryExecutionReplayInput<'_>,
 ) -> Result<Option<(query_repository::QueryTurnRow, QueryExecutionReplayRow)>, sqlx::Error> {
-    let ttl_seconds = i64::try_from(input.ttl_seconds).unwrap_or(i64::MAX);
     let mut transaction = postgres.begin().await?;
     // Keep one deterministic lock order across source mutations, winner
     // replacement, conversation deletion, and replay materialization:
     // library -> target conversation/request -> source execution -> cache.
     // The library lock conflicts with the `FOR NO KEY UPDATE` lock taken by
     // every committed source-generation change.
+    if !lock_replay_destination(&mut transaction, input).await? {
+        transaction.rollback().await?;
+        return Ok(None);
+    }
+    let Some(source) = lock_replay_source(&mut transaction, input).await? else {
+        transaction.rollback().await?;
+        return Ok(None);
+    };
+    if !lock_exact_replay_winner(&mut transaction, input).await? {
+        transaction.rollback().await?;
+        return Ok(None);
+    }
+    let replay = materialize_replay(&mut transaction, input, &source).await?;
+    transaction.commit().await?;
+    Ok(Some(replay))
+}
+
+async fn lock_replay_destination(
+    connection: &mut PgConnection,
+    input: &CreateQueryExecutionReplayInput<'_>,
+) -> Result<bool, sqlx::Error> {
     let library_is_current = sqlx::query_scalar::<_, bool>(
         "select true
          from catalog_library
@@ -280,12 +406,11 @@ pub async fn create_query_execution_replay(
     .bind(input.library_id)
     .bind(input.workspace_id)
     .bind(input.expected_source_truth_version)
-    .fetch_optional(&mut *transaction)
+    .fetch_optional(&mut *connection)
     .await?
     .unwrap_or(false);
     if !library_is_current {
-        transaction.rollback().await?;
-        return Ok(None);
+        return Ok(false);
     }
 
     let target_request_is_current = sqlx::query_scalar::<_, bool>(
@@ -310,18 +435,26 @@ pub async fn create_query_execution_replay(
     .bind(input.library_id)
     .bind(input.conversation_id)
     .bind(input.request_turn_id)
-    .fetch_optional(&mut *transaction)
+    .fetch_optional(connection)
     .await?
     .unwrap_or(false);
-    if !target_request_is_current {
-        transaction.rollback().await?;
-        return Ok(None);
-    }
+    Ok(target_request_is_current)
+}
 
-    // Re-read the canonical response and its terminal verification evidence
+#[derive(FromRow)]
+struct ReplaySourceSelection {
+    content_text: String,
+    bundle_id: Uuid,
+}
+
+async fn lock_replay_source(
+    connection: &mut PgConnection,
+    input: &CreateQueryExecutionReplayInput<'_>,
+) -> Result<Option<ReplaySourceSelection>, sqlx::Error> {
+    // Re-read the expected response and its terminal verification evidence
     // under row locks. The caller's previously hydrated detail is useful for
     // the response payload, but it is not trusted to authorize a replay.
-    let source_identity = sqlx::query_as::<_, (String, Uuid)>(
+    let source_identity = sqlx::query_as::<_, ReplaySourceSelection>(
         "select response_turn.content_text, bundle.bundle_id
          from query_execution as source_execution
          join runtime_execution as source_runtime
@@ -338,10 +471,10 @@ pub async fn create_query_execution_replay(
            and source_execution.workspace_id = $2
            and source_execution.library_id = $3
            and source_execution.failure_code is null
-           and source_execution.completed_at is not null
            and source_runtime.owner_kind = 'query_execution'
            and source_runtime.owner_id = source_execution.id
            and source_runtime.lifecycle_state = 'completed'
+           and source_runtime.completed_at is not null
            and source_runtime.failure_code is null
            and bundle.workspace_id = $2
            and bundle.library_id = $3
@@ -353,14 +486,13 @@ pub async fn create_query_execution_replay(
     .bind(input.source_execution_id)
     .bind(input.workspace_id)
     .bind(input.library_id)
-    .fetch_optional(&mut *transaction)
+    .fetch_optional(&mut *connection)
     .await?;
-    let Some((source_response_content, source_bundle_id)) = source_identity else {
-        transaction.rollback().await?;
+    let Some(source) = source_identity else {
         return Ok(None);
     };
 
-    // A verified label alone is insufficient: lock at least one canonical
+    // A verified label alone is insufficient: lock at least one durable
     // grounding reference that the answer was verified against. Each CTE is
     // bounded to one row; keeping the qualifying child locked prevents a
     // concurrent replace/delete from erasing all grounding between this check
@@ -419,15 +551,33 @@ pub async fn create_query_execution_replay(
              or exists(select 1 from selected_fact)",
     )
     .bind(input.source_execution_id)
-    .bind(source_bundle_id)
+    .bind(source.bundle_id)
     .bind(input.library_id)
     .bind(input.workspace_id)
-    .fetch_one(&mut *transaction)
+    .fetch_one(&mut *connection)
     .await?;
     if !grounding_is_current {
-        transaction.rollback().await?;
         return Ok(None);
     }
+
+    if !execution_sources_are_current(
+        connection,
+        input.source_execution_id,
+        input.workspace_id,
+        input.library_id,
+    )
+    .await?
+    {
+        return Ok(None);
+    }
+    Ok(Some(source))
+}
+
+async fn lock_exact_replay_winner(
+    connection: &mut PgConnection,
+    input: &CreateQueryExecutionReplayInput<'_>,
+) -> Result<bool, sqlx::Error> {
+    let ttl_seconds = i64::try_from(input.ttl_seconds).unwrap_or(i64::MAX);
 
     // The cache row is checked last, after potentially slower source
     // validation, so an expiry, GC delete, or A->B replacement that happened
@@ -449,27 +599,30 @@ pub async fn create_query_execution_replay(
     .bind(input.library_id)
     .bind(input.source_execution_id)
     .bind(ttl_seconds)
-    .fetch_optional(&mut *transaction)
+    .fetch_optional(connection)
     .await?
     .unwrap_or(false);
-    if !exact_winner_is_fresh {
-        transaction.rollback().await?;
-        return Ok(None);
-    }
+    Ok(exact_winner_is_fresh)
+}
 
+async fn materialize_replay(
+    connection: &mut PgConnection,
+    input: &CreateQueryExecutionReplayInput<'_>,
+    source: &ReplaySourceSelection,
+) -> Result<(query_repository::QueryTurnRow, QueryExecutionReplayRow), sqlx::Error> {
     let response_turn = query_repository::create_turn_in_connection(
-        &mut transaction,
+        connection,
         &query_repository::NewQueryTurn {
             conversation_id: input.conversation_id,
             turn_kind: "assistant",
             author_principal_id: None,
-            content_text: &source_response_content,
+            content_text: &source.content_text,
             execution_id: Some(input.source_execution_id),
         },
     )
     .await?;
     let replay = record_query_execution_replay_in_connection(
-        &mut transaction,
+        connection,
         &NewQueryExecutionReplay {
             workspace_id: input.workspace_id,
             library_id: input.library_id,
@@ -481,8 +634,7 @@ pub async fn create_query_execution_replay(
         },
     )
     .await?;
-    transaction.commit().await?;
-    Ok(Some((response_turn, replay)))
+    Ok((response_turn, replay))
 }
 
 async fn record_query_execution_replay_in_connection(

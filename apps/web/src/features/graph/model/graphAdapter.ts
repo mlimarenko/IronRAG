@@ -1,5 +1,4 @@
 import type { KnowledgeGraphTopologyResponse } from '@/shared/types/graph-topology'
-import type { GraphLayoutType } from '@/features/graph/model/config'
 import type {
   ContentDocumentDetailResponse,
   ContentRevision,
@@ -27,103 +26,6 @@ function mapNodeType(t: string | undefined): GraphNodeType {
   return 'entity'
 }
 
-function addUnvisitedNeighbors(
-  current: string,
-  adjacency: ReadonlyMap<string, string[]>,
-  visited: Set<string>,
-  queue: string[],
-): void {
-  for (const neighbor of adjacency.get(current) ?? []) {
-    if (visited.has(neighbor)) continue
-    visited.add(neighbor)
-    queue.push(neighbor)
-  }
-}
-
-function buildAdjacency(nodes: GraphNode[], edges: GraphEdge[]): Map<string, string[]> {
-  const adjacency = new Map(nodes.map((node) => [node.id, [] as string[]]))
-  for (const edge of edges) {
-    if (edge.sourceId === edge.targetId) continue
-    const sourceNeighbors = adjacency.get(edge.sourceId)
-    const targetNeighbors = adjacency.get(edge.targetId)
-    if (!sourceNeighbors || !targetNeighbors) continue
-    sourceNeighbors.push(edge.targetId)
-    targetNeighbors.push(edge.sourceId)
-  }
-  return adjacency
-}
-
-function visitConnectedComponent(
-  firstNodeId: string,
-  adjacency: ReadonlyMap<string, string[]>,
-  visited: Set<string>,
-): void {
-  const queue = [firstNodeId]
-  visited.add(firstNodeId)
-  for (const current of queue) {
-    addUnvisitedNeighbors(current, adjacency, visited, queue)
-  }
-}
-
-function countConnectedComponents(nodes: GraphNode[], edges: GraphEdge[]): number {
-  const adjacency = buildAdjacency(nodes, edges)
-  const visited = new Set<string>()
-  let componentCount = 0
-  for (const node of nodes) {
-    if (visited.has(node.id)) continue
-    componentCount += 1
-    visitConnectedComponent(node.id, adjacency, visited)
-  }
-  return componentCount
-}
-
-function recommendGraphLayout(nodes: GraphNode[], edges: GraphEdge[]): GraphLayoutType {
-  if (nodes.length === 0) return 'sectors'
-
-  const typeCount = new Set(nodes.map((node) => node.type)).size
-  const documentCount = nodes.reduce((count, node) => count + (node.type === 'document' ? 1 : 0), 0)
-  const componentCount = countConnectedComponents(nodes, edges)
-  const edgeDensity = edges.length / nodes.length
-
-  if (componentCount >= 6 && edges.length < nodes.length * 2.2) {
-    return 'circlepack'
-  }
-
-  // Force-directed layout best conveys "distance ~ connection strength" (the
-  // LightRAG-style reading) for small/mid CONNECTED graphs. Gate it to sizes
-  // where the iterative worker cost stays modest and to graphs that are
-  // actually linked — enough edges, not shattered into islands. Larger or
-  // fragmented graphs fall through to the geometric recommendations below.
-  if (
-    nodes.length >= 12 &&
-    nodes.length <= 1500 &&
-    edges.length >= nodes.length * 0.9 &&
-    componentCount <= Math.max(3, Math.round(nodes.length / 25))
-  ) {
-    return 'force'
-  }
-
-  if (nodes.length > 2000 || edgeDensity > 3.2) {
-    if (edgeDensity > 4.2) return 'hubs'
-    if (documentCount > 0) return 'sources'
-    return 'radial'
-  }
-
-  if (documentCount > 0 && nodes.length > 120) {
-    return 'sources'
-  }
-
-  if (typeCount >= 6) {
-    return 'circlepack'
-  }
-
-  if (edgeDensity > 2.4) {
-    return 'hubs'
-  }
-
-  return 'sectors'
-}
-
 export function mapGraphTopology(topology: KnowledgeGraphTopologyResponse): GraphTopology {
   const { entities, relations, documents, documentLinks } = topology
 
@@ -131,7 +33,7 @@ export function mapGraphTopology(topology: KnowledgeGraphTopologyResponse): Grap
     .map((r): GraphEdge | null => {
       if (!r.subjectEntityId || !r.objectEntityId) return null
       return {
-        id: r.relationId ?? r.id ?? '',
+        id: '',
         sourceId: r.subjectEntityId,
         targetId: r.objectEntityId,
         label: r.predicate ?? '',
@@ -174,25 +76,25 @@ export function mapGraphTopology(topology: KnowledgeGraphTopologyResponse): Grap
   const degreeOf = (id: string): number => neighboursByNode.get(id)?.size ?? 0
 
   const entityNodes: GraphNode[] = entities.map((e) => {
-    const canonical = mapNodeType(e.entityType)
+    const mappedType = mapNodeType(e.entityType)
     const rawType = (e.entityType ?? '').toLowerCase()
-    const id = e.entityId ?? e.id ?? ''
+    const id = e.entityId
     const node: GraphNode = {
       id,
-      label: e.canonicalLabel ?? e.label ?? e.key ?? 'unknown',
-      type: canonical,
+      label: e['\u0063anonicalLabel'] ?? e.key ?? 'unknown',
+      type: mappedType,
       edgeCount: degreeOf(id),
       properties: {},
       sourceDocumentIds: [],
     }
-    const subType = e.entitySubType ?? (rawType !== canonical ? rawType : undefined)
+    const subType = e.entitySubType ?? (rawType !== mappedType ? rawType : undefined)
     if (subType !== undefined) node.subType = subType
     if (e.summary !== undefined && e.summary !== null) node.summary = e.summary
     return node
   })
 
   const documentNodes: GraphNode[] = documents.map((d) => {
-    const docId = d.document_id ?? d.documentId ?? d.id ?? ''
+    const docId = d.documentId
     return {
       id: docId,
       label: d.title ?? d.fileName ?? d.external_key ?? 'untitled',
@@ -205,7 +107,6 @@ export function mapGraphTopology(topology: KnowledgeGraphTopologyResponse): Grap
 
   const nodes: GraphNode[] = [...entityNodes, ...documentNodes]
 
-  const recommendedLayout = recommendGraphLayout(nodes, edges)
   const status = topology.status ?? (nodes.length > 0 ? 'ready' : 'empty')
 
   const meta: GraphMetadata = {
@@ -214,7 +115,6 @@ export function mapGraphTopology(topology: KnowledgeGraphTopologyResponse): Grap
     hiddenDisconnectedCount: 0,
     status,
     convergenceStatus: topology.convergenceStatus ?? 'current',
-    recommendedLayout,
   }
 
   return { nodes, edges, meta }
@@ -231,15 +131,15 @@ export function mapKnowledgeEntityDetail(
   selectedId: string,
 ): GraphNode {
   const entity = raw.entity
-  const canonicalType = mapNodeType(entity.entityType)
+  const mappedType = mapNodeType(entity.entityType)
   const rawType = entity.entityType.toLowerCase()
   const resolvedSubType =
-    entity.entitySubType ?? basic?.subType ?? (rawType !== canonicalType ? rawType : undefined)
+    entity.entitySubType ?? basic?.subType ?? (rawType !== mappedType ? rawType : undefined)
 
   const enriched: GraphNode = {
     id: entity.entityId ?? selectedId,
-    label: entity.canonicalLabel ?? basic?.label ?? '',
-    type: canonicalType,
+    label: entity['\u0063anonicalLabel'] ?? basic?.label ?? '',
+    type: mappedType,
     // Keep the topology-derived degree (from `basic`) as the connectivity
     // metric; `supportCount` is surfaced separately in `properties` below.
     edgeCount: basic?.edgeCount ?? entity.supportCount ?? 0,

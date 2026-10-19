@@ -20,7 +20,3 @@ export function compactText(value: string | null | undefined, maxLength: number)
     isTruncated: true,
   }
 }
-
-export function truncatedTitle(compact: CompactText): string | undefined {
-  return compact.isTruncated ? compact.fullText : undefined
-}

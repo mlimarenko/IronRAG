@@ -1,0 +1,420 @@
+.login-page {
+  min-height: 100dvh;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  place-items: center;
+  padding: 32px 20px;
+  background: var(--bg);
+}
+
+.login-panel {
+  width: 100%;
+  min-width: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  place-items: center;
+  position: relative;
+}
+.login-form {
+  width: min(360px, 100%);
+  min-width: 0;
+}
+.login-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 24px;
+}
+.login-form h1,
+.bootstrap-flow > h1 {
+  margin: 7px 0 4px;
+  font-size: 1.5rem;
+  letter-spacing: -0.025em;
+}
+.login-form .field {
+  margin: 13px 0;
+}
+.login-form > .button {
+  width: 100%;
+}
+.login-auth-separator {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 18px 0 12px;
+  color: var(--faint);
+  font-size: 0.75rem;
+  text-transform: none;
+  letter-spacing: normal;
+}
+.login-auth-separator::before,
+.login-auth-separator::after {
+  content: '';
+  height: 1px;
+  flex: 1;
+  background: var(--border);
+}
+.login-sso-button {
+  width: 100%;
+}
+.login-error {
+  display: flex;
+  align-items: flex-start;
+  gap: 7px;
+  padding: 10px;
+  margin: 12px 0;
+  border-radius: 8px;
+  background: var(--failed-bg);
+  color: var(--failed);
+  font-size: 0.75rem;
+  line-height: 1.45;
+}
+.provider-cards {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  margin: 14px 0;
+}
+.provider-cards > button {
+  min-height: 76px;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  color: var(--text);
+  text-align: left;
+  cursor: pointer;
+}
+.provider-cards > button.is-active {
+  border-color: var(--accent);
+  background: var(--surface-2);
+}
+.provider-cards button > div {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+.provider-cards small {
+  display: block;
+  margin: 9px 0;
+  color: var(--muted);
+  font-size: 0.75rem;
+}
+.not-found {
+  min-height: 220px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+}
+.not-found > svg {
+  color: var(--accent);
+}
+.not-found > span {
+  margin-top: 15px;
+  color: var(--accent);
+  font-size: 0.875rem;
+}
+.not-found h1 {
+  max-width: 100%;
+  margin: 7px 0;
+  font-size: 1.5rem;
+  letter-spacing: -0.04em;
+}
+.not-found p {
+  color: var(--muted);
+}
+.not-found .button {
+  margin-top: 10px;
+}
+.not-found .button a {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+
+@media (max-width: 500px) {
+  .login-page {
+    padding: 24px 16px;
+  }
+  .provider-cards {
+    grid-template-columns: 1fr;
+  }
+}
+
+.login-loading {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  color: var(--muted);
+  font-size: 0.75rem;
+}
+.bootstrap-flow {
+  width: min(680px, 100%);
+  min-width: 0;
+}
+.bootstrap-flow > p {
+  margin: 0 0 22px;
+  color: var(--muted);
+}
+.bootstrap-flow > .button {
+  width: 100%;
+  margin-top: 16px;
+}
+.bootstrap-section {
+  margin-top: 16px;
+  padding: 16px 0;
+  border-top: 1px solid var(--border);
+}
+.bootstrap-section__heading {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin-bottom: 14px;
+  color: var(--text);
+  font-size: 0.75rem;
+}
+.bootstrap-section__heading > svg {
+  color: var(--accent);
+}
+.bootstrap-section__description {
+  margin: -6px 0 12px;
+  color: var(--muted);
+  font-size: 0.75rem;
+  line-height: 1.5;
+}
+.field-error {
+  color: var(--failed);
+  font-size: 0.75rem;
+}
+.bootstrap-placeholder {
+  min-height: 60px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 12px;
+  border: 1px dashed var(--border-strong);
+  border-radius: 9px;
+  background: var(--surface-2);
+  color: var(--muted);
+  font-size: 0.75rem;
+  text-align: center;
+}
+.bootstrap-provider-fields {
+  margin-top: 14px;
+}
+.bootstrap-preconfigured {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  margin-top: 14px;
+  padding: 11px;
+  border-radius: 9px;
+  background: var(--ready-bg);
+  color: var(--ready);
+}
+.bootstrap-preconfigured div {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.bootstrap-preconfigured strong {
+  font-size: 0.75rem;
+}
+.bootstrap-preconfigured span {
+  font-size: 0.75rem;
+}
+.bootstrap-summary {
+  margin-top: 14px;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  overflow: hidden;
+}
+.bootstrap-summary__heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 11px;
+  background: var(--surface-2);
+}
+.bootstrap-summary__heading > div {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.bootstrap-summary__heading strong {
+  font-size: 0.75rem;
+}
+.bootstrap-summary__heading span {
+  color: var(--muted);
+  font-size: 0.75rem;
+}
+.bootstrap-summary dl {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  margin: 0;
+}
+.bootstrap-summary dl > div {
+  min-width: 0;
+  padding: 9px 11px;
+  border-top: 1px solid var(--border);
+}
+.bootstrap-summary dt {
+  color: var(--muted);
+  font-size: 0.75rem;
+  text-transform: none;
+  letter-spacing: normal;
+}
+.bootstrap-summary dd {
+  margin: 3px 0 0;
+  overflow-wrap: anywhere;
+  font-size: 0.75rem;
+}
+.bootstrap-bindings {
+  display: grid;
+  gap: 6px;
+  margin-top: 10px;
+}
+.bootstrap-bindings > div {
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr) auto;
+  gap: 7px;
+  align-items: start;
+  padding: 9px;
+  border-radius: 8px;
+  background: var(--surface-2);
+}
+.bootstrap-bindings > div > svg {
+  color: var(--ready);
+}
+.bootstrap-bindings div > div {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.bootstrap-bindings strong {
+  font-size: 0.75rem;
+}
+.bootstrap-bindings span {
+  color: var(--muted);
+  font-size: 0.75rem;
+  line-height: 1.4;
+}
+.bootstrap-bindings code {
+  max-width: 180px;
+  overflow-wrap: anywhere;
+  color: var(--muted);
+  font-size: 0.75rem;
+  text-align: right;
+}
+
+@media (max-width: 500px) {
+  .bootstrap-summary dl {
+    grid-template-columns: 1fr;
+  }
+  .bootstrap-bindings > div {
+    grid-template-columns: 18px minmax(0, 1fr);
+  }
+  .bootstrap-bindings code {
+    grid-column: 2;
+    max-width: none;
+    text-align: left;
+  }
+}
+
+/* Scope switcher (workspace + library picker) */
+.scope-switcher {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 1.25rem;
+}
+.scope-switcher section {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+  min-width: 0;
+}
+.scope-switcher header {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 0.75rem;
+  text-transform: none;
+  letter-spacing: normal;
+  color: var(--muted);
+}
+.scope-search {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.5rem 0.7rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm, 8px);
+  background: var(--surface-2);
+  color: var(--muted);
+}
+.scope-search input {
+  flex: 1;
+  border: none;
+  background: transparent;
+  color: var(--text);
+  outline: none;
+  font-size: 0.9rem;
+}
+.scope-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  max-height: 20rem;
+  overflow-y: auto;
+}
+.scope-list > li > button {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  padding: 0.55rem 0.7rem;
+  border: none;
+  border-radius: var(--radius-sm, 8px);
+  background: transparent;
+  color: var(--text);
+  cursor: pointer;
+  text-align: left;
+  font-size: 0.9rem;
+}
+.scope-list > li > button:hover {
+  background: var(--surface-2);
+}
+.scope-list > li > button.is-active {
+  background: var(--accent-soft);
+  color: var(--accent-hover);
+}
+.scope-empty {
+  padding: 0.55rem 0.7rem;
+  color: var(--muted);
+  font-size: 0.8rem;
+}
+.update-badge {
+  text-decoration: none;
+}
+@media (max-width: 768px) {
+  .scope-switcher {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* First-run progress note under the setup button */
+.login-progress-note {
+  margin-top: 0.6rem;
+  color: var(--muted);
+  font-size: 0.82rem;
+  line-height: 1.45;
+}

@@ -1,3 +1,6 @@
+pub(super) mod bundle_references;
+mod prepared_references;
+
 use std::collections::{HashMap, HashSet};
 
 use anyhow::Context;
@@ -6,9 +9,22 @@ use serde_json::json;
 use std::time::Instant;
 use uuid::Uuid;
 
+use bundle_references::{
+    absorb_traversal_row, augment_fact_rank_refs_from_chunk_support, build_chunk_bundle_edges,
+    build_entity_bundle_edges, build_evidence_bundle_edges, build_relation_bundle_edges,
+    derive_block_rank_refs, evidence_rank_for_bundle, evidence_score_for_bundle,
+    freshness_snapshot_json, merge_technical_fact_rows, seed_chunk_refs_from_answer_context,
+    seed_entity_refs_from_answer_graph, seed_relation_endpoint_refs_from_answer_graph,
+    seed_relation_refs_from_answer_graph, select_diversified_fact_ids,
+};
+pub(crate) use prepared_references::{
+    load_execution_prepared_reference_context, query_ir_from_bundle_diagnostics,
+};
+
 use super::{
-    ExecutionPreparedReferenceContext, PreparedSegmentRevisionInfo, RankedBundleReference,
-    merge_ranked_reference, runtime_mode_label, saturating_rank, top_ranked_ids,
+    ExecutionPreparedReferenceContext, MAX_DETAIL_TECHNICAL_FACT_REFERENCES,
+    PreparedSegmentRevisionInfo, RankedBundleReference, merge_ranked_reference, runtime_mode_label,
+    saturating_rank, top_ranked_ids,
 };
 use crate::{
     app::state::AppState,
@@ -89,9 +105,9 @@ fn merge_lexical_references(
     }
 }
 
-async fn persist_context_debug_trace(
-    state: &AppState,
-    conversation: &query_repository::QueryConversationRow,
+struct ContextDebugTrace<'a> {
+    state: &'a AppState,
+    conversation: &'a query_repository::QueryConversationRow,
     execution_id: Uuid,
     bundle_id: Uuid,
     include_debug: bool,
@@ -100,7 +116,21 @@ async fn persist_context_debug_trace(
     assembly_diagnostics: serde_json::Value,
     retrieval_strategy: String,
     now: chrono::DateTime<Utc>,
-) -> anyhow::Result<()> {
+}
+
+async fn persist_context_debug_trace(trace_input: ContextDebugTrace<'_>) -> anyhow::Result<()> {
+    let ContextDebugTrace {
+        state,
+        conversation,
+        execution_id,
+        bundle_id,
+        include_debug,
+        started_at,
+        candidate_summary,
+        assembly_diagnostics,
+        retrieval_strategy,
+        now,
+    } = trace_input;
     if !include_debug {
         return Ok(());
     }
@@ -126,6 +156,234 @@ async fn persist_context_debug_trace(
         .upsert_trace(&trace)
         .await
         .context("failed to upsert knowledge retrieval trace")?;
+    Ok(())
+}
+
+/// Parallel entity-neighborhood fan-out. Each seed entity issues a single
+/// graph traversal; they're fully independent, so running them sequentially
+/// wastes wall-clock on N round-trips. `join_all` pins the batch at
+/// max(per-entity latency).
+async fn load_entity_neighborhoods(
+    state: &AppState,
+    library_id: Uuid,
+    entity_seed_ids: &[Uuid],
+    graph_traversal_limit: usize,
+) -> anyhow::Result<Vec<Vec<KnowledgeGraphTraversalRow>>> {
+    let futures = entity_seed_ids.iter().map(|entity_id| {
+        let entity_id = *entity_id;
+        async move {
+            state
+                .graph_store
+                .list_entity_neighborhood(
+                    entity_id,
+                    library_id,
+                    CONTEXT_BUNDLE_GRAPH_TRAVERSAL_DEPTH,
+                    graph_traversal_limit.min(super::MAX_DETAIL_GRAPH_NODE_REFERENCES),
+                )
+                .await
+                .with_context(|| {
+                    format!(
+                        "failed to load entity neighborhood while assembling query context bundle for entity {entity_id}"
+                    )
+                })
+        }
+    });
+    futures::future::try_join_all(futures).await
+}
+
+/// Serialises the entity-neighborhood merge so rank indices stay stable.
+fn absorb_entity_neighborhoods(
+    neighborhoods: Vec<Vec<KnowledgeGraphTraversalRow>>,
+    entity_refs: &mut HashMap<Uuid, RankedBundleReference>,
+    relation_refs: &mut HashMap<Uuid, RankedBundleReference>,
+    evidence_refs: &mut HashMap<Uuid, RankedBundleReference>,
+) -> usize {
+    let mut entity_neighborhood_rows = 0usize;
+    for neighborhood in neighborhoods {
+        entity_neighborhood_rows = entity_neighborhood_rows.saturating_add(neighborhood.len());
+        for row in neighborhood {
+            absorb_traversal_row(
+                &row,
+                entity_refs,
+                relation_refs,
+                evidence_refs,
+                "entity_neighborhood",
+            );
+        }
+    }
+    entity_neighborhood_rows
+}
+
+/// Parallel relation fan-out. For each seed relation we issue two independent
+/// graph-store calls — `expand_relation_centric` and
+/// `list_relation_evidence_lookup` — in parallel, and the outer `join_all`
+/// collapses every seed into one max-latency batch rather than paying 2 × N
+/// round-trips serially.
+async fn load_relation_batches(
+    state: &AppState,
+    library_id: Uuid,
+    relation_seed_ids: &[Uuid],
+    graph_traversal_limit: usize,
+    candidate_limit: usize,
+) -> anyhow::Result<
+    Vec<(
+        Uuid,
+        Vec<KnowledgeGraphTraversalRow>,
+        Vec<crate::infra::knowledge_rows::KnowledgeRelationEvidenceLookupRow>,
+    )>,
+> {
+    let futures = relation_seed_ids.iter().map(|relation_id| {
+        let relation_id = *relation_id;
+        async move {
+            let expand_future = state.graph_store.expand_relation_centric(
+                relation_id,
+                library_id,
+                CONTEXT_BUNDLE_GRAPH_TRAVERSAL_DEPTH,
+                graph_traversal_limit,
+            );
+            let evidence_future = state.graph_store.list_relation_evidence_lookup(
+                relation_id,
+                library_id,
+                candidate_limit,
+            );
+            let (traversal, evidence_lookup) = tokio::join!(expand_future, evidence_future);
+            let traversal = traversal.with_context(|| {
+                format!(
+                    "failed to expand relation-centric neighborhood while assembling query context bundle for relation {relation_id}"
+                )
+            })?;
+            let evidence_lookup = evidence_lookup.with_context(|| {
+                format!(
+                    "failed to load relation evidence lookup while assembling query context bundle for relation {relation_id}"
+                )
+            })?;
+            Ok::<_, anyhow::Error>((relation_id, traversal, evidence_lookup))
+        }
+    });
+    futures::future::try_join_all(futures).await
+}
+
+fn absorb_relation_batches(
+    batches: Vec<(
+        Uuid,
+        Vec<KnowledgeGraphTraversalRow>,
+        Vec<crate::infra::knowledge_rows::KnowledgeRelationEvidenceLookupRow>,
+    )>,
+    entity_refs: &mut HashMap<Uuid, RankedBundleReference>,
+    relation_refs: &mut HashMap<Uuid, RankedBundleReference>,
+    evidence_refs: &mut HashMap<Uuid, RankedBundleReference>,
+) -> (usize, usize) {
+    let mut relation_traversal_rows = 0usize;
+    let mut relation_evidence_rows = 0usize;
+    for (_relation_id, traversal, evidence_lookup) in batches {
+        relation_traversal_rows = relation_traversal_rows.saturating_add(traversal.len());
+        for row in traversal {
+            absorb_traversal_row(
+                &row,
+                entity_refs,
+                relation_refs,
+                evidence_refs,
+                "relation_traversal",
+            );
+        }
+        relation_evidence_rows = relation_evidence_rows.saturating_add(evidence_lookup.len());
+        for (index, row) in evidence_lookup.into_iter().enumerate() {
+            merge_ranked_reference(
+                relation_refs,
+                row.relation.relation_id,
+                saturating_rank(index),
+                row.support_edge_score.unwrap_or_default(),
+                "relation_provenance",
+            );
+            merge_ranked_reference(
+                evidence_refs,
+                row.evidence.evidence_id,
+                saturating_rank(index),
+                row.support_edge_score.unwrap_or_default(),
+                "relation_evidence",
+            );
+        }
+    }
+    (relation_traversal_rows, relation_evidence_rows)
+}
+
+struct ContextBundleAssemblyCounts {
+    chunk_refs: usize,
+    entity_refs: usize,
+    relation_refs: usize,
+    evidence_refs: usize,
+}
+
+fn log_context_bundle_assembled(
+    execution_id: Uuid,
+    bundle_id: Uuid,
+    library_id: Uuid,
+    started_at: Instant,
+    counts: ContextBundleAssemblyCounts,
+) {
+    let ContextBundleAssemblyCounts { chunk_refs, entity_refs, relation_refs, evidence_refs } =
+        counts;
+    tracing::info!(
+        stage = "query.context_bundle.assembled",
+        %execution_id,
+        %bundle_id,
+        library_id = %library_id,
+        elapsed_ms = started_at.elapsed().as_millis(),
+        chunk_refs,
+        entity_refs,
+        relation_refs,
+        evidence_refs,
+        "assembled query context bundle"
+    );
+}
+
+struct ContextBundlePersistence<'a> {
+    library_id: Uuid,
+    bundle_row: &'a KnowledgeContextBundleRow,
+    chunk_edges: &'a [KnowledgeBundleChunkEdgeRow],
+    entity_edges: &'a [KnowledgeBundleEntityEdgeRow],
+    relation_edges: &'a [KnowledgeBundleRelationEdgeRow],
+    evidence_edges: &'a [KnowledgeBundleEvidenceEdgeRow],
+}
+
+async fn persist_context_bundle(
+    state: &AppState,
+    persistence: ContextBundlePersistence<'_>,
+) -> anyhow::Result<()> {
+    let ContextBundlePersistence {
+        library_id,
+        bundle_row,
+        chunk_edges,
+        entity_edges,
+        relation_edges,
+        evidence_edges,
+    } = persistence;
+    let bundle_id = bundle_row.bundle_id;
+    state
+        .context_store
+        .upsert_bundle(bundle_row)
+        .await
+        .context("failed to upsert knowledge context bundle document")?;
+    state
+        .context_store
+        .replace_bundle_chunk_edges(bundle_id, library_id, chunk_edges)
+        .await
+        .context("failed to replace bundle chunk edges")?;
+    state
+        .context_store
+        .replace_bundle_entity_edges(bundle_id, library_id, entity_edges)
+        .await
+        .context("failed to replace bundle entity edges")?;
+    state
+        .context_store
+        .replace_bundle_relation_edges(bundle_id, library_id, relation_edges)
+        .await
+        .context("failed to replace bundle relation edges")?;
+    state
+        .context_store
+        .replace_bundle_evidence_edges(bundle_id, library_id, evidence_edges)
+        .await
+        .context("failed to replace bundle evidence edges")?;
     Ok(())
 }
 
@@ -155,7 +413,7 @@ pub(crate) async fn assemble_context_bundle(
     // so this stage must not issue a second provider embedding request on
     // the user-visible critical path.
     let lexical_search = state
-        .canonical_services
+        .application_services
         .search
         .search_query_evidence(
             state,
@@ -165,9 +423,7 @@ pub(crate) async fn assemble_context_bundle(
             candidate_limit,
         )
         .await
-        .context(
-            "failed canonical lexical evidence search while assembling query context bundle",
-        )?;
+        .context("failed primary lexical evidence search while assembling query context bundle")?;
     let lexical_entity_hits = lexical_search.entity_hits;
     let lexical_relation_hits = lexical_search.relation_hits;
     let lexical_fact_hits = lexical_search.technical_fact_hits;
@@ -197,114 +453,35 @@ pub(crate) async fn assemble_context_bundle(
         .max(candidate_limit)
         .min(super::MAX_DETAIL_GRAPH_EDGE_REFERENCES);
     let entity_seed_ids = top_ranked_ids(&entity_refs, graph_seed_limit);
-    let mut entity_neighborhood_rows = 0usize;
-    // Parallel entity-neighborhood fan-out. Each seed entity issues a single
-    // graph traversal; they're fully independent, so running them sequentially
-    // wastes wall-clock on N round-trips. `join_all` pins the batch at
-    // max(per-entity latency). The absorb loop below serialises the HashMap
-    // merge; that's intentional to keep rank indices stable.
-    let entity_neighborhood_futures = entity_seed_ids.iter().map(|entity_id| {
-        let entity_id = *entity_id;
-        async move {
-            let neighborhood = state
-                .graph_store
-                .list_entity_neighborhood(
-                    entity_id,
-                    conversation.library_id,
-                    CONTEXT_BUNDLE_GRAPH_TRAVERSAL_DEPTH,
-                    graph_traversal_limit.min(super::MAX_DETAIL_GRAPH_NODE_REFERENCES),
-                )
-                .await
-                .with_context(|| {
-                    format!(
-                        "failed to load entity neighborhood while assembling query context bundle for entity {entity_id}"
-                    )
-                })?;
-            Ok::<_, anyhow::Error>(neighborhood)
-        }
-    });
-    let entity_neighborhoods: Vec<_> =
-        futures::future::try_join_all(entity_neighborhood_futures).await?;
-    for neighborhood in entity_neighborhoods {
-        entity_neighborhood_rows = entity_neighborhood_rows.saturating_add(neighborhood.len());
-        for row in neighborhood {
-            absorb_traversal_row(
-                &row,
-                &mut entity_refs,
-                &mut relation_refs,
-                &mut evidence_refs,
-                "entity_neighborhood",
-            );
-        }
-    }
+    let entity_neighborhoods = load_entity_neighborhoods(
+        state,
+        conversation.library_id,
+        &entity_seed_ids,
+        graph_traversal_limit,
+    )
+    .await?;
+    let entity_neighborhood_rows = absorb_entity_neighborhoods(
+        entity_neighborhoods,
+        &mut entity_refs,
+        &mut relation_refs,
+        &mut evidence_refs,
+    );
 
     let relation_seed_ids = top_ranked_ids(&relation_refs, graph_seed_limit);
-    let mut relation_traversal_rows = 0usize;
-    let mut relation_evidence_rows = 0usize;
-    // Parallel relation fan-out. For each seed relation we issue two
-    // independent graph-store calls — `expand_relation_centric` and
-    // `list_relation_evidence_lookup` — in parallel, and the outer `join_all`
-    // collapses every seed into one max-latency batch rather than paying 2 × N
-    // round-trips serially.
-    let relation_futures = relation_seed_ids.iter().map(|relation_id| {
-        let relation_id = *relation_id;
-        async move {
-            let expand_future = state.graph_store.expand_relation_centric(
-                relation_id,
-                conversation.library_id,
-                CONTEXT_BUNDLE_GRAPH_TRAVERSAL_DEPTH,
-                graph_traversal_limit,
-            );
-            let evidence_future = state.graph_store.list_relation_evidence_lookup(
-                relation_id,
-                conversation.library_id,
-                candidate_limit,
-            );
-            let (traversal, evidence_lookup) = tokio::join!(expand_future, evidence_future);
-            let traversal = traversal.with_context(|| {
-                format!(
-                    "failed to expand relation-centric neighborhood while assembling query context bundle for relation {relation_id}"
-                )
-            })?;
-            let evidence_lookup = evidence_lookup.with_context(|| {
-                format!(
-                    "failed to load relation evidence lookup while assembling query context bundle for relation {relation_id}"
-                )
-            })?;
-            Ok::<_, anyhow::Error>((relation_id, traversal, evidence_lookup))
-        }
-    });
-    let relation_batches: Vec<_> = futures::future::try_join_all(relation_futures).await?;
-    for (relation_id, traversal, evidence_lookup) in relation_batches {
-        let _ = relation_id;
-        relation_traversal_rows = relation_traversal_rows.saturating_add(traversal.len());
-        for row in traversal {
-            absorb_traversal_row(
-                &row,
-                &mut entity_refs,
-                &mut relation_refs,
-                &mut evidence_refs,
-                "relation_traversal",
-            );
-        }
-        relation_evidence_rows = relation_evidence_rows.saturating_add(evidence_lookup.len());
-        for (index, row) in evidence_lookup.into_iter().enumerate() {
-            merge_ranked_reference(
-                &mut relation_refs,
-                row.relation.relation_id,
-                saturating_rank(index),
-                row.support_edge_score.unwrap_or_default(),
-                "relation_provenance",
-            );
-            merge_ranked_reference(
-                &mut evidence_refs,
-                row.evidence.evidence_id,
-                saturating_rank(index),
-                row.support_edge_score.unwrap_or_default(),
-                "relation_evidence",
-            );
-        }
-    }
+    let relation_batches = load_relation_batches(
+        state,
+        conversation.library_id,
+        &relation_seed_ids,
+        graph_traversal_limit,
+        candidate_limit,
+    )
+    .await?;
+    let (relation_traversal_rows, relation_evidence_rows) = absorb_relation_batches(
+        relation_batches,
+        &mut entity_refs,
+        &mut relation_refs,
+        &mut evidence_refs,
+    );
 
     let evidence_rows = state
         .graph_store
@@ -330,7 +507,7 @@ pub(crate) async fn assemble_context_bundle(
         .context("failed to load technical facts while assembling query context bundle")?;
     let now = Utc::now();
     let generations = state
-        .canonical_services
+        .application_services
         .knowledge
         .derive_library_generation_rows(state, conversation.library_id)
         .await
@@ -505,33 +682,20 @@ pub(crate) async fn assemble_context_bundle(
         created_at: now,
         updated_at: now,
     };
-    state
-        .context_store
-        .upsert_bundle(&bundle_row)
-        .await
-        .context("failed to upsert knowledge context bundle document")?;
-    state
-        .context_store
-        .replace_bundle_chunk_edges(bundle_id, conversation.library_id, &chunk_edges)
-        .await
-        .context("failed to replace bundle chunk edges")?;
-    state
-        .context_store
-        .replace_bundle_entity_edges(bundle_id, conversation.library_id, &entity_edges)
-        .await
-        .context("failed to replace bundle entity edges")?;
-    state
-        .context_store
-        .replace_bundle_relation_edges(bundle_id, conversation.library_id, &relation_edges)
-        .await
-        .context("failed to replace bundle relation edges")?;
-    state
-        .context_store
-        .replace_bundle_evidence_edges(bundle_id, conversation.library_id, &evidence_edges)
-        .await
-        .context("failed to replace bundle evidence edges")?;
+    persist_context_bundle(
+        state,
+        ContextBundlePersistence {
+            library_id: conversation.library_id,
+            bundle_row: &bundle_row,
+            chunk_edges: &chunk_edges,
+            entity_edges: &entity_edges,
+            relation_edges: &relation_edges,
+            evidence_edges: &evidence_edges,
+        },
+    )
+    .await?;
 
-    persist_context_debug_trace(
+    persist_context_debug_trace(ContextDebugTrace {
         state,
         conversation,
         execution_id,
@@ -542,749 +706,21 @@ pub(crate) async fn assemble_context_bundle(
         assembly_diagnostics,
         retrieval_strategy,
         now,
-    )
+    })
     .await?;
 
-    tracing::info!(
-        stage = "query.context_bundle.assembled",
-        %execution_id,
-        %bundle_id,
-        library_id = %conversation.library_id,
-        elapsed_ms = started_at.elapsed().as_millis(),
-        chunk_refs = chunk_edges.len(),
-        entity_refs = entity_edges.len(),
-        relation_refs = relation_edges.len(),
-        evidence_refs = evidence_edges.len(),
-        "assembled query context bundle"
+    log_context_bundle_assembled(
+        execution_id,
+        bundle_id,
+        conversation.library_id,
+        started_at,
+        ContextBundleAssemblyCounts {
+            chunk_refs: chunk_edges.len(),
+            entity_refs: entity_edges.len(),
+            relation_refs: relation_edges.len(),
+            evidence_refs: evidence_edges.len(),
+        },
     );
 
     Ok(())
-}
-
-pub(crate) fn seed_chunk_refs_from_answer_context(
-    answer_chunk_references: &[QueryChunkReferenceSnapshot],
-) -> HashMap<Uuid, RankedBundleReference> {
-    let mut chunk_refs = HashMap::new();
-    for reference in answer_chunk_references {
-        merge_ranked_reference(
-            &mut chunk_refs,
-            reference.chunk_id,
-            reference.rank,
-            reference.score,
-            "answer_context",
-        );
-    }
-    chunk_refs
-}
-
-pub(crate) fn seed_entity_refs_from_answer_graph(
-    answer_entity_references: &[RuntimeMatchedEntity],
-    entity_refs: &mut HashMap<Uuid, RankedBundleReference>,
-) {
-    for (index, reference) in answer_entity_references.iter().enumerate() {
-        merge_ranked_reference(
-            entity_refs,
-            reference.node_id,
-            saturating_rank(index),
-            reference.score.map_or(0.0, f64::from),
-            "answer_graph_context",
-        );
-    }
-}
-
-pub(crate) fn seed_relation_refs_from_answer_graph(
-    answer_relation_references: &[RuntimeMatchedRelationship],
-    relation_refs: &mut HashMap<Uuid, RankedBundleReference>,
-) {
-    for (index, reference) in answer_relation_references.iter().enumerate() {
-        merge_ranked_reference(
-            relation_refs,
-            reference.edge_id,
-            saturating_rank(index),
-            reference.score.map_or(0.0, f64::from),
-            "answer_graph_context",
-        );
-    }
-}
-
-pub(crate) fn seed_relation_endpoint_refs_from_answer_graph(
-    answer_relation_references: &[RuntimeMatchedRelationship],
-    entity_refs: &mut HashMap<Uuid, RankedBundleReference>,
-) {
-    for (index, reference) in answer_relation_references.iter().enumerate() {
-        let rank = saturating_rank(index);
-        let score = reference.score.map_or(0.0, f64::from);
-        merge_ranked_reference(
-            entity_refs,
-            reference.from_node_id,
-            rank,
-            score,
-            "answer_relation_endpoint",
-        );
-        merge_ranked_reference(
-            entity_refs,
-            reference.to_node_id,
-            rank,
-            score,
-            "answer_relation_endpoint",
-        );
-    }
-}
-
-fn absorb_traversal_row(
-    row: &KnowledgeGraphTraversalRow,
-    entity_refs: &mut HashMap<Uuid, RankedBundleReference>,
-    relation_refs: &mut HashMap<Uuid, RankedBundleReference>,
-    evidence_refs: &mut HashMap<Uuid, RankedBundleReference>,
-    reason: &str,
-) {
-    let rank = traversal_rank(row.path_length);
-    let score = row.edge_score.unwrap_or_else(|| traversal_score(row.path_length));
-    match row.vertex_kind.as_str() {
-        "knowledge_chunk" => {}
-        "knowledge_entity" => {
-            merge_ranked_reference(entity_refs, row.vertex_id, rank, score, reason);
-        }
-        "knowledge_relation" => {
-            merge_ranked_reference(relation_refs, row.vertex_id, rank, score, reason);
-        }
-        "knowledge_evidence" => {
-            merge_ranked_reference(evidence_refs, row.vertex_id, rank, score, reason);
-        }
-        _ => {}
-    }
-}
-
-fn traversal_rank(path_length: i64) -> i32 {
-    i32::try_from(path_length.saturating_add(1)).unwrap_or(i32::MAX)
-}
-
-fn traversal_score(path_length: i64) -> f64 {
-    match path_length {
-        0 => 1.0,
-        1 => 0.8,
-        2 => 0.6,
-        3 => 0.4,
-        _ => 0.2,
-    }
-}
-
-fn build_chunk_bundle_edges(
-    bundle_id: Uuid,
-    refs: &HashMap<Uuid, RankedBundleReference>,
-    created_at: chrono::DateTime<chrono::Utc>,
-) -> Vec<KnowledgeBundleChunkEdgeRow> {
-    let mut items: Vec<(Uuid, &RankedBundleReference)> =
-        refs.iter().map(|(id, value)| (*id, value)).collect();
-    items.sort_by(|(left_id, left), (right_id, right)| {
-        left.rank
-            .cmp(&right.rank)
-            .then_with(|| right.score.total_cmp(&left.score))
-            .then_with(|| left_id.cmp(right_id))
-    });
-    items
-        .into_iter()
-        .map(|(chunk_id, reference)| KnowledgeBundleChunkEdgeRow {
-            bundle_id,
-            chunk_id,
-            rank: reference.rank,
-            score: reference.score,
-            inclusion_reason: Some(reference.reasons.iter().cloned().collect::<Vec<_>>().join("+")),
-            created_at,
-        })
-        .collect()
-}
-
-fn build_entity_bundle_edges(
-    bundle_id: Uuid,
-    refs: &HashMap<Uuid, RankedBundleReference>,
-    created_at: chrono::DateTime<chrono::Utc>,
-) -> Vec<KnowledgeBundleEntityEdgeRow> {
-    let mut items: Vec<(Uuid, &RankedBundleReference)> =
-        refs.iter().map(|(id, value)| (*id, value)).collect();
-    items.sort_by(|(left_id, left), (right_id, right)| {
-        left.rank
-            .cmp(&right.rank)
-            .then_with(|| right.score.total_cmp(&left.score))
-            .then_with(|| left_id.cmp(right_id))
-    });
-    items
-        .into_iter()
-        .map(|(entity_id, reference)| KnowledgeBundleEntityEdgeRow {
-            bundle_id,
-            entity_id,
-            rank: reference.rank,
-            score: reference.score,
-            inclusion_reason: Some(reference.reasons.iter().cloned().collect::<Vec<_>>().join("+")),
-            created_at,
-        })
-        .collect()
-}
-
-fn build_relation_bundle_edges(
-    bundle_id: Uuid,
-    refs: &HashMap<Uuid, RankedBundleReference>,
-    created_at: chrono::DateTime<chrono::Utc>,
-) -> Vec<KnowledgeBundleRelationEdgeRow> {
-    let mut items: Vec<(Uuid, &RankedBundleReference)> =
-        refs.iter().map(|(id, value)| (*id, value)).collect();
-    items.sort_by(|(left_id, left), (right_id, right)| {
-        left.rank
-            .cmp(&right.rank)
-            .then_with(|| right.score.total_cmp(&left.score))
-            .then_with(|| left_id.cmp(right_id))
-    });
-    items
-        .into_iter()
-        .map(|(relation_id, reference)| KnowledgeBundleRelationEdgeRow {
-            bundle_id,
-            relation_id,
-            rank: reference.rank,
-            score: reference.score,
-            inclusion_reason: Some(reference.reasons.iter().cloned().collect::<Vec<_>>().join("+")),
-            created_at,
-        })
-        .collect()
-}
-
-fn build_evidence_bundle_edges(
-    bundle_id: Uuid,
-    refs: &HashMap<Uuid, RankedBundleReference>,
-    created_at: chrono::DateTime<chrono::Utc>,
-) -> Vec<KnowledgeBundleEvidenceEdgeRow> {
-    let mut items: Vec<(Uuid, &RankedBundleReference)> =
-        refs.iter().map(|(id, value)| (*id, value)).collect();
-    items.sort_by(|(left_id, left), (right_id, right)| {
-        left.rank
-            .cmp(&right.rank)
-            .then_with(|| right.score.total_cmp(&left.score))
-            .then_with(|| left_id.cmp(right_id))
-    });
-    items
-        .into_iter()
-        .map(|(evidence_id, reference)| KnowledgeBundleEvidenceEdgeRow {
-            bundle_id,
-            evidence_id,
-            rank: reference.rank,
-            score: reference.score,
-            inclusion_reason: Some(reference.reasons.iter().cloned().collect::<Vec<_>>().join("+")),
-            created_at,
-        })
-        .collect()
-}
-
-pub(crate) fn evidence_rank_for_bundle(
-    refs: &HashMap<Uuid, RankedBundleReference>,
-    evidence_id: Uuid,
-) -> i32 {
-    refs.get(&evidence_id).map_or(i32::MAX, |reference| reference.rank)
-}
-
-pub(crate) fn evidence_score_for_bundle(
-    refs: &HashMap<Uuid, RankedBundleReference>,
-    evidence_id: Uuid,
-) -> f64 {
-    refs.get(&evidence_id).map_or(0.0, |reference| reference.score)
-}
-
-pub(crate) fn fact_rank_for_bundle(
-    refs: &HashMap<Uuid, RankedBundleReference>,
-    fact_id: Uuid,
-) -> i32 {
-    refs.get(&fact_id).map_or(i32::MAX, |reference| reference.rank)
-}
-
-pub(crate) fn fact_score_for_bundle(
-    refs: &HashMap<Uuid, RankedBundleReference>,
-    fact_id: Uuid,
-) -> f64 {
-    refs.get(&fact_id).map_or(0.0, |reference| reference.score)
-}
-
-pub(crate) fn derive_chunk_rank_refs(
-    bundle: &KnowledgeContextBundleReferenceSetRow,
-) -> HashMap<Uuid, RankedBundleReference> {
-    let mut chunk_refs = HashMap::<Uuid, RankedBundleReference>::new();
-    for reference in &bundle.chunk_references {
-        merge_ranked_reference(
-            &mut chunk_refs,
-            reference.chunk_id,
-            reference.rank,
-            reference.score,
-            reference.inclusion_reason.as_deref().unwrap_or("bundle_chunk"),
-        );
-    }
-    chunk_refs
-}
-
-pub(crate) fn augment_fact_rank_refs_from_chunk_support(
-    bundle: Option<&KnowledgeContextBundleReferenceSetRow>,
-    technical_fact_rows: &[KnowledgeTechnicalFactRow],
-    fact_rank_refs: &mut HashMap<Uuid, RankedBundleReference>,
-) {
-    let Some(bundle) = bundle else {
-        return;
-    };
-    let chunk_rank_refs = derive_chunk_rank_refs(bundle);
-    if chunk_rank_refs.is_empty() {
-        return;
-    }
-    for fact in technical_fact_rows {
-        let mut best_rank = None::<i32>;
-        let mut best_score = 0.0_f64;
-        for chunk_id in &fact.support_chunk_ids {
-            let Some(reference) = chunk_rank_refs.get(chunk_id) else {
-                continue;
-            };
-            best_rank = Some(best_rank.map_or(reference.rank, |rank| rank.min(reference.rank)));
-            if reference.score > best_score {
-                best_score = reference.score;
-            }
-        }
-        let Some(rank) = best_rank else {
-            continue;
-        };
-        merge_ranked_reference(
-            fact_rank_refs,
-            fact.fact_id,
-            rank,
-            best_score.max(1.0),
-            "selected_chunk_support",
-        );
-    }
-}
-
-pub(crate) fn merge_technical_fact_rows(
-    target: &mut Vec<KnowledgeTechnicalFactRow>,
-    additional: &[KnowledgeTechnicalFactRow],
-) {
-    let mut seen = target.iter().map(|row| row.fact_id).collect::<std::collections::BTreeSet<_>>();
-    for row in additional {
-        if seen.insert(row.fact_id) {
-            target.push(row.clone());
-        }
-    }
-    target.sort_by(|left, right| {
-        left.fact_kind.cmp(&right.fact_kind).then_with(|| left.fact_id.cmp(&right.fact_id))
-    });
-}
-
-#[derive(Debug, PartialEq, Eq, Hash)]
-struct TechnicalFactDiversityKey {
-    document_id: Uuid,
-    revision_id: Uuid,
-    fact_kind: TechnicalFactKind,
-    canonical_value: String,
-    qualifiers: Vec<(String, String)>,
-}
-
-#[derive(Debug, PartialEq, Eq, Hash)]
-enum TechnicalFactDiversityIdentity {
-    Known(TechnicalFactDiversityKey),
-    Opaque(Uuid),
-}
-
-pub(crate) fn select_diversified_fact_ids(
-    fact_rank_refs: &HashMap<Uuid, RankedBundleReference>,
-    technical_fact_rows: &[KnowledgeTechnicalFactRow],
-    limit: usize,
-) -> Vec<Uuid> {
-    if limit == 0 || fact_rank_refs.is_empty() {
-        return Vec::new();
-    }
-
-    let facts_by_id =
-        technical_fact_rows.iter().map(|fact| (fact.fact_id, fact)).collect::<HashMap<_, _>>();
-    let mut seen = HashSet::<TechnicalFactDiversityIdentity>::new();
-    let mut selected = Vec::<Uuid>::with_capacity(limit.min(fact_rank_refs.len()));
-
-    for fact_id in top_ranked_ids(fact_rank_refs, fact_rank_refs.len()) {
-        let identity =
-            facts_by_id.get(&fact_id).and_then(|fact| technical_fact_diversity_key(fact)).map_or(
-                TechnicalFactDiversityIdentity::Opaque(fact_id),
-                TechnicalFactDiversityIdentity::Known,
-            );
-        if seen.insert(identity) {
-            selected.push(fact_id);
-            if selected.len() >= limit {
-                break;
-            }
-        }
-    }
-
-    selected
-}
-
-fn technical_fact_diversity_key(
-    fact: &KnowledgeTechnicalFactRow,
-) -> Option<TechnicalFactDiversityKey> {
-    let fact_kind = fact.fact_kind.parse::<TechnicalFactKind>().ok()?;
-    let canonical_value = fact.canonical_value_exact.trim();
-    if canonical_value.is_empty() {
-        return None;
-    }
-    let mut qualifiers =
-        serde_json::from_value::<Vec<TechnicalFactQualifier>>(fact.qualifiers_json.clone())
-            .ok()?
-            .into_iter()
-            .map(|qualifier| {
-                (qualifier.key.trim().to_ascii_lowercase(), qualifier.value.trim().to_string())
-            })
-            .collect::<Vec<_>>();
-    qualifiers.sort();
-    qualifiers.dedup();
-
-    Some(TechnicalFactDiversityKey {
-        document_id: fact.document_id,
-        revision_id: fact.revision_id,
-        fact_kind,
-        canonical_value: canonical_value.to_string(),
-        qualifiers,
-    })
-}
-
-pub(crate) fn derive_fact_rank_refs(
-    bundle: &KnowledgeContextBundleReferenceSetRow,
-    evidence_rows: &[KnowledgeEvidenceRow],
-) -> HashMap<Uuid, RankedBundleReference> {
-    let mut fact_refs = HashMap::<Uuid, RankedBundleReference>::new();
-    let evidence_by_id = evidence_rows
-        .iter()
-        .map(|evidence| (evidence.evidence_id, evidence))
-        .collect::<HashMap<_, _>>();
-    for reference in &bundle.evidence_references {
-        let Some(evidence) = evidence_by_id.get(&reference.evidence_id) else {
-            continue;
-        };
-        let Some(fact_id) = evidence.fact_id else {
-            continue;
-        };
-        merge_ranked_reference(
-            &mut fact_refs,
-            fact_id,
-            reference.rank,
-            reference.score,
-            reference.inclusion_reason.as_deref().unwrap_or("bundle_evidence"),
-        );
-    }
-    for (index, fact_id) in bundle.bundle.selected_fact_ids.iter().copied().enumerate() {
-        let score = fact_refs.get(&fact_id).map_or(1.0, |reference| reference.score.max(1.0));
-        merge_ranked_reference(
-            &mut fact_refs,
-            fact_id,
-            saturating_rank(index),
-            score,
-            "bundle_selected_fact",
-        );
-    }
-    fact_refs
-}
-
-pub(crate) fn derive_block_rank_refs(
-    bundle: &KnowledgeContextBundleReferenceSetRow,
-    evidence_rows: &[KnowledgeEvidenceRow],
-    technical_fact_rows: &[KnowledgeTechnicalFactRow],
-    chunk_rows: &[crate::infra::knowledge_rows::KnowledgeChunkRow],
-) -> HashMap<Uuid, RankedBundleReference> {
-    let mut block_refs = HashMap::<Uuid, RankedBundleReference>::new();
-    let evidence_by_id = evidence_rows
-        .iter()
-        .map(|evidence| (evidence.evidence_id, evidence))
-        .collect::<HashMap<_, _>>();
-    for reference in &bundle.evidence_references {
-        let Some(evidence) = evidence_by_id.get(&reference.evidence_id) else {
-            continue;
-        };
-        let Some(block_id) = evidence.block_id else {
-            continue;
-        };
-        merge_ranked_reference(
-            &mut block_refs,
-            block_id,
-            reference.rank,
-            reference.score,
-            reference.inclusion_reason.as_deref().unwrap_or("bundle_evidence"),
-        );
-    }
-    let fact_rank_refs = derive_fact_rank_refs(bundle, evidence_rows);
-    for fact in technical_fact_rows {
-        let rank = fact_rank_for_bundle(&fact_rank_refs, fact.fact_id);
-        let score = fact_score_for_bundle(&fact_rank_refs, fact.fact_id).max(1.0);
-        for block_id in &fact.support_block_ids {
-            merge_ranked_reference(
-                &mut block_refs,
-                *block_id,
-                rank,
-                score,
-                "technical_fact_support",
-            );
-        }
-    }
-    let chunk_rank_refs = derive_chunk_rank_refs(bundle);
-    for chunk in chunk_rows {
-        let Some(reference) = chunk_rank_refs.get(&chunk.chunk_id) else {
-            continue;
-        };
-        for block_id in &chunk.support_block_ids {
-            merge_ranked_reference(
-                &mut block_refs,
-                *block_id,
-                reference.rank,
-                reference.score.max(1.0),
-                "selected_chunk_support",
-            );
-        }
-    }
-    block_refs
-}
-
-pub(crate) fn selected_fact_ids_for_detail(
-    bundle: &KnowledgeContextBundleReferenceSetRow,
-    fact_rank_refs: &HashMap<Uuid, RankedBundleReference>,
-) -> Vec<Uuid> {
-    let mut fact_ids = bundle.bundle.selected_fact_ids.clone();
-    for fact_id in top_ranked_ids(fact_rank_refs, super::MAX_DETAIL_TECHNICAL_FACT_REFERENCES) {
-        if fact_ids.len() >= super::MAX_DETAIL_TECHNICAL_FACT_REFERENCES {
-            break;
-        }
-        if !fact_ids.contains(&fact_id) {
-            fact_ids.push(fact_id);
-        }
-    }
-    fact_ids.truncate(super::MAX_DETAIL_TECHNICAL_FACT_REFERENCES);
-    fact_ids
-}
-
-pub(crate) async fn load_execution_prepared_reference_context(
-    state: &AppState,
-    execution_id: Uuid,
-) -> Result<ExecutionPreparedReferenceContext, ApiError> {
-    let bundle_refs = state
-        .context_store
-        .get_bundle_reference_set_by_query_execution(execution_id)
-        .await
-        .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
-    let Some(bundle) = bundle_refs.as_ref() else {
-        return Ok(ExecutionPreparedReferenceContext::default());
-    };
-
-    let chunk_rows = state
-        .document_store
-        .list_chunks_by_ids(
-            &bundle.chunk_references.iter().map(|reference| reference.chunk_id).collect::<Vec<_>>(),
-        )
-        .await
-        .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
-    let evidence_rows = state
-        .graph_store
-        .list_evidence_by_ids(
-            &bundle
-                .evidence_references
-                .iter()
-                .map(|reference| reference.evidence_id)
-                .collect::<Vec<_>>(),
-        )
-        .await
-        .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
-    let mut fact_rank_refs = derive_fact_rank_refs(bundle, &evidence_rows);
-    let chunk_supported_fact_rows = if chunk_rows.is_empty() {
-        Vec::new()
-    } else {
-        state
-            .document_store
-            .list_technical_facts_by_chunk_ids(
-                &chunk_rows.iter().map(|row| row.chunk_id).collect::<Vec<_>>(),
-            )
-            .await
-            .map_err(|e| ApiError::internal_with_log(e, "internal"))?
-    };
-    augment_fact_rank_refs_from_chunk_support(
-        Some(bundle),
-        &chunk_supported_fact_rows,
-        &mut fact_rank_refs,
-    );
-    // Post-answer reference hydration: the generated answer body is
-    // already accepted and streamed before we reach this block, so an
-    // intermittent knowledge-store error must not turn a succeeded turn into a
-    // 500. Fail-soft to an empty vec and log so references degrade but the
-    // answer still reaches the user.
-    let technical_fact_rows =
-        if fact_rank_refs.is_empty() && bundle.bundle.selected_fact_ids.is_empty() {
-            Vec::new()
-        } else {
-            let ids = selected_fact_ids_for_detail(bundle, &fact_rank_refs);
-            match state.document_store.list_technical_facts_by_ids(&ids).await {
-                Ok(rows) => rows,
-                Err(error) => {
-                    tracing::warn!(
-                        ?error,
-                        technical_fact_ids = ids.len(),
-                        "post-answer technical fact lookup failed; returning empty reference list",
-                    );
-                    Vec::new()
-                }
-            }
-        };
-    let block_rank_refs =
-        derive_block_rank_refs(bundle, &evidence_rows, &technical_fact_rows, &chunk_rows);
-    let structured_block_rows = if block_rank_refs.is_empty() {
-        Vec::new()
-    } else {
-        let ids: Vec<Uuid> = block_rank_refs.keys().copied().collect();
-        match state.document_store.list_structured_blocks_by_ids(&ids).await {
-            Ok(rows) => rows,
-            Err(error) => {
-                tracing::warn!(
-                    ?error,
-                    structured_block_ids = ids.len(),
-                    "post-answer structured block lookup failed; returning empty reference list",
-                );
-                Vec::new()
-            }
-        }
-    };
-    let segment_revision_info =
-        load_prepared_segment_revision_info(state, &structured_block_rows).await;
-    let assistant_document_references =
-        assistant_document_references_from_diagnostics(&bundle.bundle.assembly_diagnostics);
-
-    Ok(ExecutionPreparedReferenceContext {
-        bundle_refs,
-        chunk_rows,
-        fact_rank_refs,
-        technical_fact_rows,
-        block_rank_refs,
-        structured_block_rows,
-        segment_revision_info,
-        assistant_document_references,
-    })
-}
-
-fn assistant_document_references_from_diagnostics(
-    assembly_diagnostics: &serde_json::Value,
-) -> Vec<AssistantGroundingDocumentReference> {
-    assembly_diagnostics
-        .get("assistantGrounding")
-        .and_then(|value| value.get("documentReferences"))
-        .cloned()
-        .and_then(|value| {
-            serde_json::from_value::<Vec<AssistantGroundingDocumentReference>>(value).ok()
-        })
-        .unwrap_or_default()
-}
-
-pub(crate) fn query_ir_from_bundle_diagnostics(
-    assembly_diagnostics: &serde_json::Value,
-) -> Option<crate::domains::query_ir::QueryIR> {
-    assembly_diagnostics
-        .get("queryIr")
-        .cloned()
-        .and_then(|value| serde_json::from_value(value).ok())
-}
-
-async fn load_prepared_segment_revision_info(
-    state: &AppState,
-    blocks: &[crate::infra::knowledge_rows::KnowledgeStructuredBlockRow],
-) -> HashMap<Uuid, PreparedSegmentRevisionInfo> {
-    if blocks.is_empty() {
-        return HashMap::new();
-    }
-
-    let document_ids = blocks
-        .iter()
-        .map(|block| block.document_id)
-        .collect::<std::collections::HashSet<_>>()
-        .into_iter()
-        .collect::<Vec<_>>();
-    let revision_ids = blocks
-        .iter()
-        .map(|block| block.revision_id)
-        .collect::<std::collections::HashSet<_>>()
-        .into_iter()
-        .collect::<Vec<_>>();
-
-    let doc_titles: HashMap<Uuid, Option<String>> = state
-        .document_store
-        .list_documents_by_ids(&document_ids)
-        .await
-        .unwrap_or_default()
-        .into_iter()
-        .map(|document| (document.document_id, document.title))
-        .collect();
-
-    let library_ids = blocks
-        .iter()
-        .map(|block| block.library_id)
-        .collect::<std::collections::HashSet<_>>()
-        .into_iter()
-        .collect::<Vec<_>>();
-    let mut library_settings = HashMap::<Uuid, bool>::new();
-    for library_id in library_ids {
-        let enabled =
-            catalog_repository::get_library_by_id(&state.persistence.postgres, library_id)
-                .await
-                .ok()
-                .flatten()
-                .map(|library| library.include_document_hint_in_mcp_answers)
-                .unwrap_or(true);
-        library_settings.insert(library_id, enabled);
-    }
-
-    state
-        .document_store
-        .list_revisions_by_ids(&revision_ids)
-        .await
-        .unwrap_or_default()
-        .into_iter()
-        .map(|revision| {
-            let source_descriptor =
-                crate::services::content::source_access::describe_content_source(
-                    revision.document_id,
-                    Some(revision.revision_id),
-                    &revision.revision_kind,
-                    revision.source_uri.as_deref(),
-                    revision.storage_ref.as_deref(),
-                    revision.title.as_deref(),
-                    doc_titles
-                        .get(&revision.document_id)
-                        .and_then(|title| title.as_deref())
-                        .unwrap_or("document"),
-                );
-            let document_title = doc_titles
-                .get(&revision.document_id)
-                .cloned()
-                .flatten()
-                .or_else(|| revision.title.clone())
-                .or_else(|| Some(source_descriptor.file_name.clone()));
-            let library_setting =
-                library_settings.get(&revision.library_id).copied().unwrap_or(true);
-            let document_hint = resolve_document_hint(
-                &revision.revision_kind,
-                revision.source_uri.as_deref(),
-                revision.document_hint.as_deref(),
-                document_title.as_deref(),
-                library_setting,
-            );
-            (
-                revision.revision_id,
-                PreparedSegmentRevisionInfo {
-                    document_title,
-                    source_uri: revision.source_uri.clone(),
-                    document_hint,
-                    source_access: source_descriptor.access,
-                },
-            )
-        })
-        .collect()
-}
-
-fn freshness_snapshot_json(row: &KnowledgeLibraryGenerationRow) -> serde_json::Value {
-    json!({
-        "generationId": row.generation_id,
-        "activeTextGeneration": row.active_text_generation,
-        "activeVectorGeneration": row.active_vector_generation,
-        "activeGraphGeneration": row.active_graph_generation,
-        "degradedState": row.degraded_state,
-        "updatedAt": row.updated_at,
-    })
 }

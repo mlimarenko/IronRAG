@@ -62,7 +62,7 @@ type KeyMap = Map<
     }
 >;
 
-function buildKeyMap(fields: FieldsConfig, map?: KeyMap): KeyMap {
+const buildKeyMap = (fields: FieldsConfig, map?: KeyMap): KeyMap => {
   map ??= new Map();
 
   for (const config of fields) {
@@ -83,23 +83,22 @@ function buildKeyMap(fields: FieldsConfig, map?: KeyMap): KeyMap {
   }
 
   return map;
-}
+};
 
 interface Params {
-  body?: unknown;
+  body: unknown;
   headers: Record<string, unknown>;
   path: Record<string, unknown>;
   query: Record<string, unknown>;
 }
 
-function stripEmptySlots(params: Params): void {
+const stripEmptySlots = (params: Params) => {
   for (const [slot, value] of Object.entries(params)) {
-    if (slot === 'body') continue;
     if (value && typeof value === 'object' && !Array.isArray(value) && !Object.keys(value).length) {
       delete params[slot as Slot];
     }
   }
-}
+};
 
 function writeExtraParam(params: Params, config: FieldsConfig[number], key: string, value: unknown): void {
   const extra = extraPrefixes.find(([prefix]) => key.startsWith(prefix));
@@ -135,13 +134,13 @@ function writeMappedParam(params: Params, map: KeyMap, config: FieldsConfig[numb
 
 export function buildClientParams(args: ReadonlyArray<unknown>, fields: FieldsConfig): Params {
   const params: Params = {
+    body: Object.create(null),
     headers: Object.create(null),
     path: Object.create(null),
     query: Object.create(null),
   };
 
   const map = buildKeyMap(fields);
-
 
   let config: FieldsConfig[number] | undefined;
 
@@ -160,4 +159,4 @@ export function buildClientParams(args: ReadonlyArray<unknown>, fields: FieldsCo
   stripEmptySlots(params);
 
   return params;
-}
+};

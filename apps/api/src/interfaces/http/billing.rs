@@ -21,7 +21,7 @@ use crate::{
         },
         router_support::ApiError,
     },
-    services::ops::billing::{LibraryCostSummary, WorkspaceCostSummary},
+    services::ops::billing::{BillingExecutionPageQuery, LibraryCostSummary, WorkspaceCostSummary},
 };
 
 pub fn router() -> Router<AppState> {
@@ -68,22 +68,24 @@ pub async fn list_provider_calls(
 ) -> Result<Json<BillingProviderCallPage>, ApiError> {
     let span = tracing::Span::current();
     let library_id = state
-        .canonical_services
+        .application_services
         .billing
         .resolve_execution_library_id(&state, execution_kind.as_str(), execution_id)
         .await?;
     let _ = load_library_and_authorize(&auth, &state, library_id, POLICY_USAGE_READ).await?;
     let cursor = query.cursor.as_deref().map(decode_keyset_cursor).transpose()?;
     let page = state
-        .canonical_services
+        .application_services
         .billing
         .list_execution_provider_calls_page(
             &state,
-            execution_kind,
-            execution_id,
-            cursor,
-            i64::from(query.limit()),
-            query.include_total(),
+            BillingExecutionPageQuery {
+                execution_kind,
+                execution_id,
+                cursor,
+                limit: i64::from(query.limit()),
+                include_total: query.include_total(),
+            },
         )
         .await?;
     span.record("item_count", page.items.len());
@@ -125,22 +127,24 @@ pub async fn list_charges(
 ) -> Result<Json<BillingChargePage>, ApiError> {
     let span = tracing::Span::current();
     let library_id = state
-        .canonical_services
+        .application_services
         .billing
         .resolve_execution_library_id(&state, execution_kind.as_str(), execution_id)
         .await?;
     let _ = load_library_and_authorize(&auth, &state, library_id, POLICY_USAGE_READ).await?;
     let cursor = query.cursor.as_deref().map(decode_keyset_cursor).transpose()?;
     let page = state
-        .canonical_services
+        .application_services
         .billing
         .list_execution_charges_page(
             &state,
-            execution_kind,
-            execution_id,
-            cursor,
-            i64::from(query.limit()),
-            query.include_total(),
+            BillingExecutionPageQuery {
+                execution_kind,
+                execution_id,
+                cursor,
+                limit: i64::from(query.limit()),
+                include_total: query.include_total(),
+            },
         )
         .await?;
     span.record("item_count", page.items.len());
@@ -178,13 +182,13 @@ pub async fn get_execution_cost(
     Path((execution_kind, execution_id)): Path<(BillingExecutionOwnerKind, Uuid)>,
 ) -> Result<Json<BillingExecutionCost>, ApiError> {
     let library_id = state
-        .canonical_services
+        .application_services
         .billing
         .resolve_execution_library_id(&state, execution_kind.as_str(), execution_id)
         .await?;
     let _ = load_library_and_authorize(&auth, &state, library_id, POLICY_USAGE_READ).await?;
     let cost = state
-        .canonical_services
+        .application_services
         .billing
         .get_execution_cost(&state, execution_kind.as_str(), execution_id)
         .await?;
@@ -224,7 +228,7 @@ pub async fn list_library_document_costs(
     let offset = query.cursor.as_deref().map(decode_offset_cursor).transpose()?.unwrap_or(0);
     let limit = query.limit();
     let page = state
-        .canonical_services
+        .application_services
         .billing
         .list_document_costs_for_library_page(
             &state,
@@ -236,7 +240,12 @@ pub async fn list_library_document_costs(
         .await?;
     span.record("item_count", page.items.len());
     let next_cursor = page.has_more.then(|| encode_offset_cursor(offset + page.items.len()));
-    Ok(Json(DocumentCostPage { items: page.items, next_cursor, total: page.total }))
+    Ok(Json(DocumentCostPage {
+        cost_rollup_freshness: page.cost_rollup_freshness,
+        items: page.items,
+        next_cursor,
+        total: page.total,
+    }))
 }
 
 #[utoipa::path(
@@ -266,7 +275,7 @@ pub async fn get_library_cost_summary(
 ) -> Result<Json<LibraryCostSummary>, ApiError> {
     let _ = load_library_and_authorize(&auth, &state, library_id, POLICY_USAGE_READ).await?;
     let summary =
-        state.canonical_services.billing.get_library_cost_summary(&state, library_id).await?;
+        state.application_services.billing.get_library_cost_summary(&state, library_id).await?;
     Ok(Json(summary))
 }
 
@@ -297,6 +306,6 @@ pub async fn get_workspace_cost_summary(
 ) -> Result<Json<WorkspaceCostSummary>, ApiError> {
     let _ = load_workspace_and_authorize(&auth, &state, workspace_id, POLICY_USAGE_READ).await?;
     let summary =
-        state.canonical_services.billing.get_workspace_cost_summary(&state, workspace_id).await?;
+        state.application_services.billing.get_workspace_cost_summary(&state, workspace_id).await?;
     Ok(Json(summary))
 }

@@ -7,8 +7,6 @@ import type {
   UpdateProviderCatalogRequest as GeneratedUpdateProviderCatalogRequest,
   CreateModelCatalogRequest as GeneratedCreateModelCatalogRequest,
   UpdateModelCatalogRequest as GeneratedUpdateModelCatalogRequest,
-  CreateWorkspacePriceOverrideRequest,
-  UpdateWorkspacePriceOverrideRequest,
 } from '@/shared/api/generated'
 
 type OptionalKeys<T> = {
@@ -27,5 +25,3 @@ export type CreateProviderRequest = RequestInput<GeneratedCreateProviderCatalogR
 export type UpdateProviderRequest = RequestInput<GeneratedUpdateProviderCatalogRequest>
 export type CreateModelRequest = RequestInput<GeneratedCreateModelCatalogRequest>
 export type UpdateModelRequest = RequestInput<GeneratedUpdateModelCatalogRequest>
-export type CreatePriceOverrideRequest = RequestInput<CreateWorkspacePriceOverrideRequest>
-export type UpdatePriceOverrideRequest = RequestInput<UpdateWorkspacePriceOverrideRequest>

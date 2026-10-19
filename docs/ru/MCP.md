@@ -4,11 +4,11 @@
 
 ### Подключите Codex, Cursor, VS Code, Claude Code или любой HTTP MCP-клиент к той же базе знаний, что использует IronRAG
 
-[Обзор](./README.md) | [MCP (EN)](../en/MCP.md) | [IAM](./IAM.md) | [CLI](./CLI.md) | [Бенчмарки](./BENCHMARKS.md)
+[Обзор](./README.md) | [MCP (EN)](../en/MCP.md) | [IAM](./IAM.md) | [CLI](./CLI.md)
 
 </div>
 
-## Endpoint
+## Адрес сервера
 
 - Endpoint URL: `http://127.0.0.1:19000/v1/mcp`
 - Transport: **MCP Streamable HTTP, spec `2025-11-25`**. Один endpoint принимает `POST`, `GET` и `DELETE` — никакого отдельного SSE-канала, никакого stdio-прокси.
@@ -18,8 +18,8 @@
     - Notification-only запросы (без `id`) подтверждаются голым `202 Accepted`.
   - `GET` — зарезервирован для server-push stream. IronRAG сейчас не отправляет фоновых уведомлений, поэтому возвращает `200 OK` + `Content-Type: text/event-stream` с одним SSE-комментарием `: ready` и больше ничего не шлёт. Спека 2025-11-25 разрешает и 405, и пустой SSE-поток; мы выбрали второе потому что некоторые bundled MCP-клиенты считают non-200 на handshake фатальной ошибкой и выбрасывают весь MCP-сервер из runtime для этого agent-контекста.
   - `DELETE` — сигнал завершения принадлежащей клиенту сессии. Сервер записывает ограниченный по TTL распределённый tombstone, отклоняет последующие вызовы этой сессии и отменяет выполняющуюся работу на любой API-реплике. Повторный cleanup того же владельца идемпотентен, пока tombstone активен.
-- Ответ на `initialize` содержит заголовок `Mcp-Session-Id` (UUIDv7). Каждый последующий `POST`, `GET` и `DELETE` обязан вернуть ровно это значение и отправить `Mcp-Protocol-Version: 2025-11-25`. Отсутствующая, некорректная, истёкшая, завершённая или чужая сессия отклоняется; неподдерживаемый либо дублированный заголовок версии также не принимается. На корректный initialize с другой версией сервер возвращает в результате единственную canonical-версию; клиент без её поддержки должен отключиться.
-- Native-клиент может не отправлять `Origin`. Если заголовок присутствует, допускается ровно одно canonical HTTP origin, точно совпадающее с `IRONRAG_FRONTEND_ORIGIN` либо опциональным `IRONRAG_OPENAPI_PUBLIC_ORIGIN`; дубликат, некорректное, неканоническое или недоверенное значение получает HTTP `403` до авторизации, чтения сессии и разбора JSON.
+- Ответ на `initialize` содержит заголовок `Mcp-Session-Id` (UUIDv7). Каждый последующий `POST`, `GET` и `DELETE` обязан вернуть ровно это значение и отправить `Mcp-Protocol-Version: 2025-11-25`. Отсутствующая, некорректная, истёкшая, завершённая или чужая сессия отклоняется; неподдерживаемый либо дублированный заголовок версии также не принимается. На корректный initialize с другой версией сервер возвращает в результате единственную поддерживаемую сервером версию; клиент без её поддержки должен отключиться.
+- Native-клиент может не отправлять `Origin`. Если заголовок присутствует, он должен содержать ровно один HTTP origin в нормализованной ASCII-форме, точно совпадающий с `IRONRAG_FRONTEND_ORIGIN` либо опциональным `IRONRAG_OPENAPI_PUBLIC_ORIGIN`; дублированное, некорректное, иначе сериализованное или недоверенное значение получает HTTP `403` до авторизации, чтения сессии и разбора JSON.
 - Capabilities (для мониторинга и UI): `GET http://127.0.0.1:19000/v1/mcp/capabilities` — это не часть MCP-протокола, а отдельный probe endpoint.
 - Авторизация: `Authorization: Bearer <token>` на каждом запросе (включая `GET`/`DELETE`).
 - Имя MCP-сервера на протокольном уровне: `ironrag-mcp-memory`.
@@ -28,7 +28,7 @@
 Быстрая проверка (JSON):
 
 ```bash
-export IRONRAG_MCP_TOKEN='irt_...'
+export IRONRAG_MCP_TOKEN='inrg_...'
 
 curl -sS -X POST http://127.0.0.1:19000/v1/mcp \
   -H "Authorization: Bearer $IRONRAG_MCP_TOKEN" \
@@ -52,9 +52,9 @@ curl -sS -X POST http://127.0.0.1:19000/v1/mcp \
 ## Подключение за минуту
 
 1. Поднимите IronRAG через Docker Compose.
-2. В `Admin -> Access` создайте API-токен и сразу сохраните plaintext secret.
-3. Выдайте гранты на workspace, library или document, которые агент должен видеть.
-4. В `Admin -> MCP` скопируйте готовый сниппет для клиента.
+2. В `Admin -> Access` создайте API-токен и сохраните его: открытое значение показывается только при создании.
+3. Выдайте разрешения на workspace, library или document, которые агент должен видеть.
+4. В `Admin -> MCP` скопируйте готовый фрагмент конфигурации для клиента.
 
 `tools/list` фильтруется грантами. Если токену что-то нельзя, инструмент просто не будет рекламироваться.
 JSON-RPC поверхность намеренно маленькая: `initialize`, `tools/list`, `tools/call` и `notifications/initialized`. Пустой surface `resources/*` IronRAG не рекламирует и не поддерживает.
@@ -62,6 +62,8 @@ JSON-RPC поверхность намеренно маленькая: `initiali
 Цели каталога задаются через стабильные ref-ы вместо opaque UUID: `workspace` имеет вид `<workspace>`, а `library` — `<workspace>/<library>`. Discovery-ответы возвращают эти значения в поле `ref`.
 
 ## Инструменты
+
+Текст tool-result самодостаточен: `content[].text` содержит полный payload результата (JSON), а `structuredContent` дублирует его в машиночитаемом виде для клиентов, которые его потребляют напрямую. Клиенты, показывающие модели только текст (opencode, Claude Code, Codex), получают данные без чтения `structuredContent`.
 
 ### Grounded Q&A (использовать первым для содержательных вопросов)
 
@@ -89,14 +91,21 @@ Response структура: текст tool-result содержит ответ.
 
 | Инструмент | Описание | Обязательные параметры |
 |------------|----------|----------------------|
-| `search_documents` | Поиск по библиотеке: гибридный BM25 + вектор. Возвращает хиты на уровне документов. Поиск можно сузить списком ref-ов через `libraries`. | `query` |
-| `read_document` | Прочитать документ полностью или частями (с continuation token). | `documentId` |
+| `search_documents` | Поиск по памяти библиотеки с результатами на уровне документов. Поиск можно сузить списком ref-ов через `libraries`. | `query` |
+| `read_document` | Прочитать документ полностью или фрагментом. | `documentId` |
 | `view_document_image` | Получить оригинальные байты изображения (PNG/JPEG/и т.п.) документа-вложения, чтобы мультимодальная модель могла его увидеть напрямую. Показывается только когда активный Agent binding указывает на мультимодальную модель. | `documentId` |
 | `list_documents` | Список документов в библиотеке с фильтрацией по статусу. | `library` (опц.) |
-| `upload_documents` | Загрузить один или несколько документов. Поддерживает base64 и inline-текст. | `library`, `documents` |
-| `update_document` | Дописать или заменить содержимое документа. | `library`, `documentId`, `operationKind` |
+
+### Мутации только diagnostics surface
+
+Эти инструменты рекламируются только на diagnostics MCP mount `/v1/mcp/diagnostics` и не появляются на answer surface `/v1/mcp`.
+
+| Инструмент | Описание | Обязательные параметры |
+|------------|----------|----------------------|
+| `create_documents` | Создать один или несколько документов в библиотеке. | `library`, `documents` |
+| `create_document_revision` | Дописать или заменить содержимое документа, сохраняя его identity. | `library`, `documentId`, `mode` |
 | `delete_document` | Удалить документ вместе с ревизиями, чанками и вкладом в граф. | `documentId` |
-| `get_mutation_status` | Проверить статус мутации (upload/update/delete). | `receiptId` |
+| `get_operation` | Проверить create или revision operation до terminal state. | `operationId` |
 
 ### Граф знаний
 
@@ -111,10 +120,10 @@ Response структура: текст tool-result содержит ответ.
 
 | Инструмент | Описание | Обязательные параметры |
 |------------|----------|----------------------|
-| `submit_web_ingest_run` | Запустить ingestion с веб-страницы или рекурсивный краул сайта. | `library`, `seedUrl`, `mode` |
-| `get_web_ingest_run` | Загрузить текущий статус веб-краулинга. | `runId` |
-| `list_web_ingest_run_pages` | Список обнаруженных страниц и их статусов. | `runId` |
-| `cancel_web_ingest_run` | Отменить активный веб-краулинг. | `runId` |
+| `submit_web_run` | Запустить ingestion с веб-страницы или рекурсивный краул сайта. | `library`, `seedUrl`, `mode` |
+| `get_web_run` | Загрузить текущий статус веб-краулинга. | `runId` |
+| `list_web_run_pages` | Список обнаруженных страниц и их статусов. | `runId` |
+| `cancel_web_run` | Отменить активный веб-краулинг. | `runId` |
 
 ### Runtime
 
@@ -144,15 +153,14 @@ Response структура: текст tool-result содержит ответ.
 
 ## Что получает клиент
 
-- Ту же searchable и grounded базу знаний, что использует встроенный ассистент в UI.
-- Граф знаний с типизированными сущностями (person, organization, artifact, natural, process, concept и др.) и 90 типами связей.
-- Гибридный поиск (BM25 + vector) с учётом quality score чанков и field-weighted scoring заголовков.
-- Нормальный способ подключить внутреннего бота, саппорт-ассистента или персонального агента к управляемой knowledge base без отдельного адаптерного слоя.
+- Те же документы и поиск с источниками, что использует встроенный ассистент.
+- То же состояние документов, что используется при загрузке, обновлении, поиске и просмотре графа.
+- Подключение внутреннего бота или персонального агента к управляемой базе знаний без отдельного адаптера.
 
 ## OpenAI Codex CLI
 
 ```bash
-export IRONRAG_MCP_TOKEN='irt_...'
+export IRONRAG_MCP_TOKEN='inrg_...'
 
 codex mcp add ironragMemory \
   --url http://127.0.0.1:19000/v1/mcp \
@@ -240,7 +248,7 @@ claude mcp add ironrag http://127.0.0.1:19000/v1/mcp \
       "ironrag": {
         "url": "http://127.0.0.1:19000/v1/mcp",
         "headers": {
-          "Authorization": "Bearer irt_..."
+          "Authorization": "Bearer inrg_..."
         }
       }
     }
@@ -251,7 +259,7 @@ claude mcp add ironrag http://127.0.0.1:19000/v1/mcp \
 Или эквивалент через CLI:
 
 ```bash
-openclaw mcp set ironrag '{"url":"http://127.0.0.1:19000/v1/mcp","headers":{"Authorization":"Bearer irt_..."}}'
+openclaw mcp set ironrag '{"url":"http://127.0.0.1:19000/v1/mcp","headers":{"Authorization":"Bearer inrg_..."}}'
 ```
 
 ## Hermes

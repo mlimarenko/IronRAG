@@ -11,16 +11,16 @@
 //!   (`tokio::join!` / `try_join!` / `futures::buffer_unordered`); it does not
 //!   cross a `tokio::spawn` boundary, which the hot retrieval/answer path does
 //!   not use.
-//! - The sink is drained once at the end of an execution and persisted on that
-//!   execution's `LlmContextSnapshot`, so the parent agent turn and each child
-//!   `grounded_answer` execution each carry their own spans.
+//! - The sink is drained once, when the `capture_turn_spans` scope ends, into
+//!   the retrieval result the answer stage already carries. Every write of that
+//!   execution's `LlmContextSnapshot` reads the spans from there by reference,
+//!   so a path that writes the row twice cannot blank the timings on the second
+//!   write.
 
-use std::collections::HashMap;
-use std::sync::{Arc, LazyLock, Mutex};
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
-use uuid::Uuid;
 
 /// One timed sub-operation within an execution.
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
@@ -110,36 +110,6 @@ where
     (result, sink.drain())
 }
 
-/// Hand-off store keyed by `execution_id`. The retrieval flow drains its span
-/// sink and stashes the spans here once the execution_id is known; the snapshot
-/// writer takes them when persisting that execution's snapshot. This decouples
-/// recording (task-local, scoped to retrieval) from persistence (a later,
-/// separate code path) without threading spans through the whole answer flow.
-static SPAN_STORE: LazyLock<Mutex<HashMap<Uuid, Vec<TurnSpan>>>> =
-    LazyLock::new(|| Mutex::new(HashMap::new()));
-
-/// Bound the store so an execution whose snapshot is never written (rare error
-/// paths) cannot leak unboundedly.
-const MAX_STASHED_EXECUTIONS: usize = 256;
-
-/// Stash spans for `execution_id` so the snapshot writer can attach them later.
-pub(crate) fn stash_execution_spans(execution_id: Uuid, spans: Vec<TurnSpan>) {
-    if spans.is_empty() {
-        return;
-    }
-    if let Ok(mut store) = SPAN_STORE.lock() {
-        if store.len() >= MAX_STASHED_EXECUTIONS {
-            store.clear();
-        }
-        store.insert(execution_id, spans);
-    }
-}
-
-/// Take (and remove) the stashed spans for `execution_id`. Empty if none.
-pub(crate) fn take_execution_spans(execution_id: Uuid) -> Vec<TurnSpan> {
-    SPAN_STORE.lock().ok().and_then(|mut store| store.remove(&execution_id)).unwrap_or_default()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -197,33 +167,5 @@ mod tests {
         .await;
         assert_eq!(spans.len(), 1);
         assert_eq!(spans[0].name, "same.task");
-    }
-
-    #[test]
-    fn stash_and_take_execution_spans_round_trip() {
-        let execution_id = Uuid::new_v4();
-        stash_execution_spans(
-            execution_id,
-            vec![TurnSpan {
-                name: "db.knowledge_chunk".into(),
-                kind: "db".into(),
-                duration_ms: 5,
-                started_offset_ms: 0,
-                detail: None,
-                rows: Some(3),
-            }],
-        );
-        let taken = take_execution_spans(execution_id);
-        assert_eq!(taken.len(), 1);
-        assert_eq!(taken[0].name, "db.knowledge_chunk");
-        // The store removes the entry on take, so a second take is empty.
-        assert!(take_execution_spans(execution_id).is_empty());
-    }
-
-    #[test]
-    fn stash_empty_spans_is_noop() {
-        let execution_id = Uuid::new_v4();
-        stash_execution_spans(execution_id, Vec::new());
-        assert!(take_execution_spans(execution_id).is_empty());
     }
 }

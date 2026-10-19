@@ -1,7 +1,4 @@
-use crate::{
-    domains::graph_quality::{ExtractionOutcomeStatus, ExtractionRecoverySummary},
-    infra::repositories::RuntimeGraphExtractionRecoveryAttemptRow,
-};
+use crate::domains::graph_quality::{ExtractionOutcomeStatus, ExtractionRecoverySummary};
 
 const MIN_SECOND_PASS_WORD_COUNT: usize = 12;
 const MAX_RECOVERY_SUMMARY_CHARS: usize = 240;
@@ -21,6 +18,15 @@ pub struct SecondPassTrigger {
 #[derive(Debug, Clone, Default)]
 pub struct ExtractionRecoveryService;
 
+/// The second-pass gate: whether recovery is enabled and which attempt this is
+/// within the configured maximum.
+#[derive(Debug, Clone, Copy)]
+pub struct SecondPassPolicy {
+    pub enabled: bool,
+    pub attempt_no: usize,
+    pub max_attempts: usize,
+}
+
 impl ExtractionRecoveryService {
     #[must_use]
     pub fn classify_second_pass(
@@ -28,10 +34,9 @@ impl ExtractionRecoveryService {
         chunk_text: &str,
         entity_count: usize,
         relationship_count: usize,
-        enabled: bool,
-        attempt_no: usize,
-        max_attempts: usize,
+        policy: SecondPassPolicy,
     ) -> SecondPassTrigger {
+        let SecondPassPolicy { enabled, attempt_no, max_attempts } = policy;
         if !enabled || attempt_no >= max_attempts {
             return SecondPassTrigger { should_attempt: false, decision: None };
         }
@@ -109,34 +114,6 @@ impl ExtractionRecoveryService {
         }
     }
 
-    #[must_use]
-    pub fn summarize_attempt_rows(
-        &self,
-        attempts: &[RuntimeGraphExtractionRecoveryAttemptRow],
-    ) -> Option<ExtractionRecoverySummary> {
-        if attempts.is_empty() {
-            return None;
-        }
-
-        let second_pass_applied =
-            attempts.iter().any(|attempt| attempt.recovery_kind == "second_pass");
-        let status = if attempts.iter().any(|attempt| attempt.status == "failed") {
-            ExtractionOutcomeStatus::Failed
-        } else if attempts.iter().any(|attempt| attempt.status == "partial") {
-            ExtractionOutcomeStatus::Partial
-        } else if attempts.iter().any(|attempt| attempt.status == "recovered") {
-            ExtractionOutcomeStatus::Recovered
-        } else {
-            ExtractionOutcomeStatus::Clean
-        };
-
-        Some(ExtractionRecoverySummary {
-            warning: warning_for_status(&status),
-            status,
-            second_pass_applied,
-        })
-    }
-
     fn recovery_decision(
         &self,
         reason_code: &str,
@@ -180,9 +157,7 @@ mod tests {
             "OpenAI signed a multiyear infrastructure agreement with Contoso in 2025 and expanded the knowledge graph platform rollout.",
             1,
             0,
-            true,
-            1,
-            2,
+            SecondPassPolicy { enabled: true, attempt_no: 1, max_attempts: 2 },
         );
 
         assert!(decision.should_attempt);
@@ -190,6 +165,25 @@ mod tests {
             decision.decision.as_ref().map(|decision| decision.reason_code.as_str()),
             Some("sparse_extraction")
         );
+    }
+
+    #[test]
+    fn second_pass_policy_preserves_disable_and_attempt_limit_gates() {
+        let service = ExtractionRecoveryService;
+        let chunk = "One sufficiently long chunk supplies enough words to qualify sparse graph output for recovery.";
+        for policy in [
+            SecondPassPolicy { enabled: false, attempt_no: 0, max_attempts: 2 },
+            SecondPassPolicy { enabled: true, attempt_no: 2, max_attempts: 2 },
+            SecondPassPolicy { enabled: true, attempt_no: 3, max_attempts: 2 },
+            SecondPassPolicy { enabled: true, attempt_no: 0, max_attempts: 0 },
+        ] {
+            let trigger = service.classify_second_pass(chunk, 0, 0, policy);
+            assert!(!trigger.should_attempt, "policy={policy:?}");
+            assert_eq!(trigger.decision, None);
+        }
+        let policy = SecondPassPolicy { enabled: true, attempt_no: 1, max_attempts: 2 };
+        assert!(service.classify_second_pass(chunk, 0, 0, policy).should_attempt);
+        assert!(!service.classify_second_pass("short chunk", 0, 0, policy).should_attempt);
     }
 
     #[test]

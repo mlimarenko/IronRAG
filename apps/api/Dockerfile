@@ -1,9 +1,12 @@
 # syntax=docker/dockerfile:1.7
 
 # ── Stage 1: Rust builder ──────────────────────────────────────────────
-FROM rust:1.97.0-trixie AS builder
+FROM rust@sha256:a8a5f0a1e5fe7dfe1d352591e4a1c7dd2c08fd70475cae872cf3458ba0df0546 AS builder
 WORKDIR /workspace
-ARG APP_VERSION=0.0.0-dev
+# No default: the build identity is baked into the binary and served by
+# /v1/version, so an unset value must stop the build rather than ship a
+# placeholder that reads like a real release. Enforced below, before cargo runs.
+ARG APP_VERSION
 
 # Wild 0.9.0 linker for fast native-speed dockerfile builds (~2x mold on incremental link).
 ARG WILD_VERSION=0.9.0
@@ -34,9 +37,9 @@ RUN apt-get update \
 # which otherwise reaches static.rust-lang.org on every build. That fetch can
 # hang for the full rustup timeout in sandboxes with a dead IPv6 egress route,
 # so the build must not depend on it — the base image is the source of truth
-# for the toolchain version (kept in lockstep with the FROM tag above).
+# for the toolchain version (asserted below against the digest-pinned image).
 ENV CARGO_HOME=/usr/local/cargo \
-    RUSTUP_TOOLCHAIN=1.97.0 \
+    RUSTUP_TOOLCHAIN=1.98.1 \
     RUSTFLAGS="-C linker=clang -C link-arg=--ld-path=/usr/local/bin/wild" \
     CARGO_INCREMENTAL=0 \
     APP_VERSION=${APP_VERSION}
@@ -52,13 +55,26 @@ ARG CACHEBUST=0
 # `--build-arg CARGO_FEATURES=heap-profile` to produce a profiling image; see
 # docs/perf/README.md.
 ARG CARGO_FEATURES=
+# Gate the build on the compiler the base image actually activates. The FROM
+# digest fixes what is installed and RUSTUP_TOOLCHAIN selects it, but a drift
+# there would otherwise ship an artefact built by some other rustc despite the
+# expected 1.98.1 builder image.
+RUN test "$(rustc --version | awk '{print $2}')" = "1.98.1"
 # --mount=type=cache,target=/workspace/target persists compiled artefacts
 # across `docker build` runs.  Combined with CARGO_INCREMENTAL=0 + wild,
 # only changed crates are relinked.
 RUN --mount=type=cache,target=/usr/local/cargo/registry,id=ironrag-cargo-reg,sharing=locked \
     --mount=type=cache,target=/usr/local/cargo/git,id=ironrag-cargo-git,sharing=locked \
     --mount=type=cache,target=/workspace/target,id=ironrag-target,sharing=locked \
-    echo "Cache bust: ${CACHEBUST}" \
+    if [ -z "$(printf '%s' "${APP_VERSION}" | tr -d '[:space:]')" ]; then \
+      echo "APP_VERSION is blank: this image would report an unidentifiable build at /v1/version." >&2; \
+      echo "Pass the release tag or commit, for example:" >&2; \
+      echo "  IRONRAG_VERSION=\$(git describe --always --abbrev=40 --dirty --match '')" >&2; \
+      echo "  docker compose build backend," >&2; \
+      echo "or docker build --build-arg APP_VERSION=<tag-or-commit>." >&2; \
+      exit 1; \
+    fi \
+ && echo "Cache bust: ${CACHEBUST}" \
  && cargo build --release -p ironrag-backend \
       $(if [ -n "${CARGO_FEATURES}" ]; then echo "--features ${CARGO_FEATURES}"; fi) \
       --bin ironrag-backend \
@@ -76,13 +92,12 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,id=ironrag-cargo-reg,sha
 # application-code changes without re-downloading model weights.
 FROM python:3.14.4-slim-trixie AS docling-base
 WORKDIR /app
-ARG DOCLING_VERSION=2.107.0
-# rapidocr is a transitive docling dependency and must stay pinned: its 3.8.2
-# wheel ships without the pytorch inference-engine data files
-# (networks/arch_config.yaml), and with torch present in the venv rapidocr
-# auto-selects that engine, so an unpinned fresh build fails the OCR warmup
-# below. 3.8.1 is the latest correctly packaged release.
-ARG RAPIDOCR_VERSION=3.8.1
+ARG DOCLING_VERSION=2.132.0
+ARG URLLIB3_VERSION=2.8.0
+ARG TESSDATA_REVISION=e12c65a915945e4c28e237a9b52bc4a8f39a0cec
+ARG CHINESE_TESSDATA_SHA256=4fef2d1306c8e87616d4d3e4c6c67faf5d44be3342290cf8f2f0f6e3aa7e735b
+ARG TESSDATA_LICENSE_SHA256=a6cba85bc92e0cff7a450b1d873c0eaa2e9fc96bf472df0247a26bec77bf3ff9
+ARG TESSDATA_README_SHA256=08c87523fb799c5bae6380f6ffa1a823494ab78f63906d7255dddd7671f94a5f
 ARG TORCH_VERSION=2.12.0+cpu
 ARG TORCHVISION_VERSION=0.27.0+cpu
 ENV VIRTUAL_ENV=/opt/ironrag-docling
@@ -91,7 +106,17 @@ ENV PYTHONUNBUFFERED=1
 
 COPY docker/apt/debian-backports.sources /etc/apt/sources.list.d/debian-backports.sources
 COPY docker/apt/90-backports /etc/apt/preferences.d/90-backports
-RUN apt-get update \
+# The apt layer is this stage's cache boundary: BuildKit registry cache keeps
+# `apt-get upgrade` from re-running, so Debian security updates published after
+# the layer was first built never reach the image. Bump APT_CACHEBUST to force
+# the apt layer (and everything after it) to rebuild with current package
+# versions — the same manual pattern as CACHEBUST in the builder stage.
+ARG APT_CACHEBUST=20261001
+# Use the accuracy model for Chinese; the distribution's fast model loses
+# characters in sparse picture text. Ship its upstream license declaration and
+# provenance alongside the only installed Chinese model.
+RUN echo "apt cache bust: ${APT_CACHEBUST}" \
+  && apt-get update \
   && apt-get upgrade -y \
   && apt-get install -y --no-install-recommends \
     ca-certificates \
@@ -99,6 +124,9 @@ RUN apt-get update \
     libgl1 \
     libglib2.0-0 \
     libgomp1 \
+    tesseract-ocr \
+    tesseract-ocr-eng \
+    tesseract-ocr-rus \
   && rm -rf /var/lib/apt/lists/* \
   && python -m venv "${VIRTUAL_ENV}" \
   && "${VIRTUAL_ENV}/bin/pip" install --no-cache-dir --upgrade pip \
@@ -109,14 +137,43 @@ RUN apt-get update \
     "torchvision==${TORCHVISION_VERSION}" \
   && "${VIRTUAL_ENV}/bin/pip" install --no-cache-dir \
     "docling==${DOCLING_VERSION}" \
-    "rapidocr==${RAPIDOCR_VERSION}"
+    "urllib3==${URLLIB3_VERSION}" \
+  && "${VIRTUAL_ENV}/bin/python" -m pip uninstall --yes pip \
+  && /usr/local/bin/python -m pip uninstall --yes pip \
+  && "${VIRTUAL_ENV}/bin/python" -c 'import importlib.util; assert importlib.util.find_spec("pip") is None' \
+  && /usr/local/bin/python -c 'import importlib.util; assert importlib.util.find_spec("pip") is None' \
+  && curl --fail --location --max-time 120 \
+      "https://raw.githubusercontent.com/tesseract-ocr/tessdata_best/${TESSDATA_REVISION}/chi_sim.traineddata" \
+      --output /usr/share/tesseract-ocr/5/tessdata/chi_sim.traineddata \
+  && mkdir -p /usr/share/doc/tessdata_best \
+  && curl --fail --location --max-time 120 \
+      "https://raw.githubusercontent.com/tesseract-ocr/tessdata_best/${TESSDATA_REVISION}/LICENSE" \
+      --output /usr/share/doc/tessdata_best/LICENSE \
+  && curl --fail --location --max-time 120 \
+      "https://raw.githubusercontent.com/tesseract-ocr/tessdata_best/${TESSDATA_REVISION}/README.md" \
+      --output /usr/share/doc/tessdata_best/README.md \
+  && printf '%s  %s\n' \
+      "${CHINESE_TESSDATA_SHA256}" /usr/share/tesseract-ocr/5/tessdata/chi_sim.traineddata \
+      "${TESSDATA_LICENSE_SHA256}" /usr/share/doc/tessdata_best/LICENSE \
+      "${TESSDATA_README_SHA256}" /usr/share/doc/tessdata_best/README.md \
+      | sha256sum --check \
+  && printf '%s\n' \
+      'Model: chi_sim.traineddata (unmodified)' \
+      'Upstream: https://github.com/tesseract-ocr/tessdata_best' \
+      "Revision: ${TESSDATA_REVISION}" \
+      "Model SHA256: ${CHINESE_TESSDATA_SHA256}" \
+      'License: Apache-2.0; see LICENSE and the upstream README.md declaration' \
+      > /usr/share/doc/tessdata_best/MODEL
+
+# Package installation is finished. Both interpreters are installer-free before
+# model download and OCR warmup prove that the runtime does not depend on pip.
 
 COPY apps/api/docker/docling-extract.py /usr/local/bin/ironrag-docling-extract
 
 RUN chmod +x /usr/local/bin/ironrag-docling-extract \
   && adduser --disabled-password --gecos "" appuser \
   && mkdir -p /var/lib/ironrag/content-storage \
-  && HOME=/home/appuser "${VIRTUAL_ENV}/bin/docling-tools" models download \
+  && HOME=/home/appuser "${VIRTUAL_ENV}/bin/docling-tools" models download layout tableformer \
   && printf '%s\n' \
     'from pathlib import Path' \
     'from PIL import Image, ImageDraw' \
@@ -131,6 +188,11 @@ RUN chmod +x /usr/local/bin/ironrag-docling-extract \
   && chown -R appuser:appuser /app /var/lib/ironrag \
   && chown -R appuser:appuser "${VIRTUAL_ENV}" \
   && chown -R appuser:appuser /home/appuser
+
+# Cached Docling model cards carry their license declarations. TableFormer uses
+# CDLA-Permissive-2.0; include its agreement text alongside the native Apache text.
+COPY apps/api/docker/model-licenses/CDLA-Permissive-2.0.txt \
+     /usr/share/common-licenses/CDLA-Permissive-2.0
 
 # ── Stage 3: Runtime assembly ──────────────────────────────────────────
 FROM docling-base AS runtime
@@ -162,5 +224,7 @@ ENV _RJEM_MALLOC_CONF=background_thread:true,narenas:4,dirty_decay_ms:1000,muzzy
     RUST_BACKTRACE=full
 
 EXPOSE 8080
+HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=5 \
+  CMD curl -fsS http://127.0.0.1:8080/v1/health >/dev/null || exit 1
 ENTRYPOINT ["/usr/local/bin/runtime-entrypoint.sh"]
 CMD ["ironrag-backend"]

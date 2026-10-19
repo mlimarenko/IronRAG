@@ -1,4 +1,4 @@
-import { act, renderHook, waitFor } from '@testing-library/react'
+import { renderHook, waitFor } from '@testing-library/react'
 import { beforeEach, describe, expect, it } from 'vitest'
 
 import {
@@ -44,6 +44,42 @@ describe('useTableState', () => {
     localStorage.clear()
   })
 
+  it('ignores a legacy storage key while persisting through its v1 key', async () => {
+    localStorage.setItem(
+      'ironrag_table_state:demo.table',
+      JSON.stringify({
+        pageSize: 50,
+        density: 'comfortable',
+        sort: { key: 'status', direction: 'desc' },
+      }),
+    )
+    const storageKey = getTableStateStorageKey('demo.table')
+
+    const { result } = renderHook(() =>
+      useTableState<DemoTableState>({
+        tableId: 'demo.table',
+        defaultValue: DEFAULT_STATE,
+        parse: parseDemoTableState,
+      }),
+    )
+
+    expect(result.current[0]).toEqual(DEFAULT_STATE)
+
+    result.current[1]({
+      pageSize: 50,
+      density: 'comfortable',
+      sort: { key: 'status', direction: 'desc' },
+    })
+
+    await waitFor(() => {
+      expect(JSON.parse(localStorage.getItem(storageKey) ?? 'null')).toEqual({
+        pageSize: 50,
+        density: 'comfortable',
+        sort: { key: 'status', direction: 'desc' },
+      })
+    })
+  })
+
   it('restores valid table state and writes updates', async () => {
     const storageKey = getTableStateStorageKey('demo.table')
     localStorage.setItem(
@@ -69,12 +105,10 @@ describe('useTableState', () => {
       sort: { key: 'status', direction: 'desc' },
     })
 
-    act(() => {
-      result.current[1]({
-        pageSize: 25,
-        density: 'compact',
-        sort: { key: 'name', direction: 'asc' },
-      })
+    result.current[1]({
+      pageSize: 25,
+      density: 'compact',
+      sort: { key: 'name', direction: 'asc' },
     })
 
     await waitFor(() => {

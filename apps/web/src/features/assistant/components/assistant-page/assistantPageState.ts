@@ -2,8 +2,7 @@ import type { SetStateAction } from 'react'
 import type { AssistantMessage, EvidenceBundle } from '@/shared/types'
 import type { AssistantTurnExecutionResponse } from '@/shared/api/query'
 import { mapAssistantTurnToEvidence } from '@/features/assistant/model/assistantAdapter'
-
-export const STARTER_PROMPT_IDS = ['overview', 'keyPoints', 'openQuestions', 'recentItems'] as const
+import type { AssistantEvidenceView } from '@/features/assistant/model/assistantAdapter'
 
 export const EMPTY_MESSAGES: AssistantMessage[] = []
 
@@ -34,27 +33,56 @@ export function createPendingAssistantMessage(now: number): AssistantMessage {
   }
 }
 
+/** Matches the browser turn-stream budget in `query.ts` (`TURN_TIMEOUT_MS`). */
+export const ASSISTANT_IN_PROGRESS_LIMIT_MS = 195_000
+
 /**
- * Server-authoritative turn wall-clock in milliseconds, measured entirely on
- * the API host so it is immune to client↔server clock skew. Prefers the
- * execution window (`completedAt − startedAt`); falls back to the request →
- * response turn timestamps, which are likewise both server-stamped. Returns
- * `undefined` when no consistent server pair is available.
+ * Empty assistant content is in-progress only for the optimistic placeholder
+ * or a server pending execution that still reports elapsed time. A finished
+ * turn with an empty body is an outcome, not a spinner.
+ */
+export function isInProgressAssistantTurn(message: AssistantMessage): boolean {
+  if (message.role !== 'assistant') return false
+  if (message.content.trim().length > 0) return false
+  if (typeof message.elapsedMs === 'number') {
+    return message.elapsedMs < ASSISTANT_IN_PROGRESS_LIMIT_MS
+  }
+  return message.executionId == null
+}
+
+export function sessionMessagesHydrationKey(
+  sessionId: string,
+  messages: readonly AssistantMessage[],
+): string {
+  return [
+    sessionId,
+    messages
+      .map((message) =>
+        [
+          message.id,
+          message.role,
+          message.executionId ?? '',
+          message.timestamp,
+          message.content,
+          isInProgressAssistantTurn(message) ? '1' : '0',
+        ].join('\u001f'),
+      )
+      .join('\u001e'),
+  ].join('\u001d')
+}
+
+/**
+ * Active runtime wall-clock in milliseconds, measured entirely on the API
+ * host. Lifecycle duration is never inferred from query or turn timestamps.
  */
 export function serverTurnDurationMs(result: AssistantTurnExecutionResponse): number | undefined {
-  const serverPairs: Array<[string | null | undefined, string | null | undefined]> = [
-    [result.execution?.startedAt, result.execution?.completedAt],
-    [result.requestTurn?.createdAt, result.responseTurn?.createdAt],
-  ]
-  for (const [startIso, endIso] of serverPairs) {
-    if (!startIso || !endIso) continue
-    const start = Date.parse(startIso)
-    const end = Date.parse(endIso)
-    if (Number.isFinite(start) && Number.isFinite(end) && end >= start) {
-      return end - start
-    }
-  }
-  return undefined
+  const startIso = result.runtimeSummary?.acceptedAt
+  const endIso = result.runtimeSummary?.completedAt
+  if (!startIso || !endIso) return undefined
+
+  const start = Date.parse(startIso)
+  const end = Date.parse(endIso)
+  return Number.isFinite(start) && Number.isFinite(end) && end >= start ? end - start : undefined
 }
 
 /**
@@ -78,13 +106,8 @@ export function applyTurnResultToMessages(
   const answerText = result.responseTurn?.contentText ?? emptyAnswerText
   const evidence = mapAssistantTurnToEvidence(result)
   const durationMs = serverTurnDurationMs(result)
-  const answerTimestamp = result.execution?.completedAt ?? result.responseTurn?.createdAt
-  // Always a server timestamp: prefer the user turn's own stamp, else the
-  // execution start. This guarantees the restamped question shares a clock with
-  // the server-stamped answer even in degenerate responses, so the reload-style
-  // timestamp-delta fallback can never silently subtract a browser timestamp
-  // from a server one.
-  const questionTimestamp = result.requestTurn?.createdAt ?? result.execution?.startedAt
+  const answerTimestamp = result.runtimeSummary?.completedAt ?? result.responseTurn?.createdAt
+  const questionTimestamp = result.runtimeSummary?.acceptedAt
 
   // The user turn that triggered this answer is the nearest message preceding
   // the pending placeholder; restamp it from the server so the question and
@@ -133,11 +156,15 @@ export function applyTurnResultToMessages(
 export function countDistinctSources(message: AssistantMessage): number {
   const evidence = message.evidence
   if (!evidence) return 0
+  const evidenceView = evidence as AssistantEvidenceView
+  if (evidenceView.referenceSummary) {
+    return evidenceView.referenceSummary.totalCount
+  }
   const documents = new Set<string>()
   for (const ref of evidence.segmentRefs) {
     documents.add(ref.documentId || ref.documentName)
   }
-  return documents.size + evidence.entityRefs.length
+  return documents.size + evidence.entityRefs.length + (evidenceView.chunkRefs?.length ?? 0)
 }
 
 export function latestEvidenceFromMessages(

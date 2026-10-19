@@ -8,7 +8,9 @@ import {
   mapAssistantSession,
 } from '@/features/assistant/model/assistantAdapter'
 import { queryApi, queries } from '@/shared/api'
+import { getApiProblem } from '@/shared/api/runtime'
 import type { AssistantSessionListItem, QuerySessionListResponse } from '@/shared/api/generated'
+import { AssistantTurnFailedEventError } from '@/shared/api/query'
 import type { AssistantTurnExecutionResponse, LlmContextDebugResponse } from '@/shared/api/query'
 import { errorMessage } from '@/shared/lib/errorMessage'
 import type {
@@ -21,8 +23,10 @@ import {
   createPendingAssistantMessage,
   createUserMessage,
   EMPTY_MESSAGES,
+  isInProgressAssistantTurn,
   latestEvidenceFromMessages,
   resolveStateAction,
+  sessionMessagesHydrationKey,
   serverTurnDurationMs,
   type RetryableAssistantTurn,
 } from './assistantPageState'
@@ -72,8 +76,52 @@ type LocalPendingTurn = {
   userMessage: AssistantMessage
 }
 
-const ACTIVE_SESSION_STORAGE_PREFIX = 'ironrag_assistant_active_session'
+const ACTIVE_SESSION_STORAGE_PREFIX = 'ironrag.v1.assistant.active-session'
 const ACTIVE_SESSION_POLL_INTERVAL_MS = 1000
+
+type AssistantFailurePresentation = {
+  inlineMessage: string
+  retryDiagnosis: string | null
+  unusableLibrary: boolean
+}
+
+export function classifyAssistantFailure(
+  error: unknown,
+  t: TFunction,
+): AssistantFailurePresentation {
+  const problem = getApiProblem(error)
+  // A turn that fails mid-stream arrives as a stream event, not as a problem
+  // response, and carries the same code. Reading only the problem body meant
+  // every streamed failure — which is every failure the assistant screen
+  // produces — landed on the generic apology below.
+  const streamedCode =
+    error instanceof AssistantTurnFailedEventError ? (error.code ?? undefined) : undefined
+  const code = (problem?.code ?? streamedCode)?.toLowerCase()
+  const isKnowledgeUnavailable =
+    code === 'knowledge_not_ready' || code === 'empty_library' || code === 'empty-library'
+  if (isKnowledgeUnavailable) {
+    return {
+      inlineMessage: t('assistant.libraryContentUnavailableInline'),
+      retryDiagnosis: null,
+      unusableLibrary: true,
+    }
+  }
+  if (problem?.status === 503) {
+    const message = t('assistant.temporarilyUnavailable')
+    return { inlineMessage: message, retryDiagnosis: message, unusableLibrary: false }
+  }
+  if (problem && problem.status >= 400 && problem.status < 500) {
+    const title = typeof problem.body.title === 'string' ? problem.body.title.trim() : ''
+    const detail = typeof problem.body.detail === 'string' ? problem.body.detail.trim() : ''
+    return {
+      inlineMessage: [title, detail].filter(Boolean).join('\n\n') || t('assistant.requestRejected'),
+      retryDiagnosis: null,
+      unusableLibrary: false,
+    }
+  }
+  const message = t('assistant.serverFailure')
+  return { inlineMessage: message, retryDiagnosis: message, unusableLibrary: false }
+}
 
 function activeSessionStorageKey(scopeKey: string | null): string | null {
   return scopeKey ? `${ACTIVE_SESSION_STORAGE_PREFIX}:${scopeKey}` : null
@@ -141,29 +189,45 @@ function withSessionItems(
   return { items, nextCursor: current?.nextCursor ?? null, total: items.length }
 }
 
-function sessionMessagesHydrationKey(sessionId: string, messages: AssistantMessage[]): string {
-  return [
-    sessionId,
-    messages
-      .map((message) =>
-        [
-          message.id,
-          message.role,
-          message.executionId ?? '',
-          message.timestamp,
-          message.content,
-        ].join('\u001f'),
-      )
-      .join('\u001e'),
-  ].join('\u001d')
+function withRenamedSession(
+  current: QuerySessionListResponse | undefined,
+  renamed: AssistantSessionListItem,
+): QuerySessionListResponse {
+  return withSessionItems(current, (items) =>
+    items.map((session) => (session.id === renamed.id ? renamed : session)),
+  )
+}
+
+function withoutSession(
+  current: QuerySessionListResponse | undefined,
+  sessionId: string,
+): QuerySessionListResponse {
+  return withSessionItems(current, (items) => items.filter((session) => session.id !== sessionId))
+}
+
+function withCreatedSession(
+  current: QuerySessionListResponse | undefined,
+  sessionItem: AssistantSessionListItem,
+  optimisticSessionId: string | null,
+): QuerySessionListResponse {
+  return withSessionItems(current, (items) => [
+    sessionItem,
+    ...items.filter(
+      (candidate) => candidate.id !== optimisticSessionId && candidate.id !== sessionItem.id,
+    ),
+  ])
 }
 
 function appendPendingActivity(
   message: AssistantMessage,
   event: AssistantAgentActivityEvent,
 ): AssistantMessage {
+  const elapsedMs = event.elapsed_ms
   return {
     ...message,
+    ...(typeof elapsedMs === 'number' && Number.isFinite(elapsedMs) && elapsedMs >= 0
+      ? { elapsedMs }
+      : {}),
     activityEvents: [...(message.activityEvents ?? []), event].slice(-24),
   }
 }
@@ -188,9 +252,7 @@ function isCurrentDebugRequest(
 }
 
 function hasPendingAssistantTurn(messages: AssistantMessage[]): boolean {
-  return messages.some(
-    (message) => message.role === 'assistant' && message.content.trim().length === 0,
-  )
+  return messages.some(isInProgressAssistantTurn)
 }
 
 function mergeHydratedMessagesWithLocalPendingTurn(
@@ -244,7 +306,9 @@ function finalizedAssistantMessageFromResult(
     role: 'assistant',
     content: result.responseTurn?.contentText ?? emptyAnswerText,
     timestamp:
-      result.execution?.completedAt ?? result.responseTurn?.createdAt ?? pendingMessage.timestamp,
+      result.runtimeSummary?.completedAt ??
+      result.responseTurn?.createdAt ??
+      pendingMessage.timestamp,
     ...(durationMs !== undefined ? { durationMs } : {}),
     executionId: result.responseTurn?.executionId ?? null,
     evidence: mapAssistantTurnToEvidence(result),
@@ -260,7 +324,6 @@ function isOptionalDebugSnapshotMiss(error: unknown): boolean {
 
 export function useAssistantSession({ workspaceId, libraryId, t }: UseAssistantSessionParams) {
   const queryClient = useQueryClient()
-  const [isExecuting, setIsExecuting] = useState(false)
   const libraryScopeKey = workspaceId && libraryId ? `${workspaceId}:${libraryId}` : null
   const [activeSession, setActiveSessionState] = useScopedState<string | null>(
     libraryScopeKey,
@@ -273,6 +336,10 @@ export function useAssistantSession({ workspaceId, libraryId, t }: UseAssistantS
   const [retryable, setRetryable] = useScopedState<RetryableAssistantTurn | null>(
     libraryScopeKey,
     null,
+  )
+  const [libraryContentUnavailable, setLibraryContentUnavailable] = useScopedState(
+    libraryScopeKey,
+    false,
   )
   const [sessionSearch, setSessionSearch] = useScopedState(libraryScopeKey, '')
   const [debugContext, setDebugContext] = useScopedState<LlmContextDebugResponse | null>(
@@ -294,9 +361,25 @@ export function useAssistantSession({ workspaceId, libraryId, t }: UseAssistantS
   const debugRequestRef = useRef(0)
   const debugRequestsInFlightRef = useRef<Set<string>>(new Set())
   const unavailableDebugExecutionsRef = useRef<Set<string>>(new Set())
-  const executingRef = useRef(false)
+  const executingScopesRef = useRef<Set<string>>(new Set())
+  const [executingScopes, setExecutingScopes] = useState<ReadonlySet<string>>(() => new Set())
   const hydratedSessionRef = useRef<string | null>(null)
   const [optimisticSessionId, setOptimisticSessionId] = useState<string | null>(null)
+  const isScopeExecuting = useCallback(
+    (scopeKey: string | null) => scopeKey !== null && executingScopesRef.current.has(scopeKey),
+    [],
+  )
+  const setScopeExecuting = useCallback((scopeKey: string | null, executing: boolean) => {
+    if (scopeKey === null) return
+    const scopes = executingScopesRef.current
+    if (scopes.has(scopeKey) === executing) return
+    const next = new Set(scopes)
+    if (executing) next.add(scopeKey)
+    else next.delete(scopeKey)
+    executingScopesRef.current = next
+    setExecutingScopes(next)
+  }, [])
+  const isExecuting = libraryScopeKey !== null && executingScopes.has(libraryScopeKey)
   const sessionHasPendingAssistantTurn = useMemo(
     () => hasPendingAssistantTurn(messages),
     [messages],
@@ -340,6 +423,7 @@ export function useAssistantSession({ workspaceId, libraryId, t }: UseAssistantS
   const {
     data: sessionsData,
     error: sessionsError,
+    isLoading: sessionsLoading,
     refetch: refetchSessions,
   } = useQuery({
     ...sessionsQueryOptions,
@@ -420,9 +504,7 @@ export function useAssistantSession({ workspaceId, libraryId, t }: UseAssistantS
       queryApi.renameSession(sessionId, title),
     onSuccess: (renamed) => {
       queryClient.setQueryData<QuerySessionListResponse>(sessionsQueryOptions.queryKey, (current) =>
-        withSessionItems(current, (items) =>
-          items.map((session) => (session.id === renamed.id ? renamed : session)),
-        ),
+        withRenamedSession(current, renamed),
       )
     },
     onError: (error) => {
@@ -443,7 +525,7 @@ export function useAssistantSession({ workspaceId, libraryId, t }: UseAssistantS
     mutationFn: (sessionId: string) => queryApi.deleteSession(sessionId),
     onSuccess: (_result, sessionId) => {
       queryClient.setQueryData<QuerySessionListResponse>(sessionsQueryOptions.queryKey, (current) =>
-        withSessionItems(current, (items) => items.filter((session) => session.id !== sessionId)),
+        withoutSession(current, sessionId),
       )
       queryClient.removeQueries({
         queryKey: queries.getQuerySessionOptions({ path: { sessionId } }).queryKey,
@@ -455,6 +537,7 @@ export function useAssistantSession({ workspaceId, libraryId, t }: UseAssistantS
         setMessages(EMPTY_MESSAGES)
         setLocalPendingTurn(null)
         setRetryable(null)
+        setLibraryContentUnavailable(false)
         setDebugContext(null)
         setDebugError(null)
         setDebugErrorExecutionId(null)
@@ -476,18 +559,18 @@ export function useAssistantSession({ workspaceId, libraryId, t }: UseAssistantS
   const renameSession = useCallback(
     (sessionId: string, rawTitle: string) => {
       const title = rawTitle.trim()
-      if (!title || executingRef.current || isRenameSessionPending) return
+      if (!title || isScopeExecuting(libraryScopeRef.current) || isRenameSessionPending) return
       mutateRenameSession({ sessionId, title })
     },
-    [isRenameSessionPending, mutateRenameSession],
+    [isRenameSessionPending, isScopeExecuting, mutateRenameSession],
   )
 
   const deleteSession = useCallback(
     (sessionId: string) => {
-      if (executingRef.current || isDeleteSessionPending) return
+      if (isScopeExecuting(libraryScopeRef.current) || isDeleteSessionPending) return
       mutateDeleteSession(sessionId)
     },
-    [isDeleteSessionPending, mutateDeleteSession],
+    [isDeleteSessionPending, isScopeExecuting, mutateDeleteSession],
   )
 
   useEffect(() => {
@@ -527,13 +610,7 @@ export function useAssistantSession({ workspaceId, libraryId, t }: UseAssistantS
           )
         }
         queryClient.setQueryData<QuerySessionListResponse>(variables.sessionsQueryKey, (current) =>
-          withSessionItems(current, (items) => [
-            sessionItem,
-            ...items.filter(
-              (candidate) =>
-                candidate.id !== variables.optimisticSessionId && candidate.id !== sessionItem.id,
-            ),
-          ]),
+          withCreatedSession(current, sessionItem, variables.optimisticSessionId),
         )
       }
 
@@ -607,7 +684,6 @@ export function useAssistantSession({ workspaceId, libraryId, t }: UseAssistantS
         userMessage: variables.userMessage,
       })
       setRetryable(null)
-      setIsExecuting(true)
       return {
         previousActiveSession,
         previousMessages,
@@ -649,8 +725,8 @@ export function useAssistantSession({ workspaceId, libraryId, t }: UseAssistantS
       }
     },
     onError: (err, variables, context) => {
-      const rawMessage = errorMessage(err, t('assistant.unknownError'))
-      const inlineError = t('assistant.turnFailedInline', { error: rawMessage })
+      const failure = classifyAssistantFailure(err, t)
+      const inlineError = failure.inlineMessage
       if (context) {
         if (libraryScopeRef.current === variables.requestScope) {
           const activeIsUnresolvedOptimistic =
@@ -676,10 +752,12 @@ export function useAssistantSession({ workspaceId, libraryId, t }: UseAssistantS
                 : message,
             )
           })
-          setRetryable({
-            question: variables.questionText,
-            diagnosis: rawMessage,
-          })
+          setRetryable(
+            failure.retryDiagnosis
+              ? { question: variables.questionText, diagnosis: failure.retryDiagnosis }
+              : null,
+          )
+          setLibraryContentUnavailable(failure.unusableLibrary)
           setLocalPendingTurn((current) =>
             current?.pendingMessage.id === variables.pendingMessage.id
               ? {
@@ -693,11 +771,11 @@ export function useAssistantSession({ workspaceId, libraryId, t }: UseAssistantS
           )
         }
       }
-      toast.error(t('assistant.mutations.sendTurn.failed', { error: rawMessage }))
+      // The failed turn itself carries the error and its retry action now;
+      // a global toast repeated the same sentence in a second surface.
     },
     onSettled: async (_data, _err, variables) => {
-      executingRef.current = false
-      setIsExecuting(false)
+      setScopeExecuting(variables ? variables.requestScope : libraryScopeRef.current, false)
       if (variables) {
         await queryClient.invalidateQueries({ queryKey: variables.sessionsQueryKey })
       }
@@ -710,7 +788,7 @@ export function useAssistantSession({ workspaceId, libraryId, t }: UseAssistantS
 
   const selectSession = useCallback(
     (sessionId: string) => {
-      if (executingRef.current) return
+      if (isScopeExecuting(libraryScopeRef.current)) return
       const sessionExists = sessions.some(
         (candidate) => candidate.id === sessionId && candidate.libraryId === libraryId,
       )
@@ -718,11 +796,11 @@ export function useAssistantSession({ workspaceId, libraryId, t }: UseAssistantS
       activeSessionRef.current = sessionId
       setActiveSession(sessionId)
     },
-    [libraryId, sessions, setActiveSession],
+    [isScopeExecuting, libraryId, sessions, setActiveSession],
   )
 
   const newSession = useCallback(() => {
-    if (executingRef.current) return
+    if (isScopeExecuting(libraryScopeRef.current)) return
     activeSessionRef.current = null
     setActiveSession(null)
     setMessages([])
@@ -732,6 +810,7 @@ export function useAssistantSession({ workspaceId, libraryId, t }: UseAssistantS
     setDebugError(null)
     setDebugErrorExecutionId(null)
   }, [
+    isScopeExecuting,
     setActiveSession,
     setDebugContext,
     setDebugError,
@@ -800,14 +879,14 @@ export function useAssistantSession({ workspaceId, libraryId, t }: UseAssistantS
         !workspaceId ||
         !libraryId ||
         !libraryScopeKey ||
-        executingRef.current ||
+        isScopeExecuting(libraryScopeKey) ||
         sessionHasPendingAssistantTurn
       ) {
         return false
       }
 
-      executingRef.current = true
       const requestScope = libraryScopeKey
+      setScopeExecuting(requestScope, true)
       const now = Date.now()
       const pendingMessage = createPendingAssistantMessage(now)
       const currentSessionId = activeSessionRef.current
@@ -833,6 +912,7 @@ export function useAssistantSession({ workspaceId, libraryId, t }: UseAssistantS
       return true
     },
     [
+      isScopeExecuting,
       libraryId,
       libraryScopeKey,
       messages.length,
@@ -840,6 +920,7 @@ export function useAssistantSession({ workspaceId, libraryId, t }: UseAssistantS
       sessionHasPendingAssistantTurn,
       sessions,
       sessionsQueryOptions.queryKey,
+      setScopeExecuting,
       workspaceId,
     ],
   )
@@ -862,6 +943,7 @@ export function useAssistantSession({ workspaceId, libraryId, t }: UseAssistantS
     isExecuting: isExecuting || sessionHasPendingAssistantTurn,
     isSessionMutationPending: isRenameSessionPending || isDeleteSessionPending,
     latestEvidence,
+    libraryContentUnavailable,
     messages,
     newSession,
     openDebugFor,
@@ -870,11 +952,14 @@ export function useAssistantSession({ workspaceId, libraryId, t }: UseAssistantS
     retryable,
     selectSession,
     sessionSearch,
+    sessionsError,
+    sessionsLoading,
     sessions,
     setDebugContext,
     setDebugError,
     setDebugErrorExecutionId,
     setSessionSearch,
+    refetchSessions,
     sendQuestion,
   }
 }

@@ -1,11 +1,25 @@
-use super::provider_validation::fetch_provider_model_names_for_capabilities;
+pub(super) use super::bootstrap_persistence::{
+    ensure_bootstrap_binding, ensure_bootstrap_provider_account,
+};
+use super::provider_validation::fetch_provider_model_names;
 use super::*;
 use serde::Deserialize;
 
 /// Default `temperature` for generative (non-embedding) bootstrap bindings.
-const DEFAULT_BOOTSTRAP_TEMPERATURE: f64 = 0.3;
+///
+/// Every generative purpose in this product emits either a schema-validated
+/// structured object (`query_compile`, `extract_graph`) or text bound to
+/// retrieved evidence (`query_answer`, `extract_text`, `agent`). None of them
+/// is open-ended writing, so sampling variance buys nothing and costs
+/// reproducibility: the same question compiles to a different typed query and
+/// then reads as a different answer on a second ask. Operators can still raise
+/// this per binding when they want variety.
+const DEFAULT_BOOTSTRAP_TEMPERATURE: f64 = 0.0;
 /// Default `top_p` for generative (non-embedding) bootstrap bindings.
-const DEFAULT_BOOTSTRAP_TOP_P: f64 = 0.9;
+///
+/// Paired with a zero temperature: restricting the nucleus as well would drop
+/// tokens the greedy choice may still need, without adding determinism.
+const DEFAULT_BOOTSTRAP_TOP_P: f64 = 1.0;
 
 fn provider_id_for_kind(providers: &[ProviderCatalogEntry], provider_kind: &str) -> Option<Uuid> {
     providers
@@ -90,15 +104,8 @@ fn configured_binding_default_for_purpose(
     })
 }
 
-fn bootstrap_model_supports_purpose(
-    model: &ModelCatalogEntry,
-    purpose: AiBindingPurpose,
-    providers: &[ProviderCatalogEntry],
-) -> bool {
+fn bootstrap_model_supports_purpose(model: &ModelCatalogEntry, purpose: AiBindingPurpose) -> bool {
     validate_model_binding_purpose(purpose, model).is_ok()
-        && providers.iter().find(|provider| provider.id == model.provider_catalog_id).is_some_and(
-            |provider| validate_provider_capability_for_binding(provider, purpose).is_ok(),
-        )
 }
 
 fn select_configured_bootstrap_model<'a>(
@@ -126,14 +133,13 @@ fn select_configured_bootstrap_model<'a>(
         (Some(provider), Some(model_name)) => Ok(models.iter().find(|model| {
             model.provider_catalog_id == provider.id
                 && model.model_name == model_name
-                && bootstrap_model_supports_purpose(model, purpose, providers)
+                && bootstrap_model_supports_purpose(model, purpose)
         })),
         (Some(provider), None) => {
             Ok(select_bootstrap_suggested_model_for_provider(provider, purpose, models))
         }
         (None, Some(model_name)) => Ok(models.iter().find(|model| {
-            model.model_name == model_name
-                && bootstrap_model_supports_purpose(model, purpose, providers)
+            model.model_name == model_name && bootstrap_model_supports_purpose(model, purpose)
         })),
         (None, None) => Ok(None),
     }
@@ -144,9 +150,6 @@ fn select_bootstrap_suggested_model_for_provider<'a>(
     purpose: AiBindingPurpose,
     models: &'a [ModelCatalogEntry],
 ) -> Option<&'a ModelCatalogEntry> {
-    if validate_provider_capability_for_binding(provider, purpose).is_err() {
-        return None;
-    }
     if let Some(preferred_model_name) =
         bootstrap_binding_profile_for_provider_purpose(provider, purpose)
             .map(|profile| profile.model_name)
@@ -286,7 +289,7 @@ fn bootstrap_binding_descriptors_from_profile(
             let model = models.iter().find(|model| {
                 model.provider_catalog_id == provider.id
                     && model.model_name == binding_profile.model_name
-                    && bootstrap_model_supports_purpose(model, binding_profile.purpose, providers)
+                    && bootstrap_model_supports_purpose(model, binding_profile.purpose)
             })?;
             let model_owner = providers
                 .iter()
@@ -338,7 +341,7 @@ pub(super) fn resolve_bootstrap_provider_binding_bundle(
     credential_source: BootstrapAiCredentialSource,
 ) -> Result<Option<BootstrapAiProviderBindingBundle>, ApiError> {
     let profile = bootstrap_provider_binding_profile(provider)?;
-    if !CANONICAL_REQUIRED_RUNTIME_BINDING_PURPOSES
+    if !REQUIRED_BINDING_PURPOSES
         .iter()
         .all(|purpose| profile.iter().any(|binding| binding.purpose == *purpose))
     {
@@ -346,7 +349,7 @@ pub(super) fn resolve_bootstrap_provider_binding_bundle(
     }
 
     let bindings = bootstrap_binding_descriptors_from_profile(provider, providers, models, profile);
-    if !CANONICAL_REQUIRED_RUNTIME_BINDING_PURPOSES
+    if !REQUIRED_BINDING_PURPOSES
         .iter()
         .all(|purpose| bindings.iter().any(|binding| binding.binding_purpose == *purpose))
     {
@@ -428,10 +431,7 @@ pub(super) fn resolve_configured_bootstrap_binding_inputs(
         .map(|secret| secret.provider_kind.as_str())
         .collect::<std::collections::BTreeSet<_>>();
     let mut selections = Vec::new();
-    for purpose in CANONICAL_REQUIRED_RUNTIME_BINDING_PURPOSES
-        .into_iter()
-        .chain(std::iter::once(AiBindingPurpose::ExtractText))
-    {
+    for purpose in REQUIRED_BINDING_PURPOSES {
         if let Some(binding_default) =
             configured_binding_default_for_purpose(Some(configured_ai), purpose)
             && let Some(model) =
@@ -509,7 +509,7 @@ pub(super) fn resolve_configured_bootstrap_binding_inputs(
 pub(super) fn bootstrap_binding_inputs_cover_required_purposes(
     inputs: &[BootstrapAiBindingInput],
 ) -> bool {
-    CANONICAL_REQUIRED_RUNTIME_BINDING_PURPOSES
+    REQUIRED_BINDING_PURPOSES
         .iter()
         .all(|purpose| inputs.iter().any(|selection| selection.binding_purpose == *purpose))
 }
@@ -519,7 +519,7 @@ pub(super) fn validate_bootstrap_binding_inputs_cover_required_purposes(
 ) -> Result<(), ApiError> {
     if !bootstrap_binding_inputs_cover_required_purposes(inputs) {
         return Err(ApiError::BadRequest(
-            "bootstrap binding bundle must cover extract_graph, embed_chunk, query_compile, query_answer, and agent"
+            "bootstrap binding bundle must cover extract_text, extract_graph, embed_chunk, query_compile, query_answer, and agent"
                 .to_string(),
         ));
     }
@@ -554,11 +554,6 @@ pub(super) fn normalize_bootstrap_binding_inputs(
             .find(|model| model.id == input.model_catalog_id)
             .ok_or_else(|| ApiError::resource_not_found("model_catalog", input.model_catalog_id))?;
         validate_model_binding_purpose(input.binding_purpose, model)?;
-        let provider = providers
-            .iter()
-            .find(|provider| provider.id == provider_catalog_id)
-            .ok_or_else(|| ApiError::resource_not_found("provider_catalog", provider_catalog_id))?;
-        validate_provider_capability_for_binding(provider, input.binding_purpose)?;
         if model.provider_catalog_id != provider_catalog_id {
             return Err(ApiError::BadRequest(
                 "bootstrap model selection must belong to the selected provider".to_string(),
@@ -610,28 +605,6 @@ pub(super) fn missing_bootstrap_model_list_models(
         .collect())
 }
 
-fn bootstrap_model_list_capability_kinds(
-    provider: &ProviderCatalogEntry,
-    binding_inputs: &[BootstrapAiBindingInput],
-    models: &[ModelCatalogEntry],
-) -> Result<std::collections::BTreeSet<String>, ApiError> {
-    let mut capability_kinds = std::collections::BTreeSet::new();
-    for input in binding_inputs.iter().filter(|input| input.provider_kind == provider.provider_kind)
-    {
-        let model = models
-            .iter()
-            .find(|model| model.id == input.model_catalog_id)
-            .ok_or_else(|| ApiError::resource_not_found("model_catalog", input.model_catalog_id))?;
-        if model.provider_catalog_id != provider.id {
-            return Err(ApiError::BadRequest(
-                "bootstrap model selection must belong to the selected provider".to_string(),
-            ));
-        }
-        capability_kinds.insert(model.capability_kind.clone());
-    }
-    Ok(capability_kinds)
-}
-
 pub(super) async fn validate_bootstrap_model_list_binding_inputs(
     provider: &ProviderCatalogEntry,
     account: &AiAccount,
@@ -647,14 +620,8 @@ pub(super) async fn validate_bootstrap_model_list_binding_inputs(
             provider.provider_kind
         )));
     };
-    let capability_kinds = bootstrap_model_list_capability_kinds(provider, binding_inputs, models)?;
-    let discovered_model_names = fetch_provider_model_names_for_capabilities(
-        provider,
-        account.api_key.as_deref(),
-        &base_url,
-        &capability_kinds,
-    )
-    .await?;
+    let discovered_model_names =
+        fetch_provider_model_names(provider, account.api_key.as_deref(), &base_url).await?;
     let missing_model_names = missing_bootstrap_model_list_models(
         provider,
         binding_inputs,
@@ -670,258 +637,4 @@ pub(super) async fn validate_bootstrap_model_list_binding_inputs(
         provider.provider_kind,
         missing_model_names.join(", ")
     )))
-}
-
-pub(super) async fn ensure_bootstrap_provider_account(
-    service: &AiCatalogService,
-    state: &AppState,
-    provider: &ProviderCatalogEntry,
-    credential_input: Option<BootstrapAiCredentialInput>,
-    existing_accounts: &[AiAccount],
-    updated_by_principal_id: Option<Uuid>,
-) -> Result<AiAccount, ApiError> {
-    let canonical_label = format!("Bootstrap {}", provider.display_name);
-    let provider_accounts = bootstrap_accounts_for_provider(existing_accounts, provider.id);
-    let canonical_account = bootstrap_resolve_account(&canonical_label, &provider_accounts);
-    let api_key =
-        credential_input.as_ref().and_then(|input| normalize_optional(input.api_key.as_deref()));
-    let base_url =
-        credential_input.as_ref().and_then(|input| normalize_optional(input.base_url.as_deref()));
-    if api_key.is_some() || base_url.is_some() {
-        if let Some(existing) = canonical_account {
-            return match service
-                .update_account(
-                    state,
-                    UpdateAiAccountCommand {
-                        account_id: existing.id,
-                        label: canonical_label.clone(),
-                        api_key,
-                        base_url,
-                        credential_state: "active".to_string(),
-                    },
-                )
-                .await
-            {
-                Ok(updated) => Ok(updated),
-                Err(ApiError::Conflict(_)) => {
-                    bootstrap_reload_account(service, state, provider, &canonical_label).await
-                }
-                Err(error) => Err(error),
-            };
-        }
-        return match service
-            .create_account(
-                state,
-                CreateAiAccountCommand {
-                    scope_kind: AiScopeKind::Instance,
-                    workspace_id: None,
-                    library_id: None,
-                    provider_catalog_id: provider.id,
-                    label: canonical_label.clone(),
-                    api_key,
-                    base_url,
-                    created_by_principal_id: updated_by_principal_id,
-                },
-            )
-            .await
-        {
-            Ok(created) => Ok(created),
-            Err(ApiError::Conflict(_)) => {
-                bootstrap_reload_account(service, state, provider, &canonical_label).await
-            }
-            Err(error) => Err(error),
-        };
-    }
-
-    canonical_account.ok_or_else(|| {
-        let required_field = if provider.api_key_required { "apiKey" } else { "baseUrl" };
-        ApiError::BadRequest(format!(
-            "bootstrap ai setup requires {required_field} for provider {}",
-            provider.provider_kind
-        ))
-    })
-}
-
-fn bootstrap_accounts_for_provider(
-    accounts: &[AiAccount],
-    provider_catalog_id: Uuid,
-) -> Vec<AiAccount> {
-    accounts
-        .iter()
-        .filter(|account| account.provider_catalog_id == provider_catalog_id)
-        .cloned()
-        .collect()
-}
-
-fn bootstrap_resolve_account(canonical_label: &str, accounts: &[AiAccount]) -> Option<AiAccount> {
-    accounts
-        .iter()
-        .find(|account| account.label == canonical_label)
-        .cloned()
-        .or_else(|| (accounts.len() == 1).then(|| accounts[0].clone()))
-        .or_else(|| accounts.iter().find(|account| account.credential_state == "active").cloned())
-}
-
-pub(super) async fn bootstrap_reload_account(
-    service: &AiCatalogService,
-    state: &AppState,
-    provider: &ProviderCatalogEntry,
-    canonical_label: &str,
-) -> Result<AiAccount, ApiError> {
-    let reloaded = service
-        .list_accounts_exact(
-            state,
-            AiScopeRef { scope_kind: AiScopeKind::Instance, workspace_id: None, library_id: None },
-        )
-        .await?;
-    bootstrap_resolve_account(
-        canonical_label,
-        &bootstrap_accounts_for_provider(&reloaded, provider.id),
-    )
-    .ok_or_else(|| ApiError::Conflict("AI catalog resource already exists".to_string()))
-}
-
-fn bootstrap_find_binding(bindings: &[AiBinding], purpose: AiBindingPurpose) -> Option<AiBinding> {
-    bindings.iter().find(|binding| binding.binding_purpose == purpose).cloned()
-}
-
-/// Build the only bootstrap update that may be applied to an existing binding.
-///
-/// Replaying the same account/model selection must preserve every operator-owned
-/// tuning field. Provider presets are defaults for a new target, not an
-/// authority that silently rewrites prompts, sampling, output limits, or
-/// embedding parameters on each startup. A deliberate account/model switch
-/// adopts the new target's complete preset instead.
-pub(super) fn bootstrap_binding_update_command(
-    existing: &AiBinding,
-    binding_input: &BootstrapAiBindingInput,
-    account_id: Uuid,
-    updated_by_principal_id: Option<Uuid>,
-) -> Option<UpdateAiBindingCommand> {
-    let target_changed = existing.account_id != account_id
-        || existing.model_catalog_id != binding_input.model_catalog_id;
-    if !target_changed && existing.binding_state == "active" {
-        return None;
-    }
-
-    let (system_prompt, temperature, top_p, max_output_tokens_override, extra_parameters_json) =
-        if target_changed {
-            (
-                binding_input.system_prompt.clone(),
-                binding_input.temperature,
-                binding_input.top_p,
-                binding_input.max_output_tokens_override,
-                binding_input.extra_parameters_json.clone(),
-            )
-        } else {
-            (
-                existing.system_prompt.clone(),
-                existing.temperature,
-                existing.top_p,
-                existing.max_output_tokens_override,
-                existing.extra_parameters_json.clone(),
-            )
-        };
-
-    Some(UpdateAiBindingCommand {
-        binding_id: existing.id,
-        account_id,
-        model_catalog_id: binding_input.model_catalog_id,
-        system_prompt,
-        temperature,
-        top_p,
-        max_output_tokens_override,
-        extra_parameters_json,
-        binding_state: "active".to_string(),
-        updated_by_principal_id,
-    })
-}
-
-pub(super) async fn ensure_bootstrap_binding(
-    service: &AiCatalogService,
-    state: &AppState,
-    binding_input: &BootstrapAiBindingInput,
-    account_id: Uuid,
-    bindings: &mut Vec<AiBinding>,
-    updated_by_principal_id: Option<Uuid>,
-) -> Result<(), ApiError> {
-    let existing = bootstrap_find_binding(bindings, binding_input.binding_purpose);
-    let operation = if let Some(existing) = existing {
-        let Some(command) = bootstrap_binding_update_command(
-            &existing,
-            binding_input,
-            account_id,
-            updated_by_principal_id,
-        ) else {
-            return Ok(());
-        };
-        service.update_binding(state, command).await
-    } else {
-        service
-            .create_binding(
-                state,
-                CreateAiBindingCommand {
-                    scope_kind: AiScopeKind::Instance,
-                    workspace_id: None,
-                    library_id: None,
-                    binding_purpose: binding_input.binding_purpose,
-                    account_id,
-                    model_catalog_id: binding_input.model_catalog_id,
-                    system_prompt: binding_input.system_prompt.clone(),
-                    temperature: binding_input.temperature,
-                    top_p: binding_input.top_p,
-                    max_output_tokens_override: binding_input.max_output_tokens_override,
-                    extra_parameters_json: binding_input.extra_parameters_json.clone(),
-                    updated_by_principal_id,
-                },
-            )
-            .await
-    };
-
-    match operation {
-        Ok(binding) => {
-            if let Some(index) = bindings
-                .iter()
-                .position(|entry| entry.binding_purpose == binding_input.binding_purpose)
-            {
-                bindings[index] = binding;
-            } else {
-                bindings.push(binding);
-            }
-            Ok(())
-        }
-        Err(ApiError::Conflict(_)) => {
-            *bindings = service
-                .list_bindings(
-                    state,
-                    AiScopeRef {
-                        scope_kind: AiScopeKind::Instance,
-                        workspace_id: None,
-                        library_id: None,
-                    },
-                )
-                .await?;
-            let existing = bootstrap_find_binding(bindings, binding_input.binding_purpose)
-                .ok_or_else(|| {
-                    ApiError::Conflict("AI catalog resource already exists".to_string())
-                })?;
-            let Some(command) = bootstrap_binding_update_command(
-                &existing,
-                binding_input,
-                account_id,
-                updated_by_principal_id,
-            ) else {
-                return Ok(());
-            };
-            let updated = service.update_binding(state, command).await?;
-            if let Some(index) = bindings
-                .iter()
-                .position(|entry| entry.binding_purpose == binding_input.binding_purpose)
-            {
-                bindings[index] = updated;
-            }
-            Ok(())
-        }
-        Err(error) => Err(error),
-    }
 }

@@ -33,7 +33,7 @@
       "minTechnicalFactReferenceCount": 0,
       "minEntityReferenceCount": 0,
       "minRelationReferenceCount": 0,
-      "allowedVerificationStates": ["verified", "unverified"]
+      "allowedVerificationStates": ["verified", "partially_supported"]
     },
     {
       "id": "fastapi_path_params_type_validation",
@@ -41,14 +41,14 @@
       "searchQuery": "FastAPI path parameter type validation error integer string",
       "expectedDocumentsContains": ["fastapi_path_params"],
       "searchRequiredAll": ["path"],
-      "answerRequiredAny": ["validation error", "422", "type", "Pydantic"],
+      "answerRequiredAny": ["validation error", "valid integer", "type", "Pydantic"],
       "answerForbiddenAny": ["Django REST"],
       "minChunkReferenceCount": 1,
       "minPreparedSegmentReferenceCount": 0,
       "minTechnicalFactReferenceCount": 0,
       "minEntityReferenceCount": 0,
       "minRelationReferenceCount": 0,
-      "allowedVerificationStates": ["verified", "unverified"]
+      "allowedVerificationStates": ["verified", "partially_supported"]
     },
     {
       "id": "fastapi_dependency_injection",
@@ -64,7 +64,7 @@
       "minTechnicalFactReferenceCount": 0,
       "minEntityReferenceCount": 0,
       "minRelationReferenceCount": 0,
-      "allowedVerificationStates": ["verified", "unverified"]
+      "allowedVerificationStates": ["verified", "partially_supported"]
     },
     {
       "id": "rust_server_route_map",
@@ -80,7 +80,7 @@
       "minTechnicalFactReferenceCount": 0,
       "minEntityReferenceCount": 0,
       "minRelationReferenceCount": 0,
-      "allowedVerificationStates": ["verified", "unverified"]
+      "allowedVerificationStates": ["verified", "partially_supported"]
     },
     {
       "id": "rust_server_user_roles",
@@ -96,7 +96,7 @@
       "minTechnicalFactReferenceCount": 0,
       "minEntityReferenceCount": 0,
       "minRelationReferenceCount": 0,
-      "allowedVerificationStates": ["verified", "unverified"]
+      "allowedVerificationStates": ["verified", "partially_supported"]
     },
     {
       "id": "rust_server_env_vars",
@@ -105,14 +105,14 @@
       "expectedDocumentsContains": ["sample_rust_http_server"],
       "searchRequiredAll": ["APP_PORT"],
       "answerRequiredAll": ["APP_DATABASE_URL", "APP_JWT_SECRET"],
-      "answerRequiredAny": ["8080", "APP_PORT"],
+      "answerRequiredAny": ["default: 8080", "APP_PORT"],
       "answerForbiddenAny": [],
       "minChunkReferenceCount": 1,
       "minPreparedSegmentReferenceCount": 0,
       "minTechnicalFactReferenceCount": 0,
       "minEntityReferenceCount": 0,
       "minRelationReferenceCount": 0,
-      "allowedVerificationStates": ["verified", "unverified"]
+      "allowedVerificationStates": ["verified", "partially_supported"]
     },
     {
       "id": "python_ml_model_types",
@@ -128,7 +128,7 @@
       "minTechnicalFactReferenceCount": 0,
       "minEntityReferenceCount": 0,
       "minRelationReferenceCount": 0,
-      "allowedVerificationStates": ["verified", "unverified"]
+      "allowedVerificationStates": ["verified", "partially_supported"]
     },
     {
       "id": "python_ml_preprocessing_steps",
@@ -144,23 +144,23 @@
       "minTechnicalFactReferenceCount": 0,
       "minEntityReferenceCount": 0,
       "minRelationReferenceCount": 0,
-      "allowedVerificationStates": ["verified", "unverified"]
+      "allowedVerificationStates": ["verified", "partially_supported"]
     },
     {
       "id": "docker_compose_services_and_ports",
       "question": "What services are defined in the Docker Compose configuration, and what ports does each service use?",
-      "searchQuery": "Docker Compose services ports auth-service user-service notification-service",
+      "searchQuery": "Docker Compose services ports auth-service user-service notification-service worker prometheus minio",
       "expectedDocumentsContains": ["sample_docker_compose"],
       "searchRequiredAll": ["auth-service"],
       "answerRequiredAll": ["8001"],
-      "answerRequiredAny": ["8002", "8003", "5432", "6379"],
+      "answerRequiredAny": ["port 8002", "port 8003", "postgres:5432", "redis:6379"],
       "answerForbiddenAny": [],
       "minChunkReferenceCount": 1,
       "minPreparedSegmentReferenceCount": 0,
       "minTechnicalFactReferenceCount": 0,
       "minEntityReferenceCount": 0,
       "minRelationReferenceCount": 0,
-      "allowedVerificationStates": ["verified", "unverified"]
+      "allowedVerificationStates": ["verified", "partially_supported"]
     },
     {
       "id": "docker_compose_networks",
@@ -176,7 +176,7 @@
       "minTechnicalFactReferenceCount": 0,
       "minEntityReferenceCount": 0,
       "minRelationReferenceCount": 0,
-      "allowedVerificationStates": ["verified", "unverified"]
+      "allowedVerificationStates": ["verified", "partially_supported"]
     },
     {
       "id": "inventory_api_stock_adjustment",
@@ -185,14 +185,14 @@
       "expectedDocumentsContains": ["sample_api_specification"],
       "searchRequiredAll": ["reason_code"],
       "answerRequiredAll": ["receiving"],
-      "answerRequiredAny": ["422", "damage", "loss", "correction"],
+      "answerRequiredAny": ["Insufficient stock", "damage", "loss", "correction"],
       "answerForbiddenAny": [],
       "minChunkReferenceCount": 1,
       "minPreparedSegmentReferenceCount": 0,
       "minTechnicalFactReferenceCount": 0,
       "minEntityReferenceCount": 0,
       "minRelationReferenceCount": 0,
-      "allowedVerificationStates": ["verified", "unverified"]
+      "allowedVerificationStates": ["verified", "partially_supported"]
     },
     {
       "id": "inventory_api_webhook_events",
@@ -208,7 +208,7 @@
       "minTechnicalFactReferenceCount": 0,
       "minEntityReferenceCount": 0,
       "minRelationReferenceCount": 0,
-      "allowedVerificationStates": ["verified", "unverified"]
+      "allowedVerificationStates": ["verified", "partially_supported"]
     },
     {
       "id": "terraform_eks_node_groups",
@@ -216,15 +216,15 @@
       "searchQuery": "EKS managed node groups app system instance_types m6i.xlarge t3.large scaling",
       "expectedDocumentsContains": ["sample_terraform_infra"],
       "searchRequiredAll": ["node"],
-      "answerRequiredAll": ["m6i.xlarge"],
-      "answerRequiredAny": ["t3.large", "3", "10"],
+      "answerRequiredAll": ["m6i.xlarge", "t3.large"],
+      "answerRequiredAny": ["10 nodes", "2 nodes"],
       "answerForbiddenAny": [],
       "minChunkReferenceCount": 1,
       "minPreparedSegmentReferenceCount": 0,
       "minTechnicalFactReferenceCount": 0,
       "minEntityReferenceCount": 0,
       "minRelationReferenceCount": 0,
-      "allowedVerificationStates": ["verified", "unverified"]
+      "allowedVerificationStates": ["verified", "partially_supported"]
     },
     {
       "id": "terraform_monthly_cost",
@@ -240,13 +240,13 @@
       "minTechnicalFactReferenceCount": 0,
       "minEntityReferenceCount": 0,
       "minRelationReferenceCount": 0,
-      "allowedVerificationStates": ["verified", "unverified"]
+      "allowedVerificationStates": ["verified", "partially_supported"]
     },
     {
       "id": "cross_domain_auth_comparison",
       "question": "Compare the authentication mechanisms used across the Rust HTTP server, the Docker Compose auth service, and the Inventory API. What token format or auth scheme does each use?",
-      "searchQuery": "authentication JWT Bearer token OAuth2 authorization mechanism",
-      "expectedDocumentsContains": ["sample_rust_http_server"],
+      "searchQuery": "Rust HTTP server authentication Docker Compose auth service Inventory API token scheme JWT",
+      "expectedDocumentsContains": ["sample_rust_http_server", "sample_docker_compose", "sample_api_specification"],
       "searchRequiredAll": ["JWT"],
       "answerRequiredAll": ["JWT"],
       "answerRequiredAny": ["Bearer", "OAuth", "RS256"],
@@ -256,7 +256,7 @@
       "minTechnicalFactReferenceCount": 0,
       "minEntityReferenceCount": 0,
       "minRelationReferenceCount": 0,
-      "allowedVerificationStates": ["verified", "unverified"]
+      "allowedVerificationStates": ["verified", "partially_supported"]
     },
     {
       "id": "cross_domain_postgres_usage",
@@ -265,14 +265,14 @@
       "expectedDocumentsContains": [],
       "searchRequiredAll": ["postgres"],
       "answerRequiredAll": ["PostgreSQL"],
-      "answerRequiredAny": ["16", "max_connections", "shared_buffers", "APP_DATABASE_URL"],
+      "answerRequiredAny": ["PostgreSQL 18", "max_connections", "shared_buffers", "APP_DATABASE_URL"],
       "answerForbiddenAny": [],
       "minChunkReferenceCount": 2,
       "minPreparedSegmentReferenceCount": 0,
       "minTechnicalFactReferenceCount": 0,
       "minEntityReferenceCount": 0,
       "minRelationReferenceCount": 0,
-      "allowedVerificationStates": ["verified", "unverified"]
+      "allowedVerificationStates": ["verified", "partially_supported"]
     }
   ]
 }

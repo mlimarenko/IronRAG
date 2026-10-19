@@ -64,6 +64,8 @@ spec:
             initialDelaySeconds: 15
             periodSeconds: 20
           volumeMounts:
+            - name: tmp
+              mountPath: /tmp
             - name: nginx-cache
               mountPath: /var/cache/nginx
             - name: nginx-conf
@@ -73,6 +75,9 @@ spec:
           resources:
             {{- toYaml .Values.web.resources | nindent 12 }}
       volumes:
+        - name: tmp
+          emptyDir:
+            sizeLimit: 256Mi
         - name: nginx-cache
           emptyDir: {}
         - name: nginx-conf

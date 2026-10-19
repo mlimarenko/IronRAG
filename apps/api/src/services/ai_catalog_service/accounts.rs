@@ -1,4 +1,3 @@
-use super::provider_validation::sync_provider_model_catalog;
 use super::*;
 use crate::shared::secret_encryption::SecretPurpose;
 
@@ -99,9 +98,6 @@ impl AiCatalogService {
                 || ApiError::resource_not_found("provider_catalog", command.provider_catalog_id),
             )?;
         let api_key = normalize_optional(command.api_key.as_deref());
-        if api_key.is_some() && !state.settings.credential_encryption_write_enabled {
-            return Err(ApiError::credential_encryption_writes_disabled());
-        }
         let account_id = Uuid::now_v7();
         let encrypted_api_key = api_key
             .as_deref()
@@ -120,20 +116,21 @@ impl AiCatalogService {
             .await?;
         let row = ai_repository::create_account(
             &state.persistence.postgres,
-            account_id,
-            scope_kind_key(scope.scope_kind),
-            scope.workspace_id,
-            scope.library_id,
-            command.provider_catalog_id,
-            &label,
+            ai_repository::NewAiAccount {
+                account_id,
+                scope_kind: scope_kind_key(scope.scope_kind),
+                workspace_id: scope.workspace_id,
+                library_id: scope.library_id,
+                provider_catalog_id: command.provider_catalog_id,
+                label: &label,
+                base_url: base_url.as_deref(),
+                created_by_principal_id: command.created_by_principal_id,
+            },
             encrypted_api_key.as_ref(),
-            base_url.as_deref(),
-            command.created_by_principal_id,
         )
         .await
         .map_err(map_ai_write_error)?;
         let account = map_account_row(&state.credential_cipher, row)?;
-        sync_provider_model_catalog_after_account_save(state, provider, &account).await;
         Ok(account)
     }
 
@@ -144,6 +141,11 @@ impl AiCatalogService {
     ) -> Result<AiAccount, ApiError> {
         let label = normalize_non_empty(&command.label, "label")?;
         let existing = self.get_account(state, command.account_id).await?;
+        if existing.updated_at != command.expected_updated_at {
+            return Err(ApiError::Conflict(
+                "AI account changed after it was loaded; refresh it before saving".to_string(),
+            ));
+        }
         let providers = self.list_provider_catalog(state).await?;
         let models = self.list_model_catalog(state, Some(existing.provider_catalog_id)).await?;
         let provider =
@@ -151,9 +153,6 @@ impl AiCatalogService {
                 || ApiError::resource_not_found("provider_catalog", existing.provider_catalog_id),
             )?;
         let api_key = normalize_optional(command.api_key.as_deref());
-        if api_key.is_some() && !state.settings.credential_encryption_write_enabled {
-            return Err(ApiError::credential_encryption_writes_disabled());
-        }
         let encrypted_api_key = api_key
             .as_deref()
             .map(|plaintext| {
@@ -182,17 +181,23 @@ impl AiCatalogService {
             .await?;
         let row = ai_repository::update_account(
             &state.persistence.postgres,
-            command.account_id,
-            &label,
+            ai_repository::AiAccountUpdate {
+                account_id: command.account_id,
+                label: &label,
+                base_url: base_url.as_deref(),
+                credential_state: &command.credential_state,
+                expected_updated_at: command.expected_updated_at,
+            },
             encrypted_api_key.as_ref(),
-            base_url.as_deref(),
-            &command.credential_state,
         )
         .await
         .map_err(map_ai_write_error)?
-        .ok_or_else(|| ApiError::resource_not_found("provider_credential", command.account_id))?;
+        .ok_or_else(|| {
+            ApiError::Conflict(
+                "AI account changed after it was loaded; refresh it before saving".to_string(),
+            )
+        })?;
         let account = map_account_row(&state.credential_cipher, row)?;
-        sync_provider_model_catalog_after_account_save(state, provider, &account).await;
         Ok(account)
     }
 
@@ -247,40 +252,4 @@ pub(super) fn map_account_row(
         created_at: row.created_at,
         updated_at: row.updated_at,
     })
-}
-
-async fn sync_provider_model_catalog_after_account_save(
-    state: &AppState,
-    provider: &ProviderCatalogEntry,
-    account: &AiAccount,
-) {
-    if account.credential_state != "active" {
-        return;
-    }
-
-    match sync_provider_model_catalog(
-        state,
-        provider,
-        account.api_key.as_deref(),
-        account.base_url.as_deref(),
-    )
-    .await
-    {
-        Ok(model_names) => {
-            tracing::info!(
-                provider_kind = %provider.provider_kind,
-                account_id = %account.id,
-                model_count = model_names.len(),
-                "synced provider model catalog after account save"
-            );
-        }
-        Err(error) => {
-            tracing::warn!(
-                provider_kind = %provider.provider_kind,
-                account_id = %account.id,
-                error = %error,
-                "failed to sync provider model catalog after account save"
-            );
-        }
-    }
 }

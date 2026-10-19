@@ -162,35 +162,44 @@ fn associative_frontier_edges(
     graph_index: &QueryGraphIndex,
     relevance_profile: &GraphQueryRelevanceProfile,
 ) -> Vec<AssociativeCandidateEdge> {
+    let scope = AssociativeIncidentScope {
+        selected_edge_ids,
+        known_node_ids,
+        seed_scores,
+        graph_index,
+        relevance_profile,
+    };
     let mut depth_edge_ids = BTreeSet::new();
     let mut depth_edges = frontier
         .iter()
         .take(ASSOCIATIVE_GRAPH_MAX_FRONTIER_NODES)
-        .flat_map(|node_id| {
-            associative_incident_edges(
-                *node_id,
-                selected_edge_ids,
-                &mut depth_edge_ids,
-                known_node_ids,
-                seed_scores,
-                graph_index,
-                relevance_profile,
-            )
-        })
+        .flat_map(|node_id| associative_incident_edges(*node_id, &scope, &mut depth_edge_ids))
         .collect::<Vec<_>>();
     sort_associative_candidate_edges(&mut depth_edges);
     depth_edges
 }
 
+/// Graph inputs shared by every step of one associative incident-edge walk.
+pub(super) struct AssociativeIncidentScope<'a> {
+    pub(super) selected_edge_ids: &'a BTreeSet<Uuid>,
+    pub(super) known_node_ids: &'a BTreeSet<Uuid>,
+    pub(super) seed_scores: &'a BTreeMap<Uuid, f32>,
+    pub(super) graph_index: &'a QueryGraphIndex,
+    pub(super) relevance_profile: &'a GraphQueryRelevanceProfile,
+}
+
 fn associative_incident_edges(
     node_id: Uuid,
-    selected_edge_ids: &BTreeSet<Uuid>,
+    scope: &AssociativeIncidentScope<'_>,
     depth_edge_ids: &mut BTreeSet<Uuid>,
-    known_node_ids: &BTreeSet<Uuid>,
-    seed_scores: &BTreeMap<Uuid, f32>,
-    graph_index: &QueryGraphIndex,
-    relevance_profile: &GraphQueryRelevanceProfile,
 ) -> Vec<AssociativeCandidateEdge> {
+    let AssociativeIncidentScope {
+        selected_edge_ids,
+        known_node_ids,
+        seed_scores,
+        graph_index,
+        relevance_profile,
+    } = *scope;
     let mut incident_edges = graph_index
         .incident_edges(node_id)
         .filter(|edge| !selected_edge_ids.contains(&edge.id))

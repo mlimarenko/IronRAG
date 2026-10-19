@@ -163,9 +163,17 @@ async fn prune_and_log(state: &AppState) {
     .await
     {
         Ok(0) => {}
-        Ok(pruned) => info!(pruned, "pruned dispatched webhook lifecycle outbox rows"),
-        Err(error) => warn!(?error, "webhook lifecycle outbox prune failed; continuing"),
+        Ok(pruned) => log_pruned_outbox_rows(pruned),
+        Err(error) => log_prune_failed(&error),
     }
+}
+
+fn log_pruned_outbox_rows(pruned: u64) {
+    info!(pruned, "pruned dispatched webhook lifecycle outbox rows");
+}
+
+fn log_prune_failed(error: &sqlx::Error) {
+    warn!(?error, "webhook lifecycle outbox prune failed; continuing");
 }
 
 async fn drain_and_log(
@@ -181,19 +189,27 @@ async fn drain_and_log(
     )
     .await
     {
-        Ok(report) if report.leased > 0 => info!(
-            leased = report.leased,
-            dispatched = report.dispatched,
-            retried = report.retried,
-            dead_lettered = report.dead_lettered,
-            lease_conflicts = report.lease_conflicts,
-            state_update_failures = report.state_update_failures,
-            cancelled = report.cancelled,
-            "webhook lifecycle outbox drain completed",
-        ),
+        Ok(report) if report.leased > 0 => log_drain_completed(&report),
         Ok(_) => {}
-        Err(error) => warn!(?error, "webhook lifecycle outbox drain failed; continuing"),
+        Err(error) => log_drain_failed(&error),
     }
+}
+
+fn log_drain_completed(report: &WebhookLifecycleOutboxDrainReport) {
+    info!(
+        leased = report.leased,
+        dispatched = report.dispatched,
+        retried = report.retried,
+        dead_lettered = report.dead_lettered,
+        lease_conflicts = report.lease_conflicts,
+        state_update_failures = report.state_update_failures,
+        cancelled = report.cancelled,
+        "webhook lifecycle outbox drain completed",
+    );
+}
+
+fn log_drain_failed(error: &anyhow::Error) {
+    warn!(?error, "webhook lifecycle outbox drain failed; continuing");
 }
 
 /// Drains at most `batch_limit` due lifecycle events once.
@@ -201,21 +217,10 @@ async fn drain_and_log(
 /// One row is leased at a time. This prevents later rows in a batch from
 /// expiring while a large recipient set is still being fanned out. The active
 /// row is renewed under its token fence until fanout completes.
-pub async fn drain_webhook_lifecycle_outbox_once(
-    state: &AppState,
-    lease_owner: &str,
-    batch_limit: i64,
-) -> anyhow::Result<WebhookLifecycleOutboxDrainReport> {
-    drain_webhook_lifecycle_outbox_once_with_cancellation(
-        state,
-        lease_owner,
-        batch_limit,
-        &CancellationToken::new(),
-    )
-    .await
-}
-
-async fn drain_webhook_lifecycle_outbox_once_with_cancellation(
+///
+/// # Errors
+/// Returns any error raised while leasing, fanning out, or settling a row.
+pub async fn drain_webhook_lifecycle_outbox_once_with_cancellation(
     state: &AppState,
     lease_owner: &str,
     batch_limit: i64,
@@ -254,140 +259,249 @@ async fn drain_webhook_lifecycle_outbox_impl(
         if cancellation_token.is_cancelled() {
             break;
         }
-        let lease = tokio::select! {
-            () = cancellation_token.cancelled() => break,
-            result = webhook_outbox_repository::lease_webhook_lifecycle_outbox_batch(
-                &state.persistence.postgres,
-                lease_owner,
-                lease_duration,
-                1,
-            ) => result?,
-        };
-        let Some(row) = lease.events.into_iter().next() else {
+        let Some((row, lease_token)) =
+            lease_next_lifecycle_event(state, lease_owner, lease_duration, cancellation_token)
+                .await?
+        else {
             break;
         };
         report.leased += 1;
         record_outbox_event_age(&row);
 
-        let failures = match fanout_leased_webhook_lifecycle_event(
+        let step = relay_one_leased_event(
             state,
+            &mut report,
             &row,
-            lease.lease_token,
+            lease_token,
             lease_duration,
             cancellation_token,
         )
-        .await
-        {
-            LeasedWebhookFanoutOutcome::Completed(failures) => failures,
-            LeasedWebhookFanoutOutcome::LeaseLost => {
-                report.lease_conflicts += 1;
-                record_lease_conflict("heartbeat");
-                record_outbox_outcome("lease_lost");
-                continue;
-            }
-            LeasedWebhookFanoutOutcome::HeartbeatFailed => {
-                report.state_update_failures += 1;
-                record_outbox_outcome("heartbeat_failed");
-                continue;
-            }
-            LeasedWebhookFanoutOutcome::Cancelled => {
-                report.cancelled += 1;
-                record_outbox_outcome("cancelled");
-                break;
-            }
-        };
-
-        if failures.is_empty() {
-            match webhook_outbox_repository::mark_webhook_lifecycle_outbox_dispatched(
-                &state.persistence.postgres,
-                row.id,
-                lease.lease_token,
-            )
-            .await
-            {
-                Ok(true) => {
-                    report.dispatched += 1;
-                    record_outbox_outcome("dispatched");
-                }
-                Ok(false) => {
-                    report.lease_conflicts += 1;
-                    record_lease_conflict("completion");
-                    record_outbox_outcome("lease_lost");
-                }
-                Err(error) => {
-                    report.state_update_failures += 1;
-                    record_outbox_outcome("state_update_failed");
-                    warn!(
-                        outbox_id = %row.id,
-                        event_id = %row.event_id,
-                        ?error,
-                        "webhook lifecycle outbox dispatch succeeded but completion update failed",
-                    );
-                }
-            }
-            continue;
-        }
-
-        let retry_disposition = webhook_fanout_retry_disposition(&failures);
-        let retry_at = next_dispatch_retry_at(row.dispatch_attempts);
-        let failure = redacted_dispatch_failure(&failures);
-        match webhook_outbox_repository::fail_webhook_lifecycle_outbox_dispatch(
-            &state.persistence.postgres,
-            row.id,
-            lease.lease_token,
-            retry_at,
-            failure.code,
-            &failure.message,
-            WEBHOOK_LIFECYCLE_OUTBOX_MAX_ATTEMPTS,
-            retry_disposition.is_retryable(),
-        )
-        .await
-        {
-            Ok(Some(state)) if state == "pending" => {
-                report.retried += 1;
-                record_outbox_outcome("retried");
-            }
-            Ok(Some(state)) if state == "dead_letter" => {
-                report.dead_lettered += 1;
-                record_outbox_outcome("dead_lettered");
-                warn!(
-                    outbox_id = %row.id,
-                    event_id = %row.event_id,
-                    dispatch_attempts = row.dispatch_attempts,
-                    error_code = failure.code,
-                    ?retry_disposition,
-                    "webhook lifecycle outbox event entered the dead-letter state",
-                );
-            }
-            Ok(Some(state)) => {
-                report.state_update_failures += 1;
-                record_outbox_outcome("state_update_failed");
-                warn!(
-                    outbox_id = %row.id,
-                    event_id = %row.event_id,
-                    dispatch_state = %state,
-                    "webhook lifecycle outbox failure update returned an unexpected state",
-                );
-            }
-            Ok(None) => {
-                report.lease_conflicts += 1;
-                record_lease_conflict("failure_release");
-                record_outbox_outcome("lease_lost");
-            }
-            Err(error) => {
-                report.state_update_failures += 1;
-                record_outbox_outcome("state_update_failed");
-                warn!(
-                    outbox_id = %row.id,
-                    event_id = %row.event_id,
-                    ?error,
-                    "webhook lifecycle outbox failure update failed",
-                );
-            }
+        .await?;
+        if step == LifecycleStep::Break {
+            break;
         }
     }
 
     Ok(report)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LifecycleStep {
+    Continue,
+    Break,
+}
+
+/// Leases the next due event, or `None` when none is due or the drain was
+/// cancelled. Both cases terminate the bounded loop identically.
+async fn lease_next_lifecycle_event(
+    state: &AppState,
+    lease_owner: &str,
+    lease_duration: ChronoDuration,
+    cancellation_token: &CancellationToken,
+) -> anyhow::Result<Option<(webhook_outbox_repository::WebhookLifecycleOutboxRow, Uuid)>> {
+    let lease = tokio::select! {
+        () = cancellation_token.cancelled() => return Ok(None),
+        result = webhook_outbox_repository::lease_webhook_lifecycle_outbox_batch(
+            &state.persistence.postgres,
+            lease_owner,
+            lease_duration,
+            1,
+        ) => result?,
+    };
+    let Some(row) = lease.events.into_iter().next() else {
+        return Ok(None);
+    };
+    Ok(Some((row, lease.lease_token)))
+}
+
+/// Fans out one leased event and folds the outcome into `report`, returning
+/// whether the drain must stop.
+async fn relay_one_leased_event(
+    state: &AppState,
+    report: &mut WebhookLifecycleOutboxDrainReport,
+    row: &webhook_outbox_repository::WebhookLifecycleOutboxRow,
+    lease_token: Uuid,
+    lease_duration: ChronoDuration,
+    cancellation_token: &CancellationToken,
+) -> anyhow::Result<LifecycleStep> {
+    match fanout_leased_webhook_lifecycle_event(
+        state,
+        row,
+        lease_token,
+        lease_duration,
+        cancellation_token,
+    )
+    .await
+    {
+        LeasedWebhookFanoutOutcome::Completed(failures) => {
+            settle_completed_fanout(state, report, row, lease_token, failures).await?;
+            Ok(LifecycleStep::Continue)
+        }
+        LeasedWebhookFanoutOutcome::LeaseLost => {
+            report.lease_conflicts += 1;
+            record_lease_conflict("heartbeat");
+            record_outbox_outcome("lease_lost");
+            Ok(LifecycleStep::Continue)
+        }
+        LeasedWebhookFanoutOutcome::HeartbeatFailed => {
+            report.state_update_failures += 1;
+            record_outbox_outcome("heartbeat_failed");
+            Ok(LifecycleStep::Continue)
+        }
+        LeasedWebhookFanoutOutcome::Cancelled => {
+            report.cancelled += 1;
+            record_outbox_outcome("cancelled");
+            Ok(LifecycleStep::Break)
+        }
+    }
+}
+
+async fn settle_completed_fanout(
+    state: &AppState,
+    report: &mut WebhookLifecycleOutboxDrainReport,
+    row: &webhook_outbox_repository::WebhookLifecycleOutboxRow,
+    lease_token: Uuid,
+    failures: Vec<WebhookFanoutFailure>,
+) -> anyhow::Result<()> {
+    if failures.is_empty() {
+        settle_dispatched_event(state, report, row, lease_token).await
+    } else {
+        settle_failed_event(state, report, row, lease_token, &failures).await
+    }
+}
+
+async fn settle_dispatched_event(
+    state: &AppState,
+    report: &mut WebhookLifecycleOutboxDrainReport,
+    row: &webhook_outbox_repository::WebhookLifecycleOutboxRow,
+    lease_token: Uuid,
+) -> anyhow::Result<()> {
+    match webhook_outbox_repository::mark_webhook_lifecycle_outbox_dispatched(
+        &state.persistence.postgres,
+        row.id,
+        lease_token,
+    )
+    .await
+    {
+        Ok(true) => {
+            report.dispatched += 1;
+            record_outbox_outcome("dispatched");
+        }
+        Ok(false) => {
+            report.lease_conflicts += 1;
+            record_lease_conflict("completion");
+            record_outbox_outcome("lease_lost");
+        }
+        Err(error) => {
+            report.state_update_failures += 1;
+            record_outbox_outcome("state_update_failed");
+            log_completion_update_failed(row, &error);
+        }
+    }
+    Ok(())
+}
+
+fn log_completion_update_failed(
+    row: &webhook_outbox_repository::WebhookLifecycleOutboxRow,
+    error: &sqlx::Error,
+) {
+    warn!(
+        outbox_id = %row.id,
+        event_id = %row.event_id,
+        ?error,
+        "webhook lifecycle outbox dispatch succeeded but completion update failed",
+    );
+}
+
+async fn settle_failed_event(
+    state: &AppState,
+    report: &mut WebhookLifecycleOutboxDrainReport,
+    row: &webhook_outbox_repository::WebhookLifecycleOutboxRow,
+    lease_token: Uuid,
+    failures: &[WebhookFanoutFailure],
+) -> anyhow::Result<()> {
+    let retry_disposition = webhook_fanout_retry_disposition(failures);
+    let retry_at = next_dispatch_retry_at(row.dispatch_attempts);
+    let failure = redacted_dispatch_failure(failures);
+    match webhook_outbox_repository::fail_webhook_lifecycle_outbox_dispatch(
+        &state.persistence.postgres,
+        webhook_outbox_repository::WebhookLifecycleOutboxFailure {
+            outbox_id: row.id,
+            lease_token,
+            retry_at,
+            error_code: failure.code,
+            error_message: &failure.message,
+            max_attempts: WEBHOOK_LIFECYCLE_OUTBOX_MAX_ATTEMPTS,
+            retryable: retry_disposition.is_retryable(),
+        },
+    )
+    .await
+    {
+        Ok(Some(state)) if state == "pending" => {
+            report.retried += 1;
+            record_outbox_outcome("retried");
+        }
+        Ok(Some(state)) if state == "dead_letter" => {
+            report.dead_lettered += 1;
+            record_outbox_outcome("dead_lettered");
+            log_dead_letter(row, &failure, retry_disposition);
+        }
+        Ok(Some(state)) => {
+            report.state_update_failures += 1;
+            record_outbox_outcome("state_update_failed");
+            log_unexpected_dispatch_state(row, &state);
+        }
+        Ok(None) => {
+            report.lease_conflicts += 1;
+            record_lease_conflict("failure_release");
+            record_outbox_outcome("lease_lost");
+        }
+        Err(error) => {
+            report.state_update_failures += 1;
+            record_outbox_outcome("state_update_failed");
+            log_failure_update_failed(row, &error);
+        }
+    }
+    Ok(())
+}
+
+fn log_dead_letter(
+    row: &webhook_outbox_repository::WebhookLifecycleOutboxRow,
+    failure: &RedactedDispatchFailure,
+    retry_disposition: WebhookFanoutRetryDisposition,
+) {
+    warn!(
+        outbox_id = %row.id,
+        event_id = %row.event_id,
+        dispatch_attempts = row.dispatch_attempts,
+        error_code = failure.code,
+        ?retry_disposition,
+        "webhook lifecycle outbox event entered the dead-letter state",
+    );
+}
+
+fn log_unexpected_dispatch_state(
+    row: &webhook_outbox_repository::WebhookLifecycleOutboxRow,
+    state: &str,
+) {
+    warn!(
+        outbox_id = %row.id,
+        event_id = %row.event_id,
+        dispatch_state = %state,
+        "webhook lifecycle outbox failure update returned an unexpected state",
+    );
+}
+
+fn log_failure_update_failed(
+    row: &webhook_outbox_repository::WebhookLifecycleOutboxRow,
+    error: &sqlx::Error,
+) {
+    warn!(
+        outbox_id = %row.id,
+        event_id = %row.event_id,
+        ?error,
+        "webhook lifecycle outbox failure update failed",
+    );
 }
 
 enum LeasedWebhookFanoutOutcome {
@@ -413,40 +527,7 @@ async fn fanout_leased_webhook_lifecycle_event(
         library_id: row.library_id,
         payload_json: row.payload_json.clone(),
     };
-    let fanout = async {
-        let targets = tokio::select! {
-            () = fanout_cancellation.cancelled() => {
-                return WebhookTargetFanoutOutcome::Cancelled;
-            }
-            result = webhook_outbox_repository::list_active_webhook_lifecycle_recipient_targets(
-                &state.persistence.postgres,
-                row.id,
-            ) => match result {
-                Ok(targets) => targets,
-                Err(error) => {
-                    warn!(
-                        outbox_id = %row.id,
-                        event_id = %row.event_id,
-                        ?error,
-                        "webhook lifecycle outbox recipient lookup failed",
-                    );
-                    return WebhookTargetFanoutOutcome::Completed(vec![
-                        WebhookFanoutFailure::new(
-                            WebhookFanoutFailureKind::RecipientSnapshotLookup,
-                            error.to_string(),
-                        ),
-                    ]);
-                }
-            },
-        };
-        publish_webhook_event_to_targets_cancellable(
-            &state.persistence.postgres,
-            &event,
-            &targets,
-            &fanout_cancellation,
-        )
-        .await
-    };
+    let fanout = run_fanout_targets(state, row, &event, &fanout_cancellation);
     tokio::pin!(fanout);
 
     let first_heartbeat = TokioInstant::now() + WEBHOOK_LIFECYCLE_OUTBOX_HEARTBEAT_INTERVAL;
@@ -471,51 +552,141 @@ async fn fanout_leased_webhook_lifecycle_event(
                 };
             }
             _ = heartbeat.tick() => {
-                let renewal = tokio::select! {
-                    () = cancellation_token.cancelled() => {
-                        fanout_cancellation.cancel();
-                        return LeasedWebhookFanoutOutcome::Cancelled;
-                    }
-                    result = webhook_outbox_repository::renew_webhook_lifecycle_outbox_lease(
-                        &state.persistence.postgres,
-                        row.id,
-                        lease_token,
-                        lease_duration,
-                    ) => result,
-                };
-                match renewal {
-                    Ok(true) => {
-                        webhook_lifecycle_outbox_metrics().lease_renewals.add(
-                            1,
-                            &[KeyValue::new("outcome", "renewed")],
-                        );
-                    }
-                    Ok(false) => {
-                        webhook_lifecycle_outbox_metrics().lease_renewals.add(
-                            1,
-                            &[KeyValue::new("outcome", "lease_lost")],
-                        );
-                        fanout_cancellation.cancel();
-                        return LeasedWebhookFanoutOutcome::LeaseLost;
-                    }
-                    Err(error) => {
-                        webhook_lifecycle_outbox_metrics().lease_renewals.add(
-                            1,
-                            &[KeyValue::new("outcome", "error")],
-                        );
-                        fanout_cancellation.cancel();
-                        warn!(
-                            outbox_id = %row.id,
-                            event_id = %row.event_id,
-                            ?error,
-                            "webhook lifecycle outbox lease heartbeat failed; fanout cancelled",
-                        );
-                        return LeasedWebhookFanoutOutcome::HeartbeatFailed;
-                    }
+                match renew_lease_or_cancel(
+                    state,
+                    row,
+                    lease_token,
+                    lease_duration,
+                    cancellation_token,
+                    &fanout_cancellation,
+                )
+                .await
+                {
+                    HeartbeatOutcome::Renewed => {}
+                    HeartbeatOutcome::LeaseLost => return LeasedWebhookFanoutOutcome::LeaseLost,
+                    HeartbeatOutcome::Cancelled => return LeasedWebhookFanoutOutcome::Cancelled,
+                    HeartbeatOutcome::Failed => return LeasedWebhookFanoutOutcome::HeartbeatFailed,
                 }
             }
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HeartbeatOutcome {
+    Renewed,
+    LeaseLost,
+    Cancelled,
+    Failed,
+}
+
+/// Resolves the recipient snapshot and fans out. A lookup error becomes a
+/// `RecipientSnapshotLookup` failure rather than propagating; fanout
+/// cancellation returns the cancelled outcome the caller folds into the loop.
+async fn run_fanout_targets(
+    state: &AppState,
+    row: &webhook_outbox_repository::WebhookLifecycleOutboxRow,
+    event: &WebhookEvent,
+    fanout_cancellation: &CancellationToken,
+) -> WebhookTargetFanoutOutcome {
+    let targets = tokio::select! {
+        () = fanout_cancellation.cancelled() => {
+            return WebhookTargetFanoutOutcome::Cancelled;
+        }
+        result = webhook_outbox_repository::list_active_webhook_lifecycle_recipient_targets(
+            &state.persistence.postgres,
+            row.id,
+        ) => match result {
+            Ok(targets) => targets,
+            Err(error) => {
+                log_recipient_lookup_failed(row, &error);
+                return WebhookTargetFanoutOutcome::Completed(vec![
+                    WebhookFanoutFailure::new(
+                        WebhookFanoutFailureKind::RecipientSnapshotLookup,
+                        error.to_string(),
+                    ),
+                ]);
+            }
+        },
+    };
+    publish_webhook_event_to_targets_cancellable(
+        &state.persistence.postgres,
+        event,
+        &targets,
+        fanout_cancellation,
+    )
+    .await
+}
+
+fn log_recipient_lookup_failed(
+    row: &webhook_outbox_repository::WebhookLifecycleOutboxRow,
+    error: &sqlx::Error,
+) {
+    warn!(
+        outbox_id = %row.id,
+        event_id = %row.event_id,
+        ?error,
+        "webhook lifecycle outbox recipient lookup failed",
+    );
+}
+
+/// Renews the lease under its fence, cancelling the fanout when the token is
+/// lost or the renewal errors.
+async fn renew_lease_or_cancel(
+    state: &AppState,
+    row: &webhook_outbox_repository::WebhookLifecycleOutboxRow,
+    lease_token: Uuid,
+    lease_duration: ChronoDuration,
+    cancellation_token: &CancellationToken,
+    fanout_cancellation: &CancellationToken,
+) -> HeartbeatOutcome {
+    let renewal = tokio::select! {
+        () = cancellation_token.cancelled() => {
+            fanout_cancellation.cancel();
+            return HeartbeatOutcome::Cancelled;
+        }
+        result = webhook_outbox_repository::renew_webhook_lifecycle_outbox_lease(
+            &state.persistence.postgres,
+            row.id,
+            lease_token,
+            lease_duration,
+        ) => result,
+    };
+    match renewal {
+        Ok(true) => {
+            webhook_lifecycle_outbox_metrics()
+                .lease_renewals
+                .add(1, &[KeyValue::new("outcome", "renewed")]);
+            HeartbeatOutcome::Renewed
+        }
+        Ok(false) => {
+            webhook_lifecycle_outbox_metrics()
+                .lease_renewals
+                .add(1, &[KeyValue::new("outcome", "lease_lost")]);
+            fanout_cancellation.cancel();
+            HeartbeatOutcome::LeaseLost
+        }
+        Err(error) => {
+            webhook_lifecycle_outbox_metrics()
+                .lease_renewals
+                .add(1, &[KeyValue::new("outcome", "error")]);
+            fanout_cancellation.cancel();
+            log_heartbeat_failed(row, &error);
+            HeartbeatOutcome::Failed
+        }
+    }
+}
+
+fn log_heartbeat_failed(
+    row: &webhook_outbox_repository::WebhookLifecycleOutboxRow,
+    error: &sqlx::Error,
+) {
+    warn!(
+        outbox_id = %row.id,
+        event_id = %row.event_id,
+        ?error,
+        "webhook lifecycle outbox lease heartbeat failed; fanout cancelled",
+    );
 }
 
 fn record_outbox_event_age(row: &webhook_outbox_repository::WebhookLifecycleOutboxRow) {
