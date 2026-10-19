@@ -28,7 +28,7 @@ mod tests {
     }
 
     #[test]
-    fn canonical_delivery_payload_overrides_spoofed_metadata() {
+    fn persisted_delivery_payload_overrides_spoofed_metadata() {
         let event = WebhookEvent {
             event_type: "revision.ready".into(),
             event_id: "revision.ready:stable".into(),
@@ -41,7 +41,7 @@ mod tests {
             }),
         };
 
-        let payload = event.canonical_delivery_payload().expect("object payload");
+        let payload = event.persisted_delivery_payload().expect("object payload");
         assert_eq!(payload["event_id"], event.event_id);
         assert_eq!(payload["event_type"], event.event_type);
         assert_eq!(payload["workspace_id"], event.workspace_id.to_string());
@@ -49,7 +49,7 @@ mod tests {
 
         let mut invalid = event;
         invalid.payload_json = serde_json::json!(["not", "an", "object"]);
-        assert!(invalid.canonical_delivery_payload().is_none());
+        assert!(invalid.persisted_delivery_payload().is_none());
     }
 }
 
@@ -61,7 +61,7 @@ pub struct WebhookEvent {
     /// Immutable producer-side occurrence time persisted with the outbox row.
     pub occurred_at: DateTime<Utc>,
     pub workspace_id: Uuid,
-    /// Canonical queue ownership. Outbound events are emitted by document or
+    /// Single queue ownership. Outbound events are emitted by document or
     /// revision lifecycle transitions, both of which always belong to a
     /// library. Keeping this non-optional prevents invalid nil-library jobs.
     pub library_id: Uuid,
@@ -83,13 +83,13 @@ impl std::fmt::Debug for WebhookEvent {
 }
 
 impl WebhookEvent {
-    /// Builds the flat signed outbound contract. Canonical metadata always
+    /// Builds the flat signed outbound contract. Persisted metadata always
     /// overwrites same-named payload keys so producers cannot spoof routing or
     /// dedupe identity inside the signed body.
     #[must_use]
-    pub fn canonical_delivery_payload(&self) -> Option<serde_json::Value> {
+    pub fn persisted_delivery_payload(&self) -> Option<serde_json::Value> {
         self.payload_json.as_object()?;
-        Some(canonical_delivery_payload_from_parts(
+        Some(delivery_payload_from_persisted_parts(
             &self.payload_json,
             &self.event_type,
             &self.event_id,
@@ -103,10 +103,10 @@ impl WebhookEvent {
 /// Rebuilds the signed flat payload from trusted relational metadata.
 ///
 /// Delivery calls this again even though new attempts already persist a
-/// canonical payload. That makes legacy attempts safe and prevents a stored
+/// reconstructed payload. That makes legacy attempts safe and prevents a stored
 /// JSON field from overriding routing, tenant, identity or occurrence data.
 #[must_use]
-pub fn canonical_delivery_payload_from_parts(
+pub fn delivery_payload_from_persisted_parts(
     payload_json: &serde_json::Value,
     event_type: &str,
     event_id: &str,
@@ -124,7 +124,7 @@ pub fn canonical_delivery_payload_from_parts(
 }
 
 /// Stable identity for the one `revision.ready` transition owned by a
-/// canonical revision. Worker retries must reuse this value so queue dedupe is
+/// current revision. Worker retries must reuse this value so queue dedupe is
 /// effective across process crashes.
 #[must_use]
 pub fn revision_ready_event_id(revision_id: Uuid) -> String {
@@ -133,7 +133,7 @@ pub fn revision_ready_event_id(revision_id: Uuid) -> String {
 
 /// Stable identity for one persisted document-delete transition.
 ///
-/// `deleted_at` is part of the canonical document row and is locked before the
+/// `deleted_at` is part of the persisted document row and is locked before the
 /// event is created. A retry of the same transition reuses the same identity,
 /// while a later restore/delete cycle receives a different one.
 #[must_use]

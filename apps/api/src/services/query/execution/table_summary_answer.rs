@@ -11,7 +11,8 @@ use crate::shared::extraction::table_summary::{
 use super::{
     focused_answer_document_id,
     retrieve::{excerpt_for, score_value},
-    table_row_answer::{normalize_table_header, parse_table_row_chunk},
+    table_row_answer::parse_table_row_chunk,
+    table_row_identity::normalize_table_header,
     types::RuntimeMatchedChunk,
 };
 

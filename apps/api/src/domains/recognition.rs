@@ -110,7 +110,7 @@ impl LibraryRecognitionPolicy {
     /// Builds a policy from persisted JSON.
     ///
     /// # Errors
-    /// Returns an error when the JSON shape is not the canonical recognition policy shape.
+    /// Returns an error when the JSON shape is not the normalized recognition policy shape.
     pub fn from_json(value: serde_json::Value) -> Result<Self, String> {
         let policy = serde_json::from_value::<Self>(value)
             .map_err(|error| format!("invalid recognition policy: {error}"))?;
@@ -118,7 +118,7 @@ impl LibraryRecognitionPolicy {
         Ok(policy)
     }
 
-    /// Serializes the policy into the canonical database/API JSON representation.
+    /// Serializes the policy into the stored database/API JSON representation.
     ///
     /// # Errors
     /// Returns an error if serialization unexpectedly fails.

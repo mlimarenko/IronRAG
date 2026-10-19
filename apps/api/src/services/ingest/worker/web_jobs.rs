@@ -9,14 +9,14 @@ use crate::{
     },
 };
 
-pub(super) async fn run_canonical_web_discovery_job(
+pub(super) async fn run_web_discovery_job(
     state: &AppState,
     job: &ingest_repository::IngestJobRow,
     attempt_id: Uuid,
 ) -> anyhow::Result<()> {
-    let run_id = resolve_canonical_job_subject_id(state, job, "content_web_ingest_run").await?;
+    let run_id = resolve_ingest_job_subject_id(state, job, "content_web_ingest_run").await?;
     state
-        .canonical_services
+        .application_services
         .ingest
         .record_stage_event(
             state,
@@ -40,13 +40,13 @@ pub(super) async fn run_canonical_web_discovery_job(
         .await
         .context("failed to record web_discovery start stage event")?;
     match Box::pin(
-        state.canonical_services.web_ingest.execute_recursive_discovery_job(state, run_id),
+        state.application_services.web_ingest.execute_recursive_discovery_job(state, run_id),
     )
     .await
     {
         Ok(()) => {
             state
-                .canonical_services
+                .application_services
                 .ingest
                 .record_stage_event(
                     state,
@@ -76,7 +76,7 @@ pub(super) async fn run_canonical_web_discovery_job(
         Err(error) => {
             let error_message = error.to_string();
             state
-                .canonical_services
+                .application_services
                 .ingest
                 .record_stage_event(
                     state,
@@ -107,15 +107,15 @@ pub(super) async fn run_canonical_web_discovery_job(
     }
 }
 
-pub(super) async fn run_canonical_web_materialize_page_job(
+pub(super) async fn run_web_materialize_page_job(
     state: &AppState,
     job: &ingest_repository::IngestJobRow,
     attempt_id: Uuid,
 ) -> anyhow::Result<()> {
     let candidate_id =
-        resolve_canonical_job_subject_id(state, job, "content_web_discovered_page").await?;
+        resolve_ingest_job_subject_id(state, job, "content_web_discovered_page").await?;
     state
-        .canonical_services
+        .application_services
         .ingest
         .record_stage_event(
             state,
@@ -138,11 +138,15 @@ pub(super) async fn run_canonical_web_materialize_page_job(
         )
         .await
         .context("failed to record web_materialize_page start stage event")?;
-    match state.canonical_services.web_ingest.execute_recursive_page_job(state, candidate_id).await
+    match state
+        .application_services
+        .web_ingest
+        .execute_recursive_page_job(state, candidate_id)
+        .await
     {
         Ok(()) => {
             state
-                .canonical_services
+                .application_services
                 .ingest
                 .record_stage_event(
                     state,
@@ -170,7 +174,7 @@ pub(super) async fn run_canonical_web_materialize_page_job(
         Err(error) => {
             let error_message = error.to_string();
             state
-                .canonical_services
+                .application_services
                 .ingest
                 .record_stage_event(
                     state,
@@ -201,28 +205,25 @@ pub(super) async fn run_canonical_web_materialize_page_job(
     }
 }
 
-pub(super) async fn resolve_canonical_job_subject_id(
+pub(super) async fn resolve_ingest_job_subject_id(
     state: &AppState,
     job: &ingest_repository::IngestJobRow,
     expected_subject_kind: &str,
 ) -> anyhow::Result<Uuid> {
     let operation_id =
-        job.async_operation_id.context("canonical web ingest job is missing async_operation_id")?;
+        job.async_operation_id.context("web ingest job is missing async_operation_id")?;
     let operation = state
-        .canonical_services
+        .application_services
         .ops
         .get_async_operation(state, operation_id)
         .await
         .map_err(|error| anyhow::anyhow!(error.to_string()))?;
-    let subject_kind = operation
-        .subject_kind
-        .as_deref()
-        .context("canonical web ingest job subject_kind is missing")?;
-    let subject_id =
-        operation.subject_id.context("canonical web ingest job subject_id is missing")?;
+    let subject_kind =
+        operation.subject_kind.as_deref().context("web ingest job subject_kind is missing")?;
+    let subject_id = operation.subject_id.context("web ingest job subject_id is missing")?;
     if subject_kind != expected_subject_kind {
         anyhow::bail!(
-            "canonical web ingest job subject kind mismatch: expected {expected_subject_kind}, found {subject_kind}"
+            "web ingest job subject kind mismatch: expected {expected_subject_kind}, found {subject_kind}"
         );
     }
     Ok(subject_id)

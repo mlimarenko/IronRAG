@@ -1,578 +1,97 @@
-//! Self-healing pass that reconciles documents whose LLM graph extraction
-//! finished but whose `reconcile_revision_graph` never produced a document
-//! node in the projection.
+//! Durable self-healing admission for readable document graph state.
 //!
 //! Root cause this module addresses: the `extract_graph` stage can succeed
 //! at the per-chunk level (`runtime_graph_extraction` rows flipped to
 //! `ready`) yet still fail at the stage level — typically via the 600-second
-//! canonical wall-clock timeout on a long document, or a projection write
+//! configured wall-clock timeout on a long document, or a projection write
 //! failure. When the stage fails, the worker skips the downstream
 //! `reconcile_revision_graph` call, so the extracted entities/relations
 //! never become `runtime_graph_node` / `runtime_graph_edge` rows. The
 //! dashboard keeps showing the document as "readable" while the graph
 //! viewer never learns it exists.
 //!
-//! The backfill pass queries documents in this exact state and replays
-//! `reconcile_revision_graph` against the already-persisted extraction
-//! records. No LLM call is made — the merge runs purely over the `ready`
-//! records in Postgres. Typically cheap (milliseconds per document).
-//!
-//! # Debounce
-//!
-//! Library-wide passes cost O(missing-docs × reconcile-cost). Under a full
-//! queue burst every finishing job would kick another pass while the
-//! previous pass is still walking the same set of documents. A dedicated
-//! 60 s slot per library compresses that burst; the slot is independent of
-//! the maintenance slot so heavy maintenance work does not starve
-//! backfill, and vice versa.
-
-use std::{
-    collections::HashMap,
-    sync::{Mutex, OnceLock},
-    time::{Duration, Instant},
-};
+//! The durable periodic scheduler repairs exact-revision active-projection
+//! publication gaps backed by a positive current completion, current-version
+//! extraction history, or an exact-head interrupted graph stage, then enqueues
+//! the standard authority-owning
+//! `graph_refresh` job. An unexplained version-coverage gap remains an explicit
+//! operator migration, and a valid zero-contribution completion is terminal.
+//! The shared dedupe key prevents competing periodic and operator paths from
+//! publishing a revision twice.
 
 use anyhow::Context;
-use chrono::Utc;
-use futures::stream::{self, StreamExt};
+use chrono::{DateTime, Utc};
 use uuid::Uuid;
 
 use crate::{
     app::state::AppState,
     infra::repositories::{
-        self,
+        self, AUTOMATIC_GRAPH_REEXTRACT_PRIORITY, EXPLICIT_GRAPH_REEXTRACT_PRIORITY,
+        GraphReextractSelectionMode,
         ingest_repository::{self, NewIngestJob},
     },
-    services::graph::{error::GraphServiceError, summary::PendingGraphSummaryRefresh},
+    services::graph::{
+        error::GraphServiceError,
+        extract::{GRAPH_EXTRACTION_CONTRACT_VERSION, GRAPH_EXTRACTION_VERSION},
+    },
 };
-
-/// Minimum wall-clock gap between two backfill passes on the same library.
-/// Chosen to comfortably clear a mid-sized missing-node batch (a few hundred
-/// documents × low-millisecond reconcile per doc) before the next burst.
-pub(crate) const BACKFILL_INTERVAL: Duration = Duration::from_mins(1);
-
-/// Extended debounce applied when a backfill pass finds that *every*
-/// candidate is already skipped by the terminal marker. In that case
-/// the library-wide head query (`list_library_documents_missing_graph_node`)
-/// is still expensive (measured 12–20 s under merge load) but the
-/// per-doc reconcile work is zero because every doc is marked
-/// structurally barren. Running the head query every 60 s is pure
-/// waste; extend the debounce to 5 min so the scan only re-runs when a
-/// realistic amount of new content could have changed the picture.
-/// The extended window is cleared on the next pass that does produce
-/// at least one active candidate.
-pub(crate) const BACKFILL_ALL_TERMINAL_BACKOFF: Duration = Duration::from_mins(5);
-
-/// Upper bound on documents reconciled per pass. Bounded so one backfill
-/// cannot starve the rest of the worker loop; follow-up passes pick up any
-/// documents that exceed the limit on the next window.
-pub(crate) const BACKFILL_BATCH_SIZE: i64 = 256;
-
-/// Concurrent reconcile fan-out inside a single pass on a *small* library
-/// projection. Reconcile is I/O bound (Postgres round-trips; the LLM is
-/// NOT invoked) so a small fan-out amortises round-trip latency without
-/// stressing the pool.
-///
-/// This fan-out is only safe while the canonical projection is small. The
-/// first reconcile of a backfill candidate whose library snapshot still
-/// reports an empty graph takes the *full* projection path
-/// (`project_canonical_graph` → `list_admitted_runtime_graph_*_by_library`),
-/// which materialises every admitted node + edge row of the whole library
-/// into memory. On a large library (measured ~95.6k nodes + ~430.5k edges,
-/// ~260 MiB resident per full build) running four of those concurrently
-/// peaks at ~1.04 GiB and trips the worker's 1 GiB cgroup cap — an infinite
-/// OOM/restart loop because the worker dies before it can upsert the
-/// non-empty snapshot that would flip subsequent docs onto the bounded
-/// targeted path. [`graph_backfill_concurrency`] caps the fan-out to
-/// [`BACKFILL_CONCURRENCY_LARGE_PROJECTION`] above
-/// [`BACKFILL_LARGE_PROJECTION_THRESHOLD`] so the peak stays bounded.
-pub(crate) const BACKFILL_CONCURRENCY: usize = 4;
-
-/// Fan-out used once the canonical projection is large enough that a single
-/// full reconcile build is memory-heavy. Forcing the first build to run
-/// alone keeps peak resident set near one full-build cost (~260 MiB on the
-/// measured 95.6k-node/430.5k-edge library) instead of `N ×` that. After the
-/// first candidate upserts a non-empty snapshot, every remaining candidate
-/// in the pass takes the bounded *targeted* projection path, so serial
-/// execution at this size costs throughput on a background pass only — never
-/// latency on a query.
-pub(crate) const BACKFILL_CONCURRENCY_LARGE_PROJECTION: usize = 1;
-
-/// Admitted-row count (nodes + edges of the active projection) at or above
-/// which the pass drops to [`BACKFILL_CONCURRENCY_LARGE_PROJECTION`]. Set
-/// well below the measured OOM point: four concurrent full builds at
-/// ~95.6k + ~430.5k ≈ 526k admitted rows peaked at ~1.04 GiB, so the
-/// threshold is anchored at 100k combined rows — roughly one fifth of the
-/// observed failure size — to engage the safe fan-out long before the cap
-/// is in reach, while leaving genuinely small libraries on the faster
-/// four-way fan-out.
-pub(crate) const BACKFILL_LARGE_PROJECTION_THRESHOLD: i64 = 100_000;
-
-/// Chooses the reconcile fan-out for a backfill pass from the size of the
-/// active canonical projection (admitted node + edge count). Pure so the
-/// decision is unit-testable without a live database.
-///
-/// Returns [`BACKFILL_CONCURRENCY_LARGE_PROJECTION`] once the combined
-/// admitted-row count reaches [`BACKFILL_LARGE_PROJECTION_THRESHOLD`],
-/// otherwise the faster [`BACKFILL_CONCURRENCY`]. Negative counts (which
-/// should not occur but are representable in `i64`) are treated as zero, so
-/// a malformed count never accidentally selects the unsafe fan-out.
-#[must_use]
-pub(crate) fn graph_backfill_concurrency(
-    admitted_node_count: i64,
-    admitted_edge_count: i64,
-) -> usize {
-    let combined = admitted_node_count.max(0).saturating_add(admitted_edge_count.max(0));
-    if combined >= BACKFILL_LARGE_PROJECTION_THRESHOLD {
-        BACKFILL_CONCURRENCY_LARGE_PROJECTION
-    } else {
-        BACKFILL_CONCURRENCY
-    }
-}
-
-/// How many consecutive zero-contribution reconcile attempts against the
-/// same active revision we tolerate before flagging the document as
-/// "extract yielded nothing graph-worthy" and skipping it on subsequent
-/// backfill passes. Prevents the 15–25 s head query from re-running the
-/// same heavy reconcile fan-out every minute on documents that are
-/// structurally incapable of producing a graph contribution (e.g. empty
-/// tables, pure-image PDFs that OCR'd to noise, binary blobs). The
-/// marker is cleared automatically when the document's `active_revision_id`
-/// changes — a fresh revision gets a fresh try.
-const TERMINAL_MARKER_THRESHOLD: u32 = 3;
-const GRAPH_SLOT_CACHE_CAPACITY: usize = 1_024;
-const TERMINAL_MARKER_CAPACITY: usize = 4_096;
-const TERMINAL_MARKER_TTL: Duration = Duration::from_hours(24);
-
-#[derive(Debug, Clone)]
-struct ZeroContributionMarker {
-    revision_id: Uuid,
-    consecutive_zero_count: u32,
-    last_seen: Instant,
-}
-
-#[derive(Debug, Clone, Copy)]
-struct BackfillSlotState {
-    last_run: Instant,
-    /// If set, the next pass must not run until this instant — even if
-    /// `BACKFILL_INTERVAL` already elapsed. Populated when a pass finds
-    /// every candidate terminal-marked; cleared on the next pass that
-    /// runs (i.e. when the extended window itself expires) or that
-    /// observes at least one active candidate.
-    extended_next_run: Option<Instant>,
-}
-
-fn last_run() -> &'static Mutex<HashMap<Uuid, BackfillSlotState>> {
-    static LAST_RUN: OnceLock<Mutex<HashMap<Uuid, BackfillSlotState>>> = OnceLock::new();
-    LAST_RUN.get_or_init(|| Mutex::new(HashMap::new()))
-}
-
-/// Records that the current backfill pass found every candidate
-/// terminal-marked; applies [`BACKFILL_ALL_TERMINAL_BACKOFF`] before the
-/// next pass may acquire the slot. Called from inside
-/// `run_library_graph_backfill` after the empty-active branch.
-fn record_all_terminal_backoff(library_id: Uuid) {
-    let now = Instant::now();
-    let extended_until = now + BACKFILL_ALL_TERMINAL_BACKOFF;
-    let mut guard = last_run().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-    prune_backfill_slots(&mut guard, now);
-    guard
-        .entry(library_id)
-        .and_modify(|s| s.extended_next_run = Some(extended_until))
-        .or_insert(BackfillSlotState { last_run: now, extended_next_run: Some(extended_until) });
-}
-
-fn prune_backfill_slots(guard: &mut HashMap<Uuid, BackfillSlotState>, now: Instant) {
-    guard.retain(|_, state| {
-        state.extended_next_run.is_some_and(|until| until > now)
-            || now.duration_since(state.last_run) < BACKFILL_ALL_TERMINAL_BACKOFF
-    });
-    if guard.len() >= GRAPH_SLOT_CACHE_CAPACITY
-        && let Some(oldest) =
-            guard.iter().min_by_key(|(_, state)| state.last_run).map(|(id, _)| *id)
-    {
-        guard.remove(&oldest);
-    }
-}
-
-fn terminal_markers() -> &'static Mutex<HashMap<(Uuid, Uuid), ZeroContributionMarker>> {
-    static MARKERS: OnceLock<Mutex<HashMap<(Uuid, Uuid), ZeroContributionMarker>>> =
-        OnceLock::new();
-    MARKERS.get_or_init(|| Mutex::new(HashMap::new()))
-}
-
-/// Returns true if a prior run observed `TERMINAL_MARKER_THRESHOLD`
-/// consecutive zero-contribution reconciles for this `(library, doc)`
-/// against the same `revision_id`. A change of revision clears the
-/// marker — every new extract gets a fresh chance.
-fn should_skip_by_terminal_marker(library_id: Uuid, document_id: Uuid, revision_id: Uuid) -> bool {
-    let mut guard = terminal_markers().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-    let key = (library_id, document_id);
-    let Some(marker) = guard.get(&key) else {
-        return false;
-    };
-    if marker.revision_id != revision_id || marker.last_seen.elapsed() >= TERMINAL_MARKER_TTL {
-        guard.remove(&key);
-        return false;
-    }
-    let Some(marker) = guard.get_mut(&key) else {
-        return false;
-    };
-    marker.last_seen = Instant::now();
-    let should_skip = marker.consecutive_zero_count >= TERMINAL_MARKER_THRESHOLD;
-    drop(guard);
-    should_skip
-}
-
-/// Update the terminal marker for `(library, doc)` based on the outcome
-/// of one reconcile attempt. `contributed=true` clears the marker; a
-/// zero-contribution attempt increments the counter and re-anchors to
-/// `revision_id` (so a stale marker from a previous revision is wiped).
-fn record_terminal_marker_result(
-    library_id: Uuid,
-    document_id: Uuid,
-    revision_id: Uuid,
-    contributed: bool,
-) {
-    let mut guard = terminal_markers().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-    let now = Instant::now();
-    guard.retain(|_, marker| now.duration_since(marker.last_seen) < TERMINAL_MARKER_TTL);
-    if contributed {
-        guard.remove(&(library_id, document_id));
-        return;
-    }
-    match guard.get_mut(&(library_id, document_id)) {
-        Some(marker) if marker.revision_id == revision_id => {
-            marker.consecutive_zero_count = marker.consecutive_zero_count.saturating_add(1);
-            marker.last_seen = now;
-        }
-        _ => {
-            if guard.len() >= TERMINAL_MARKER_CAPACITY
-                && let Some(oldest) =
-                    guard.iter().min_by_key(|(_, marker)| marker.last_seen).map(|(key, _)| *key)
-            {
-                guard.remove(&oldest);
-            }
-            guard.insert(
-                (library_id, document_id),
-                ZeroContributionMarker { revision_id, consecutive_zero_count: 1, last_seen: now },
-            );
-        }
-    }
-}
-
-#[cfg(test)]
-pub(crate) fn reset_terminal_markers_for_tests() {
-    terminal_markers().lock().unwrap().clear();
-}
-
-/// Returns `true` when the caller has been granted the backfill slot for
-/// `library_id` in the current window. The caller MUST run the backfill
-/// pass — there is no explicit release; the slot becomes available again
-/// once [`BACKFILL_INTERVAL`] has elapsed.
-#[must_use]
-pub(crate) fn try_acquire_graph_backfill_slot(library_id: Uuid) -> bool {
-    let now = Instant::now();
-    let mut guard = last_run().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-    prune_backfill_slots(&mut guard, now);
-    if let Some(state) = guard.get(&library_id) {
-        if let Some(extended) = state.extended_next_run
-            && now < extended
-        {
-            return false;
-        }
-        if now.duration_since(state.last_run) < BACKFILL_INTERVAL {
-            return false;
-        }
-        guard.insert(library_id, BackfillSlotState { last_run: now, extended_next_run: None });
-        true
-    } else {
-        guard.insert(library_id, BackfillSlotState { last_run: now, extended_next_run: None });
-        true
-    }
-}
-
-#[derive(Debug, Clone, Default)]
-pub(crate) struct GraphBackfillOutcome {
-    pub candidates: usize,
-    pub reconciled: usize,
-    pub produced_graph: usize,
-    pub failures: usize,
-}
-
-type GraphBackfillCandidate = (Uuid, Uuid);
-type GraphBackfillReconcileOutcome = (Uuid, Uuid, bool, Option<PendingGraphSummaryRefresh>);
-type GraphBackfillReconcileResult = Result<GraphBackfillReconcileOutcome, anyhow::Error>;
-
-struct GraphBackfillResultSummary {
-    outcome: GraphBackfillOutcome,
-    terminal_promotions: usize,
-    pending_summary_refresh: Option<PendingGraphSummaryRefresh>,
-}
-
-fn active_backfill_candidates(
-    library_id: Uuid,
-    raw_candidates: Vec<GraphBackfillCandidate>,
-) -> (Vec<GraphBackfillCandidate>, usize) {
-    let (active, skipped): (Vec<_>, Vec<_>) =
-        raw_candidates.into_iter().partition(|(document_id, revision_id)| {
-            !should_skip_by_terminal_marker(library_id, *document_id, *revision_id)
-        });
-    (active, skipped.len())
-}
-
-fn all_terminal_backfill_outcome(
-    library_id: Uuid,
-    raw_candidates: usize,
-    skipped_by_marker: usize,
-) -> GraphBackfillOutcome {
-    record_all_terminal_backoff(library_id);
-    tracing::info!(
-        %library_id,
-        raw_candidates,
-        skipped_by_marker,
-        backoff_secs = BACKFILL_ALL_TERMINAL_BACKOFF.as_secs(),
-        "graph backfill pass: all candidates are terminal, extending debounce"
-    );
-    GraphBackfillOutcome { candidates: raw_candidates, ..GraphBackfillOutcome::default() }
-}
-
-async fn resolve_backfill_concurrency(
-    state: &AppState,
-    library_id: Uuid,
-) -> Result<(i64, i64, i64, usize), GraphServiceError> {
-    let projection_scope =
-        crate::services::graph::projection::resolve_projection_scope(state, library_id)
-            .await
-            .context("failed to resolve active projection scope for backfill fan-out sizing")?;
-    let projection_counts = repositories::count_admitted_runtime_graph_projection(
-        &state.persistence.postgres,
-        library_id,
-        projection_scope.projection_version,
-    )
-    .await
-    .context("failed to count admitted graph rows for backfill fan-out sizing")?;
-    let concurrency =
-        graph_backfill_concurrency(projection_counts.node_count, projection_counts.edge_count);
-    Ok((
-        projection_scope.projection_version,
-        projection_counts.node_count,
-        projection_counts.edge_count,
-        concurrency,
-    ))
-}
-
-async fn reconcile_backfill_candidates(
-    state: &AppState,
-    library_id: Uuid,
-    candidates: Vec<GraphBackfillCandidate>,
-    concurrency: usize,
-) -> Vec<GraphBackfillReconcileResult> {
-    stream::iter(candidates.into_iter().map(|(document_id, revision_id)| {
-        let graph_service = state.canonical_services.graph.clone();
-        async move {
-            let cancellation_token = tokio_util::sync::CancellationToken::new();
-            let outcome = graph_service
-                .reconcile_revision_graph(
-                    state,
-                    library_id,
-                    document_id,
-                    revision_id,
-                    None,
-                    &cancellation_token,
-                )
-                .await
-                .with_context(|| {
-                    format!(
-                        "graph backfill reconcile failed for document {document_id} revision {revision_id}"
-                    )
-                })?;
-            Ok((
-                document_id,
-                revision_id,
-                outcome.graph_contribution_count > 0,
-                outcome.pending_summary_refresh,
-            ))
-        }
-    }))
-    .buffer_unordered(concurrency)
-    .collect()
-    .await
-}
-
-fn merge_pending_summary_refresh(
-    current: Option<PendingGraphSummaryRefresh>,
-    pending: Option<PendingGraphSummaryRefresh>,
-) -> Option<PendingGraphSummaryRefresh> {
-    match (current, pending) {
-        (Some(current), Some(pending)) => Some(current.merge(pending)),
-        (Some(current), None) => Some(current),
-        (None, pending) => pending,
-    }
-}
-
-fn summarize_backfill_results(
-    library_id: Uuid,
-    raw_candidates: usize,
-    results: Vec<GraphBackfillReconcileResult>,
-) -> GraphBackfillResultSummary {
-    let mut summary = GraphBackfillResultSummary {
-        outcome: GraphBackfillOutcome {
-            candidates: raw_candidates,
-            ..GraphBackfillOutcome::default()
-        },
-        terminal_promotions: 0,
-        pending_summary_refresh: None,
-    };
-    for result in results {
-        match result {
-            Ok((document_id, revision_id, contributed, pending)) => {
-                summary.pending_summary_refresh =
-                    merge_pending_summary_refresh(summary.pending_summary_refresh.take(), pending);
-                record_terminal_marker_result(library_id, document_id, revision_id, contributed);
-                summary.outcome.reconciled += 1;
-                if contributed {
-                    summary.outcome.produced_graph += 1;
-                } else if should_skip_by_terminal_marker(library_id, document_id, revision_id) {
-                    summary.terminal_promotions += 1;
-                }
-            }
-            Err(error) => {
-                summary.outcome.failures += 1;
-                tracing::warn!(%library_id, ?error, "graph backfill reconcile failed for document");
-            }
-        }
-    }
-    summary
-}
-
-async fn publish_backfill_summary_refresh(
-    state: &AppState,
-    library_id: Uuid,
-    pending_summary_refresh: Option<PendingGraphSummaryRefresh>,
-) -> Result<(), GraphServiceError> {
-    let Some(pending_summary_refresh) = pending_summary_refresh else {
-        return Ok(());
-    };
-    let source_truth_version =
-        repositories::catalog_repository::touch_library_source_truth_version(
-            &state.persistence.postgres,
-            library_id,
-        )
-        .await
-        .context("failed to publish graph backfill source generation")?;
-    state
-        .canonical_services
-        .graph
-        .apply_published_summary_refresh(
-            state,
-            library_id,
-            source_truth_version,
-            &pending_summary_refresh,
-        )
-        .await
-        .context("failed to refresh canonical summaries after graph backfill publication")?;
-    Ok(())
-}
-
-/// Runs one backfill pass for `library_id`. Idempotent: documents that are
-/// already in the graph are not revisited, and documents where the replay
-/// still yields zero contributions will reappear on subsequent passes
-/// until extraction produces graph content (or they are handled via a
-/// terminal marker in a follow-up change).
-pub(crate) async fn run_library_graph_backfill(
-    state: &AppState,
-    library_id: Uuid,
-) -> Result<GraphBackfillOutcome, GraphServiceError> {
-    let raw_candidates = repositories::list_library_documents_missing_graph_node(
-        &state.persistence.postgres,
-        library_id,
-        BACKFILL_BATCH_SIZE,
-    )
-    .await
-    .context("failed to list documents missing graph node for backfill")?;
-    if raw_candidates.is_empty() {
-        return Ok(GraphBackfillOutcome::default());
-    }
-
-    let raw_total = raw_candidates.len();
-    let (candidates, skipped_by_marker) = active_backfill_candidates(library_id, raw_candidates);
-    if candidates.is_empty() {
-        return Ok(all_terminal_backfill_outcome(library_id, raw_total, skipped_by_marker));
-    }
-
-    let (projection_version, admitted_node_count, admitted_edge_count, concurrency) =
-        resolve_backfill_concurrency(state, library_id).await?;
-    tracing::info!(
-        %library_id,
-        raw_candidates = raw_total,
-        active_candidates = candidates.len(),
-        skipped_by_marker,
-        projection_version,
-        admitted_node_count,
-        admitted_edge_count,
-        concurrency,
-        "graph backfill pass: replaying reconcile for documents missing graph node"
-    );
-
-    let active_candidates = candidates.len();
-    let results = reconcile_backfill_candidates(state, library_id, candidates, concurrency).await;
-    let summary = summarize_backfill_results(library_id, raw_total, results);
-    publish_backfill_summary_refresh(state, library_id, summary.pending_summary_refresh).await?;
-
-    tracing::info!(
-        %library_id,
-        candidates = summary.outcome.candidates,
-        active_candidates,
-        skipped_by_marker,
-        reconciled = summary.outcome.reconciled,
-        produced_graph = summary.outcome.produced_graph,
-        failures = summary.outcome.failures,
-        terminal_promotions = summary.terminal_promotions,
-        "graph backfill pass completed"
-    );
-    Ok(summary.outcome)
-}
-
-/// Process-local debounce state for the graph re-extract pass. Separate
-/// from the backfill slot because the two passes solve different problems
-/// on different time horizons: backfill is cheap (no LLM), re-extract is
-/// expensive (new LLM calls per doc).
-fn last_reextract_run() -> &'static Mutex<HashMap<Uuid, Instant>> {
-    static LAST_RUN: OnceLock<Mutex<HashMap<Uuid, Instant>>> = OnceLock::new();
-    LAST_RUN.get_or_init(|| Mutex::new(HashMap::new()))
-}
-
-/// Minimum wall-clock gap between two re-extract passes on the same
-/// library. Larger than backfill because the downstream jobs spend LLM
-/// budget — a tight retry loop on a systematically failing document would
-/// be expensive.
-pub(crate) const REEXTRACT_INTERVAL: Duration = Duration::from_mins(5);
 
 /// Upper bound on re-extract jobs enqueued per pass. Prevents one pass
 /// from saturating the ingest queue and blocking other mutations.
 pub(crate) const REEXTRACT_BATCH_SIZE: i64 = 64;
 
-/// Returns `true` when the caller has been granted the re-extract slot
-/// for `library_id` in the current window.
+/// Hard ceiling for an operator-triggered re-extract batch. Operators can
+/// choose smaller batches, but one request cannot flood the ingest queue with
+/// an unbounded library-wide insert.
+pub(crate) const REEXTRACT_MAX_BATCH_SIZE: i64 = 256;
+
+/// Number of worker-capacity waves admitted by one periodic pass. A short
+/// queue keeps every configured library slot useful without letting repair
+/// work monopolize the ingest queue.
+const PERIODIC_REEXTRACT_BATCH_WAVES: u32 = 4;
+
+/// Absolute cap for the automatic pass. Operator-triggered repair keeps its
+/// separate, larger limit, while background recovery remains conservative.
+const PERIODIC_REEXTRACT_MAX_BATCH_SIZE: u32 = 32;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct PeriodicGraphReextractPolicy {
+    pub batch_size: u32,
+}
+
 #[must_use]
-pub(crate) fn try_acquire_graph_reextract_slot(library_id: Uuid) -> bool {
-    let now = Instant::now();
-    let mut guard = last_reextract_run().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-    guard.retain(|_, last| now.duration_since(*last) < REEXTRACT_INTERVAL);
-    match guard.get(&library_id) {
-        Some(last) if now.duration_since(*last) < REEXTRACT_INTERVAL => false,
-        _ => {
-            if guard.len() >= GRAPH_SLOT_CACHE_CAPACITY
-                && let Some(oldest) =
-                    guard.iter().min_by_key(|(_, instant)| **instant).map(|(id, _)| *id)
-            {
-                guard.remove(&oldest);
-            }
-            guard.insert(library_id, now);
-            true
-        }
+pub(crate) fn periodic_graph_reextract_policy(
+    max_parallel_jobs_per_library: usize,
+) -> PeriodicGraphReextractPolicy {
+    let library_parallelism =
+        u32::try_from(max_parallel_jobs_per_library.max(1)).unwrap_or(u32::MAX);
+    PeriodicGraphReextractPolicy {
+        batch_size: library_parallelism
+            .saturating_mul(PERIODIC_REEXTRACT_BATCH_WAVES)
+            .min(PERIODIC_REEXTRACT_MAX_BATCH_SIZE),
     }
+}
+
+#[must_use]
+const fn cap_periodic_graph_reextract_batch(
+    policy: PeriodicGraphReextractPolicy,
+    requested_max_batch_size: u32,
+) -> u32 {
+    if policy.batch_size < requested_max_batch_size {
+        policy.batch_size
+    } else {
+        requested_max_batch_size
+    }
+}
+
+#[must_use]
+pub(crate) fn normalize_graph_reextract_batch_size(requested: Option<u32>) -> i64 {
+    requested.map_or(REEXTRACT_BATCH_SIZE, i64::from).clamp(1, REEXTRACT_MAX_BATCH_SIZE)
+}
+
+#[must_use]
+const fn periodic_graph_reextract_can_admit(has_live_graph_refresh: bool) -> bool {
+    !has_live_graph_refresh
 }
 
 #[derive(Debug, Clone, Default)]
@@ -583,219 +102,357 @@ pub(crate) struct GraphReextractOutcome {
     pub failures: usize,
 }
 
-/// Runs one re-extract pass for `library_id`. Finds documents whose active
-/// revision has no extraction record after a revision transition and enqueues
-/// the canonical `graph_refresh` maintenance job. Graph repair must not
-/// masquerade as a user content mutation or rewrite content-head ownership.
-///
-/// Loop protection is provided by the unique
-/// `idx_ingest_job_dedupe_key` index on `(library_id, dedupe_key)`:
-/// the pass derives a stable `graph_reextract:{revision_id}` key, so if
-/// an earlier pass already enqueued a job for the same revision (whether
-/// still queued, leased, completed, or failed) the insert fails with a
-/// unique violation and the pass moves on. A failed prior run therefore
-/// does not re-trigger the LLM — ops can inspect and retry manually.
-pub(crate) async fn run_library_graph_reextract(
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct GraphReextractProgress {
+    pub readable_document_count: i64,
+    pub known_eligible_document_count: i64,
+    pub current_extraction_document_count: i64,
+    pub missing_current_extraction_document_count: i64,
+    pub outdated_or_incomplete_document_count: i64,
+    pub never_extracted_document_count: i64,
+    pub queued_job_count: i64,
+    pub leased_job_count: i64,
+    pub paused_job_count: i64,
+}
+
+#[derive(Debug, Clone, Default)]
+pub(crate) struct GraphReextractBatchResult {
+    pub batch_size: i64,
+    pub outcome: GraphReextractOutcome,
+    pub progress: GraphReextractProgress,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct GraphReextractCandidate {
+    pub workspace_id: Uuid,
+    pub document_id: Uuid,
+    pub revision_id: Uuid,
+}
+
+fn graph_reextract_job(
+    library_id: Uuid,
+    candidate: GraphReextractCandidate,
+    priority: i32,
+    now: DateTime<Utc>,
+) -> NewIngestJob {
+    NewIngestJob {
+        workspace_id: candidate.workspace_id,
+        library_id,
+        mutation_id: None,
+        mutation_item_id: None,
+        connector_id: None,
+        async_operation_id: None,
+        knowledge_document_id: Some(candidate.document_id),
+        knowledge_revision_id: Some(candidate.revision_id),
+        job_kind: "graph_refresh".to_string(),
+        queue_state: "queued".to_string(),
+        priority,
+        dedupe_key: Some(format!(
+            "graph_reextract:{GRAPH_EXTRACTION_VERSION}:{}",
+            candidate.revision_id
+        )),
+        queued_at: Some(now),
+        available_at: Some(now),
+        completed_at: None,
+    }
+}
+
+pub(crate) async fn enqueue_graph_reextract_jobs(
     state: &AppState,
     library_id: Uuid,
-) -> Result<GraphReextractOutcome, GraphServiceError> {
-    let candidates = repositories::list_library_documents_needing_graph_reextract(
+    candidates: &[GraphReextractCandidate],
+) -> GraphReextractOutcome {
+    enqueue_graph_reextract_jobs_with_priority(
+        state,
+        library_id,
+        candidates,
+        EXPLICIT_GRAPH_REEXTRACT_PRIORITY,
+        None,
+    )
+    .await
+}
+
+async fn enqueue_graph_reextract_jobs_with_priority(
+    state: &AppState,
+    library_id: Uuid,
+    candidates: &[GraphReextractCandidate],
+    priority: i32,
+    automatic_global_live_job_cap: Option<u32>,
+) -> GraphReextractOutcome {
+    let mut outcome =
+        GraphReextractOutcome { candidates: candidates.len(), ..GraphReextractOutcome::default() };
+    let now = Utc::now();
+    for candidate in candidates {
+        let job = graph_reextract_job(library_id, *candidate, priority, now);
+        let enqueue = match automatic_global_live_job_cap {
+            Some(global_cap) => {
+                ingest_repository::enqueue_automatic_graph_refresh_job_with_live_dedupe(
+                    &state.persistence.postgres,
+                    &job,
+                    global_cap,
+                )
+                .await
+            }
+            None => {
+                ingest_repository::enqueue_active_library_ingest_job_with_live_dedupe(
+                    &state.persistence.postgres,
+                    &job,
+                )
+                .await
+            }
+        };
+        match enqueue {
+            Ok(Some(_)) => outcome.enqueued += 1,
+            Ok(None) => outcome.skipped_dedupe += 1,
+            Err(error) => {
+                outcome.failures += 1;
+                tracing::warn!(
+                    %library_id,
+                    document_id = %candidate.document_id,
+                    revision_id = %candidate.revision_id,
+                    ?error,
+                    "failed to enqueue graph re-extract job"
+                );
+            }
+        }
+    }
+    outcome
+}
+
+pub(crate) async fn load_library_graph_reextract_progress(
+    state: &AppState,
+    library_id: Uuid,
+) -> Result<GraphReextractProgress, GraphServiceError> {
+    let row = repositories::get_library_graph_reextract_progress(
         &state.persistence.postgres,
         library_id,
-        REEXTRACT_BATCH_SIZE,
+        GRAPH_EXTRACTION_VERSION,
+    )
+    .await
+    .context("failed to load graph re-extract progress")?;
+    Ok(GraphReextractProgress {
+        readable_document_count: row.ready_document_count,
+        known_eligible_document_count: row.known_eligible_document_count,
+        current_extraction_document_count: row.current_extraction_document_count,
+        missing_current_extraction_document_count: row.missing_current_extraction_document_count,
+        outdated_or_incomplete_document_count: row.outdated_or_incomplete_document_count,
+        never_extracted_document_count: row.never_extracted_document_count,
+        queued_job_count: row.queued_job_count,
+        leased_job_count: row.leased_job_count,
+        paused_job_count: row.paused_job_count,
+    })
+}
+
+async fn enqueue_library_graph_reextract_batch(
+    state: &AppState,
+    library_id: Uuid,
+    requested_batch_size: Option<u32>,
+    selection_mode: GraphReextractSelectionMode,
+    automatic_global_live_job_cap: Option<u32>,
+) -> Result<(i64, GraphReextractOutcome), GraphServiceError> {
+    let batch_size = normalize_graph_reextract_batch_size(requested_batch_size);
+    let candidates = repositories::list_library_documents_needing_graph_reextract_for_version(
+        &state.persistence.postgres,
+        library_id,
+        GRAPH_EXTRACTION_VERSION,
+        GRAPH_EXTRACTION_CONTRACT_VERSION,
+        selection_mode,
+        batch_size,
     )
     .await
     .context("failed to list documents needing graph re-extract")?;
 
-    if candidates.is_empty() {
+    let candidates = candidates
+        .into_iter()
+        .map(|(workspace_id, document_id, revision_id)| GraphReextractCandidate {
+            workspace_id,
+            document_id,
+            revision_id,
+        })
+        .collect::<Vec<_>>();
+    let priority = match selection_mode {
+        GraphReextractSelectionMode::ProjectionRepair => AUTOMATIC_GRAPH_REEXTRACT_PRIORITY,
+        GraphReextractSelectionMode::VersionRecovery { .. } => EXPLICIT_GRAPH_REEXTRACT_PRIORITY,
+    };
+    let outcome = enqueue_graph_reextract_jobs_with_priority(
+        state,
+        library_id,
+        &candidates,
+        priority,
+        automatic_global_live_job_cap,
+    )
+    .await;
+    Ok((batch_size, outcome))
+}
+
+pub(crate) async fn run_library_graph_reextract_batch(
+    state: &AppState,
+    library_id: Uuid,
+    requested_batch_size: Option<u32>,
+    include_never_extracted: bool,
+) -> Result<GraphReextractBatchResult, GraphServiceError> {
+    let (batch_size, outcome) = enqueue_library_graph_reextract_batch(
+        state,
+        library_id,
+        requested_batch_size,
+        GraphReextractSelectionMode::VersionRecovery { include_never_extracted },
+        None,
+    )
+    .await?;
+    let progress = load_library_graph_reextract_progress(state, library_id).await?;
+    Ok(GraphReextractBatchResult { batch_size, outcome, progress })
+}
+
+/// Runs one durable repair pass for `library_id`. It enqueues the shared
+/// `graph_refresh` job only for active readable heads lacking exact-revision
+/// document-node publication evidence in the active projection whose current
+/// extraction is missing/malformed or has a valid positive contribution.
+/// Missing/malformed completions additionally need current-version,
+/// current-revision extraction history or exact-revision interrupted-stage
+/// evidence; an unexplained legacy gap is left for explicit operator migration.
+/// Valid zero-contribution completions are terminal. Canceled exact-revision
+/// jobs suppress automatic resurrection; terminal automatic jobs observe a
+/// durable cooldown and finite dead-letter ceiling. Broader extraction-version
+/// migration and overrides remain explicit operator actions.
+/// Graph repair must not masquerade as a user content mutation or rewrite
+/// content-head ownership.
+///
+/// The periodic pass waits until the library has no live `graph_refresh` work,
+/// then admits at most `requested_max_batch_size` jobs, additionally bounded by
+/// the per-library worker-capacity policy. The stable
+/// `graph_reextract:{version}:{revision_id}` key remains the race-safe final
+/// guard if two enqueue paths observe the empty library queue concurrently. Periodic callers
+/// first reserve a durable cluster-wide tick, while the dedupe key still
+/// protects against operator or rebuild enqueue paths outside that scheduler.
+/// There is deliberately no second process-local time debounce: once the prior
+/// batch clears, the next cluster tick may refill the library's bounded worker
+/// wave instead of leaving it idle until an unrelated five-minute timer ends.
+pub(crate) async fn run_library_graph_reextract(
+    state: &AppState,
+    library_id: Uuid,
+    requested_max_batch_size: u32,
+    global_live_job_cap: u32,
+) -> Result<GraphReextractOutcome, GraphServiceError> {
+    let policy =
+        periodic_graph_reextract_policy(state.settings.ingestion_max_parallel_jobs_per_library);
+    let batch_size = cap_periodic_graph_reextract_batch(policy, requested_max_batch_size);
+    if batch_size == 0 {
         return Ok(GraphReextractOutcome::default());
     }
 
-    tracing::info!(
-        %library_id,
-        candidates = candidates.len(),
-        "graph re-extract pass: enqueueing graph_refresh jobs for orphaned active revisions"
-    );
-
-    let total = candidates.len();
-    let mut outcome =
-        GraphReextractOutcome { candidates: total, ..GraphReextractOutcome::default() };
-    let now = Utc::now();
-    for (workspace_id, document_id, revision_id) in candidates {
-        let dedupe_key = Some(format!("graph_reextract:{revision_id}"));
-        let job = NewIngestJob {
-            workspace_id,
-            library_id,
-            mutation_id: None,
-            mutation_item_id: None,
-            connector_id: None,
-            async_operation_id: None,
-            knowledge_document_id: Some(document_id),
-            knowledge_revision_id: Some(revision_id),
-            job_kind: "graph_refresh".to_string(),
-            queue_state: "queued".to_string(),
-            priority: 200,
-            dedupe_key,
-            queued_at: Some(now),
-            available_at: Some(now),
-            completed_at: None,
-        };
-        match ingest_repository::create_ingest_job(&state.persistence.postgres, &job).await {
-            Ok(_) => outcome.enqueued += 1,
-            Err(error) => {
-                if matches!(&error, sqlx::Error::Database(db)
-                    if db.constraint() == Some("idx_ingest_job_dedupe_key"))
-                {
-                    outcome.skipped_dedupe += 1;
-                } else {
-                    outcome.failures += 1;
-                    tracing::warn!(
-                        %library_id,
-                        %document_id,
-                        %revision_id,
-                        ?error,
-                        "failed to enqueue graph re-extract job"
-                    );
-                }
-            }
-        }
+    let has_live_graph_refresh = ingest_repository::has_live_ingest_jobs_by_kind(
+        &state.persistence.postgres,
+        library_id,
+        "graph_refresh",
+    )
+    .await
+    .context("failed to inspect live graph re-extract jobs")?;
+    if !periodic_graph_reextract_can_admit(has_live_graph_refresh) {
+        log_graph_reextract_skipped(library_id);
+        return Ok(GraphReextractOutcome::default());
     }
+    let (_, outcome) = enqueue_library_graph_reextract_batch(
+        state,
+        library_id,
+        Some(batch_size),
+        GraphReextractSelectionMode::ProjectionRepair,
+        Some(global_live_job_cap),
+    )
+    .await?;
 
+    log_graph_reextract_completed(library_id, batch_size, requested_max_batch_size, &outcome);
+
+    Ok(outcome)
+}
+
+fn log_graph_reextract_skipped(library_id: Uuid) {
+    tracing::debug!(
+        %library_id,
+        "graph re-extract pass skipped while prior graph-refresh batch remains live"
+    );
+}
+
+fn log_graph_reextract_completed(
+    library_id: Uuid,
+    batch_size: u32,
+    requested_max_batch_size: u32,
+    outcome: &GraphReextractOutcome,
+) {
     tracing::info!(
         %library_id,
+        batch_size,
+        requested_max_batch_size,
+        selection_mode = "projection_repair",
         candidates = outcome.candidates,
         enqueued = outcome.enqueued,
         skipped_dedupe = outcome.skipped_dedupe,
         failures = outcome.failures,
         "graph re-extract pass completed"
     );
-
-    Ok(outcome)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn with_terminal_marker_test_lock(test: impl FnOnce()) {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        let _guard = LOCK
-            .get_or_init(|| Mutex::new(()))
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        reset_terminal_markers_for_tests();
-        test();
-        reset_terminal_markers_for_tests();
-    }
-
     #[test]
-    fn first_caller_acquires_backfill_slot() {
+    fn reextract_candidate_uses_standard_graph_refresh_job() {
         let library_id = Uuid::now_v7();
-        assert!(try_acquire_graph_backfill_slot(library_id));
-    }
+        let candidate = GraphReextractCandidate {
+            workspace_id: Uuid::now_v7(),
+            document_id: Uuid::now_v7(),
+            revision_id: Uuid::now_v7(),
+        };
 
-    #[test]
-    fn second_caller_in_same_window_is_rejected() {
-        let library_id = Uuid::now_v7();
-        assert!(try_acquire_graph_backfill_slot(library_id));
-        assert!(!try_acquire_graph_backfill_slot(library_id));
-    }
+        let job = graph_reextract_job(
+            library_id,
+            candidate,
+            EXPLICIT_GRAPH_REEXTRACT_PRIORITY,
+            Utc::now(),
+        );
 
-    #[test]
-    fn distinct_libraries_do_not_contend() {
-        let library_a = Uuid::now_v7();
-        let library_b = Uuid::now_v7();
-        assert!(try_acquire_graph_backfill_slot(library_a));
-        assert!(try_acquire_graph_backfill_slot(library_b));
-    }
-
-    #[test]
-    fn terminal_marker_skips_after_threshold_zero_attempts() {
-        with_terminal_marker_test_lock(|| {
-            let library_id = Uuid::now_v7();
-            let document_id = Uuid::now_v7();
-            let revision_id = Uuid::now_v7();
-
-            for _ in 0..TERMINAL_MARKER_THRESHOLD {
-                assert!(!should_skip_by_terminal_marker(library_id, document_id, revision_id));
-                record_terminal_marker_result(library_id, document_id, revision_id, false);
-            }
-
-            assert!(should_skip_by_terminal_marker(library_id, document_id, revision_id));
-        });
-    }
-
-    #[test]
-    fn terminal_marker_clears_when_revision_changes() {
-        with_terminal_marker_test_lock(|| {
-            let library_id = Uuid::now_v7();
-            let document_id = Uuid::now_v7();
-            let revision_a = Uuid::now_v7();
-            let revision_b = Uuid::now_v7();
-
-            for _ in 0..TERMINAL_MARKER_THRESHOLD {
-                record_terminal_marker_result(library_id, document_id, revision_a, false);
-            }
-            assert!(should_skip_by_terminal_marker(library_id, document_id, revision_a));
-
-            // New revision — marker for revision_a must not apply.
-            assert!(!should_skip_by_terminal_marker(library_id, document_id, revision_b));
-        });
-    }
-
-    #[test]
-    fn small_projection_keeps_fast_backfill_fan_out() {
-        // Well under the threshold → keep the four-way fan-out.
-        assert_eq!(graph_backfill_concurrency(0, 0), BACKFILL_CONCURRENCY);
-        assert_eq!(graph_backfill_concurrency(1_000, 5_000), BACKFILL_CONCURRENCY);
-        // Just below the threshold is still the fast path.
+        assert_eq!(job.library_id, library_id);
+        assert_eq!(job.knowledge_document_id, Some(candidate.document_id));
+        assert_eq!(job.knowledge_revision_id, Some(candidate.revision_id));
+        assert_eq!(job.job_kind, "graph_refresh");
+        assert_eq!(job.priority, EXPLICIT_GRAPH_REEXTRACT_PRIORITY);
         assert_eq!(
-            graph_backfill_concurrency(BACKFILL_LARGE_PROJECTION_THRESHOLD - 1, 0),
-            BACKFILL_CONCURRENCY
+            job.dedupe_key,
+            Some(format!("graph_reextract:{GRAPH_EXTRACTION_VERSION}:{}", candidate.revision_id))
         );
     }
 
     #[test]
-    fn large_projection_drops_to_serial_backfill_fan_out() {
-        // Exactly at the threshold engages the safe fan-out.
-        assert_eq!(
-            graph_backfill_concurrency(BACKFILL_LARGE_PROJECTION_THRESHOLD, 0),
-            BACKFILL_CONCURRENCY_LARGE_PROJECTION
-        );
-        // The measured OOM-trigger library (~95.6k nodes + ~430.5k edges)
-        // must select the serial fan-out.
-        assert_eq!(
-            graph_backfill_concurrency(95_598, 430_549),
-            BACKFILL_CONCURRENCY_LARGE_PROJECTION
-        );
+    fn operator_reextract_batch_size_is_bounded() {
+        assert_eq!(normalize_graph_reextract_batch_size(None), REEXTRACT_BATCH_SIZE);
+        assert_eq!(normalize_graph_reextract_batch_size(Some(0)), 1);
+        assert_eq!(normalize_graph_reextract_batch_size(Some(17)), 17);
+        assert_eq!(normalize_graph_reextract_batch_size(Some(u32::MAX)), REEXTRACT_MAX_BATCH_SIZE);
     }
 
     #[test]
-    fn backfill_fan_out_sizing_ignores_negative_counts() {
-        // A malformed negative count must never select the unsafe fan-out
-        // for what is actually a large projection, and must clamp to zero
-        // rather than underflow.
-        assert_eq!(graph_backfill_concurrency(-1, -1), BACKFILL_CONCURRENCY);
-        assert_eq!(
-            graph_backfill_concurrency(-5, BACKFILL_LARGE_PROJECTION_THRESHOLD),
-            BACKFILL_CONCURRENCY_LARGE_PROJECTION
-        );
+    fn periodic_reextract_batch_scales_with_library_concurrency_and_is_bounded() {
+        assert_eq!(periodic_graph_reextract_policy(1).batch_size, 4);
+        assert_eq!(periodic_graph_reextract_policy(2).batch_size, 8);
+        assert_eq!(periodic_graph_reextract_policy(4).batch_size, 16);
+        assert_eq!(periodic_graph_reextract_policy(128).batch_size, 32);
     }
 
     #[test]
-    fn terminal_marker_clears_on_successful_contribution() {
-        with_terminal_marker_test_lock(|| {
-            let library_id = Uuid::now_v7();
-            let document_id = Uuid::now_v7();
-            let revision_id = Uuid::now_v7();
+    fn periodic_reextract_batch_respects_remaining_tick_budget() {
+        let policy = periodic_graph_reextract_policy(4);
 
-            for _ in 0..TERMINAL_MARKER_THRESHOLD {
-                record_terminal_marker_result(library_id, document_id, revision_id, false);
-            }
-            assert!(should_skip_by_terminal_marker(library_id, document_id, revision_id));
+        assert_eq!(cap_periodic_graph_reextract_batch(policy, 32), 16);
+        assert_eq!(cap_periodic_graph_reextract_batch(policy, 3), 3);
+        assert_eq!(cap_periodic_graph_reextract_batch(policy, 0), 0);
+    }
 
-            record_terminal_marker_result(library_id, document_id, revision_id, true);
-            assert!(!should_skip_by_terminal_marker(library_id, document_id, revision_id));
-        });
+    #[test]
+    fn periodic_reextract_refills_on_the_next_tick_after_the_live_batch_clears() {
+        let first_tick_has_live_batch = true;
+        let next_tick_has_live_batch = false;
+
+        assert!(!periodic_graph_reextract_can_admit(first_tick_has_live_batch));
+        assert!(periodic_graph_reextract_can_admit(next_tick_has_live_batch));
     }
 }

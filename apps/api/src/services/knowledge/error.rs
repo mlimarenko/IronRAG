@@ -9,6 +9,8 @@ pub enum KnowledgeServiceError {
     NotFound { message: String },
     #[error("knowledge graph not ready: {message}")]
     GraphNotReady { message: String },
+    #[error("knowledge graph integrity error: {message}")]
+    GraphIntegrity { message: String },
     #[error("knowledge cache unavailable: {message}")]
     CacheUnavailable { message: String },
     #[error("knowledge repository failure: {0}")]
@@ -37,6 +39,7 @@ impl KnowledgeServiceError {
             Self::LibraryNotFound { .. } => "KnowledgeServiceError::LibraryNotFound",
             Self::NotFound { .. } => "KnowledgeServiceError::NotFound",
             Self::GraphNotReady { .. } => "KnowledgeServiceError::GraphNotReady",
+            Self::GraphIntegrity { .. } => "KnowledgeServiceError::GraphIntegrity",
             Self::CacheUnavailable { .. } => "KnowledgeServiceError::CacheUnavailable",
             Self::Repository(_) => "KnowledgeServiceError::Repository",
             Self::Internal(_) => "KnowledgeServiceError::Internal",

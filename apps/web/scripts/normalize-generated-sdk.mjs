@@ -126,7 +126,7 @@ function normalizeGeneratedFindings(relativePath, source) {
   if (relativePath === 'core/pathSerializer.gen.ts') {
     normalized = replaceGenerated(
       normalized,
-      "export const separatorObjectExplode = (style: ObjectSeparatorStyle): '.' | ';' | ',' | '&' => {\n  switch (style) {\n    case 'label':\n      return '.';\n    case 'matrix':\n      return ';';\n    case 'simple':\n      return ',';\n    default:\n      return '&';\n  }\n};",
+      "export const separatorObjectExplode = (style: ObjectSeparatorStyle) => {\n  switch (style) {\n    case 'label':\n      return '.';\n    case 'matrix':\n      return ';';\n    case 'simple':\n      return ',';\n    default:\n      return '&';\n  }\n};",
       "export const separatorObjectExplode = (style: ObjectSeparatorStyle): '.' | ';' | ',' | '&' =>\n  separatorArrayExplode(style as ArraySeparatorStyle);",
       relativePath,
     )
@@ -141,7 +141,7 @@ function normalizeGeneratedFindings(relativePath, source) {
   if (relativePath === 'core/queryKeySerializer.gen.ts') {
     normalized = replaceGenerated(
       normalized,
-      'export const queryKeyJsonReplacer = (_key: string, value: unknown): unknown | undefined => {',
+      'export const queryKeyJsonReplacer = (_key: string, value: unknown) => {',
       'export const queryKeyJsonReplacer = (_key: string, value: unknown): unknown => {',
       relativePath,
     )
@@ -212,7 +212,7 @@ function normalizeClientComplexity(relativePath, source) {
   if (relativePath === 'client/utils.gen.ts') {
     normalized = replaceGenerated(
       normalized,
-      'export const createQuerySerializer = <T = unknown>({\n  parameters = {},\n  ...args\n}: QuerySerializerOptions = {}): ((queryParams: T) => string) => {',
+      'export const createQuerySerializer = <T = unknown>({\n  parameters = {},\n  ...args\n}: QuerySerializerOptions = {}) => {',
       "const serializeQueryParameter = (name: string, value: unknown, options: QuerySerializerOptions): string => {\n  if (Array.isArray(value)) {\n    return serializeArrayParam({ ...(options.allowReserved !== undefined ? { allowReserved: options.allowReserved } : {}), explode: true, name, style: 'form', value, ...options.array });\n  }\n  if (typeof value === 'object' && value !== null) {\n    return serializeObjectParam({ ...(options.allowReserved !== undefined ? { allowReserved: options.allowReserved } : {}), explode: true, name, style: 'deepObject', value: value as Record<string, unknown>, ...options.object });\n  }\n  return serializePrimitiveParam({ name, value: value as string, ...(options.allowReserved !== undefined ? { allowReserved: options.allowReserved } : {}) });\n};\n\nexport const createQuerySerializer = <T = unknown>({\n  parameters = {},\n  ...args\n}: QuerySerializerOptions = {}): ((queryParams: T) => string) => {",
       relativePath,
     )
@@ -244,7 +244,7 @@ function normalizeCoreComplexity(relativePath, source) {
   if (relativePath === 'core/utils.gen.ts') {
     normalized = replaceGenerated(
       normalized,
-      'export const defaultPathSerializer = ({ path, url: _url }: PathSerializer): string => {',
+      'export const defaultPathSerializer = ({ path, url: _url }: PathSerializer) => {',
       "const serializePathValue = (name: string, value: unknown, explode: boolean, style: ArraySeparatorStyle): string | null => {\n  if (value == null) return null;\n  if (Array.isArray(value)) return serializeArrayParam({ explode, name, style, value });\n  if (typeof value === 'object') return serializeObjectParam({ explode, name, style: style === 'spaceDelimited' || style === 'pipeDelimited' ? 'form' : style, value: value as Record<string, unknown>, valueOnly: true });\n  if (style === 'matrix') return `;${serializePrimitiveParam({ name, value: value as string })}`;\n  return encodeURIComponent(style === 'label' ? `.${value as string}` : value as string);\n};\n\nexport const defaultPathSerializer = ({ path, url: _url }: PathSerializer): string => {",
       relativePath,
     )
@@ -257,7 +257,7 @@ function normalizeCoreComplexity(relativePath, source) {
 
   if (relativePath === 'core/params.gen.ts') {
     const generated =
-      'export function buildClientParams(args: ReadonlyArray<unknown>, fields: FieldsConfig): Params {'
+      'export const buildClientParams = (args: ReadonlyArray<unknown>, fields: FieldsConfig) => {'
     const compatible = `function writeExtraParam(params: Params, config: FieldsConfig[number], key: string, value: unknown): void {
   const extra = extraPrefixes.find(([prefix]) => key.startsWith(prefix));
   if (extra) { ensureSlot(params, extra[1])[key.slice(extra[0].length)] = value; return; }
@@ -314,6 +314,13 @@ function normalizeSseComplexity(relativePath, source) {
     if (start >= 0 && end >= 0) {
       const replacement = `type SseState = Readonly<{ lastEventId?: string; retryDelay: number }>;
 
+type SseFrameState = Readonly<{
+  dataLines: string[];
+  eventName?: string;
+  lastEventId?: string;
+  retryDelay: number;
+}>;
+
 type ParsedSseChunk<TData> = Readonly<{
   event: StreamEvent<TData>;
   hasData: boolean;
@@ -321,7 +328,7 @@ type ParsedSseChunk<TData> = Readonly<{
   state: SseState;
 }>;
 
-function parseSseField(state: Readonly<{ dataLines: string[]; eventName?: string; lastEventId?: string; retryDelay: number }>, line: string) {
+function parseSseField(state: SseFrameState, line: string): SseFrameState {
   if (line.startsWith('data:')) return { ...state, dataLines: [...state.dataLines, line.replace(/^data:\\s*/, '')] };
   if (line.startsWith('event:')) return { ...state, eventName: line.replace(/^event:\\s*/, '') };
   if (line.startsWith('id:')) return { ...state, lastEventId: line.replace(/^id:\\s*/, '') };
@@ -338,8 +345,8 @@ function parseSseData(dataLines: string[]): Readonly<{ data: unknown; isJson: bo
 }
 
 function parseSseChunk<TData>(chunk: string, previous: SseState): ParsedSseChunk<TData> {
-  const initial = { dataLines: [], retryDelay: previous.retryDelay, ...(previous.lastEventId !== undefined ? { lastEventId: previous.lastEventId } : {}) };
-  const parsed = chunk.split('\\n').reduce(
+  const initial: SseFrameState = { dataLines: [], retryDelay: previous.retryDelay, ...(previous.lastEventId !== undefined ? { lastEventId: previous.lastEventId } : {}) };
+  const parsed = chunk.split('\\n').reduce<SseFrameState>(
     (state, line) => parseSseField(state, line),
     initial,
   );
@@ -441,6 +448,16 @@ function normalizeReactQueryComplexity(relativePath, source) {
         relativePath,
       )
     }
+    const clientImport = "import { client } from '../client.gen';"
+    const dataShapeImport = "import type { TDataShape } from '../client';"
+    if (!normalized.includes(dataShapeImport)) {
+      normalized = replaceGenerated(
+        normalized,
+        clientImport,
+        `${dataShapeImport}\n${clientImport}`,
+        relativePath,
+      )
+    }
     const legacyInfiniteParams =
       "const createInfiniteParams = <K extends Pick<QueryKey<Options>[0], 'body' | 'headers' | 'path' | 'query'>>(queryKey: QueryKey<Options>, page: K) => {"
     const compatibleInfiniteParams =
@@ -448,7 +465,7 @@ function normalizeReactQueryComplexity(relativePath, source) {
     const infinitePageParams =
       "type InfinitePageParams = Pick<QueryKey<Options>[0], 'body' | 'headers' | 'path' | 'query'>;"
     const genericInfinitePageParams =
-      "type GenericInfinitePageParams<TData> = Pick<QueryKey<Options<TData>>[0], 'body' | 'headers' | 'path' | 'query'>;"
+      "type GenericInfinitePageParams<TData extends TDataShape> = Pick<QueryKey<Options<TData>>[0], 'body' | 'headers' | 'path' | 'query'>;"
     const infinitePageParam = 'type InfinitePageParam = number | InfinitePageParams;'
     const infiniteStringPageParam = 'type InfiniteStringPageParam = string | InfinitePageParams;'
     if (normalized.includes(legacyInfiniteParams)) {
@@ -469,7 +486,7 @@ function normalizeReactQueryComplexity(relativePath, source) {
         relativePath,
       )
     }
-    if (normalized.includes(infinitePageParam)) {
+    if (normalized.includes(infinitePageParam) && !normalized.includes(genericInfinitePageParams)) {
       normalized = normalized.replaceAll(
         /number \| Pick<QueryKey<Options<[^>]+>>\[0\], 'body' \| 'headers' \| 'path' \| 'query'>/g,
         'InfinitePageParam',
@@ -505,12 +522,18 @@ function normalizeGeneratedTypes(relativePath, source) {
     '        unknown\n',
     relativePath,
   )
-  normalized = replaceGenerated(
-    normalized,
-    '// eslint-disable-next-line @typescript-eslint/no-empty-object-type\nexport interface ClientMeta {}',
-    'export type ClientMeta = Record<never, never>',
-    relativePath,
-  )
+  if (
+    normalized.includes(
+      '// eslint-disable-next-line @typescript-eslint/no-empty-object-type\nexport interface ClientMeta {}',
+    )
+  ) {
+    normalized = replaceGenerated(
+      normalized,
+      '// eslint-disable-next-line @typescript-eslint/no-empty-object-type\nexport interface ClientMeta {}',
+      'export type ClientMeta = Record<never, never>',
+      relativePath,
+    )
+  }
   return replaceGenerated(
     normalized,
     'type IsExactlyNeverOrNeverUndefined<T> = [T] extends [never]\n  ? true\n  : [T] extends [never | undefined]\n    ? [undefined] extends [T]\n      ? false\n      : true\n    : false;',

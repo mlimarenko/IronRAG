@@ -613,7 +613,7 @@ mod tests {
             target_types: target_types
                 .into_iter()
                 .map(|value| {
-                    QueryTargetKind::from_wire(value).expect("test target type must be canonical")
+                    QueryTargetKind::from_wire(value).expect("test target type must be normalized")
                 })
                 .collect(),
             target_entities: Vec::new(),

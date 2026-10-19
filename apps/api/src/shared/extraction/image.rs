@@ -7,7 +7,7 @@ use png::{
 };
 
 use crate::{
-    integrations::llm::{LlmGateway, VisionRequest},
+    integrations::llm::{LlmGateway, VisionRequest, disable_bounded_answer_reasoning},
     shared::extraction::{
         ExtractionOutput, ExtractionSourceMetadata, build_text_layout_from_content,
     },
@@ -25,28 +25,28 @@ pub struct ImageVisionOutput {
     pub mime_type: String,
 }
 
+/// Connection parameters for one vision provider call.
+///
+/// The provider identity, credential overrides, and request extras travel
+/// together; grouping them keeps the image bytes and MIME type from being
+/// interleaved with five positional provider fields.
+#[derive(Clone, Copy)]
+pub struct VisionProviderInput<'a> {
+    pub provider_kind: &'a str,
+    pub model_name: &'a str,
+    pub api_key: &'a str,
+    pub base_url: Option<&'a str>,
+    pub extra_parameters_json: &'a serde_json::Value,
+}
+
 pub async fn extract_image_with_provider(
     gateway: &dyn LlmGateway,
-    provider_kind: &str,
-    model_name: &str,
-    api_key: &str,
-    base_url: Option<&str>,
-    extra_parameters_json: &serde_json::Value,
+    input: VisionProviderInput<'_>,
     mime_type: &str,
     file_bytes: &[u8],
 ) -> Result<ExtractionOutput> {
-    let response = run_vision_image_request(
-        gateway,
-        provider_kind,
-        model_name,
-        api_key,
-        base_url,
-        extra_parameters_json,
-        mime_type,
-        file_bytes,
-        IMAGE_OCR_PROMPT,
-    )
-    .await?;
+    let response =
+        run_vision_image_request(gateway, input, mime_type, file_bytes, IMAGE_OCR_PROMPT).await?;
 
     let layout = build_text_layout_from_content(&response.text);
 
@@ -73,45 +73,35 @@ pub async fn extract_image_with_provider(
 
 pub async fn describe_image_with_provider(
     gateway: &dyn LlmGateway,
-    provider_kind: &str,
-    model_name: &str,
-    api_key: &str,
-    base_url: Option<&str>,
-    extra_parameters_json: &serde_json::Value,
+    input: VisionProviderInput<'_>,
     mime_type: &str,
     file_bytes: &[u8],
 ) -> Result<ImageVisionOutput> {
-    run_vision_image_request(
-        gateway,
-        provider_kind,
-        model_name,
-        api_key,
-        base_url,
-        extra_parameters_json,
-        mime_type,
-        file_bytes,
-        IMAGE_DESCRIPTION_PROMPT,
-    )
-    .await
+    run_vision_image_request(gateway, input, mime_type, file_bytes, IMAGE_DESCRIPTION_PROMPT).await
 }
 
 async fn run_vision_image_request(
     gateway: &dyn LlmGateway,
-    provider_kind: &str,
-    model_name: &str,
-    api_key: &str,
-    base_url: Option<&str>,
-    extra_parameters_json: &serde_json::Value,
+    input: VisionProviderInput<'_>,
     mime_type: &str,
     file_bytes: &[u8],
     prompt: &str,
 ) -> Result<ImageVisionOutput> {
+    let VisionProviderInput { provider_kind, model_name, api_key, base_url, extra_parameters_json } =
+        input;
     let normalized_payload = prepare_vision_image_payload(file_bytes, mime_type).context(
         "image payload could not be decoded and normalized for vision extraction; re-export as PNG/JPEG and retry",
     )?;
     let request_image_bytes = normalized_payload.image_bytes;
     let request_mime_type = normalized_payload.mime_type;
     let warnings = normalized_payload.warnings;
+
+    // Bounded extraction wants the answer, not a chain of thought: a
+    // provider whose endpoint accepts the formal control (DeepSeek) gets
+    // hidden reasoning switched off here, which also avoids the empty-content
+    // mode its default-on thinking can land in for OCR prompts.
+    let mut bounded_extra_parameters = extra_parameters_json.clone();
+    disable_bounded_answer_reasoning(provider_kind, &mut bounded_extra_parameters);
 
     let response = gateway
         .vision_extract(VisionRequest {
@@ -126,7 +116,7 @@ async fn run_vision_image_request(
             temperature: None,
             top_p: None,
             max_output_tokens_override: None,
-            extra_parameters_json: extra_parameters_json.clone(),
+            extra_parameters_json: bounded_extra_parameters,
         })
         .await?;
 
@@ -147,6 +137,24 @@ struct PreparedVisionPayload {
 }
 
 const PNG_SIGNATURE: &[u8; 8] = b"\x89PNG\r\n\x1a\n";
+
+/// Whether the bytes carry a raster-image signature the extraction stack can
+/// decode. Reuses the decoder crate's own magic scan instead of a second
+/// signature table, and accepts only the formats the upload MIME set and
+/// `docling` image sources cover, so an unknown binary is not routed to a
+/// decoder that cannot open it.
+#[must_use]
+pub(crate) fn bytes_look_like_raster_image(file_bytes: &[u8]) -> bool {
+    matches!(
+        image::guess_format(file_bytes),
+        Ok(ImageFormat::Png
+            | ImageFormat::Jpeg
+            | ImageFormat::Gif
+            | ImageFormat::Bmp
+            | ImageFormat::WebP
+            | ImageFormat::Tiff)
+    )
+}
 
 fn prepare_vision_image_payload(
     file_bytes: &[u8],
@@ -272,7 +280,20 @@ mod tests {
         EmbeddingResponse, VisionResponse,
     };
 
-    struct FakeGateway;
+    #[derive(Default)]
+    struct FakeGateway {
+        last_extra_parameters: std::sync::Mutex<Option<serde_json::Value>>,
+    }
+
+    impl FakeGateway {
+        fn last_extra_parameters(&self) -> serde_json::Value {
+            self.last_extra_parameters
+                .lock()
+                .expect("fake gateway mutex")
+                .clone()
+                .unwrap_or_default()
+        }
+    }
 
     fn valid_png_bytes() -> Vec<u8> {
         let image = DynamicImage::new_rgba8(2, 2);
@@ -312,6 +333,8 @@ mod tests {
         }
 
         async fn vision_extract(&self, mut request: VisionRequest) -> Result<VisionResponse> {
+            *self.last_extra_parameters.lock().expect("fake gateway mutex") =
+                Some(request.extra_parameters_json.clone());
             let mime_type = request.mime_type.clone();
             Ok(VisionResponse {
                 provider_kind: std::mem::take(&mut request.provider_kind),
@@ -325,12 +348,16 @@ mod tests {
     #[tokio::test]
     async fn normalizes_provider_vision_response() {
         let output = extract_image_with_provider(
-            &FakeGateway,
-            "openai",
-            "gpt-5.4-mini",
-            "test-key",
-            None,
-            &serde_json::json!({"_providerProfile": {"runtime": {"kind": "openai_compatible"}}}),
+            &FakeGateway::default(),
+            VisionProviderInput {
+                provider_kind: "openai",
+                model_name: "gpt-5.4-mini",
+                api_key: "test-key",
+                base_url: None,
+                extra_parameters_json: &serde_json::json!({
+                    "_providerProfile": {"runtime": {"kind": "openai_compatible"}}
+                }),
+            },
             "image/png",
             &valid_png_bytes(),
         )
@@ -347,12 +374,16 @@ mod tests {
     #[tokio::test]
     async fn normalizes_non_png_mime_payloads_before_provider_call() {
         let output = extract_image_with_provider(
-            &FakeGateway,
-            "openai",
-            "gpt-5.4-mini",
-            "test-key",
-            None,
-            &serde_json::json!({"_providerProfile": {"runtime": {"kind": "openai_compatible"}}}),
+            &FakeGateway::default(),
+            VisionProviderInput {
+                provider_kind: "openai",
+                model_name: "gpt-5.4-mini",
+                api_key: "test-key",
+                base_url: None,
+                extra_parameters_json: &serde_json::json!({
+                    "_providerProfile": {"runtime": {"kind": "openai_compatible"}}
+                }),
+            },
             "image/webp",
             &valid_png_bytes(),
         )
@@ -367,12 +398,16 @@ mod tests {
     #[tokio::test]
     async fn source_image_description_reuses_the_normalized_png_payload() {
         let output = describe_image_with_provider(
-            &FakeGateway,
-            "openai",
-            "gpt-5.4-mini",
-            "test-key",
-            None,
-            &serde_json::json!({"_providerProfile": {"runtime": {"kind": "openai_compatible"}}}),
+            &FakeGateway::default(),
+            VisionProviderInput {
+                provider_kind: "openai",
+                model_name: "gpt-5.4-mini",
+                api_key: "test-key",
+                base_url: None,
+                extra_parameters_json: &serde_json::json!({
+                    "_providerProfile": {"runtime": {"kind": "openai_compatible"}}
+                }),
+            },
             "image/webp",
             &valid_png_bytes(),
         )
@@ -423,5 +458,54 @@ mod tests {
         for pixel in decoded.pixels() {
             assert_eq!(pixel.0, [255, 255, 255]);
         }
+    }
+
+    #[tokio::test]
+    async fn bounded_extraction_disables_hidden_reasoning_when_the_profile_declares_it() {
+        let gateway = FakeGateway::default();
+        let declaring = serde_json::json!({
+            "_providerProfile": {
+                "runtime": {"kind": "openai_compatible"},
+                "requestPolicy": {"reasoning": "disable_with_none"}
+            }
+        });
+        extract_image_with_provider(
+            &gateway,
+            VisionProviderInput {
+                provider_kind: "deepseek",
+                model_name: "deepseek-flash",
+                api_key: "test-key",
+                base_url: None,
+                extra_parameters_json: &declaring,
+            },
+            "image/png",
+            &valid_png_bytes(),
+        )
+        .await
+        .expect("image extraction");
+        assert_eq!(gateway.last_extra_parameters()["reasoning_effort"], serde_json::json!("none"));
+
+        let gateway = FakeGateway::default();
+        let forwarding = serde_json::json!({
+            "_providerProfile": {
+                "runtime": {"kind": "openai_compatible"},
+                "requestPolicy": {"reasoning": "forward"}
+            }
+        });
+        extract_image_with_provider(
+            &gateway,
+            VisionProviderInput {
+                provider_kind: "openai",
+                model_name: "gpt-5.4-mini",
+                api_key: "test-key",
+                base_url: None,
+                extra_parameters_json: &forwarding,
+            },
+            "image/png",
+            &valid_png_bytes(),
+        )
+        .await
+        .expect("image extraction");
+        assert!(gateway.last_extra_parameters().get("reasoning_effort").is_none());
     }
 }

@@ -5,31 +5,39 @@ use crate::{
     services::iam::audit::{AppendAuditEventCommand, AppendAuditEventSubjectCommand},
 };
 
-pub(super) async fn record_canonical_mcp_audit(
+/// One MCP audit event, minus the actor and request identity that
+/// [`record_mcp_audit`] binds from the live [`AuthContext`]. Keeps the
+/// descriptive fields together so the append call takes a cohesive value
+/// instead of a long positional argument list.
+pub(super) struct McpAuditEvent {
+    pub(super) action_kind: &'static str,
+    pub(super) result_kind: &'static str,
+    pub(super) redacted_message: Option<String>,
+    pub(super) internal_message: Option<String>,
+    pub(super) subjects: Vec<AppendAuditEventSubjectCommand>,
+}
+
+pub(super) async fn record_mcp_audit(
     state: &AppState,
     auth: &AuthContext,
     request_id: &str,
-    action_kind: &str,
-    result_kind: &str,
-    redacted_message: Option<String>,
-    internal_message: Option<String>,
-    subjects: Vec<AppendAuditEventSubjectCommand>,
+    event: McpAuditEvent,
 ) {
     if let Err(error) = state
-        .canonical_services
+        .application_services
         .audit
         .append_event(
             state,
             AppendAuditEventCommand {
                 actor_principal_id: Some(auth.principal_id),
                 surface_kind: "mcp".to_string(),
-                action_kind: action_kind.to_string(),
+                action_kind: event.action_kind.to_string(),
                 request_id: Some(request_id.to_string()),
                 trace_id: None,
-                result_kind: result_kind.to_string(),
-                redacted_message,
-                internal_message,
-                subjects,
+                result_kind: event.result_kind.to_string(),
+                redacted_message: event.redacted_message,
+                internal_message: event.internal_message,
+                subjects: event.subjects,
             },
         )
         .await
@@ -38,7 +46,7 @@ pub(super) async fn record_canonical_mcp_audit(
     }
 }
 
-/// `receipt.operation_id` already *is* the canonical async-operation id
+/// `receipt.operation_id` already *is* the shared async-operation id
 /// (see [`McpMutationReceipt`]) — no DB round-trip needed to derive it,
 /// unlike the pre-convergence version of this function.
 pub(super) fn build_mcp_mutation_subjects(
@@ -48,13 +56,13 @@ pub(super) fn build_mcp_mutation_subjects(
     let mut subjects = Vec::new();
     for receipt in receipts {
         if let Some(document_id) = receipt.document_id {
-            subjects.push(state.canonical_services.audit.knowledge_document_subject(
+            subjects.push(state.application_services.audit.knowledge_document_subject(
                 document_id,
                 receipt.workspace_id,
                 receipt.library_id,
             ));
         }
-        subjects.push(state.canonical_services.audit.async_operation_subject(
+        subjects.push(state.application_services.audit.async_operation_subject(
             receipt.operation_id,
             receipt.workspace_id,
             receipt.library_id,
@@ -88,7 +96,7 @@ pub(super) fn build_mcp_search_subjects(
 ) -> Vec<AppendAuditEventSubjectCommand> {
     let mut subjects = Vec::new();
     for hit in &payload.hits {
-        subjects.push(state.canonical_services.audit.knowledge_document_subject(
+        subjects.push(state.application_services.audit.knowledge_document_subject(
             hit.document_id,
             hit.workspace_id,
             hit.library_id,

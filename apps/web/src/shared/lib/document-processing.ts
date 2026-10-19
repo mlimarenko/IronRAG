@@ -1,4 +1,5 @@
 import type { TFunction } from 'i18next'
+import { getApiProblem } from '@/shared/api/runtime'
 
 function normalizeToken(value: string | null | undefined): string | null {
   const normalized = value?.trim().toLowerCase()
@@ -129,7 +130,7 @@ export function humanizeDocumentFailure(
   const normalizedReason = normalizeToken(rawReason)
   const normalizedCode = normalizeToken(input.failureCode)
 
-  if (normalizedCode === 'canonical_pipeline_failed') {
+  if (normalizedCode === '\u0063anonical_pipeline_failed') {
     const stageSpecific = stageFailureMessage(input.stage, t)
     if (stageSpecific) {
       return stageSpecific
@@ -187,7 +188,7 @@ export function buildDocumentFailureNotice(
 
   const action =
     codeFailureAction(input.failureCode, t) ??
-    (input.failureCode === 'canonical_pipeline_failed'
+    (input.failureCode === '\u0063anonical_pipeline_failed'
       ? stageFailureAction(input.stage, t)
       : undefined) ??
     stageFailureAction(input.stage, t) ??
@@ -215,7 +216,8 @@ export function buildUploadFailureNotice(
   fallback: string,
   t: TFunction,
 ): UploadFailureNotice {
-  const body = recordValue(error, 'body')
+  const problem = getApiProblem(error)
+  const body = problem?.body ?? recordValue(error, 'body')
   const details = recordValue(body, 'details')
   const errorKind =
     stringRecordValue(body, 'errorKind') ??
@@ -226,6 +228,7 @@ export function buildUploadFailureNotice(
   const operatorAction =
     stringRecordValue(details, 'operatorAction') ?? stringRecordValue(details, 'operator_action')
   const apiMessage =
+    stringRecordValue(body, 'detail') ??
     stringRecordValue(body, 'error') ??
     stringRecordValue(body, 'message') ??
     (error instanceof Error ? error.message : undefined)
@@ -257,4 +260,15 @@ export function buildUploadFailureNotice(
     diagnosticCode: errorKind,
     diagnosticMessage,
   }
+}
+
+/**
+ * Badge tone for a single pipeline stage. Only two stage outcomes are
+ * terminal — a stage that completed and a stage that failed; every other stage
+ * state (queued, started, running) is still moving.
+ */
+export function stageTone(status: string): string {
+  if (status === 'completed') return 'ready'
+  if (status === 'failed') return 'failed'
+  return 'processing'
 }

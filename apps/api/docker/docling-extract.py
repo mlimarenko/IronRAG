@@ -9,19 +9,22 @@ Usage:
     ironrag-docling-extract --page-batches SIZE START-END <input-file>  # stream page ranges
 """
 
+from __future__ import annotations
+
 import json
 import os
 import shutil
+import subprocess
 import sys
 import tempfile
 import time
+from dataclasses import dataclass
 from importlib import metadata
 from pathlib import Path
 
 from docling.datamodel.base_models import InputFormat
-from docling.datamodel.pipeline_options import PdfPipelineOptions
-from docling.document_converter import DocumentConverter, PdfFormatOption
-
+from docling.datamodel.pipeline_options import PdfPipelineOptions, TesseractCliOcrOptions
+from docling.document_converter import DocumentConverter, ImageFormatOption, PdfFormatOption
 
 EXIT_USAGE = 64
 EXIT_INPUT_NOT_FOUND = 66
@@ -59,11 +62,34 @@ def _warnings(result):
     return [str(error) for error in errors if str(error).strip()]
 
 
-_OCR_READER = None
+_OCR_LANGUAGES = {"latin": "eng", "cyrillic": "rus", "cjk": "chi_sim"}
+
+
+@dataclass(frozen=True)
+class _OcrText:
+    txts: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class _OcrReader:
+    language: str
+
+    def __call__(self, image_bytes: bytes) -> _OcrText:
+        completed = subprocess.run(
+            ["tesseract", "stdin", "stdout", "-l", self.language, "--psm", "11"],
+            input=image_bytes,
+            capture_output=True,
+            timeout=180,
+            check=True,
+        )
+        return _OcrText(tuple(completed.stdout.decode("utf-8").splitlines()))
+
+
+_OCR_READERS: dict[str, _OcrReader] = {}
 
 
 def _detect_dominant_script(sample_text):
-    """Return a coarse Unicode-script hint for RapidOCR model selection."""
+    """Return a coarse Unicode-script hint for picture OCR language selection."""
     if not sample_text:
         return "latin"
     cyr = lat = cjk = 0
@@ -82,93 +108,40 @@ def _detect_dominant_script(sample_text):
     return "latin"
 
 
-def _ocr_reader(script_hint):
-    """Lazily initialize the canonical OCR reader."""
-    global _OCR_READER
-    if _OCR_READER is None:
-        try:
-            from rapidocr import RapidOCR
-            from rapidocr.utils.typings import EngineType, LangDet, LangRec
+def _ocr_reader(script_hint: str) -> _OcrReader:
+    """Reuse a CPU recognizer only for the script it was initialized to read."""
+    if script_hint in _OCR_READERS:
+        return _OCR_READERS[script_hint]
 
-            rec_lang = {
-                "cyrillic": LangRec.CYRILLIC,
-                "cjk": LangRec.CH,
-                "latin": LangRec.EN,
-            }.get(script_hint, LangRec.CH)
-            try:
-                _OCR_READER = (
-                    "rapidocr",
-                    RapidOCR(
-                        params={
-                            "Det.engine_type": EngineType.TORCH,
-                            "Det.lang_type": LangDet.MULTI,
-                            "Cls.engine_type": EngineType.TORCH,
-                            "Rec.engine_type": EngineType.TORCH,
-                            "Rec.lang_type": rec_lang,
-                        }
-                    ),
-                )
-                return _OCR_READER
-            except Exception:
-                pass
-        except Exception:
-            pass
-        _OCR_READER = ("none", None)
-    return _OCR_READER
+    reader = _OcrReader(_OCR_LANGUAGES[script_hint])
+    _OCR_READERS[script_hint] = reader
+    return reader
 
 
-def _ocr_image_bytes(reader_tuple, image_bytes):
-    kind, reader = reader_tuple
-    if kind == "rapidocr":
-        try:
-            result = reader(image_bytes)
-        except Exception:
-            return ""
-        texts = getattr(result, "txts", None)
-        if texts is None and isinstance(result, tuple):
-            texts = result[0] if len(result) >= 1 else None
-        if not texts:
-            return ""
-        if hasattr(texts, "__iter__"):
-            return " ".join(str(t).strip() for t in texts if str(t).strip())
-        return str(texts).strip()
-    return ""
+def _ocr_image_bytes(reader: _OcrReader, image_bytes: bytes) -> str:
+    texts = reader(image_bytes).txts
+    return " ".join(text.strip() for text in texts or () if text.strip())
 
 
 def _ocr_picture_items(document, script_hint="latin"):
     """Run OCR on every PictureItem in the document and return a list
     of cleaned, non-empty text snippets in document order."""
-    reader_tuple = _ocr_reader(script_hint)
-    if reader_tuple[1] is None:
-        return []
-    try:
-        from docling_core.types.doc.document import PictureItem
-    except ImportError:
-        return []
     import io
 
-    try:
-        from PIL import Image
-    except ImportError:
-        return []
+    from docling_core.types.doc.document import PictureItem
 
+    reader = _ocr_reader(script_hint)
     snippets = []
     for item, _level in document.iterate_items():
         if not isinstance(item, PictureItem):
             continue
-        try:
-            pil_image = item.get_image(document)
-        except Exception:
-            pil_image = None
+        pil_image = item.get_image(document)
         if pil_image is None:
             snippets.append("")
             continue
-        try:
-            buf = io.BytesIO()
-            pil_image.save(buf, format="PNG")
-            text_blob = _ocr_image_bytes(reader_tuple, buf.getvalue())
-        except Exception:
-            text_blob = ""
+        buf = io.BytesIO()
+        pil_image.save(buf, format="PNG")
+        text_blob = _ocr_image_bytes(reader, buf.getvalue())
         snippets.append(text_blob)
     return snippets
 
@@ -227,6 +200,7 @@ def _get_pdf_page_count(source_path):
     """Return the page count of a PDF using pypdfium2 (already a docling dep)."""
     try:
         import pypdfium2 as pdfium
+
         pdf = pdfium.PdfDocument(source_path)
         count = len(pdf)
         pdf.close()
@@ -238,6 +212,7 @@ def _get_pdf_page_count(source_path):
 def _extract_pdf_page(source_path, page_num, output_path):
     """Extract a single page (0-based) from a PDF and write to output_path."""
     import pypdfium2 as pdfium
+
     pdf = pdfium.PdfDocument(source_path)
     if page_num >= len(pdf):
         pdf.close()
@@ -254,10 +229,12 @@ def _build_converter():
     pdf_opts.images_scale = 2.0
     pdf_opts.generate_picture_images = True
     pdf_opts.do_ocr = True
+    pdf_opts.ocr_options = TesseractCliOcrOptions(lang=list(_OCR_LANGUAGES.values()))
 
     return DocumentConverter(
         format_options={
             InputFormat.PDF: PdfFormatOption(pipeline_options=pdf_opts),
+            InputFormat.IMAGE: ImageFormatOption(pipeline_options=pdf_opts),
         }
     )
 
@@ -302,9 +279,7 @@ def _convert_page_range(source, start_page, end_page, tmpdir, converter):
         page_path = os.path.join(tmpdir, f"page_{page_num + 1}.pdf")
         _extract_pdf_page(source, page_num, page_path)
         try:
-            payload = _convert_document(
-                Path(page_path), time.perf_counter(), converter=converter
-            )
+            payload = _convert_document(Path(page_path), time.perf_counter(), converter=converter)
             payload["extractedPage"] = page_num + 1
             results.append(payload)
         finally:

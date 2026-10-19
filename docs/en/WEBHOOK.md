@@ -12,23 +12,22 @@
 
 IronRAG sends outbound webhooks to notify external systems about state changes. Inbound processing of vendor events (Confluence, MediaWiki, Notion, etc.) is the responsibility of an external middleware layer that calls IronRAG's existing upload/replace/delete HTTP API directly.
 
-**Outbound** — `webhook_subscription` registers HTTPS endpoints that receive HMAC-signed events about IronRAG state changes (`revision.ready`, `document.deleted`). Delivery is durable: every send is an `ingest_job` with `job_kind=webhook_delivery`, and the existing worker pool handles lease/heartbeat/retry semantics. Failures are retried with exponential backoff up to 8 attempts (maximum delay 128 minutes), then marked `abandoned`.
+**Outbound** — `webhook_subscription` registers HTTP(S) endpoints that receive HMAC-signed events about IronRAG state changes (`revision.ready`, `document.deleted`). Delivery is durable: every send is an `ingest_job` with `job_kind=webhook_delivery`, and the existing worker pool handles lease/heartbeat/retry semantics. Failures are retried with exponential backoff up to 8 attempts (maximum delay 128 minutes), then marked `abandoned`.
 
 ## Subscription model
 
 `webhook_subscription` rows describe HTTP destinations that receive IronRAG events.
 
 ```
-POST /v1/webhooks/subscriptions
+POST /v1/webhooks/workspaces/<workspace_uuid>/subscriptions
 Authorization: Bearer <api-token with workspace_admin>
 Content-Type: application/json
 
 {
-  "workspaceId": "<uuid>",
   "libraryId": "<uuid or null for workspace-wide>",
   "displayName": "Downstream index",
   "targetUrl": "https://hooks.example.com/ironrag-events",
-  "secret": "<random 32+ byte hex>",
+  "secret": "<at least 32 bytes of random material>",
   "eventTypes": ["revision.ready", "document.deleted"],
   "customHeaders": {
     "Authorization": "Bearer <receiver-token>"
@@ -38,38 +37,35 @@ Content-Type: application/json
 
 | Field | Notes |
 |-------|-------|
-| `workspaceId` | Scope. Only events from this workspace are dispatched |
+| Path `workspace_uuid` | Scope. Only events from this workspace are dispatched |
 | `libraryId` | Optional. If set, only events from this library; null = all libraries in the workspace |
-| `eventTypes` | Non-empty array of event names |
+| `eventTypes` | Non-empty array of 1–8 distinct supported event names |
 | `secret` | HMAC-SHA256 key for outgoing signatures |
 | `customHeaders` | Up to 32 validated string headers, encrypted at rest. Hop-by-hop, body-framing, signature, and trace-context headers are reserved |
 | `active` | Defaults to `true`; set `false` to pause |
 
-Each workspace supports at most 100 active subscriptions. A workspace-scoped
-database trigger serializes create/reactivation at the transaction boundary, so
-concurrent requests and older rolling-deployment pods share the same fanout
-bound; inactive subscriptions do not consume it. A redacted audit view reports
-any pre-existing over-quota tenant. Active and inactive rows combined are
+Each workspace supports at most 100 active subscriptions. A workspace-scoped database trigger serializes create/reactivation at the
+transaction boundary, so concurrent requests share the same fanout bound;
+inactive subscriptions do not consume it. Active and inactive rows combined are
 limited to 1,000 per workspace. IronRAG never silently age-purges inactive
 subscriptions because their delivery rows are operational audit evidence;
 delete inactive subscriptions explicitly before creating more.
 
 CRUD endpoints:
 
-- `GET    /v1/webhooks/subscriptions?workspaceId=`
-- `GET    /v1/webhooks/subscriptions/{id}`
-- `POST   /v1/webhooks/subscriptions`
-- `PATCH  /v1/webhooks/subscriptions/{id}`
-- `DELETE /v1/webhooks/subscriptions/{id}`
-- `GET    /v1/webhooks/subscriptions/{id}/attempts`
+- `GET    /v1/webhooks/workspaces/{workspaceId}/subscriptions`
+- `GET    /v1/webhooks/subscriptions/{subscriptionId}`
+- `POST   /v1/webhooks/workspaces/{workspaceId}/subscriptions`
+- `PATCH  /v1/webhooks/subscriptions/{subscriptionId}`
+- `DELETE /v1/webhooks/subscriptions/{subscriptionId}`
+- `GET    /v1/webhooks/subscriptions/{subscriptionId}/attempts`
 
-Both list endpoints use bounded `(createdAt, id)` keyset pagination while
-keeping their existing JSON-array response shape. Subscription pages default
-to 100 items; delivery-attempt pages default to 200; both clamp `limit` to 200.
-To continue, copy `createdAt` and `id` from the final item into the paired
-`afterCreatedAt` and `afterId` query parameters. Supplying only one component
-returns `400`. Subscriptions retain oldest-first ordering; attempts retain
-newest-first ordering. Management projections never load signing secrets,
+Both list endpoints use bounded `(createdAt, id)` keyset pagination and return
+an object with `items` and, when another page exists, opaque `nextCursor`.
+Subscription pages default to 100 items; delivery-attempt pages default to 200;
+both clamp `limit` to 200. To continue, pass `cursor=<nextCursor>` unchanged.
+Subscriptions retain oldest-first ordering; attempts retain newest-first
+ordering. Management projections never load signing secrets,
 custom-header ciphertext, signed event payloads, response bodies, queue job
 identifiers, or delivery lease tokens.
 
@@ -142,7 +138,7 @@ Plus any `customHeaders` configured on the subscription.
 
 The raw signed body is the flat JSON object shown in the event catalog. IronRAG
 overwrites `event_type`, `event_id`, `occurred_at`, `workspace_id`, and
-`library_id` with canonical persisted metadata before enqueueing, so a producer
+`library_id` with persisted metadata before enqueueing, so a producer
 payload cannot spoof routing or deduplication fields.
 
 The signature input is `<ts_unix_seconds>.<raw body bytes>` — the `.` is literal. The HMAC key is `subscription.secret`.
@@ -177,22 +173,6 @@ def verify(secret: bytes, header: str, body: bytes, window_seconds: int = 300) -
 
 Replay protection: receivers SHOULD reject deliveries whose `t=` is outside ±5 minutes of their clock.
 
-### Delivery-fencing upgrade note
-
-The expansion migration adds token-fenced completion without rewriting or
-reclaiming a legacy tokenless in-flight owner: that old process may still
-resume and persist its result during rolling overlap. Upgraded workers reclaim
-only leases already created with a current-protocol token. A persistent
-database trigger redacts response bodies and dynamic legacy error strings, and
-a deferred commit trigger supplies a correctly scoped queue job when the old
-two-transaction publisher commits an unlinked pending attempt.
-
-A crashed tokenless owner remains fail-closed and must be resolved with the
-explicit risk-acknowledging abandon command documented above. After old writers
-are drained, operators verify the redacted lease/tenant/contract audit views;
-only a later contract migration may validate the restrictive lease-shape and
-subscription field checks.
-
 ## Catalog deletion safety contract
 
 Library and workspace deletion are fail-closed around durable webhook work. A library delete
@@ -205,8 +185,7 @@ true anywhere in the deletion scope:
   block deletion; or
 - a `webhook_delivery` ingest job in scope is `queued`, `leased`, `paused`, or `failed`; or
 - a delivery attempt is still `pending`/`delivering`, or is retryable `failed`,
-  but has no matching active queue job (including the old publisher's
-  create-before-link crash window).
+  but has no matching active queue job.
 
 Only after those rows are drained does the same transaction perform the catalog delete. The parent
 locks also fence concurrent FK-backed library/outbox/job inserts: an insert cannot slip between the
@@ -284,7 +263,7 @@ When a PDF, DOCX, or PPTX swaps an embedded picture without changing OCR-extract
 
 ## Operational notes
 
-- **Secrets** and serialized **custom header values** are stored as separate authenticated, row-bound `ironrag:enc:v3` AEAD envelopes in `webhook_subscription.secret` and `webhook_subscription.custom_headers_json`. They are decrypted only inside delivery. Each envelope authenticates its purpose, subscription UUID, and key ID. Existing installations must first deploy the dual-reader with encrypted writes disabled, then enable writes in a separate rollout. Master-key rotation requires a three-phase overlapping keyring. Follow the complete [credential encryption runbook](./CREDENTIAL-ENCRYPTION.md); an unknown key ID or failed authentication is always fail-closed.
+- **Secrets** and serialized **custom header values** are stored as separate authenticated, row-bound `ironrag:enc:v3` AEAD envelopes in `webhook_subscription.secret` and `webhook_subscription.custom_headers_json`. They are decrypted only inside delivery. Each envelope authenticates its purpose, subscription UUID, and key ID. Credential encryption is mandatory and the master key is required at startup. Master-key rotation requires a three-phase overlapping keyring. Follow the complete [credential encryption runbook](./CREDENTIAL-ENCRYPTION.md); an unknown key ID or failed authentication is always fail-closed.
 - **Job queue** is shared with the ingest pipeline. `job_kind=webhook_delivery` competes with `content_mutation`, `web_discovery`, and `web_materialize_page` for worker leases. Heavy outbound load can throttle ingest; tune `IRONRAG_INGESTION_WORKER_POOL_SIZE` accordingly.
 - **Lifecycle relay lease**: the relay leases only one outbox row at a time and renews its five-minute lease every 60 seconds with a PostgreSQL-clock, token-fenced CAS. Losing the lease or the renewal query cancels the remaining recipient fanout; deterministic per-recipient dedupe makes the next owner converge safely.
 - **Observability**: every outbound attempt is recorded in `webhook_delivery_attempt` and queryable via SQL for forensics. Workers emit `tracing` spans on stage `webhook_delivery`. OTLP metrics include `ironrag.webhook.lifecycle_outbox.event_age_seconds`, `drain_duration_seconds`, `lease_conflicts`, `lease_renewals`, and `outcomes`.

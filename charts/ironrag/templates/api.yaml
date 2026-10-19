@@ -103,7 +103,7 @@ spec:
         {{- if eq .Values.storage.provider "filesystem" }}
         - name: content-storage
           persistentVolumeClaim:
-            claimName: {{ include "ironrag.fullname" . }}-content-storage
+            claimName: {{ include "ironrag.contentStorageClaimName" . }}
         {{- end }}
       {{- with .Values.imagePullSecrets }}
       imagePullSecrets:

@@ -1,7 +1,7 @@
 use crate::{
     agent_runtime::executor::{RuntimeExecutionError, RuntimeExecutionSession},
     agent_runtime::response::{
-        RuntimeFailureSummary, RuntimeTerminalOutcome, canonical_runtime_failure_summary,
+        RuntimeFailureSummary, RuntimeTerminalOutcome, ingest_failure_summary,
         public_runtime_failure_summary,
     },
     domains::{
@@ -60,14 +60,15 @@ pub(crate) fn graph_extraction_execution_error(
         message: message.into(),
         request_shape_key: format!("{GRAPH_EXTRACTION_VERSION}:runtime"),
         request_size_bytes: request.chunk.content.len(),
-        provider_failure,
-        recovery_summary,
+        provider_failure: provider_failure.map(Box::new),
+        provider_admission_error: None,
+        recovery_summary: Box::new(recovery_summary),
         recovery_attempts,
-        resume_state: GraphExtractionResumeState {
+        resume_state: Box::new(GraphExtractionResumeState {
             resumed_from_checkpoint: false,
             replay_count: request.resume_hint.as_ref().map_or(0, |hint| hint.replay_count),
             downgrade_level: normalized_downgrade_level(request),
-        },
+        }),
         cancelled: false,
     }
 }
@@ -82,17 +83,18 @@ pub(crate) fn graph_extraction_cancelled_error(
         request_shape_key: request_shape_key.into(),
         request_size_bytes,
         provider_failure: None,
-        recovery_summary: ExtractionRecoverySummary {
+        provider_admission_error: None,
+        recovery_summary: Box::new(ExtractionRecoverySummary {
             status: ExtractionOutcomeStatus::Failed,
             second_pass_applied: false,
             warning: None,
-        },
+        }),
         recovery_attempts: Vec::new(),
-        resume_state: GraphExtractionResumeState {
+        resume_state: Box::new(GraphExtractionResumeState {
             resumed_from_checkpoint: false,
             replay_count: request.resume_hint.as_ref().map_or(0, |hint| hint.replay_count),
             downgrade_level: normalized_downgrade_level(request),
-        },
+        }),
         cancelled: true,
     }
 }
@@ -141,10 +143,7 @@ pub(crate) fn graph_failure_code_from_outcome(
 }
 
 pub(crate) fn make_graph_runtime_failure_summary(code: &str) -> RuntimeFailureSummary {
-    RuntimeFailureSummary {
-        code: code.to_string(),
-        summary_redacted: canonical_runtime_failure_summary(code),
-    }
+    RuntimeFailureSummary { code: code.to_string(), summary_redacted: ingest_failure_summary(code) }
 }
 
 fn graph_policy_action_kind(failure_code: &str) -> Option<&'static str> {
@@ -174,7 +173,7 @@ pub(crate) async fn append_graph_runtime_policy_audit(
     let redacted_message =
         public_runtime_failure_summary(Some(&summary.code), &typed_policy_summary);
     if let Err(error) = state
-        .canonical_services
+        .application_services
         .audit
         .append_event(
             state,
@@ -190,7 +189,7 @@ pub(crate) async fn append_graph_runtime_policy_audit(
                     "runtime policy canceled graph extraction {} for document {} via runtime execution {} with code {}",
                     graph_extraction_id, request.document.id, runtime_result.execution.id, summary.code
                 )),
-                subjects: vec![state.canonical_services.audit.runtime_execution_subject(
+                subjects: vec![state.application_services.audit.runtime_execution_subject(
                     runtime_result.execution.id,
                     None,
                     None,
@@ -236,24 +235,35 @@ pub(crate) async fn begin_graph_runtime_stage(
     })
 }
 
+/// The stage transition recorded by one [`record_graph_runtime_stage`] call:
+/// the stage kind, its terminal state, whether it was deterministic, the
+/// failure that ended it (if any), and when it started.
+pub(crate) struct GraphRuntimeStageUpdate<'a> {
+    pub(crate) stage_kind: RuntimeStageKind,
+    pub(crate) stage_state: RuntimeStageState,
+    pub(crate) deterministic: bool,
+    pub(crate) failure: Option<&'a GraphExtractionTaskFailure>,
+    pub(crate) started_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
 pub(crate) fn record_graph_runtime_stage(
     executor: &crate::agent_runtime::executor::RuntimeExecutor,
     session: &mut RuntimeExecutionSession,
-    stage_kind: RuntimeStageKind,
-    stage_state: RuntimeStageState,
-    deterministic: bool,
-    failure: Option<&GraphExtractionTaskFailure>,
-    started_at: Option<chrono::DateTime<chrono::Utc>>,
+    update: GraphRuntimeStageUpdate<'_>,
 ) {
-    let resolved_started_at = started_at.unwrap_or_else(chrono::Utc::now);
+    let resolved_started_at = update.started_at.unwrap_or_else(chrono::Utc::now);
     executor.complete_stage(
         session,
-        stage_kind,
-        stage_state,
-        deterministic,
-        failure.map(|value| value.code.clone()),
-        failure.and_then(|value| make_graph_runtime_failure_summary(&value.code).summary_redacted),
-        resolved_started_at,
+        crate::agent_runtime::executor::StageCompletion {
+            stage_kind: update.stage_kind,
+            stage_state: update.stage_state,
+            deterministic: update.deterministic,
+            failure_code: update.failure.map(|value| value.code.clone()),
+            failure_summary_redacted: update
+                .failure
+                .and_then(|value| make_graph_runtime_failure_summary(&value.code).summary_redacted),
+            started_at: resolved_started_at,
+        },
     );
 }
 

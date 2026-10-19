@@ -8,6 +8,7 @@ use crate::domains::{
     },
     knowledge::StructuredDocumentRevision,
 };
+use crate::infra::repositories::admission_repository::RevisionAdmission;
 
 #[derive(Debug, Clone)]
 pub struct CreateDocumentCommand {
@@ -40,6 +41,7 @@ pub struct CreateRevisionCommand {
 
 #[derive(Debug, Clone)]
 pub struct PromoteHeadCommand {
+    pub publishing_mutation_item_id: Option<Uuid>,
     pub document_id: Uuid,
     pub active_revision_id: Option<Uuid>,
     pub readable_revision_id: Option<Uuid>,
@@ -48,20 +50,9 @@ pub struct PromoteHeadCommand {
 }
 
 #[derive(Debug, Clone)]
-pub struct AcceptMutationCommand {
-    pub workspace_id: Uuid,
-    pub library_id: Uuid,
-    pub operation_kind: String,
-    pub requested_by_principal_id: Option<Uuid>,
-    pub request_surface: String,
-    pub idempotency_key: Option<String>,
-    pub source_identity: Option<String>,
-}
-
-#[derive(Debug, Clone)]
 pub struct CreateMutationItemCommand {
     pub mutation_id: Uuid,
-    pub document_id: Option<Uuid>,
+    pub document_id: Uuid,
     pub base_revision_id: Option<Uuid>,
     pub result_revision_id: Option<Uuid>,
     pub item_state: String,
@@ -105,20 +96,8 @@ pub(crate) struct FailedRevisionReadiness {
 }
 
 #[derive(Debug, Clone)]
-pub struct RevisionAdmissionMetadata {
-    pub content_source_kind: String,
-    pub checksum: String,
-    pub mime_type: String,
-    pub byte_size: i64,
-    pub title: Option<String>,
-    pub language_code: Option<String>,
-    pub source_uri: Option<String>,
-    pub document_hint: Option<String>,
-    pub storage_key: Option<String>,
-}
-
-#[derive(Debug, Clone)]
 pub struct ReprocessRevisionSource {
+    pub file_name: String,
     pub checksum: String,
     pub mime_type: String,
     pub byte_size: i64,
@@ -137,7 +116,7 @@ pub struct AdmitDocumentCommand {
     pub created_by_principal_id: Option<Uuid>,
     pub request_surface: String,
     pub source_identity: Option<String>,
-    pub revision: Option<RevisionAdmissionMetadata>,
+    pub revision: Option<RevisionAdmission>,
     /// Connector-declared structural parent identity, threaded into
     /// [`CreateDocumentCommand::parent_external_key`] at admission.
     pub parent_external_key: Option<String>,
@@ -153,8 +132,8 @@ pub struct AdmitMutationCommand {
     pub requested_by_principal_id: Option<Uuid>,
     pub request_surface: String,
     pub source_identity: Option<String>,
-    pub revision: Option<RevisionAdmissionMetadata>,
-    /// When this mutation is part of a canonical batch operation, carries
+    pub revision: Option<RevisionAdmission>,
+    /// When this mutation is part of a parent batch operation, carries
     /// the parent batch `ops_async_operation.id`. The child mutation's own
     /// `ops_async_operation` row is linked to the parent via
     /// `parent_async_operation_id`, which lets progress polling aggregate
@@ -183,6 +162,7 @@ pub struct UploadInlineDocumentCommand {
 
 #[derive(Debug, Clone)]
 pub struct AppendInlineMutationCommand {
+    pub base_revision_id: Uuid,
     pub workspace_id: Uuid,
     pub library_id: Uuid,
     pub document_id: Uuid,
@@ -203,21 +183,42 @@ pub struct ReplaceInlineMutationCommand {
     pub request_surface: String,
     pub source_identity: Option<String>,
     pub file_name: String,
+    pub title: Option<String>,
+    pub language_code: Option<String>,
+    pub source_uri: Option<String>,
     pub document_hint: Option<String>,
     pub mime_type: Option<String>,
     pub file_bytes: Vec<u8>,
+    pub visibility_intent_id: Option<Uuid>,
 }
 
-#[derive(Debug, Clone)]
-pub struct EditInlineMutationCommand {
-    pub workspace_id: Uuid,
-    pub library_id: Uuid,
-    pub document_id: Uuid,
-    pub idempotency_key: Option<String>,
-    pub requested_by_principal_id: Option<Uuid>,
-    pub request_surface: String,
-    pub source_identity: Option<String>,
-    pub markdown: String,
+impl ReplaceInlineMutationCommand {
+    /// The byte-derived, normalized descriptor shared by admission and transports.
+    pub(crate) fn replacement_identity(
+        &self,
+    ) -> Result<
+        ironrag_contracts::documents::ReplacementIdentity,
+        crate::interfaces::http::router_support::ApiError,
+    > {
+        use crate::interfaces::http::router_support::ApiError;
+        ironrag_contracts::documents::ReplacementIdentity {
+            checksum: format!("sha256:{}", super::sha256_hex_bytes(&self.file_bytes)),
+            byte_size: i64::try_from(self.file_bytes.len())
+                .map_err(|_| ApiError::BadRequest("replacement is too large".to_owned()))?,
+            file_name: self.file_name.clone(),
+            mime_type: super::infer_inline_mime_type(
+                self.mime_type.as_deref(),
+                Some(&self.file_name),
+                "replace",
+            ),
+            title: self.title.clone(),
+            language_code: self.language_code.clone(),
+            source_uri: self.source_uri.clone(),
+            document_hint: self.document_hint.clone(),
+        }
+        .normalize()
+        .map_err(|error| ApiError::BadRequest(error.to_string()))
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -227,6 +228,7 @@ pub struct MaterializeWebCaptureCommand {
     pub mutation_id: Uuid,
     pub requested_by_principal_id: Option<Uuid>,
     pub final_url: String,
+    pub file_name: String,
     pub checksum: String,
     pub mime_type: String,
     pub byte_size: i64,
@@ -236,10 +238,19 @@ pub struct MaterializeWebCaptureCommand {
 
 #[derive(Debug, Clone)]
 pub struct ContentMutationAdmission {
+    /// True when this admission was loaded rather than newly committed.
+    pub replayed: bool,
     pub mutation: ContentMutation,
     pub items: Vec<ContentMutationItem>,
     pub job_id: Option<Uuid>,
     pub async_operation_id: Option<Uuid>,
+    /// Typed admission receipt, derived from the persisted mutation, async
+    /// operation, mutation item and result revision — never reconstructed from
+    /// request headers or guessed JSON.
+    pub operation_status: Option<String>,
+    pub result_revision_id: Option<Uuid>,
+    pub result_checksum: Option<String>,
+    pub request_fingerprint: Option<String>,
 }
 
 /// Result of `materialize_web_capture`. Content-dedup means a
@@ -276,10 +287,7 @@ pub struct CreateDocumentAdmission {
 
 #[derive(Debug, Clone)]
 pub struct MaterializeRevisionGraphCandidatesCommand {
-    pub workspace_id: Uuid,
-    pub library_id: Uuid,
-    pub revision_id: Uuid,
-    pub attempt_id: Option<Uuid>,
+    pub authority: crate::infra::knowledge_plane::IngestRevisionWriteAuthority,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -294,9 +302,6 @@ pub struct RevisionGraphCandidateMaterialization {
     /// Number of chunks whose extraction output was reused from the persistent
     /// graph extraction cache. These chunks did not trigger an LLM call.
     pub reused_chunks: usize,
-    /// Cached graph extractions reused from the same semantic extraction version
-    /// but produced with a different prompt hash.
-    pub reused_prompt_hash_mismatches: usize,
     /// Entities carried over from cached graph extraction output.
     pub reused_entities: usize,
     /// Relations carried over from cached graph extraction output.
@@ -320,11 +325,21 @@ pub struct PreparedRevisionPersistenceSummary {
 }
 
 #[derive(Clone, Default)]
-pub struct ContentService;
+pub struct ContentService {
+    #[cfg(feature = "test-support")]
+    pub(super) document_read_pause: std::sync::Arc<tokio::sync::Mutex<Option<DocumentReadPause>>>,
+}
+
+#[cfg(feature = "test-support")]
+pub(super) struct DocumentReadPause {
+    pub(super) document_id: Uuid,
+    pub(super) reached: tokio::sync::oneshot::Sender<()>,
+    pub(super) release: tokio::sync::oneshot::Receiver<()>,
+}
 
 impl ContentService {
     #[must_use]
-    pub const fn new() -> Self {
-        Self
+    pub fn new() -> Self {
+        Self::default()
     }
 }

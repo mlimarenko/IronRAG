@@ -1,8 +1,3 @@
-use argon2::{
-    Argon2,
-    password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString, rand_core::OsRng},
-};
-use chrono::{Duration, Utc};
 use tracing::warn;
 use uuid::Uuid;
 use zeroize::{Zeroize as _, Zeroizing};
@@ -17,18 +12,56 @@ use crate::{
     services::ai_catalog_service::{
         ApplyBootstrapProviderBindingBundleCommand, BootstrapAiSetupDescriptor,
     },
-    shared::auth_tokens::{
-        hash_api_token, hash_session_secret, mint_plaintext_api_token,
-        mint_plaintext_session_secret, preview_api_token,
+    shared::auth_tokens::{hash_api_token, mint_plaintext_api_token, preview_api_token},
+};
+
+mod bootstrap_support;
+mod mapping;
+mod session_support;
+#[cfg(test)]
+mod tests;
+
+pub(crate) use self::session_support::hash_password;
+use self::{
+    bootstrap_support::{
+        normalize_bootstrap_login, rollback_failed_bootstrap_principal, validate_email,
+    },
+    mapping::{
+        grant_resource_kind_as_str, map_api_token, map_grant, map_principal,
+        map_workspace_membership,
+    },
+    session_support::{
+        DUMMY_PASSWORD_HASH, OIDC_ONLY_PASSWORD_SENTINEL_HASH, issue_session_for_user,
+        verify_password,
     },
 };
 
 #[derive(Clone, Default)]
 pub struct IamService;
 
+/// Test-only observability counter: total real invocations of
+/// [`session_support::verify_password`] across both the dummy-hash and
+/// real-hash branches of [`IamService::authenticate_session`]. It exists so
+/// an integration test can prove a login-rate-limit rejection short-circuits
+/// before Argon2id ever runs, using an observed call count rather than
+/// response timing (which flakes under CI load). It never influences
+/// production behavior and does not exist in a production build.
+#[cfg(feature = "test-support")]
+pub static PASSWORD_VERIFICATION_ATTEMPTS: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+/// Current value of [`PASSWORD_VERIFICATION_ATTEMPTS`]. Test-only.
+#[cfg(feature = "test-support")]
+#[doc(hidden)]
+#[must_use]
+pub fn password_verification_attempts() -> usize {
+    PASSWORD_VERIFICATION_ATTEMPTS.load(std::sync::atomic::Ordering::SeqCst)
+}
+
 #[derive(Debug, Clone)]
 pub struct BootstrapStatusOutcome {
     pub setup_required: bool,
+    pub sso_available: bool,
     pub ai_setup: Option<BootstrapAiSetupDescriptor>,
 }
 
@@ -61,10 +94,10 @@ impl std::fmt::Debug for BootstrapSetupAiCommand {
 #[derive(Clone)]
 pub struct BootstrapSetupCommand {
     pub login: String,
+    pub email: String,
     pub display_name: Option<String>,
     pub password: String,
     pub ai_setup: Option<BootstrapSetupAiCommand>,
-    pub ttl_hours: u64,
     pub request_id: String,
 }
 
@@ -73,10 +106,10 @@ impl std::fmt::Debug for BootstrapSetupCommand {
         formatter
             .debug_struct("BootstrapSetupCommand")
             .field("login", &self.login)
+            .field("email", &self.email)
             .field("display_name", &self.display_name)
             .field("password", &"<redacted>")
             .field("ai_setup", &self.ai_setup)
-            .field("ttl_hours", &self.ttl_hours)
             .field("request_id", &self.request_id)
             .finish()
     }
@@ -147,7 +180,10 @@ impl Drop for RotateApiTokenOutcome {
 pub struct AuthenticateSessionCommand {
     pub login: String,
     pub password: String,
-    pub ttl_hours: u64,
+    /// Best-effort caller network origin used only as a login-rate-limit
+    /// bucket key (IRG-80) -- never persisted, never used for authorization.
+    /// See `interfaces::http::iam::session` for how this is derived.
+    pub source_key: String,
 }
 
 impl std::fmt::Debug for AuthenticateSessionCommand {
@@ -156,7 +192,7 @@ impl std::fmt::Debug for AuthenticateSessionCommand {
             .debug_struct("AuthenticateSessionCommand")
             .field("login", &self.login)
             .field("password", &"<redacted>")
-            .field("ttl_hours", &self.ttl_hours)
+            .field("source_key", &self.source_key)
             .finish()
     }
 }
@@ -178,6 +214,42 @@ pub struct AuthenticateSessionOutcome {
     pub expires_at: chrono::DateTime<chrono::Utc>,
 }
 
+/// Result of resolving a verified OIDC identity to a normal browser session.
+///
+/// `identity_created` is deliberately distinct from session creation: each
+/// OIDC sign-in creates a new browser session, while JIT provisioning happens
+/// only once for a durable external identity.
+pub struct AuthenticateOidcSessionOutcome {
+    pub session: AuthenticateSessionOutcome,
+    pub identity_created: bool,
+}
+
+/// Verified OIDC identity ready for durable JIT resolution. Its provider key
+/// is issuer-specific and never derived from a mutable login or email claim.
+#[derive(Clone)]
+pub struct AuthenticateOidcSessionCommand {
+    pub auth_provider_kind: String,
+    pub external_subject: String,
+    pub login: String,
+    pub email: String,
+    pub display_name: String,
+    pub bootstrap_admin: bool,
+}
+
+impl std::fmt::Debug for AuthenticateOidcSessionCommand {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("AuthenticateOidcSessionCommand")
+            .field("auth_provider_kind", &self.auth_provider_kind)
+            .field("external_subject", &"<redacted>")
+            .field("login", &self.login)
+            .field("email", &"<redacted>")
+            .field("display_name", &"<redacted>")
+            .field("bootstrap_admin", &self.bootstrap_admin)
+            .finish()
+    }
+}
+
 impl std::fmt::Debug for AuthenticateSessionOutcome {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
@@ -189,6 +261,16 @@ impl std::fmt::Debug for AuthenticateSessionOutcome {
             .field("email", &self.email)
             .field("display_name", &self.display_name)
             .field("expires_at", &self.expires_at)
+            .finish()
+    }
+}
+
+impl std::fmt::Debug for AuthenticateOidcSessionOutcome {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("AuthenticateOidcSessionOutcome")
+            .field("session", &self.session)
+            .field("identity_created", &self.identity_created)
             .finish()
     }
 }
@@ -261,7 +343,7 @@ impl IamService {
             }
             crate::domains::agent_runtime::RuntimeExecutionOwnerKind::GraphExtractionAttempt => {
                 let extraction =
-                    crate::infra::repositories::get_runtime_graph_extraction_record_by_id(
+                    crate::infra::repositories::runtime_graph_repository::get_runtime_graph_extraction_record_by_id(
                         &state.persistence.postgres,
                         runtime_execution.owner_id,
                     )
@@ -312,17 +394,19 @@ impl IamService {
         &self,
         state: &AppState,
     ) -> Result<BootstrapStatusOutcome, ApiError> {
-        let active_users =
-            iam_repository::count_active_user_principals(&state.persistence.postgres)
-                .await
-                .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
-        let setup_required = active_users == 0 && !state.bootstrap_admin_configured;
+        // Admins specifically, not any active user: an OIDC JIT-provisioned
+        // viewer must not permanently close interactive bootstrap for a
+        // deployment that never got a configured administrator.
+        let active_admins = iam_repository::count_admin_users(&state.persistence.postgres)
+            .await
+            .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
+        let setup_required = active_admins == 0 && !state.bootstrap_admin_configured;
         let ai_setup = if setup_required {
-            Some(state.canonical_services.ai_catalog.describe_bootstrap_ai_setup(state).await?)
+            Some(state.application_services.ai_catalog.describe_bootstrap_ai_setup(state).await?)
         } else {
             None
         };
-        Ok(BootstrapStatusOutcome { setup_required, ai_setup })
+        Ok(BootstrapStatusOutcome { setup_required, sso_available: state.oidc.is_some(), ai_setup })
     }
 
     pub async fn setup_bootstrap_admin(
@@ -344,7 +428,7 @@ impl IamService {
         }
         if let Some(ai_setup) = command.ai_setup.as_ref() {
             state
-                .canonical_services
+                .application_services
                 .ai_catalog
                 .ensure_bootstrap_provider_bundle_available(state, &ai_setup.provider_kind)
                 .await?;
@@ -362,7 +446,7 @@ impl IamService {
             return Err(ApiError::BadRequest("password must be at least 8 characters long".into()));
         }
 
-        let email = default_bootstrap_email(&login);
+        let email = validate_email(&command.email)?;
         let password_hash = hash_password(&password)?;
         let claimed = iam_repository::claim_bootstrap_user(
             &state.persistence.postgres,
@@ -386,7 +470,7 @@ impl IamService {
                     .await?;
             if let Some(mut ai_setup) = command.ai_setup.take() {
                 state
-                    .canonical_services
+                    .application_services
                     .ai_catalog
                     .apply_bootstrap_provider_binding_bundle(
                         state,
@@ -439,7 +523,6 @@ impl IamService {
             &claimed.login,
             &claimed.email,
             &claimed.display_name,
-            command.ttl_hours,
         )
         .await
     }
@@ -511,14 +594,16 @@ impl IamService {
         })?;
 
         for grant in &command.grants {
-            iam_repository::create_grant_with_transaction(
-                transaction_connection,
-                token_row.principal_id,
-                grant_resource_kind_as_str(&grant.resource_kind),
-                grant.resource_id,
-                &grant.permission_kind,
-                command.issued_by_principal_id,
-                grant.expires_at,
+            iam_repository::create_grant(
+                &mut *transaction_connection,
+                &iam_repository::NewGrant {
+                    principal_id: token_row.principal_id,
+                    resource_kind: grant_resource_kind_as_str(&grant.resource_kind),
+                    resource_id: grant.resource_id,
+                    permission_kind: &grant.permission_kind,
+                    granted_by_principal_id: command.issued_by_principal_id,
+                    expires_at: grant.expires_at,
+                },
             )
             .await
             .map_err(|e| {
@@ -678,11 +763,46 @@ impl IamService {
             return Err(ApiError::BadRequest("password must not be empty".into()));
         }
 
-        let user = iam_repository::get_user_by_login(&state.persistence.postgres, &login)
+        // Admission runs before any database lookup or Argon2id call, on the
+        // already-normalized login: a rejection here never touches either.
+        // See `services::iam::login_rate_limit` for why both axes are
+        // checked, why rejection is immediate rather than a wait, and why
+        // this never becomes a standing lockout on the account.
+        let verification_permit = state
+            .login_rate_limiter
+            .admit(&login, &command.source_key)
+            .await
+            .map_err(ApiError::from_login_rate_limit)?;
+
+        let user = match iam_repository::get_user_by_login(&state.persistence.postgres, &login)
             .await
             .map_err(|e| ApiError::internal_with_log(e, "internal"))?
-            .ok_or(ApiError::Unauthorized)?;
+        {
+            Some(user) => user,
+            None => {
+                #[cfg(feature = "test-support")]
+                PASSWORD_VERIFICATION_ATTEMPTS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let _ = verify_password(&command.password, DUMMY_PASSWORD_HASH);
+                return Err(ApiError::Unauthorized);
+            }
+        };
+        if user.auth_provider_kind != "password" {
+            // Keep the unknown-user and OIDC-user branches comparable enough
+            // to avoid turning the password endpoint into an identity oracle,
+            // while making the provider policy explicit instead of trusting a
+            // sentinel hash to happen not to match.
+            #[cfg(feature = "test-support")]
+            PASSWORD_VERIFICATION_ATTEMPTS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let _ = verify_password(&command.password, DUMMY_PASSWORD_HASH);
+            return Err(ApiError::Unauthorized);
+        }
+        #[cfg(feature = "test-support")]
+        PASSWORD_VERIFICATION_ATTEMPTS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         verify_password(&command.password, &user.password_hash)?;
+        // Release the concurrency slot as soon as Argon2id is done; the
+        // remaining work is plain database I/O, not the resource this
+        // admission protects.
+        drop(verification_permit);
         let principal =
             iam_repository::get_principal_by_id(&state.persistence.postgres, user.principal_id)
                 .await
@@ -698,9 +818,67 @@ impl IamService {
             &user.login,
             &user.email,
             &user.display_name,
-            command.ttl_hours,
         )
         .await
+    }
+
+    /// Resolves a verified OIDC identity to one application user and issues a
+    /// normal browser session. OIDC admission group membership is checked
+    /// before this method; it never maps an IdP group to an application role.
+    pub async fn authenticate_oidc_session(
+        &self,
+        state: &AppState,
+        command: AuthenticateOidcSessionCommand,
+    ) -> Result<AuthenticateOidcSessionOutcome, ApiError> {
+        let role = if command.bootstrap_admin {
+            iam_repository::SystemRole::Admin
+        } else {
+            iam_repository::SystemRole::Viewer
+        };
+        let provisioned = iam_repository::provision_oidc_user(
+            &state.persistence.postgres,
+            &iam_repository::NewOidcUser {
+                auth_provider_kind: &command.auth_provider_kind,
+                external_subject: &command.external_subject,
+                login: &command.login,
+                email: &command.email,
+                display_name: &command.display_name,
+                password_hash: OIDC_ONLY_PASSWORD_SENTINEL_HASH,
+                role,
+            },
+        )
+        .await
+        .map_err(|error| ApiError::internal_with_log(error, "failed to provision OIDC user"))?;
+        let (user, identity_created) = match provisioned {
+            iam_repository::OidcProvisionUserOutcome::Provisioned { user, created } => {
+                (user, created)
+            }
+            // Do not reveal whether a local email or generated login exists,
+            // and never use that collision as permission to link identities.
+            iam_repository::OidcProvisionUserOutcome::IdentityCollision => {
+                return Err(ApiError::Unauthorized);
+            }
+        };
+        let principal =
+            iam_repository::get_principal_by_id(&state.persistence.postgres, user.principal_id)
+                .await
+                .map_err(|error| {
+                    ApiError::internal_with_log(error, "failed to load OIDC user principal")
+                })?
+                .ok_or(ApiError::Unauthorized)?;
+        if principal.status != "active" {
+            return Err(ApiError::Unauthorized);
+        }
+
+        let session = issue_session_for_user(
+            state,
+            user.principal_id,
+            &user.login,
+            &user.email,
+            &user.display_name,
+        )
+        .await?;
+        Ok(AuthenticateOidcSessionOutcome { session, identity_created })
     }
 
     pub async fn revoke_session(&self, state: &AppState, session_id: Uuid) -> Result<(), ApiError> {
@@ -718,12 +896,14 @@ impl IamService {
     ) -> Result<Grant, ApiError> {
         let row = iam_repository::create_grant(
             &state.persistence.postgres,
-            command.principal_id,
-            grant_resource_kind_as_str(&command.resource_kind),
-            command.resource_id,
-            command.permission_kind.trim(),
-            command.granted_by_principal_id,
-            command.expires_at,
+            &iam_repository::NewGrant {
+                principal_id: command.principal_id,
+                resource_kind: grant_resource_kind_as_str(&command.resource_kind),
+                resource_id: command.resource_id,
+                permission_kind: command.permission_kind.trim(),
+                granted_by_principal_id: command.granted_by_principal_id,
+                expires_at: command.expires_at,
+            },
         )
         .await
         .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
@@ -736,261 +916,5 @@ impl IamService {
             .map_err(|e| ApiError::internal_with_log(e, "internal"))?
             .ok_or_else(|| ApiError::resource_not_found("grant", grant_id))?;
         map_grant(row)
-    }
-}
-
-async fn rollback_failed_bootstrap_principal(state: &AppState, principal_id: Uuid) {
-    let rollback = async {
-        sqlx::query("delete from iam_workspace_membership where principal_id = $1")
-            .bind(principal_id)
-            .execute(&state.persistence.postgres)
-            .await?;
-        sqlx::query("delete from iam_grant where principal_id = $1 or granted_by_principal_id = $1")
-            .bind(principal_id)
-            .execute(&state.persistence.postgres)
-            .await?;
-        sqlx::query("delete from iam_session where principal_id = $1")
-            .bind(principal_id)
-            .execute(&state.persistence.postgres)
-            .await?;
-        sqlx::query(
-            "delete from iam_api_token_secret where token_principal_id in (
-                select principal_id from iam_api_token where principal_id = $1 or issued_by_principal_id = $1
-            )",
-        )
-        .bind(principal_id)
-        .execute(&state.persistence.postgres)
-        .await?;
-        sqlx::query("delete from iam_api_token where principal_id = $1 or issued_by_principal_id = $1")
-            .bind(principal_id)
-            .execute(&state.persistence.postgres)
-            .await?;
-        sqlx::query("delete from iam_user where principal_id = $1")
-            .bind(principal_id)
-            .execute(&state.persistence.postgres)
-            .await?;
-        sqlx::query("delete from iam_principal where id = $1")
-            .bind(principal_id)
-            .execute(&state.persistence.postgres)
-            .await?;
-        Ok::<(), sqlx::Error>(())
-    }
-    .await;
-
-    if let Err(error) = rollback {
-        warn!(
-            ?error,
-            principal_id = %principal_id,
-            "failed to roll back incomplete bootstrap principal",
-        );
-    }
-}
-
-pub(crate) fn hash_password(password: &str) -> Result<String, ApiError> {
-    Argon2::default()
-        .hash_password(password.as_bytes(), &SaltString::generate(&mut OsRng))
-        .map(|hash| hash.to_string())
-        .map_err(|e| ApiError::internal_with_log(e, "internal"))
-}
-
-fn verify_password(password: &str, password_hash: &str) -> Result<(), ApiError> {
-    let parsed_hash =
-        PasswordHash::new(password_hash).map_err(|e| ApiError::internal_with_log(e, "internal"))?;
-    Argon2::default()
-        .verify_password(password.as_bytes(), &parsed_hash)
-        .map_err(|_| ApiError::Unauthorized)
-}
-
-fn normalize_bootstrap_login(value: &str) -> Result<String, ApiError> {
-    let login = value.trim().to_ascii_lowercase();
-    if login.is_empty() {
-        return Err(ApiError::BadRequest("login must not be empty".into()));
-    }
-    if login.bytes().any(|byte| !matches!(byte, b'a'..=b'z' | b'0'..=b'9' | b'.' | b'_' | b'-')) {
-        return Err(ApiError::BadRequest(
-            "login must contain only lowercase letters, digits, '.', '_' or '-'".into(),
-        ));
-    }
-    Ok(login)
-}
-
-fn default_bootstrap_email(login: &str) -> String {
-    format!("{login}@ironrag.local")
-}
-
-async fn issue_session_for_user(
-    state: &AppState,
-    principal_id: Uuid,
-    login: &str,
-    email: &str,
-    display_name: &str,
-    ttl_hours: u64,
-) -> Result<AuthenticateSessionOutcome, ApiError> {
-    let expires_at = Utc::now() + Duration::hours(i64::try_from(ttl_hours.max(1)).unwrap_or(24));
-    let session_secret = Zeroizing::new(mint_plaintext_session_secret());
-    let session = iam_repository::create_session(
-        &state.persistence.postgres,
-        principal_id,
-        &hash_session_secret(&session_secret),
-        expires_at,
-    )
-    .await
-    .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
-
-    Ok(AuthenticateSessionOutcome {
-        session_id: session.id,
-        session_secret: session_secret.to_string(),
-        principal_id,
-        login: login.to_string(),
-        email: email.to_string(),
-        display_name: display_name.to_string(),
-        expires_at: session.expires_at,
-    })
-}
-
-fn map_principal(row: iam_repository::IamPrincipalRow) -> Result<Principal, ApiError> {
-    Ok(Principal {
-        id: row.id,
-        principal_kind: parse_principal_kind(&row.principal_kind)?,
-        display_label: row.display_label,
-        status: row.status,
-        created_at: row.created_at,
-    })
-}
-
-fn map_api_token(row: iam_repository::IamApiTokenRow) -> ApiToken {
-    ApiToken {
-        principal_id: row.principal_id,
-        workspace_id: row.workspace_id,
-        label: row.label,
-        token_prefix: row.token_prefix,
-        status: row.status,
-        expires_at: row.expires_at,
-    }
-}
-
-fn map_grant(row: iam_repository::IamGrantRow) -> Result<Grant, ApiError> {
-    Ok(Grant {
-        id: row.id,
-        principal_id: row.principal_id,
-        resource_kind: parse_grant_resource_kind(&row.resource_kind)?,
-        resource_id: row.resource_id,
-        permission_kind: row.permission_kind,
-        granted_at: row.granted_at,
-    })
-}
-
-fn map_workspace_membership(row: iam_repository::IamWorkspaceMembershipRow) -> WorkspaceMembership {
-    WorkspaceMembership {
-        workspace_id: row.workspace_id,
-        principal_id: row.principal_id,
-        membership_state: row.membership_state,
-        joined_at: row.joined_at,
-        ended_at: row.ended_at,
-    }
-}
-
-const fn grant_resource_kind_as_str(value: &GrantResourceKind) -> &'static str {
-    match value {
-        GrantResourceKind::System => "system",
-        GrantResourceKind::Workspace => "workspace",
-        GrantResourceKind::Library => "library",
-        GrantResourceKind::Document => "document",
-        GrantResourceKind::QuerySession => "query_session",
-        GrantResourceKind::AsyncOperation => "async_operation",
-        GrantResourceKind::Connector => "connector",
-        GrantResourceKind::ProviderCredential => "provider_credential",
-        GrantResourceKind::LibraryBinding => "library_binding",
-    }
-}
-
-fn parse_principal_kind(value: &str) -> Result<PrincipalKind, ApiError> {
-    match value {
-        "user" => Ok(PrincipalKind::User),
-        "api_token" => Ok(PrincipalKind::ApiToken),
-        "worker" => Ok(PrincipalKind::Worker),
-        "bootstrap" => Ok(PrincipalKind::Bootstrap),
-        _ => Err(ApiError::Internal),
-    }
-}
-
-fn parse_grant_resource_kind(value: &str) -> Result<GrantResourceKind, ApiError> {
-    match value {
-        "system" => Ok(GrantResourceKind::System),
-        "workspace" => Ok(GrantResourceKind::Workspace),
-        "library" => Ok(GrantResourceKind::Library),
-        "document" => Ok(GrantResourceKind::Document),
-        "query_session" => Ok(GrantResourceKind::QuerySession),
-        "async_operation" => Ok(GrantResourceKind::AsyncOperation),
-        "connector" => Ok(GrantResourceKind::Connector),
-        "provider_credential" => Ok(GrantResourceKind::ProviderCredential),
-        "library_binding" => Ok(GrantResourceKind::LibraryBinding),
-        _ => Err(ApiError::Internal),
-    }
-}
-
-#[cfg(test)]
-mod secret_debug_tests {
-    use chrono::Utc;
-    use uuid::Uuid;
-
-    use super::{
-        AuthenticateSessionCommand, AuthenticateSessionOutcome, BootstrapSetupAiCommand,
-        BootstrapSetupCommand, MintApiTokenOutcome,
-    };
-    use crate::domains::iam::ApiToken;
-
-    #[test]
-    fn iam_commands_and_outcomes_redact_all_plaintext_credentials() {
-        let bootstrap = BootstrapSetupCommand {
-            login: "owner".into(),
-            display_name: None,
-            password: "bootstrap-password-regression".into(),
-            ai_setup: Some(BootstrapSetupAiCommand {
-                provider_kind: "synthetic".into(),
-                api_key: Some("provider-key-regression".into()),
-                base_url: Some("https://user:url-secret@host.example/?token=query-secret".into()),
-            }),
-            ttl_hours: 1,
-            request_id: "request".into(),
-        };
-        let login = AuthenticateSessionCommand {
-            login: "owner".into(),
-            password: "login-password-regression".into(),
-            ttl_hours: 1,
-        };
-        let session = AuthenticateSessionOutcome {
-            session_id: Uuid::now_v7(),
-            session_secret: "session-secret-regression".into(),
-            principal_id: Uuid::now_v7(),
-            login: "owner".into(),
-            email: "owner@example.com".into(),
-            display_name: "Owner".into(),
-            expires_at: Utc::now(),
-        };
-        let token = MintApiTokenOutcome {
-            token: "raw-api-token-regression".into(),
-            api_token: ApiToken {
-                principal_id: Uuid::now_v7(),
-                workspace_id: None,
-                label: "synthetic".into(),
-                token_prefix: "prefix".into(),
-                status: "active".into(),
-                expires_at: None,
-            },
-        };
-
-        let debug = format!("{bootstrap:?} {login:?} {session:?} {token:?}");
-        for secret in [
-            "bootstrap-password-regression",
-            "provider-key-regression",
-            "url-secret",
-            "query-secret",
-            "login-password-regression",
-            "session-secret-regression",
-            "raw-api-token-regression",
-        ] {
-            assert!(!debug.contains(secret), "Debug exposed {secret}");
-        }
     }
 }

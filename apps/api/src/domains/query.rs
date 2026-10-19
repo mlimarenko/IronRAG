@@ -327,14 +327,21 @@ pub struct QueryExecution {
     pub request_turn_id: Option<Uuid>,
     pub response_turn_id: Option<Uuid>,
     pub binding_id: Option<Uuid>,
-    pub runtime_execution_id: Option<Uuid>,
+    pub runtime_execution_id: Uuid,
     pub lifecycle_state: RuntimeLifecycleState,
     pub active_stage: Option<RuntimeStageKind>,
     pub query_text: String,
     pub failure_code: Option<String>,
     pub started_at: DateTime<Utc>,
-    pub completed_at: Option<DateTime<Utc>>,
 }
+
+/// How many references a caller is shown for one execution.
+///
+/// One number for two decisions that must agree: the HTTP layer projects this
+/// many references, and the service reads back detail for this many chunks.
+/// Reading detail for the whole set and then projecting twelve of it meant
+/// every answer and every history page pulled chunk bodies nobody would see.
+pub const VISIBLE_REFERENCE_LIMIT: usize = 12;
 
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct QueryChunkReference {
@@ -342,6 +349,17 @@ pub struct QueryChunkReference {
     pub chunk_id: Uuid,
     pub rank: i32,
     pub score: f64,
+    /// Document the chunk was read from, so a reader can open the source.
+    /// Absent when the chunk no longer exists — a document deleted after the
+    /// answer was written still leaves its reference behind.
+    pub document_id: Option<Uuid>,
+    pub document_title: Option<String>,
+    /// Headings above the chunk, outermost first. Where a chunk sits in a
+    /// document is often what identifies it.
+    pub section_path: Vec<String>,
+    /// Opening of the chunk's own text. Without it the reference is a rank and
+    /// an opaque score, which is what the sources panel used to show.
+    pub excerpt: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
@@ -390,7 +408,7 @@ pub struct TechnicalFactReference {
     pub fact_id: Uuid,
     pub revision_id: Uuid,
     pub fact_kind: TechnicalFactKind,
-    pub canonical_value: String,
+    pub normalized_value: String,
     pub display_value: String,
     pub rank: i32,
     pub score: f64,
@@ -516,7 +534,7 @@ pub struct QueryExecutionDetail {
     /// [`QueryAnswerDisposition::Clarification`].
     #[serde(default)]
     pub clarification: QueryClarification,
-    /// Canonical compiler output used by the execution. This is an internal
+    /// Compiled query output used by the execution. This is an internal
     /// runtime hand-off for typed completion policy and cache replay; it is
     /// intentionally absent from public HTTP/OpenAPI payloads.
     #[serde(skip)]

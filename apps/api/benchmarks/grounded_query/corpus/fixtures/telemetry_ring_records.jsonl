@@ -1,0 +1,12 @@
+{"service": "beacon-gateway", "shard": "ring-01", "latency_budget_ms": 250, "owner": "Traffic Stewards", "tier": "edge"}
+{"service": "beacon-gateway", "shard": "ring-02", "latency_budget_ms": 250, "owner": "Traffic Stewards", "tier": "edge"}
+{"service": "lattice-scheduler", "shard": "ring-01", "latency_budget_ms": 75, "owner": "Replay Guild", "tier": "control"}
+{"service": "lattice-scheduler", "shard": "ring-02", "latency_budget_ms": 75, "owner": "Replay Guild", "tier": "control"}
+{"service": "quorum-store", "shard": "ring-01", "latency_budget_ms": 40, "owner": "Build Systems", "tier": "consensus"}
+{"service": "quorum-store", "shard": "ring-02", "latency_budget_ms": 40, "owner": "Build Systems", "tier": "consensus"}
+{"service": "ingest-spool", "shard": "ring-01", "latency_budget_ms": 900, "owner": "Replay Guild", "tier": "batch"}
+{"service": "ingest-spool", "shard": "ring-02", "latency_budget_ms": 900, "owner": "Replay Guild", "tier": "batch"}
+{"service": "ledger-signer", "shard": "ring-01", "latency_budget_ms": 5000, "owner": "Release Registrars", "tier": "offline"}
+{"service": "manifest-archive", "shard": "ring-01", "latency_budget_ms": 12000, "owner": "Release Registrars", "tier": "offline"}
+{"service": "replay-harness", "shard": "ring-01", "latency_budget_ms": 30000, "owner": "Replay Guild", "tier": "batch"}
+{"service": "edge-probe", "shard": "ring-01", "latency_budget_ms": 120, "owner": "Traffic Stewards", "tier": "edge"}

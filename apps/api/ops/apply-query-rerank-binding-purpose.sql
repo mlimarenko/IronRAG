@@ -1,0 +1,15 @@
+-- Additive live schema: the `query_rerank` AI binding purpose.
+--
+-- Fresh installs receive this enum value from
+-- apps/api/migrations/0001_init.sql. Existing databases receive it only
+-- through `ironrag-maintenance migrate query-rerank-binding-purpose --apply`,
+-- which holds a transaction-scoped advisory lock, applies this DDL, validates
+-- the object groups its own target revision declares — the full current set at
+-- this revision — and only then compare-and-sets the baseline checksum.
+--
+-- The statement is idempotent: a database that already carries the value
+-- succeeds unchanged, so a re-run after a failed stamp is safe. `BEFORE
+-- 'query_answer'` keeps the live order identical to a fresh install, where the
+-- baseline declares the value at the same position, so enum-ordered purpose
+-- arrays do not depend on which path created the database.
+ALTER TYPE public.ai_binding_purpose ADD VALUE IF NOT EXISTS 'query_rerank' BEFORE 'query_answer';

@@ -1,0 +1,682 @@
+.assistant-layout {
+  height: 100%;
+  display: grid;
+  grid-template-columns: 246px minmax(0, 1fr);
+  background: var(--surface);
+}
+/* The debug column is a stored width the operator drags; `auto` is the resize
+   handle between it and the conversation. */
+.assistant-layout.has-debug {
+  grid-template-columns: 246px minmax(0, 1fr) auto var(--assistant-debug-width, 330px);
+}
+.assistant-layout.is-rail-collapsed {
+  grid-template-columns: 58px minmax(0, 1fr);
+}
+.assistant-layout.is-rail-collapsed.has-debug {
+  grid-template-columns: 58px minmax(0, 1fr) auto var(--assistant-debug-width, 330px);
+}
+.panel-resizer {
+  width: 7px;
+  cursor: col-resize;
+  background: transparent;
+  border: 0;
+  padding: 0;
+  touch-action: none;
+}
+.panel-resizer::after {
+  content: '';
+  display: block;
+  width: 1px;
+  height: 100%;
+  margin: 0 auto;
+  background: var(--border);
+  transition: background 120ms ease;
+}
+.panel-resizer:hover::after,
+.panel-resizer:focus-visible::after {
+  width: 3px;
+  background: var(--accent);
+}
+.panel-resizer:focus-visible {
+  outline: none;
+}
+.session-rail {
+  min-width: 0;
+  padding: 14px 12px;
+  background: var(--surface-2);
+  border-right: 1px solid var(--border);
+  overflow-y: auto;
+}
+.session-rail--collapsed {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 7px;
+  padding: 12px 5px;
+}
+.session-rail__heading {
+  height: 36px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.session-rail__heading strong {
+  font-size: 0.75rem;
+}
+.session-rail > .button--primary {
+  width: 100%;
+  margin: 4px 0 12px;
+}
+.session-search {
+  margin-bottom: 16px;
+}
+.session-search .input {
+  min-height: 34px;
+  background: var(--surface);
+}
+.session-group {
+  margin: 14px 0;
+}
+.session-group > span {
+  display: block;
+  margin: 0 8px 5px;
+  color: var(--muted);
+  text-transform: none;
+  letter-spacing: normal;
+  font-size: 0.75rem;
+}
+.session-row {
+  width: 100%;
+  min-height: 62px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 4px;
+  padding: 4px;
+  border-radius: 8px;
+}
+.session-row:hover,
+.session-row.is-active {
+  background: var(--surface-3);
+}
+.session-row__select {
+  min-width: 0;
+  min-height: 54px;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  padding: 4px;
+  border: 0;
+  background: transparent;
+  color: var(--text);
+  text-align: left;
+  cursor: pointer;
+}
+.session-row strong {
+  display: -webkit-box;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  font-size: 0.8125rem;
+  line-height: 1.3;
+}
+.session-row small {
+  margin-top: 3px;
+  color: var(--muted);
+  font-size: 0.75rem;
+}
+.session-row form {
+  min-width: 0;
+}
+.session-row form .input {
+  width: 100%;
+}
+.session-actions {
+  display: flex;
+  gap: 2px;
+  color: var(--muted);
+  opacity: 0;
+}
+.session-row:hover .session-actions,
+.session-row:focus-within .session-actions {
+  opacity: 1;
+}
+.chat-surface {
+  min-width: 0;
+  display: grid;
+  grid-template-rows: 52px minmax(0, 1fr) auto;
+  background: var(--surface);
+}
+.chat-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 0 20px;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface);
+}
+.chat-header > div {
+  display: flex;
+  flex-direction: column;
+}
+.chat-header .chat-header__actions {
+  flex-direction: row;
+  align-items: center;
+}
+.chat-header strong {
+  font-size: 0.875rem;
+}
+.mobile-session-trigger {
+  display: none;
+}
+.message-list {
+  overflow-y: auto;
+  padding: 24px max(22px, calc((100% - 800px) / 2));
+  scroll-behavior: smooth;
+}
+.message {
+  margin: 0 0 28px;
+}
+.message-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 7px;
+}
+.message-meta > span:first-child {
+  width: 27px;
+  height: 27px;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  background: var(--sidebar);
+  color: var(--sidebar-text);
+  font-size: 0.75rem;
+  font-weight: 800;
+}
+.message--user .message-meta > span:first-child {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+/* Pushed to the far end of the meta row and revealed on hover. Focus reveals
+   it as well, or it would be a control a keyboard could reach but never see. */
+.message-copy {
+  margin-left: auto;
+  opacity: 0;
+  transition: opacity 120ms ease;
+}
+.message:hover .message-copy,
+.message:focus-within .message-copy {
+  opacity: 1;
+}
+/* Nothing hovers on a touchscreen, so there the control simply stays. */
+@media (hover: none) {
+  .message-copy {
+    opacity: 1;
+  }
+}
+.message-meta time {
+  color: var(--muted);
+  font-size: 0.75rem;
+}
+.message-body {
+  margin-left: 35px;
+  min-width: 0;
+  max-width: 760px;
+  padding: 8px 0;
+  border: 1px solid transparent;
+  border-radius: var(--radius);
+  background: var(--surface);
+  font-size: 0.875rem;
+  line-height: 1.7;
+  overflow-wrap: anywhere;
+}
+.message--user .message-body {
+  padding: 10px 12px;
+  background: var(--surface-2);
+}
+.message-body p {
+  margin: 0 0 10px;
+}
+.message-body p:last-child {
+  margin-bottom: 0;
+}
+.message-body ol,
+.message-body ul {
+  padding-left: 20px;
+}
+/* An answer quotes real commands and paths, which contain runs with nowhere to
+   break — a shell line or a long URL. Without this the card grows past its
+   column and the page scrolls sideways. Prose wraps anywhere it must; code
+   keeps its lines intact and scrolls inside its own box instead. */
+.message-body pre {
+  max-width: 100%;
+  overflow-x: auto;
+  overflow-wrap: normal;
+  white-space: pre;
+  margin: 0 0 10px;
+  padding: 10px 12px;
+  border-radius: 6px;
+  background: var(--surface-sunken, var(--bg));
+  border: 1px solid var(--border);
+}
+.message-body pre:last-child {
+  margin-bottom: 0;
+}
+.message-body pre code {
+  white-space: inherit;
+  overflow-wrap: normal;
+}
+.message-body :not(pre) > code {
+  overflow-wrap: anywhere;
+  padding: 1px 4px;
+  border-radius: 4px;
+  background: var(--surface-sunken, var(--bg));
+}
+.message-body table {
+  display: block;
+  max-width: 100%;
+  overflow-x: auto;
+  border-collapse: collapse;
+}
+.message-actions {
+  margin: 6px 0 0 35px;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.message-actions > span {
+  margin-left: auto;
+  color: var(--muted);
+  font-size: 0.75rem;
+}
+.message--assistant.is-working .message-body {
+  border-color: color-mix(in srgb, var(--processing) 55%, var(--border));
+}
+.message--assistant.is-error .message-body {
+  border-color: color-mix(in srgb, var(--warning) 45%, var(--border));
+}
+.activity-feed {
+  display: grid;
+  gap: 5px;
+}
+.activity-feed > div {
+  min-height: 27px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--muted);
+  font-size: 0.75rem;
+}
+.activity-feed > div:last-child {
+  color: var(--processing);
+}
+.verification-warnings {
+  margin-top: 12px;
+  padding: 9px 11px;
+  border-radius: 8px;
+  background: var(--warning-bg);
+  color: var(--warning);
+}
+.verification-warnings p {
+  margin: 3px 0;
+  font-size: 0.75rem;
+}
+.verification-warnings .message-retry {
+  margin-top: 8px;
+}
+.clarification {
+  margin-top: 12px;
+  padding: 12px;
+  border-left: 3px solid var(--sparse);
+  background: var(--sparse-bg);
+}
+.clarification > div {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 9px;
+}
+.clarification button {
+  border: 1px solid color-mix(in srgb, var(--sparse) 25%, transparent);
+  border-radius: 8px;
+  background: var(--surface);
+  padding: 6px 8px;
+  cursor: pointer;
+  font-size: 0.8125rem;
+}
+.assistant-empty {
+  min-height: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+}
+.assistant-empty > span {
+  width: 36px;
+  height: 36px;
+  display: grid;
+  place-items: center;
+  border-radius: var(--radius);
+  color: var(--muted);
+  background: var(--surface-2);
+}
+.assistant-empty h2 {
+  margin: 12px 0 4px;
+  font-size: 1.125rem;
+  letter-spacing: -0.03em;
+}
+.assistant-empty p {
+  max-width: 480px;
+  margin: 0;
+  color: var(--muted);
+}
+.assistant-empty > div {
+  width: min(600px, 100%);
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  margin-top: 16px;
+}
+.assistant-empty button {
+  min-height: 44px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  color: var(--text);
+  text-align: left;
+  cursor: pointer;
+}
+.assistant-empty button:hover {
+  border-color: var(--accent);
+}
+.composer {
+  width: min(850px, calc(100% - 36px));
+  margin: 0 auto 20px;
+  display: grid;
+  grid-template-columns: 1fr 40px;
+  gap: 8px;
+  padding: 9px 9px 5px 14px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-lg);
+  background: var(--surface);
+}
+.composer:focus-within {
+  border-color: var(--accent);
+}
+.composer textarea {
+  min-height: 46px;
+  max-height: 170px;
+  resize: none;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  color: var(--text);
+  font-size: 0.875rem;
+}
+.composer > span {
+  grid-column: 1 / -1;
+  color: var(--muted);
+  font-size: 0.75rem;
+}
+.debug-panel {
+  min-width: 0;
+  padding: 12px;
+  border-left: 1px solid var(--border);
+  background: var(--surface);
+  overflow-y: auto;
+}
+.debug-panel > header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  margin-bottom: 10px;
+}
+.debug-panel header > div {
+  display: flex;
+  flex-direction: column;
+}
+.debug-panel header span {
+  color: var(--muted);
+  font-family: ui-monospace;
+  font-size: 0.75rem;
+}
+.debug-execution-id {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.debug-execution-id .button {
+  min-height: 24px;
+  padding: 2px 5px;
+  font-family: inherit;
+  font-size: 0.75rem;
+}
+.debug-panel .segmented {
+  width: 100%;
+}
+.debug-panel .segmented button {
+  flex: 1;
+}
+.debug-timeline {
+  margin-top: 14px;
+}
+.debug-timeline > div {
+  min-height: 43px;
+  display: grid;
+  grid-template-columns: 20px 1fr auto;
+  gap: 6px;
+  align-items: center;
+  border-bottom: 1px solid var(--border);
+}
+.debug-timeline span {
+  font-size: 0.75rem;
+}
+.debug-timeline strong {
+  font-size: 0.75rem;
+  color: var(--muted);
+}
+.debug-context section {
+  margin: 14px 0;
+}
+.debug-context section > span {
+  color: var(--muted);
+  text-transform: none;
+  font-size: 0.75rem;
+  letter-spacing: normal;
+}
+.debug-context pre,
+.raw-json {
+  padding: 10px;
+  border-radius: 8px;
+  overflow: auto;
+  background: var(--sidebar);
+  color: var(--sidebar-text);
+  font-size: 0.75rem;
+  line-height: 1.6;
+}
+.evidence-summary {
+  display: grid;
+  grid-template-columns: repeat(5, 1fr);
+  gap: 6px;
+}
+.evidence-summary > div {
+  padding: 9px;
+  border-radius: 8px;
+  background: var(--surface-2);
+  display: flex;
+  flex-direction: column;
+}
+.evidence-summary span {
+  color: var(--muted);
+  font-size: 0.75rem;
+}
+.evidence-summary strong {
+  font-size: 1.125rem;
+}
+.evidence-list {
+  margin-top: 14px;
+}
+.evidence-list article {
+  display: grid;
+  grid-template-columns: 28px minmax(0, 1fr) auto;
+  gap: 9px;
+  padding: 12px 0;
+  border-bottom: 1px solid var(--border);
+}
+.evidence-path {
+  color: var(--muted);
+  font-size: 0.8125rem;
+}
+.evidence-rank {
+  width: 25px;
+  height: 25px;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  background: var(--surface-2);
+  color: var(--muted);
+  font-size: 0.75rem;
+}
+.evidence-list article > div:nth-child(2) {
+  display: grid;
+  gap: 4px;
+}
+.evidence-list strong {
+  font-size: 0.75rem;
+}
+.evidence-list p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.75rem;
+  line-height: 1.45;
+}
+.evidence-list article > span {
+  font-size: 0.75rem;
+  color: var(--muted);
+}
+.evidence-list article > button,
+.evidence-list article > a {
+  grid-column: 2 / -1;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  border: 0;
+  background: transparent;
+  color: var(--processing);
+  cursor: pointer;
+  font-size: 0.75rem;
+}
+.evidence-show-more {
+  width: 100%;
+  margin-top: 10px;
+}
+.evidence-truncated {
+  margin: 8px 0 0;
+  padding: 10px;
+  background: var(--surface-2);
+  color: var(--muted);
+  border-radius: 8px;
+  font-size: 0.75rem;
+  text-align: center;
+}
+
+@media (max-width: 1200px) {
+  .assistant-layout.has-debug,
+  .assistant-layout.is-rail-collapsed.has-debug {
+    grid-template-columns: 246px minmax(0, 1fr);
+  }
+  .assistant-layout.is-rail-collapsed.has-debug {
+    grid-template-columns: 58px minmax(0, 1fr);
+  }
+  /* The panel floats over the conversation here rather than taking a column,
+     so there is no boundary to drag. */
+  .panel-resizer {
+    display: none;
+  }
+  .debug-panel {
+    position: fixed;
+    z-index: 30;
+    right: 0;
+    top: var(--topbar-height);
+    bottom: 0;
+    width: 340px;
+    box-shadow: var(--shadow-md);
+  }
+}
+@media (max-width: 767px) {
+  .assistant-layout,
+  .assistant-layout.has-debug,
+  .assistant-layout.is-rail-collapsed,
+  .assistant-layout.is-rail-collapsed.has-debug {
+    grid-template-columns: 1fr;
+  }
+  .session-rail {
+    display: none;
+  }
+  .session-rail--embedded {
+    display: block;
+    padding: 0;
+    border: 0;
+    overflow: visible;
+    background: var(--surface);
+  }
+  .session-actions {
+    opacity: 1;
+  }
+  .mobile-session-trigger {
+    display: inline-flex;
+  }
+  .desktop-session-trigger {
+    display: none;
+  }
+  .chat-surface {
+    grid-column: 1;
+  }
+  .chat-header {
+    padding-inline: 12px;
+  }
+  .message-list {
+    padding: 22px 13px;
+  }
+  .message-body {
+    margin-left: 0;
+  }
+  .message-actions {
+    margin-left: 0;
+  }
+  .assistant-empty > div {
+    grid-template-columns: 1fr;
+  }
+  .composer {
+    width: calc(100% - 20px);
+    margin-bottom: 10px;
+  }
+  .debug-panel {
+    top: 0;
+    width: min(360px, 94vw);
+  }
+  .evidence-summary {
+    grid-template-columns: repeat(2, 1fr);
+  }
+}
+
+/*
+ * The renderer turns GFM tables into real table elements; without cell
+ * padding they read as touching words. The block/scroll wrapper above stays,
+ * the cells get borders and spacing from the theme tokens.
+ */
+.message-body th,
+.message-body td {
+  padding: 6px 10px;
+  border: 1px solid var(--border);
+  text-align: left;
+  vertical-align: top;
+}
+.message-body thead th {
+  background: var(--surface-sunken, var(--bg));
+  font-weight: 600;
+}

@@ -1,0 +1,111 @@
+# Git file -> IronRAG library routing.
+#
+# This file is also the complete routing schema reference. Object fields not
+# listed below are rejected. The only intentionally free-form keys are those
+# inside `match` and the kind names directly below `policies`.
+#
+# Canonical library reference
+# ---------------------------
+# Every `library` value is a required string in exactly this form:
+#
+#   <workspace-slug>/<library-slug>
+#
+# Use the workspace and library slugs shown by IronRAG, for example
+# `documentation/product-docs`. UUIDs, display names without the workspace,
+# extra `/` separators, and an empty segment are invalid. `workspace` is not a
+# separate routing key.
+#
+# Top-level schema
+# ----------------
+# `default`  optional mapping or null. Used when no rule matches. If it is
+#            omitted/null and no rule matches, that file is recorded as
+#            `unrouted` and skipped.
+#   `library` required canonical library-reference string.
+# `rules`    optional list, default `[]`. Rules are evaluated top to bottom;
+#            the first matching rule wins.
+#   `description` optional string or null, default null; used only in logs.
+#   `match`       required non-empty mapping of routing-fact key to expected
+#                 YAML value.
+#   `target`      required mapping.
+#     `library`   required canonical library-reference string.
+# `policies` optional mapping, default `{}`. Each key is a SourceItemRef.kind;
+#            this connector emits exactly one kind: `file`. The `file` mapping
+#            may be omitted. An individual policy field may be omitted or null;
+#            either inherits the corresponding DEFAULT_POLICY_* env var.
+#
+# Match semantics
+# ---------------
+# All entries in one `match` mapping are ANDed. Scalar/map facts use exact
+# equality; string equality is case-sensitive and is not a glob or regular
+# expression. If the actual fact is a YAML sequence, the expected value must
+# be one of its elements. A missing fact never matches. Rule order matters and
+# there is no rule merging: the first complete match wins.
+#
+# Facts emitted for every `file`
+# --------------------------------
+# `repo`    string: `repos[].name`.
+# `branch`  string: configured branch name.
+# `path`    string: complete repository-relative POSIX path.
+# `dir`     string: parent of `path`, or `""` for a root-level file.
+# `ext`     string: lowercase suffix without `.`, or `""` when absent.
+# `top_dir` string: first directory segment, or `""` for a root-level file.
+# `repo_url` string: remote URL; present only when the repo uses `url`, absent
+#            for `local_path` repos.
+# Any `repos[].facts` key is also emitted with its configured YAML value. Custom
+# facts are arbitrary and may be matched exactly; avoid reusing a built-in key,
+# because a custom fact with the same key replaces the generated value.
+#
+# Policy fields and accepted values
+# ---------------------------------
+# `on_new`               optional `create | skip`; framework default `create`.
+# `on_changed`           optional `replace | skip`; framework default `replace`.
+# `on_missing`           optional `delete | ignore`; framework default `delete`.
+# `on_duplicate_content` optional `skip | fail`; framework default `skip`.
+# Defaults above apply unless their DEFAULT_POLICY_* env vars are changed.
+
+default:
+  library: documentation/general
+
+rules:
+  - description: All files in one configured repository
+    match:
+      repo: docs-public
+    target:
+      library: documentation/product-docs
+
+  - description: API source files (both criteria must match)
+    match:
+      repo: api-server
+      top_dir: src
+    target:
+      library: engineering/api
+
+  - description: A value inside a list-valued custom fact
+    match:
+      audiences: developers
+    target:
+      library: documentation/developer-guides
+
+  - description: A custom scalar fact
+    match:
+      tier: production
+    target:
+      library: operations/production
+
+  - description: Root-level Markdown in a local checkout
+    match:
+      repo: local-playground
+      dir: ""
+      ext: md
+    target:
+      library: sandbox/notes
+
+# Only `file` is meaningful for this adapter. Every field is shown explicitly
+# here for discoverability; remove fields whose global defaults you want to
+# inherit.
+policies:
+  file:
+    on_new: create
+    on_changed: replace
+    on_missing: delete
+    on_duplicate_content: skip

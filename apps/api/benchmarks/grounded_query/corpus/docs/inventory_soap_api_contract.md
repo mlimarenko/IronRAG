@@ -1,8 +1,8 @@
 # Inventory SOAP API Contract
 
-The inventory integration surface is published as SOAP over HTTP and described by a canonical WSDL contract.
+The inventory integration surface is published as SOAP over HTTP and described by a authoritative WSDL contract.
 
-## Canonical WSDL
+## Authoritative WSDL
 
 - WSDL URL: `http://demo.local:8080/inventory-api/ws/inventory.wsdl`
 - Transport contract: SOAP messages over HTTP, described by WSDL.

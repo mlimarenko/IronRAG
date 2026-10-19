@@ -6,17 +6,25 @@ use serde::de::{Error as _, MapAccess, Visitor};
 use url::Url;
 use zeroize::Zeroize as _;
 
-use crate::domains::{
-    ai::AiBindingPurpose,
-    deployment::{
-        ContentStorageProvider, DependencyKind, DependencyMode, DeploymentTopology, ServiceRole,
-        StartupAuthorityMode,
+use crate::{
+    domains::{
+        ai::AiBindingPurpose,
+        deployment::{
+            ContentStorageProvider, DependencyKind, DependencyMode, DeploymentTopology,
+            ServiceRole, StartupAuthorityMode,
+        },
+        query::SemanticRerankMode,
+        recognition::{LibraryRecognitionPolicy, RecognitionEngine},
     },
-    query::SemanticRerankMode,
-    recognition::{LibraryRecognitionPolicy, RecognitionEngine},
+    shared::auth_tokens::is_well_formed_api_token,
 };
 
-const DEFAULT_UI_BOOTSTRAP_ADMIN_EMAIL_DOMAIN: &str = "ironrag.local";
+mod bootstrap;
+mod loading;
+mod validation;
+
+pub(crate) use validation::resolve_ingestion_graph_extract_parallelism;
+
 const DEFAULT_UI_BOOTSTRAP_ADMIN_NAME: &str = "Admin";
 const BOOTSTRAP_PROVIDER_API_KEYS_JSON_B64_ENV: &str = "IRONRAG_AI_PROVIDER_API_KEYS_JSON_B64";
 const MAX_BOOTSTRAP_PROVIDER_KIND_BYTES: usize = 128;
@@ -28,6 +36,45 @@ const MAX_BOOTSTRAP_PROVIDER_MAP_BASE64_BYTES: usize =
 pub const DEFAULT_RUNTIME_DIAGNOSTIC_PAYLOAD_BUDGET_BYTES: usize = 32_768;
 pub const DEFAULT_RUNTIME_POLICY_REASON_BUDGET_CHARS: usize = 2_000;
 const MIN_DATABASE_CONNECTIONS_PER_RUNTIME_REPLICA: u32 = 4;
+const DEFAULT_PROVIDER_CONCURRENCY_MAX_OUTBOUND: i64 = 16;
+const DEFAULT_PROVIDER_CONCURRENCY_QUERY_RESERVED: i64 = 4;
+const DEFAULT_PROVIDER_CONCURRENCY_ACQUIRE_TIMEOUT_MS: i64 = 30_000;
+const DEFAULT_PROVIDER_CONCURRENCY_REGISTRY_MAX_ENTRIES: i64 = 64;
+const DEFAULT_PROVIDER_CONCURRENCY_REGISTRY_IDLE_TTL_SECONDS: i64 = 900;
+const DEFAULT_PROVIDER_RATE_LIMIT_REQUESTS_PER_SECOND: i64 = 8;
+const DEFAULT_PROVIDER_RATE_LIMIT_BURST: i64 = 16;
+const DEFAULT_PROVIDER_RETRY_MAX_ATTEMPTS: i64 = 3;
+const DEFAULT_PROVIDER_RETRY_INITIAL_BACKOFF_MS: i64 = 200;
+const DEFAULT_PROVIDER_RETRY_MAX_BACKOFF_MS: i64 = 5_000;
+const MAX_PROVIDER_RETRY_ATTEMPTS: u32 = 10;
+const MAX_PROVIDER_RETRY_BACKOFF_MS: u64 = 300_000;
+const MAX_PROVIDER_RATE_LIMIT_REQUESTS_PER_SECOND: u32 = 100_000;
+const MAX_PROVIDER_RATE_LIMIT_BURST: u32 = 100_000;
+pub(crate) const INGEST_GRAPH_EXTRACT_WAITING_FACTOR: usize = 2;
+// Public-login rate limiting (IRG-80). Per-login is deliberately tighter than
+// per-source: a shared office/NAT egress IP legitimately carries several
+// different users' attempts, but no single account should need more than a
+// handful of login attempts per minute.
+const DEFAULT_LOGIN_RATE_LIMIT_PER_LOGIN_MAX_ATTEMPTS: i64 = 5;
+const DEFAULT_LOGIN_RATE_LIMIT_PER_LOGIN_WINDOW_SECONDS: i64 = 60;
+const DEFAULT_LOGIN_RATE_LIMIT_PER_SOURCE_MAX_ATTEMPTS: i64 = 20;
+const DEFAULT_LOGIN_RATE_LIMIT_PER_SOURCE_WINDOW_SECONDS: i64 = 60;
+const DEFAULT_LOGIN_RATE_LIMIT_MAX_CONCURRENT_VERIFICATIONS: i64 = 8;
+const DEFAULT_LOGIN_RATE_LIMIT_ADMISSION_QUEUE: i64 = 32;
+const DEFAULT_LOGIN_RATE_LIMIT_ADMISSION_TIMEOUT_MS: i64 = 500;
+const DEFAULT_LOGIN_RATE_LIMIT_REGISTRY_MAX_ENTRIES: i64 = 10_000;
+const DEFAULT_LOGIN_RATE_LIMIT_REGISTRY_IDLE_TTL_SECONDS: i64 = 600;
+const MAX_LOGIN_RATE_LIMIT_MAX_ATTEMPTS: u32 = 100_000;
+// One owned proxy appends to X-Forwarded-For in the canonical deployment:
+// the bundled web nginx in front of the API. An ingress gateway ahead of it
+// is a second hop and must be configured explicitly per deployment.
+const DEFAULT_LOGIN_RATE_LIMIT_TRUSTED_PROXY_HOPS: i64 = 1;
+const MAX_LOGIN_RATE_LIMIT_TRUSTED_PROXY_HOPS: u32 = 8;
+pub(crate) const OIDC_CALLBACK_PATH: &str = "/v1/iam/oidc/callback";
+const MAX_OIDC_ISSUER_URL_BYTES: usize = 2_048;
+const MAX_OIDC_CLIENT_ID_BYTES: usize = 512;
+const MAX_OIDC_REQUIRED_GROUP_BYTES: usize = 512;
+const MAX_OIDC_BOOTSTRAP_SUBJECT_BYTES: usize = 1_024;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RuntimeHookBehavior {
@@ -113,12 +160,12 @@ pub struct PublicOriginSettings {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
-struct CanonicalHttpOrigin(String);
+struct NormalizedHttpOrigin(String);
 
-impl CanonicalHttpOrigin {
+impl NormalizedHttpOrigin {
     fn parse(raw: &str) -> Result<Self, String> {
         if raw.is_empty() || raw != raw.trim() {
-            return Err("origin must be a non-empty canonical value".into());
+            return Err("origin must be a non-empty normalized value".into());
         }
         let parsed = Url::parse(raw).map_err(|_| "origin must be an absolute HTTP URL")?;
         if !matches!(parsed.scheme(), "http" | "https")
@@ -131,42 +178,42 @@ impl CanonicalHttpOrigin {
         {
             return Err("origin must contain only an HTTP scheme, host, and optional port".into());
         }
-        let canonical = parsed.origin().ascii_serialization();
-        if canonical != raw {
-            return Err("origin must use its exact canonical ASCII serialization".into());
+        let normalized_origin = parsed.origin().ascii_serialization();
+        if normalized_origin != raw {
+            return Err("origin must use its exact ASCII serialization".into());
         }
-        Ok(Self(canonical))
+        Ok(Self(normalized_origin))
     }
 }
 
 /// Exact allowlist for the MCP Streamable HTTP `Origin` security boundary.
 ///
 /// Absence of the header is handled by the transport middleware so native MCP
-/// clients remain valid. Any present value must parse to one canonical HTTP
+/// clients remain valid. Any present value must parse to one primary HTTP
 /// origin and match this typed set exactly.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct McpHttpOriginPolicy {
-    allowed_origins: BTreeSet<CanonicalHttpOrigin>,
+    allowed_origins: BTreeSet<NormalizedHttpOrigin>,
 }
 
 impl McpHttpOriginPolicy {
     pub(crate) fn try_from_origins<'a>(
         allowed_origins: impl IntoIterator<Item = &'a str>,
-        canonical_public_origin: Option<&'a str>,
+        api_public_origin: Option<&'a str>,
     ) -> Result<Self, String> {
         let mut parsed_origins = BTreeSet::new();
-        for raw in allowed_origins.into_iter().chain(canonical_public_origin) {
+        for raw in allowed_origins.into_iter().chain(api_public_origin) {
             if raw.is_empty() {
                 continue;
             }
-            parsed_origins.insert(CanonicalHttpOrigin::parse(raw)?);
+            parsed_origins.insert(NormalizedHttpOrigin::parse(raw)?);
         }
         Ok(Self { allowed_origins: parsed_origins })
     }
 
     #[must_use]
     pub(crate) fn allows(&self, raw: &str) -> bool {
-        CanonicalHttpOrigin::parse(raw)
+        NormalizedHttpOrigin::parse(raw)
             .ok()
             .is_some_and(|origin| self.allowed_origins.contains(&origin))
     }
@@ -177,16 +224,56 @@ pub struct DestructiveFreshBootstrapSettings {
     pub required: bool,
 }
 
+/// Validated OpenID Connect runtime settings.
+///
+/// The client secret remains here, rather than in [`Settings`], after the
+/// application state is built. Its custom `Debug` implementation ensures a
+/// configuration dump cannot accidentally disclose it.
+#[derive(PartialEq, Eq)]
+pub struct OidcSettings {
+    pub issuer_url: String,
+    pub client_id: String,
+    pub client_secret: String,
+    pub redirect_url: String,
+    pub required_group: String,
+    pub bootstrap_admin_subject: Option<String>,
+}
+
+impl std::fmt::Debug for OidcSettings {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("OidcSettings")
+            .field("issuer_url", &self.issuer_url)
+            .field("client_id", &self.client_id)
+            .field("client_secret", &"<redacted>")
+            .field("redirect_url", &self.redirect_url)
+            .field("required_group", &self.required_group)
+            .field(
+                "bootstrap_admin_subject",
+                &self.bootstrap_admin_subject.as_ref().map(|_| "<redacted>"),
+            )
+            .finish()
+    }
+}
+
+impl Drop for OidcSettings {
+    fn drop(&mut self) {
+        self.client_secret.zeroize();
+    }
+}
+
 #[derive(Clone, Deserialize, utoipa::ToSchema)]
 pub struct Settings {
     pub bind_addr: String,
     pub service_role: String,
     pub database_url: String,
+    pub database_tls_leaf_certificate: Option<String>,
     pub database_max_connections: u32,
     pub api_replicas: usize,
     pub worker_replicas: usize,
     pub knowledge_plane_backend: String,
     pub redis_url: String,
+    pub redis_tls_leaf_certificate: Option<String>,
     pub service_name: String,
     pub environment: String,
     pub log_filter: String,
@@ -196,16 +283,12 @@ pub struct Settings {
     /// duplicate `/v1`; paths in the contract already start with `/v1/`). Env: `IRONRAG_OPENAPI_PUBLIC_ORIGIN`.
     pub openapi_public_origin: Option<String>,
     /// Dedicated encryption key for credentials persisted in `PostgreSQL`.
-    /// Must be canonical standard-base64 for exactly 32 random bytes.
+    /// Must be strict standard-base64 for exactly 32 random bytes.
     pub credential_master_key: Option<String>,
     /// Identifier embedded and authenticated in newly encrypted v3 envelopes.
     pub credential_master_key_id: Option<String>,
     /// Sorted `key-id=base64-key` map used only to decrypt and rewrap old values.
     pub credential_previous_master_keys: Option<String>,
-    /// Explicit second phase of the dual-read-first rollout. While false,
-    /// credential-bearing create/update operations fail closed so older pods
-    /// can overlap this release without receiving ciphertext as plaintext.
-    pub credential_encryption_write_enabled: bool,
     pub ui_session_secret: String,
     pub ui_default_locale: String,
     pub ui_bootstrap_admin_login: Option<String>,
@@ -213,6 +296,15 @@ pub struct Settings {
     pub ui_bootstrap_admin_name: Option<String>,
     pub ui_bootstrap_admin_password: Option<String>,
     pub ui_bootstrap_admin_api_token: Option<String>,
+    /// OpenID Connect issuer. OIDC is disabled only when all OIDC core fields
+    /// are absent; partial configuration is rejected at startup.
+    pub oidc_issuer_url: Option<String>,
+    pub oidc_client_id: Option<String>,
+    pub oidc_client_secret: Option<String>,
+    pub oidc_redirect_url: Option<String>,
+    pub oidc_required_group: Option<String>,
+    /// Stable OIDC `sub` which receives `admin` only at first provisioning.
+    pub oidc_bootstrap_admin_subject: Option<String>,
     pub ui_bootstrap_extract_text_provider_kind: Option<String>,
     pub ui_bootstrap_extract_text_model_name: Option<String>,
     pub ui_bootstrap_extract_graph_provider_kind: Option<String>,
@@ -225,7 +317,12 @@ pub struct Settings {
     pub ui_bootstrap_query_answer_model_name: Option<String>,
     pub ui_bootstrap_agent_provider_kind: Option<String>,
     pub ui_bootstrap_agent_model_name: Option<String>,
-    pub ui_session_ttl_hours: u64,
+    /// Sliding inactivity window: a session dies this many hours after its
+    /// last authenticated request.
+    pub ui_session_idle_ttl_hours: u64,
+    /// Absolute cap: a session dies this many hours after sign-in no matter
+    /// how much it was used.
+    pub ui_session_absolute_ttl_hours: u64,
     pub upload_max_size_mb: u64,
     pub recognition_default_raster_image_engine: String,
     pub startup_authority_mode: String,
@@ -274,6 +371,9 @@ pub struct Settings {
     /// A leased row whose heartbeat is older than this is returned to
     /// `pending` so a healthy scheduler can pick it up again.
     pub maintenance_stale_lease_seconds: u64,
+    /// A (class, scope) row is still scheduled at least this often even when
+    /// the library's source generation has not advanced (safety full pass).
+    pub maintenance_full_pass_interval_seconds: u64,
     /// Number of embedding batches sent in parallel within one job.
     /// Each batch contains `EMBEDDING_BATCH_SIZE` inputs. Higher values speed up
     /// long documents but may hit provider rate limits.
@@ -361,953 +461,59 @@ pub struct Settings {
     pub provider_concurrency_registry_max_entries: usize,
     /// Idle registry entry retention before eviction.
     pub provider_concurrency_registry_idle_ttl_seconds: u64,
-}
-
-impl Settings {
-    /// Loads application settings from canonical `IRONRAG_*` environment variables with defaults.
-    ///
-    /// # Errors
-    /// Returns a [`config::ConfigError`] if configuration defaults cannot be built
-    /// or environment values fail deserialization.
-    pub fn from_env() -> Result<Self, config::ConfigError> {
-        let cfg = settings_config_builder()?
-            .add_source(config::Environment::with_prefix("IRONRAG").separator("__"))
-            .add_source(
-                config::Environment::with_prefix("IRONRAG").prefix_separator("_").separator("__"),
-            )
-            .build()?;
-
-        let mut settings: Self = cfg.try_deserialize()?;
-        settings.service_role = settings.service_role.trim().to_ascii_lowercase();
-        settings.startup_authority_mode =
-            settings.startup_authority_mode.trim().to_ascii_lowercase();
-        settings.dependency_postgres_mode =
-            settings.dependency_postgres_mode.trim().to_ascii_lowercase();
-        settings.dependency_redis_mode = settings.dependency_redis_mode.trim().to_ascii_lowercase();
-        settings.knowledge_plane_backend =
-            settings.knowledge_plane_backend.trim().to_ascii_lowercase();
-        settings.dependency_object_storage_mode =
-            settings.dependency_object_storage_mode.trim().to_ascii_lowercase();
-        settings.content_storage_provider =
-            settings.content_storage_provider.trim().to_ascii_lowercase();
-        settings.content_storage_topology =
-            settings.content_storage_topology.trim().to_ascii_lowercase();
-        settings.service_name = settings.service_name.trim().to_string();
-        settings.release_check_repository = settings.release_check_repository.trim().to_string();
-        // Validate the dynamic secret namespace at the startup boundary. The
-        // returned values are immediately dropped (and zeroized); operations
-        // that need them read the environment again for the shortest possible
-        // plaintext lifetime.
-        read_bootstrap_provider_api_keys_from_env().map_err(config::ConfigError::Message)?;
-        if settings.credential_master_key.as_deref() == Some("") {
-            settings.credential_master_key = None;
-        }
-        if settings.credential_master_key_id.as_deref() == Some("") {
-            settings.credential_master_key_id = None;
-        }
-        if settings.credential_previous_master_keys.as_deref() == Some("") {
-            settings.credential_previous_master_keys = None;
-        }
-        validate_service_role(&settings).map_err(config::ConfigError::Message)?;
-        validate_startup_authority_mode(&settings).map_err(config::ConfigError::Message)?;
-        validate_dependency_modes(&settings).map_err(config::ConfigError::Message)?;
-        validate_database_settings(&settings).map_err(config::ConfigError::Message)?;
-        validate_knowledge_plane_backend(&settings).map_err(config::ConfigError::Message)?;
-        validate_content_storage_settings(&settings).map_err(config::ConfigError::Message)?;
-        validate_service_name(&settings).map_err(config::ConfigError::Message)?;
-        settings.mcp_http_origin_policy().map_err(config::ConfigError::Message)?;
-        validate_ingestion_settings(&settings).map_err(config::ConfigError::Message)?;
-        validate_provider_concurrency_settings(&settings).map_err(config::ConfigError::Message)?;
-        validate_recognition_settings(&settings).map_err(config::ConfigError::Message)?;
-        validate_runtime_agent_settings(&settings).map_err(config::ConfigError::Message)?;
-        validate_query_rerank_settings(&settings).map_err(config::ConfigError::Message)?;
-        validate_release_monitor_settings(&settings).map_err(config::ConfigError::Message)?;
-        validate_graph_gc_settings(&settings).map_err(config::ConfigError::Message)?;
-        validate_mcp_memory_settings(&settings).map_err(config::ConfigError::Message)?;
-        if let Err(message) = validate_credential_master_key(&settings) {
-            settings.discard_credential_master_key();
-            return Err(config::ConfigError::Message(message));
-        }
-
-        Ok(settings)
-    }
-
-    /// Removes and zeroizes raw credential key configuration when a process
-    /// only needs non-secret settings (for example, database-only admin
-    /// commands).
-    pub fn discard_credential_master_key(&mut self) {
-        if let Some(mut encoded_master_key) = self.credential_master_key.take() {
-            encoded_master_key.zeroize();
-        }
-        if let Some(mut encoded_previous_keys) = self.credential_previous_master_keys.take() {
-            encoded_previous_keys.zeroize();
-        }
-        self.credential_master_key_id = None;
-    }
-
-    /// Removes plaintext bootstrap administrator credentials after the
-    /// startup-only owner has been prepared.
-    ///
-    /// Login, email and display name are not credentials and remain available
-    /// for diagnostics. Password and API-token buffers are zeroized before the
-    /// retained settings value can be cloned into application state.
-    pub fn discard_ui_bootstrap_admin_secrets(&mut self) {
-        if let Some(mut password) = self.ui_bootstrap_admin_password.take() {
-            password.zeroize();
-        }
-        if let Some(mut api_token) = self.ui_bootstrap_admin_api_token.take() {
-            api_token.zeroize();
-        }
-    }
-
-    #[must_use]
-    pub const fn runtime_hook_behavior(&self) -> RuntimeHookBehavior {
-        RuntimeHookBehavior::ObserveOnly
-    }
-
-    #[must_use]
-    pub const fn runtime_maximum_diagnostic_payload_bytes(&self) -> usize {
-        self.runtime_trace_payload_budget_bytes
-    }
-
-    #[must_use]
-    pub fn bootstrap_settings(&self) -> BootstrapSettings {
-        BootstrapSettings { ui_bootstrap_admin: self.resolved_ui_bootstrap_admin() }
-    }
-
-    #[must_use]
-    pub fn public_origin_settings(&self) -> PublicOriginSettings {
-        let allowed_origins = self
-            .frontend_origin
-            .split(',')
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .map(std::string::ToString::to_string)
-            .collect::<Vec<_>>();
-        PublicOriginSettings {
-            raw_frontend_origin: self.frontend_origin.clone(),
-            session_cookie_secure: allowed_origins.iter().any(|origin| {
-                origin.get(..8).is_some_and(|prefix| prefix.eq_ignore_ascii_case("https://"))
-            }),
-            allowed_origins,
-        }
-    }
-
-    pub(crate) fn mcp_http_origin_policy(&self) -> Result<McpHttpOriginPolicy, String> {
-        let frontend_origins =
-            self.frontend_origin.split(',').map(str::trim).filter(|origin| !origin.is_empty());
-        let canonical_public_origin = self
-            .openapi_public_origin
-            .as_deref()
-            .map(str::trim)
-            .filter(|origin| !origin.is_empty());
-        McpHttpOriginPolicy::try_from_origins(frontend_origins, canonical_public_origin).map_err(
-            |reason| format!(
-                "frontend_origin and openapi_public_origin must contain canonical HTTP origins: {reason}"
-            ),
-        )
-    }
-
-    #[must_use]
-    pub fn default_recognition_policy(&self) -> LibraryRecognitionPolicy {
-        // validated at startup; parse failure here is a programming error.
-        #[allow(
-            clippy::expect_used,
-            reason = "startup validation guarantees the configured recognition engine parses"
-        )]
-        let raster_image_engine = self
-            .recognition_default_raster_image_engine
-            .parse::<RecognitionEngine>()
-            .expect("recognition_default_raster_image_engine must be validated before use");
-        LibraryRecognitionPolicy { raster_image_engine }
-    }
-
-    #[must_use]
-    pub const fn destructive_fresh_bootstrap_settings(&self) -> DestructiveFreshBootstrapSettings {
-        DestructiveFreshBootstrapSettings { required: self.destructive_fresh_bootstrap_required }
-    }
-
-    #[must_use]
-    pub fn resolved_ui_bootstrap_admin(&self) -> Option<UiBootstrapAdmin> {
-        let login = self
-            .ui_bootstrap_admin_login
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .map(str::to_lowercase)?;
-        let password = self
-            .ui_bootstrap_admin_password
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .map(std::string::ToString::to_string)?;
-        let email = self
-            .ui_bootstrap_admin_email
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .map_or_else(
-                || format!("{login}@{DEFAULT_UI_BOOTSTRAP_ADMIN_EMAIL_DOMAIN}"),
-                str::to_lowercase,
-            );
-        let display_name = self
-            .ui_bootstrap_admin_name
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .map_or_else(
-                || DEFAULT_UI_BOOTSTRAP_ADMIN_NAME.to_string(),
-                std::string::ToString::to_string,
-            );
-        let api_token = self
-            .ui_bootstrap_admin_api_token
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .map(std::string::ToString::to_string);
-
-        Some(UiBootstrapAdmin { login, email, display_name, password, api_token })
-    }
-
-    #[must_use]
-    pub fn resolved_ui_bootstrap_ai_setup(&self) -> Option<UiBootstrapAiSetup> {
-        // Settings::from_env validates this namespace before AppState exists.
-        // If a test or embedding mutates the process environment afterwards,
-        // fail closed by exposing no dynamic credentials.
-        let provider_secrets = read_bootstrap_provider_api_keys_from_env().unwrap_or_default();
-
-        let binding_defaults = [
-            resolved_ui_bootstrap_ai_binding_default(
-                AiBindingPurpose::ExtractText,
-                self.ui_bootstrap_extract_text_provider_kind.as_deref(),
-                self.ui_bootstrap_extract_text_model_name.as_deref(),
-            ),
-            resolved_ui_bootstrap_ai_binding_default(
-                AiBindingPurpose::ExtractGraph,
-                self.ui_bootstrap_extract_graph_provider_kind.as_deref(),
-                self.ui_bootstrap_extract_graph_model_name.as_deref(),
-            ),
-            resolved_ui_bootstrap_ai_binding_default(
-                AiBindingPurpose::EmbedChunk,
-                self.ui_bootstrap_embed_chunk_provider_kind.as_deref(),
-                self.ui_bootstrap_embed_chunk_model_name.as_deref(),
-            ),
-            resolved_ui_bootstrap_ai_binding_default(
-                AiBindingPurpose::QueryCompile,
-                self.ui_bootstrap_query_compile_provider_kind.as_deref(),
-                self.ui_bootstrap_query_compile_model_name.as_deref(),
-            ),
-            resolved_ui_bootstrap_ai_binding_default(
-                AiBindingPurpose::QueryAnswer,
-                self.ui_bootstrap_query_answer_provider_kind.as_deref(),
-                self.ui_bootstrap_query_answer_model_name.as_deref(),
-            ),
-            resolved_ui_bootstrap_ai_binding_default(
-                AiBindingPurpose::Agent,
-                self.ui_bootstrap_agent_provider_kind.as_deref(),
-                self.ui_bootstrap_agent_model_name.as_deref(),
-            ),
-        ]
-        .into_iter()
-        .flatten()
-        .collect::<Vec<_>>();
-
-        if provider_secrets.is_empty() && binding_defaults.is_empty() {
-            None
-        } else {
-            Some(UiBootstrapAiSetup { provider_secrets, binding_defaults })
-        }
-    }
-
-    #[must_use]
-    pub fn has_explicit_ui_bootstrap_admin(&self) -> bool {
-        self.resolved_ui_bootstrap_admin().is_some()
-    }
-
-    #[must_use]
-    pub fn runs_http_api(&self) -> bool {
-        self.service_role_kind().ok() == Some(ServiceRole::Api)
-    }
-
-    #[must_use]
-    pub fn runs_probe_http_api(&self) -> bool {
-        self.service_role_kind().ok() == Some(ServiceRole::Worker)
-    }
-
-    #[must_use]
-    pub fn runs_ingestion_workers(&self) -> bool {
-        self.service_role_kind().ok() == Some(ServiceRole::Worker)
-    }
-
-    #[must_use]
-    pub fn runs_startup_authority(&self) -> bool {
-        self.service_role_kind().ok() == Some(ServiceRole::Startup)
-    }
-
-    /// `true` when this process should host the maintenance scheduler:
-    /// it runs in the worker role AND the kill switch is set.
-    #[must_use]
-    pub fn runs_maintenance_scheduler(&self) -> bool {
-        self.maintenance_enabled
-            && self.service_role_kind().ok().is_some_and(ServiceRole::runs_maintenance_scheduler)
-    }
-
-    pub fn service_role_kind(&self) -> Result<ServiceRole, String> {
-        self.service_role.parse()
-    }
-
-    pub fn startup_authority_mode_kind(&self) -> Result<StartupAuthorityMode, String> {
-        self.startup_authority_mode.parse()
-    }
-
-    pub fn content_storage_provider_kind(&self) -> Result<ContentStorageProvider, String> {
-        self.content_storage_provider.parse()
-    }
-
-    pub fn content_storage_topology_kind(&self) -> Result<DeploymentTopology, String> {
-        self.content_storage_topology.parse()
-    }
-
-    pub fn dependency_mode(&self, kind: DependencyKind) -> Result<DependencyMode, String> {
-        match kind {
-            DependencyKind::Postgres => self.dependency_postgres_mode.parse(),
-            DependencyKind::Redis => self.dependency_redis_mode.parse(),
-            DependencyKind::ObjectStorage => self.dependency_object_storage_mode.parse(),
-        }
-    }
-}
-
-fn validate_credential_master_key(settings: &Settings) -> Result<(), String> {
-    if settings.credential_encryption_write_enabled
-        && settings.credential_master_key.as_deref().is_none_or(str::is_empty)
-    {
-        return Err(
-            "IRONRAG_CREDENTIAL_MASTER_KEY is required when IRONRAG_CREDENTIAL_ENCRYPTION_WRITE_ENABLED=true"
-                .to_string(),
-        );
-    }
-    crate::shared::secret_encryption::CredentialCipher::from_keyring_base64(
-        settings.credential_master_key_id.as_deref(),
-        settings.credential_master_key.as_deref(),
-        settings.credential_previous_master_keys.as_deref(),
-    )
-    .map(|_| ())
-    .map_err(|_| {
-        "IRONRAG_CREDENTIAL_MASTER_KEY, IRONRAG_CREDENTIAL_MASTER_KEY_ID and IRONRAG_CREDENTIAL_PREVIOUS_MASTER_KEYS must define a canonical bounded credential keyring"
-            .to_string()
-    })
-}
-
-fn settings_config_builder()
--> Result<config::ConfigBuilder<config::builder::DefaultState>, config::ConfigError> {
-    config::Config::builder()
-        .set_default("bind_addr", "0.0.0.0:8080")?
-        .set_default("service_role", "api")?
-        .set_default("service_name", "ironrag-backend")?
-        .set_default("environment", "local")?
-        .set_default("database_url", "postgres://postgres:postgres@127.0.0.1:5432/ironrag")?
-        .set_default("database_max_connections", 20)?
-        .set_default("api_replicas", 1)?
-        .set_default("worker_replicas", 1)?
-        .set_default("knowledge_plane_backend", "postgres")?
-        .set_default("redis_url", "redis://127.0.0.1:6379")?
-        .set_default("log_filter", "info")?
-        .set_default("destructive_fresh_bootstrap_required", false)?
-        .set_default("frontend_origin", "http://127.0.0.1:19000,http://localhost:19000")?
-        .set_default("credential_encryption_write_enabled", false)?
-        .set_default("ui_session_secret", "local-ui-session-secret")?
-        .set_default("ui_default_locale", "ru")?
-        .set_default("ui_session_ttl_hours", 720)?
-        .set_default("upload_max_size_mb", 50)?
-        .set_default("recognition_default_raster_image_engine", "vision")?
-        .set_default("startup_authority_mode", "not_required")?
-        .set_default("dependency_postgres_mode", "external")?
-        .set_default("dependency_redis_mode", "external")?
-        .set_default("dependency_object_storage_mode", "disabled")?
-        .set_default("content_storage_provider", "filesystem")?
-        .set_default("content_storage_topology", "single_node")?
-        .set_default("content_storage_key_prefix", "")?
-        .set_default("content_storage_root", "/var/lib/ironrag/content-storage")?
-        .set_default("content_storage_s3_region", "us-east-1")?
-        .set_default("content_storage_s3_force_path_style", true)?
-        .set_default("ingestion_max_parallel_jobs_global", 64)?
-        .set_default("ingestion_max_parallel_jobs_per_workspace", 16)?
-        .set_default("ingestion_max_parallel_jobs_per_library", 4)?
-        .set_default("ingestion_memory_soft_limit_mib", 0)?
-        .set_default("ingestion_worker_lease_seconds", 300)?
-        .set_default("ingestion_worker_heartbeat_interval_seconds", 15)?
-        .set_default("maintenance_enabled", true)?
-        .set_default("maintenance_tick_interval_seconds", 30)?
-        .set_default("maintenance_class_interval_seconds", 3600)?
-        .set_default("maintenance_stale_lease_seconds", 300)?
-        .set_default("ingestion_embedding_parallelism", 8)?
-        .set_default("ingestion_graph_extract_parallelism_per_doc", 16)?
-        .set_default("web_ingest_http_timeout_seconds", 20)?
-        .set_default("web_ingest_max_redirects", 10)?
-        .set_default("web_ingest_user_agent", "IronRAG-WebIngest/0.1")?
-        .set_default("web_ingest_crawl_concurrency", 4)?
-        .set_default("llm_http_timeout_seconds", 120)?
-        .set_default("provider_concurrency_max_outbound", 16)?
-        .set_default("provider_concurrency_query_reserved", 4)?
-        .set_default("provider_concurrency_acquire_timeout_ms", 30_000)?
-        .set_default("provider_concurrency_registry_max_entries", 64)?
-        .set_default("provider_concurrency_registry_idle_ttl_seconds", 900)?
-        .set_default("runtime_agent_max_turns", 4)?
-        .set_default("runtime_agent_max_parallel_actions", 4)?
-        .set_default(
-            "runtime_trace_payload_budget_bytes",
-            DEFAULT_RUNTIME_DIAGNOSTIC_PAYLOAD_BUDGET_BYTES as i64,
-        )?
-        .set_default(
-            "runtime_policy_reason_budget_chars",
-            DEFAULT_RUNTIME_POLICY_REASON_BUDGET_CHARS as i64,
-        )?
-        .set_default("query_intent_cache_ttl_hours", 24)?
-        .set_default("query_intent_cache_max_entries_per_library", 500)?
-        .set_default("release_check_repository", "mlimarenko/IronRAG")?
-        .set_default("release_check_interval_hours", 12)?
-        .set_default("graph_gc_hours", 24)?
-        .set_default("query_rerank_enabled", true)?
-        .set_default("query_rerank_candidate_limit", 24)?
-        .set_default("query_semantic_rerank_mode", "off")?
-        .set_default("query_semantic_rerank_timeout_ms", 1_500)?
-        .set_default("query_semantic_rerank_candidate_limit", 16)?
-        .set_default("query_semantic_rerank_candidate_text_chars", 1_200)?
-        .set_default("query_semantic_rerank_total_text_chars", 18_000)?
-        .set_default("query_balanced_context_enabled", true)?
-        .set_default("runtime_graph_extract_recovery_enabled", true)?
-        .set_default("runtime_graph_extract_recovery_max_attempts", 4)?
-        .set_default("runtime_graph_extract_idle_timeout_seconds", 300)?
-        .set_default("runtime_graph_extract_stage_timeout_seconds", 1800)?
-        .set_default("runtime_graph_extract_resume_downgrade_level_one_after_replays", 3)?
-        .set_default("runtime_graph_extract_resume_downgrade_level_two_after_replays", 5)?
-        .set_default("runtime_graph_summary_refresh_batch_size", 64)?
-        .set_default("runtime_graph_targeted_reconciliation_enabled", true)?
-        .set_default("runtime_graph_targeted_reconciliation_max_targets", 128)?
-        // Activity freshness window must be wider than the worker's heartbeat
-        // interval (`CANONICAL_HEARTBEAT_INTERVAL = 15s`) by a comfortable
-        // margin, otherwise the UI flips to "stalled" every time a heartbeat
-        // is briefly delayed by DB lock contention from many parallel
-        // attempts hitting `touch_attempt_heartbeat`. 90s = 6× heartbeat,
-        // matched to the dispatcher's `active_leases` freshness window so
-        // all three thresholds (worker heartbeat, dispatcher count, UI
-        // stalled flag) agree on the same definition of "this lease is
-        // alive".
-        .set_default("runtime_document_activity_freshness_seconds", 90)?
-        .set_default("runtime_document_stalled_after_seconds", 240)?
-        .set_default("runtime_graph_filter_empty_relations", true)?
-        .set_default("runtime_graph_filter_degenerate_self_loops", true)?
-        .set_default("runtime_graph_convergence_warning_backlog_threshold", 1)?
-        .set_default("runtime_graph_projection_prewarm_enabled", false)?
-        .set_default("runtime_graph_projection_prewarm_max_libraries", 0)?
-        .set_default("mcp_memory_default_read_window_chars", 48_000)?
-        .set_default("mcp_memory_max_read_window_chars", 192_000)?
-        .set_default("mcp_memory_default_search_limit", 10)?
-        .set_default("mcp_memory_max_search_limit", 25)?
-        .set_default("mcp_memory_idempotency_retention_hours", 72)?
-        .set_default("mcp_memory_audit_enabled", true)?
-        .set_default("chunking_max_chars", 2800)?
-        .set_default("chunking_overlap_chars", 280)
-}
-
-fn validate_service_role(settings: &Settings) -> Result<(), String> {
-    settings.service_role.parse::<ServiceRole>().map(|_| ())
-}
-
-fn validate_startup_authority_mode(settings: &Settings) -> Result<(), String> {
-    settings.startup_authority_mode.parse::<StartupAuthorityMode>().map(|_| ())
-}
-
-fn validate_dependency_modes(settings: &Settings) -> Result<(), String> {
-    for kind in [DependencyKind::Postgres, DependencyKind::Redis, DependencyKind::ObjectStorage] {
-        let mode = settings.dependency_mode(kind)?;
-        if matches!(kind, DependencyKind::Postgres | DependencyKind::Redis)
-            && matches!(mode, DependencyMode::Disabled)
-        {
-            return Err(format!("{} must not use disabled mode", kind.as_str()));
-        }
-    }
-    Ok(())
-}
-
-fn validate_database_settings(settings: &Settings) -> Result<(), String> {
-    let runtime_replicas = settings.api_replicas.saturating_add(settings.worker_replicas);
-    if settings.runs_http_api() && settings.api_replicas == 0 {
-        return Err("api_replicas must be at least 1 when service_role=api".into());
-    }
-    if settings.runs_ingestion_workers() && settings.worker_replicas == 0 {
-        return Err("worker_replicas must be at least 1 when service_role=worker".into());
-    }
-    if runtime_replicas == 0 {
-        return Err("api_replicas and worker_replicas must not both be zero".into());
-    }
-
-    let runtime_replicas = u32::try_from(runtime_replicas).unwrap_or(u32::MAX);
-    let minimum_budget =
-        MIN_DATABASE_CONNECTIONS_PER_RUNTIME_REPLICA.saturating_mul(runtime_replicas);
-    if settings.database_max_connections < minimum_budget {
-        return Err(format!(
-            "database_max_connections must be at least {minimum_budget} for api_replicas={} and worker_replicas={}",
-            settings.api_replicas, settings.worker_replicas
-        ));
-    }
-    Ok(())
-}
-
-fn validate_knowledge_plane_backend(settings: &Settings) -> Result<(), String> {
-    match settings.knowledge_plane_backend.as_str() {
-        "postgres" => Ok(()),
-        _ => Err("knowledge_plane_backend must be postgres".into()),
-    }
-}
-
-fn validate_content_storage_settings(settings: &Settings) -> Result<(), String> {
-    let provider = settings.content_storage_provider_kind()?;
-    let topology = settings.content_storage_topology_kind()?;
-    if settings.content_storage_key_prefix.trim().contains("..") {
-        return Err("content_storage_key_prefix must not contain '..'".into());
-    }
-
-    match provider {
-        ContentStorageProvider::Filesystem => {
-            if settings.content_storage_root.trim().is_empty() {
-                return Err("content_storage_root must not be empty".into());
-            }
-            if !matches!(topology, DeploymentTopology::SingleNode) {
-                return Err(
-                    "filesystem storage is supported only with content_storage_topology=single_node"
-                        .into(),
-                );
-            }
-            if !matches!(
-                settings.dependency_mode(DependencyKind::ObjectStorage)?,
-                DependencyMode::Disabled
-            ) {
-                return Err(
-                    "dependency_object_storage_mode must be disabled when content_storage_provider=filesystem"
-                        .into(),
-                );
-            }
-        }
-        ContentStorageProvider::S3 => {
-            if matches!(
-                settings.dependency_mode(DependencyKind::ObjectStorage)?,
-                DependencyMode::Disabled
-            ) {
-                return Err(
-                    "dependency_object_storage_mode must be bundled or external when content_storage_provider=s3"
-                        .into(),
-                );
-            }
-            for (field, value) in [
-                ("content_storage_s3_bucket", settings.content_storage_s3_bucket.as_deref()),
-                ("content_storage_s3_endpoint", settings.content_storage_s3_endpoint.as_deref()),
-                (
-                    "content_storage_s3_access_key_id",
-                    settings.content_storage_s3_access_key_id.as_deref(),
-                ),
-                (
-                    "content_storage_s3_secret_access_key",
-                    settings.content_storage_s3_secret_access_key.as_deref(),
-                ),
-            ] {
-                if value.map(str::trim).as_ref().is_none_or(|item| item.is_empty()) {
-                    return Err(format!(
-                        "{field} must not be empty when content_storage_provider=s3"
-                    ));
-                }
-            }
-        }
-    }
-
-    Ok(())
-}
-
-fn validate_service_name(settings: &Settings) -> Result<(), String> {
-    let value = settings.service_name.as_str();
-    if value.is_empty() {
-        return Err("service_name must not be empty".into());
-    }
-    if value
-        .bytes()
-        .any(|byte| !matches!(byte, b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'.' | b'_' | b'-'))
-    {
-        return Err("service_name must contain only ASCII letters, digits, '.', '_' or '-'".into());
-    }
-    Ok(())
-}
-
-fn read_bootstrap_provider_api_keys_from_env() -> Result<Vec<UiBootstrapAiProviderSecret>, String> {
-    let mut removed_names = std::env::vars_os()
-        .filter_map(|(name, _)| name.into_string().ok())
-        .filter(|name| is_removed_provider_api_key_env_name(name))
-        .collect::<Vec<_>>();
-    removed_names.sort_unstable();
-    if let Some(removed_name) = removed_names.first() {
-        return Err(format!(
-            "{removed_name} uses the removed provider-specific credential convention; move the exact provider kind and credential into {BOOTSTRAP_PROVIDER_API_KEYS_JSON_B64_ENV}"
-        ));
-    }
-
-    let Some(raw_encoded_map) = std::env::var_os(BOOTSTRAP_PROVIDER_API_KEYS_JSON_B64_ENV) else {
-        return Ok(Vec::new());
-    };
-    let mut raw_encoded_map = raw_encoded_map.into_string().map_err(|_| {
-        format!("{BOOTSTRAP_PROVIDER_API_KEYS_JSON_B64_ENV} must contain valid UTF-8 base64")
-    })?;
-    let result = parse_bootstrap_provider_api_keys_b64(&raw_encoded_map);
-    raw_encoded_map.zeroize();
-    result
-}
-
-fn is_removed_provider_api_key_env_name(env_name: &str) -> bool {
-    let Some(provider_fragment) =
-        env_name.strip_prefix("IRONRAG_").and_then(|value| value.strip_suffix("_API_KEY"))
-    else {
-        return false;
-    };
-    !provider_fragment.is_empty()
-        && provider_fragment
-            .bytes()
-            .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit() || byte == b'_')
-}
-
-fn parse_bootstrap_provider_api_keys_b64(
-    encoded_map: &str,
-) -> Result<Vec<UiBootstrapAiProviderSecret>, String> {
-    if encoded_map.is_empty() {
-        return Ok(Vec::new());
-    }
-    if encoded_map != encoded_map.trim()
-        || encoded_map.len() > MAX_BOOTSTRAP_PROVIDER_MAP_BASE64_BYTES
-    {
-        return Err(format!(
-            "{BOOTSTRAP_PROVIDER_API_KEYS_JSON_B64_ENV} must be canonical standard-base64 JSON within the configured size limit"
-        ));
-    }
-    let mut decoded = BASE64_STANDARD.decode(encoded_map).map_err(|_| {
-        format!("{BOOTSTRAP_PROVIDER_API_KEYS_JSON_B64_ENV} must be canonical standard-base64 JSON")
-    })?;
-    if decoded.len() > MAX_BOOTSTRAP_PROVIDER_MAP_JSON_BYTES {
-        decoded.zeroize();
-        return Err(format!(
-            "{BOOTSTRAP_PROVIDER_API_KEYS_JSON_B64_ENV} decoded JSON exceeds the configured size limit"
-        ));
-    }
-    let mut canonical_encoding = BASE64_STANDARD.encode(&decoded);
-    let is_canonical = canonical_encoding == encoded_map;
-    canonical_encoding.zeroize();
-    if !is_canonical {
-        decoded.zeroize();
-        return Err(format!(
-            "{BOOTSTRAP_PROVIDER_API_KEYS_JSON_B64_ENV} must be canonical standard-base64 JSON"
-        ));
-    }
-    let mut raw_json = match String::from_utf8(decoded) {
-        Ok(raw_json) => raw_json,
-        Err(error) => {
-            drop(zeroize::Zeroizing::new(error.into_bytes()));
-            return Err(format!(
-                "{BOOTSTRAP_PROVIDER_API_KEYS_JSON_B64_ENV} must decode to valid UTF-8 JSON"
-            ));
-        }
-    };
-    let result = parse_bootstrap_provider_api_keys_json(&raw_json);
-    raw_json.zeroize();
-    result
-}
-
-struct BootstrapProviderSecrets(Vec<UiBootstrapAiProviderSecret>);
-
-impl<'de> Deserialize<'de> for BootstrapProviderSecrets {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        deserializer.deserialize_map(BootstrapProviderSecretsVisitor)
-    }
-}
-
-struct BootstrapProviderSecretsVisitor;
-
-impl<'de> Visitor<'de> for BootstrapProviderSecretsVisitor {
-    type Value = BootstrapProviderSecrets;
-
-    fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str("a JSON object mapping exact provider kinds to API-key strings")
-    }
-
-    fn visit_map<A>(self, mut entries: A) -> Result<Self::Value, A::Error>
-    where
-        A: MapAccess<'de>,
-    {
-        let mut secrets = std::collections::BTreeMap::new();
-        let mut entry_count = 0_usize;
-        while let Some((provider_kind, mut raw_api_key)) = entries.next_entry::<String, String>()? {
-            entry_count += 1;
-            if entry_count > MAX_BOOTSTRAP_PROVIDER_SECRETS {
-                raw_api_key.zeroize();
-                return Err(A::Error::custom("provider credential map has too many entries"));
-            }
-            if let Err(reason) = validate_bootstrap_provider_kind(&provider_kind) {
-                raw_api_key.zeroize();
-                return Err(A::Error::custom(format!("provider kind {reason}")));
-            }
-            if raw_api_key.len() > MAX_BOOTSTRAP_PROVIDER_API_KEY_BYTES {
-                raw_api_key.zeroize();
-                return Err(A::Error::custom("provider credential exceeds the size limit"));
-            }
-            if raw_api_key.is_empty() {
-                continue;
-            }
-            // JSON and base64 already provide an unambiguous transport. Keep
-            // credential bytes exact: whitespace may be significant to an
-            // operator-defined provider and must never be normalized here.
-            let api_key = std::mem::take(&mut raw_api_key);
-            let candidate =
-                UiBootstrapAiProviderSecret { provider_kind: provider_kind.clone(), api_key };
-            match secrets.entry(provider_kind) {
-                std::collections::btree_map::Entry::Vacant(entry) => {
-                    entry.insert(candidate);
-                }
-                std::collections::btree_map::Entry::Occupied(entry) => {
-                    return Err(A::Error::custom(format!(
-                        "duplicate provider kind {}",
-                        entry.key()
-                    )));
-                }
-            }
-        }
-        Ok(BootstrapProviderSecrets(secrets.into_values().collect()))
-    }
-}
-
-fn parse_bootstrap_provider_api_keys_json(
-    raw_json: &str,
-) -> Result<Vec<UiBootstrapAiProviderSecret>, String> {
-    let mut deserializer = serde_json::Deserializer::from_str(raw_json);
-    let BootstrapProviderSecrets(secrets) =
-        BootstrapProviderSecrets::deserialize(&mut deserializer).map_err(|_| {
-            // serde diagnostics can include the unexpected scalar value. Do
-            // not propagate them because this document consists of secrets.
-            format!("{BOOTSTRAP_PROVIDER_API_KEYS_JSON_B64_ENV} decoded JSON is invalid")
-        })?;
-    deserializer.end().map_err(|_| {
-        format!("{BOOTSTRAP_PROVIDER_API_KEYS_JSON_B64_ENV} decoded JSON is invalid")
-    })?;
-    Ok(secrets)
-}
-
-fn validate_bootstrap_provider_kind(provider_kind: &str) -> Result<(), &'static str> {
-    if provider_kind.is_empty() || provider_kind.len() > MAX_BOOTSTRAP_PROVIDER_KIND_BYTES {
-        return Err("must contain between 1 and 128 UTF-8 bytes");
-    }
-    if provider_kind.chars().any(char::is_whitespace) {
-        return Err("must not contain whitespace");
-    }
-    if provider_kind.chars().any(char::is_control) {
-        return Err("must not contain control characters");
-    }
-    Ok(())
-}
-
-fn resolved_ui_bootstrap_ai_binding_default(
-    binding_purpose: AiBindingPurpose,
-    provider_kind: Option<&str>,
-    model_name: Option<&str>,
-) -> Option<UiBootstrapAiBindingDefault> {
-    let provider_kind =
-        provider_kind.map(str::trim).filter(|value| !value.is_empty()).map(str::to_ascii_lowercase);
-    let model_name = model_name
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(std::string::ToString::to_string);
-    if provider_kind.is_none() && model_name.is_none() {
-        return None;
-    }
-    Some(UiBootstrapAiBindingDefault { binding_purpose, provider_kind, model_name })
-}
-
-fn validate_ingestion_settings(settings: &Settings) -> Result<(), String> {
-    if settings.ingestion_max_parallel_jobs_global == 0 {
-        return Err("ingestion_max_parallel_jobs_global must be greater than zero".into());
-    }
-    if settings.ingestion_max_parallel_jobs_per_workspace == 0 {
-        return Err("ingestion_max_parallel_jobs_per_workspace must be greater than zero".into());
-    }
-    if settings.ingestion_max_parallel_jobs_per_library == 0 {
-        return Err("ingestion_max_parallel_jobs_per_library must be greater than zero".into());
-    }
-    if settings.ingestion_max_parallel_jobs_per_workspace
-        > settings.ingestion_max_parallel_jobs_global
-    {
-        return Err(
-            "ingestion_max_parallel_jobs_per_workspace must be less than or equal to ingestion_max_parallel_jobs_global"
-                .into(),
-        );
-    }
-    if settings.ingestion_max_parallel_jobs_per_library
-        > settings.ingestion_max_parallel_jobs_per_workspace
-    {
-        return Err(
-            "ingestion_max_parallel_jobs_per_library must be less than or equal to ingestion_max_parallel_jobs_per_workspace"
-                .into(),
-        );
-    }
-    Ok(())
-}
-
-fn validate_provider_concurrency_settings(settings: &Settings) -> Result<(), String> {
-    match (settings.provider_concurrency_max_outbound, settings.provider_concurrency_query_reserved)
-    {
-        (0, 0) => {}
-        (0, _) => {
-            return Err(
-                "provider_concurrency_query_reserved must be zero when provider_concurrency_max_outbound is zero"
-                    .into(),
-            );
-        }
-        (max, reserved) if reserved >= max => {
-            return Err(
-                "provider_concurrency_query_reserved must be smaller than provider_concurrency_max_outbound"
-                    .into(),
-            );
-        }
-        _ => {}
-    }
-    if settings.provider_concurrency_acquire_timeout_ms == 0 {
-        return Err("provider_concurrency_acquire_timeout_ms must be greater than zero".into());
-    }
-    if settings.provider_concurrency_registry_max_entries == 0 {
-        return Err("provider_concurrency_registry_max_entries must be greater than zero".into());
-    }
-    if settings.provider_concurrency_registry_idle_ttl_seconds == 0 {
-        return Err(
-            "provider_concurrency_registry_idle_ttl_seconds must be greater than zero".into()
-        );
-    }
-    Ok(())
-}
-
-fn validate_recognition_settings(settings: &Settings) -> Result<(), String> {
-    let engine = settings
-        .recognition_default_raster_image_engine
-        .parse::<RecognitionEngine>()
-        .map_err(|error| format!("recognition_default_raster_image_engine: {error}"))?;
-    let policy = LibraryRecognitionPolicy { raster_image_engine: engine };
-    policy.validate().map_err(|error| format!("recognition_default_raster_image_engine: {error}"))
-}
-
-fn validate_runtime_agent_settings(settings: &Settings) -> Result<(), String> {
-    if settings.runtime_agent_max_turns == 0 {
-        return Err("runtime_agent_max_turns must be greater than zero".into());
-    }
-    if settings.runtime_agent_max_parallel_actions == 0 {
-        return Err("runtime_agent_max_parallel_actions must be greater than zero".into());
-    }
-    if settings.runtime_trace_payload_budget_bytes == 0 {
-        return Err("runtime_trace_payload_budget_bytes must be greater than zero".into());
-    }
-    if settings.runtime_policy_reason_budget_chars == 0 {
-        return Err("runtime_policy_reason_budget_chars must be greater than zero".into());
-    }
-    for task_kind in parse_runtime_policy_csv(settings.runtime_policy_reject_task_kinds.as_ref()) {
-        task_kind
-            .parse::<crate::domains::agent_runtime::RuntimeTaskKind>()
-            .map_err(|error| format!("runtime_policy_reject_task_kinds contains {error}"))?;
-    }
-    for target_kind in
-        parse_runtime_policy_csv(settings.runtime_policy_reject_target_kinds.as_ref())
-    {
-        target_kind
-            .parse::<crate::domains::agent_runtime::RuntimeDecisionTargetKind>()
-            .map_err(|error| format!("runtime_policy_reject_target_kinds contains {error}"))?;
-    }
-    Ok(())
-}
-
-fn validate_query_rerank_settings(settings: &Settings) -> Result<(), String> {
-    if !settings.query_rerank_enabled
-        && settings.query_semantic_rerank_mode != SemanticRerankMode::Off
-    {
-        return Err(
-            "query_semantic_rerank_mode requires query_rerank_enabled=true for shadow or active"
-                .into(),
-        );
-    }
-    Ok(())
-}
-
-fn validate_release_monitor_settings(settings: &Settings) -> Result<(), String> {
-    let repository = settings.release_check_repository.trim();
-    let mut components = repository.split('/');
-    let owner = components.next().unwrap_or_default();
-    let repo = components.next().unwrap_or_default();
-    let has_exactly_two_components = components.next().is_none();
-    let is_valid_component = |value: &str| {
-        !value.is_empty()
-            && value.chars().all(|character| {
-                character.is_ascii_alphanumeric() || matches!(character, '.' | '-' | '_')
-            })
-    };
-
-    if !(has_exactly_two_components && is_valid_component(owner) && is_valid_component(repo)) {
-        return Err(
-            "release_check_repository must be a GitHub repository slug like owner/repo".into()
-        );
-    }
-    if settings.release_check_interval_hours == 0 {
-        return Err("release_check_interval_hours must be greater than zero".into());
-    }
-
-    Ok(())
-}
-
-fn validate_graph_gc_settings(settings: &Settings) -> Result<(), String> {
-    if settings.graph_gc_hours == 0 {
-        return Err("graph_gc_hours must be greater than zero".into());
-    }
-    Ok(())
-}
-
-fn parse_runtime_policy_csv(value: Option<&String>) -> Vec<&str> {
-    value
-        .map(std::string::String::as_str)
-        .map(|raw| {
-            raw.split(',').map(str::trim).filter(|item| !item.is_empty()).collect::<Vec<_>>()
-        })
-        .unwrap_or_default()
-}
-
-fn validate_mcp_memory_settings(settings: &Settings) -> Result<(), String> {
-    if settings.mcp_memory_default_read_window_chars == 0 {
-        return Err("mcp_memory_default_read_window_chars must be greater than zero".into());
-    }
-    if settings.mcp_memory_max_read_window_chars == 0 {
-        return Err("mcp_memory_max_read_window_chars must be greater than zero".into());
-    }
-    if settings.mcp_memory_default_read_window_chars > settings.mcp_memory_max_read_window_chars {
-        return Err(
-            "mcp_memory_default_read_window_chars must be less than or equal to mcp_memory_max_read_window_chars"
-                .into(),
-        );
-    }
-    if settings.mcp_memory_default_search_limit == 0 {
-        return Err("mcp_memory_default_search_limit must be greater than zero".into());
-    }
-    if settings.mcp_memory_max_search_limit == 0 {
-        return Err("mcp_memory_max_search_limit must be greater than zero".into());
-    }
-    if settings.mcp_memory_default_search_limit > settings.mcp_memory_max_search_limit {
-        return Err(
-            "mcp_memory_default_search_limit must be less than or equal to mcp_memory_max_search_limit"
-                .into(),
-        );
-    }
-    if settings.mcp_memory_idempotency_retention_hours == 0 {
-        return Err("mcp_memory_idempotency_retention_hours must be greater than zero".into());
-    }
-    Ok(())
+    /// Token-bucket refill rate for each provider endpoint. `0` disables the
+    /// rate budget and requires a zero burst.
+    pub provider_rate_limit_requests_per_second: u32,
+    /// Maximum request tokens each provider endpoint can accumulate.
+    pub provider_rate_limit_burst: u32,
+    /// Total attempts allowed for side-effect-free provider operations.
+    pub provider_retry_max_attempts: u32,
+    /// Initial exponential retry delay before jitter.
+    pub provider_retry_initial_backoff_ms: u64,
+    /// Upper bound applied to exponential delays when the provider omits
+    /// `Retry-After`.
+    pub provider_retry_max_backoff_ms: u64,
+    /// Concurrent outermost retrieval turns admitted into Postgres/LLM work.
+    pub query_turn_max_concurrent: usize,
+    /// Extra waiters allowed before a burst is rejected with retryable 503.
+    pub query_turn_admission_queue: usize,
+    /// How long a queued turn waits for a retrieval permit.
+    pub query_turn_admission_timeout_ms: u64,
+    /// Login attempts admitted per normalized login before a fully recovered
+    /// bucket starts rejecting further attempts with 429. Guards
+    /// `POST /v1/iam/sessions` against hammering one account.
+    pub login_rate_limit_per_login_max_attempts: u32,
+    /// Seconds for a fully drained per-login bucket to refill to capacity.
+    pub login_rate_limit_per_login_window_seconds: u64,
+    /// Login attempts admitted per source (client IP or trusted proxy hop)
+    /// before a fully recovered bucket starts rejecting further attempts.
+    /// Set higher than the per-login limit: a shared NAT/office egress IP can
+    /// legitimately carry several different users' login attempts.
+    pub login_rate_limit_per_source_max_attempts: u32,
+    /// Seconds for a fully drained per-source bucket to refill to capacity.
+    pub login_rate_limit_per_source_window_seconds: u64,
+    /// Concurrent Argon2id password verifications admitted across all login
+    /// attempts, regardless of which login or source they belong to. Bounds
+    /// worst-case CPU spend on the replica even when both leaky buckets are
+    /// individually satisfied.
+    pub login_rate_limit_max_concurrent_verifications: usize,
+    /// Extra waiters allowed to queue for a verification permit before a
+    /// burst is rejected with 429 instead of piling up pending tasks.
+    pub login_rate_limit_admission_queue: usize,
+    /// How long a queued verification waits for a permit before 429.
+    pub login_rate_limit_admission_timeout_ms: u64,
+    /// Maximum distinct keys retained by each of the two bucket registries
+    /// (login-keyed and source-keyed).
+    pub login_rate_limit_registry_max_entries: usize,
+    /// Idle bucket retention before eviction from either registry.
+    pub login_rate_limit_registry_idle_ttl_seconds: u64,
+    /// Number of proxies this deployment owns that *append* their peer to
+    /// `X-Forwarded-For` before a login request reaches this process. The
+    /// source key is the entry that many positions from the right; anything
+    /// further left is client-supplied. `0` ignores the header and keys on
+    /// the TCP peer. Over-estimating is the unsafe direction: it lets a
+    /// caller pick its own source bucket with a forged leading entry.
+    pub login_rate_limit_trusted_proxy_hops: u32,
 }
 
 #[cfg(test)]

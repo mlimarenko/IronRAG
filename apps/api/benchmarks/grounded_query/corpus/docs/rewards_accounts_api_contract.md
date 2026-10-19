@@ -2,7 +2,7 @@
 
 The rewards accounts surface is a REST API that returns JSON over HTTP.
 
-## Canonical Endpoint
+## Authoritative Endpoint
 
 - Method: `GET`
 - Path: `/v1/accounts`

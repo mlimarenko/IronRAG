@@ -17,11 +17,40 @@ pub struct UploadRejectionDetails {
     pub operator_action: String,
 }
 
+/// Why a payload did not yield an extraction plan.
+///
+/// Declared at the point where the failure is produced so no downstream
+/// consumer has to infer the category from a message or a failure-code string.
+/// It separates a payload the server can never ingest from an infrastructure,
+/// provider or operator-configuration fault that a retry may clear.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExtractionFailureClass {
+    /// Deterministic content rejection: the same payload cannot succeed on a
+    /// retry. This is the only class that maps to the operation disposition
+    /// `content_unsupported`.
+    ContentInvalid,
+    /// Operational/transient fault (infrastructure, provider, worker
+    /// resources): the same payload may extract on a retry.
+    OperationalRetryable,
+    /// Operational fault that is terminal for this attempt but is not a content
+    /// rejection (for example a memory-budget failure or a configuration gap).
+    OperationalTerminal,
+}
+
 #[derive(Debug, Clone)]
 pub struct UploadAdmissionError {
     error_kind: &'static str,
     message: String,
     details: Box<UploadRejectionDetails>,
+    /// How a consumer must treat this rejection. `None` means the rejection was
+    /// produced before any content verdict existed — a malformed or truncated
+    /// multipart body, an oversized request, or a missing part. Those bytes may
+    /// be incomplete or the request itself invalid, so `None` is never a
+    /// statement about the payload's content and must be treated as
+    /// operational. Only [`Self::from_file_extract_error`] sets `Some`, copying
+    /// the class the extraction producer decided in
+    /// [`FileExtractError::failure_class`].
+    extraction_failure_class: Option<ExtractionFailureClass>,
 }
 
 impl UploadAdmissionError {
@@ -30,6 +59,7 @@ impl UploadAdmissionError {
         Self {
             error_kind: "multipart_stream_failure",
             message: "multipart upload stream failed".to_string(),
+            extraction_failure_class: None,
             details: Box::new(UploadRejectionDetails {
                 file_name: None,
                 rejection_kind: Some("multipart_stream_failure".to_string()),
@@ -71,6 +101,7 @@ impl UploadAdmissionError {
         Self {
             error_kind: "invalid_file_body",
             message,
+            extraction_failure_class: None,
             details: Box::new(UploadRejectionDetails {
                 file_name: file_name.map(str::to_string),
                 rejection_kind: Some("invalid_file_body".to_string()),
@@ -101,6 +132,7 @@ impl UploadAdmissionError {
         Self {
             error_kind: "multipart_stream_failure",
             message,
+            extraction_failure_class: None,
             details: Box::new(UploadRejectionDetails {
                 file_name: file_name.map(str::to_string),
                 rejection_kind: Some("multipart_stream_failure".to_string()),
@@ -128,6 +160,7 @@ impl UploadAdmissionError {
         Self {
             error_kind: "upload_limit_exceeded",
             message: format!("file {file_name} exceeds the {upload_limit_mb} MB upload limit"),
+            extraction_failure_class: None,
             details: Box::new(UploadRejectionDetails {
                 file_name: Some(file_name.to_string()),
                 rejection_kind: Some("upload_limit_exceeded".to_string()),
@@ -149,6 +182,7 @@ impl UploadAdmissionError {
         Self {
             error_kind: "upload_limit_exceeded",
             message: format!("upload batch exceeds the {upload_limit_mb} MB upload limit"),
+            extraction_failure_class: None,
             details: Box::new(UploadRejectionDetails {
                 file_name: None,
                 rejection_kind: Some("upload_limit_exceeded".to_string()),
@@ -171,6 +205,7 @@ impl UploadAdmissionError {
         Self {
             error_kind: "upload_limit_exceeded",
             message: format!("request body exceeded the {upload_limit_mb} MB upload limit"),
+            extraction_failure_class: None,
             details: Box::new(UploadRejectionDetails {
                 file_name: None,
                 rejection_kind: Some("upload_limit_exceeded".to_string()),
@@ -203,6 +238,7 @@ impl UploadAdmissionError {
         Self {
             error_kind: "upload_limit_exceeded",
             message,
+            extraction_failure_class: None,
             details: Box::new(UploadRejectionDetails {
                 file_name: file_name.map(str::to_string),
                 rejection_kind: Some("upload_limit_exceeded".to_string()),
@@ -226,6 +262,7 @@ impl UploadAdmissionError {
         Self {
             error_kind: "missing_upload_file",
             message: message.clone(),
+            extraction_failure_class: None,
             details: Box::new(UploadRejectionDetails {
                 file_name: None,
                 rejection_kind: Some("missing_upload_file".to_string()),
@@ -250,6 +287,7 @@ impl UploadAdmissionError {
         let message = error.to_string();
         Self {
             error_kind,
+            extraction_failure_class: Some(error.failure_class()),
             details: Box::new(UploadRejectionDetails {
                 file_name: Some(file_name.to_string()),
                 rejection_kind: Some(error_kind.to_string()),
@@ -278,6 +316,15 @@ impl UploadAdmissionError {
     pub const fn details(&self) -> &UploadRejectionDetails {
         &self.details
     }
+
+    /// The typed category the producer assigned to this rejection, when one
+    /// exists. A consumer decides the operation disposition from it, never from
+    /// [`Self::error_kind`]. `None` is a request-level rejection that carries no
+    /// content verdict and must be treated as operational.
+    #[must_use]
+    pub const fn extraction_failure_class(&self) -> Option<ExtractionFailureClass> {
+        self.extraction_failure_class
+    }
 }
 
 impl fmt::Display for UploadAdmissionError {
@@ -292,7 +339,13 @@ impl std::error::Error for UploadAdmissionError {}
 pub enum FileExtractError {
     UnsupportedBinary,
     InvalidUtf8,
-    ExtractionFailed { file_kind: UploadFileKind, message: String },
+    ExtractionFailed {
+        file_kind: UploadFileKind,
+        /// Why extraction failed, decided at the construction site. A message
+        /// prefix is never parsed to recover this.
+        class: ExtractionFailureClass,
+        message: String,
+    },
 }
 
 impl fmt::Display for FileExtractError {
@@ -319,6 +372,19 @@ impl FileExtractError {
             Self::UnsupportedBinary => UploadFileKind::Binary,
             Self::InvalidUtf8 => UploadFileKind::TextLike,
             Self::ExtractionFailed { file_kind, .. } => *file_kind,
+        }
+    }
+
+    /// The typed failure category. `UnsupportedBinary` and `InvalidUtf8` are
+    /// deterministic content rejections; an `ExtractionFailed` carries the
+    /// class its construction site decided. A consumer must never derive the
+    /// class from [`Self::error_kind`], because `upload_extraction_failed` now
+    /// covers both a content rejection and an operational fault.
+    #[must_use]
+    pub const fn failure_class(&self) -> ExtractionFailureClass {
+        match self {
+            Self::UnsupportedBinary | Self::InvalidUtf8 => ExtractionFailureClass::ContentInvalid,
+            Self::ExtractionFailed { class, .. } => *class,
         }
     }
 

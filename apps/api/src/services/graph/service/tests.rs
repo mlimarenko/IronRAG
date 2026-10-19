@@ -55,14 +55,14 @@ fn materialization_fixture()
 }
 
 #[test]
-fn merge_projection_data_prefers_incoming_canonical_rows() {
+fn merge_projection_data_prefers_incoming_normalized_rows() {
     let node_id = Uuid::now_v7();
     let edge_id = Uuid::now_v7();
     let merged = GraphService::merge_projection_data(
         &GraphViewData {
             nodes: vec![GraphViewNodeWrite {
                 node_id,
-                canonical_key: "entity:a".to_string(),
+                identity_key: "entity:a".to_string(),
                 label: "A".to_string(),
                 node_type: "entity".to_string(),
                 support_count: 1,
@@ -75,7 +75,7 @@ fn merge_projection_data_prefers_incoming_canonical_rows() {
         &GraphViewData {
             nodes: vec![GraphViewNodeWrite {
                 node_id,
-                canonical_key: "entity:a".to_string(),
+                identity_key: "entity:a".to_string(),
                 label: "A2".to_string(),
                 node_type: "concept".to_string(),
                 support_count: 4,
@@ -88,7 +88,7 @@ fn merge_projection_data_prefers_incoming_canonical_rows() {
                 from_node_id: node_id,
                 to_node_id: Uuid::now_v7(),
                 relation_type: "links_to".to_string(),
-                canonical_key: "entity:a--links_to--entity:b".to_string(),
+                identity_key: "entity:a--links_to--entity:b".to_string(),
                 support_count: 1,
                 summary: None,
                 weight: None,
@@ -126,12 +126,13 @@ fn rebuild_outcome_requires_materialized_entities_relations_or_evidence() {
 }
 
 #[test]
-fn placeholder_entity_parts_require_non_empty_suffix() {
+fn placeholder_entity_parts_require_strict_identity_key() {
     assert!(placeholder_entity_parts_from_key("entity:").is_none());
     assert_eq!(
-        placeholder_entity_parts_from_key("entity:Acme_Print_House"),
-        Some((RuntimeNodeType::Entity, "Acme_Print_House".to_string()))
+        placeholder_entity_parts_from_key("entity:acme_print_house"),
+        Some((RuntimeNodeType::Entity, "acme_print_house".to_string()))
     );
+    assert!(placeholder_entity_parts_from_key("entity:Acme_Print_House").is_none());
 }
 
 #[test]
@@ -145,7 +146,7 @@ fn relation_candidate_keys_reject_dangling_entity_prefix() {
 }
 
 #[test]
-fn reconcile_entity_candidate_row_recanonicalizes_legacy_unicode_key() {
+fn reconcile_entity_candidate_row_rejects_mismatched_persisted_key() {
     let mut entity_key_index = crate::services::graph::identity::GraphLabelNodeTypeIndex::new();
     entity_key_index.insert("Acme Print House", RuntimeNodeType::Entity);
     let row = KnowledgeEntityCandidateRow {
@@ -165,14 +166,11 @@ fn reconcile_entity_candidate_row_recanonicalizes_legacy_unicode_key() {
         updated_at: Utc::now(),
     };
 
-    let reconciled = reconcile_entity_candidate_row(row, &entity_key_index)
-        .expect("entity candidate should reconcile");
-
-    assert_eq!(reconciled.normalization_key, "entity:acme_print_house");
+    assert!(reconcile_entity_candidate_row(row, &entity_key_index).is_none());
 }
 
 #[test]
-fn reconcile_relation_candidate_row_uses_labels_to_rebuild_keys() {
+fn reconcile_relation_candidate_row_rejects_mismatched_endpoint_keys() {
     let entity_key_index = crate::services::graph::identity::GraphLabelNodeTypeIndex::new();
     let row = KnowledgeRelationCandidateRow {
         candidate_id: Uuid::now_v7(),
@@ -193,15 +191,7 @@ fn reconcile_relation_candidate_row_uses_labels_to_rebuild_keys() {
         updated_at: Utc::now(),
     };
 
-    let reconciled = reconcile_relation_candidate_row(row, &entity_key_index)
-        .expect("relation candidate should reconcile");
-
-    assert_eq!(reconciled.subject_candidate_key, "entity:acme_print_house");
-    assert_eq!(reconciled.object_candidate_key, "entity:register");
-    assert_eq!(
-        reconciled.normalized_assertion,
-        "entity:acme_print_house--mentions--entity:register"
-    );
+    assert!(reconcile_relation_candidate_row(row, &entity_key_index).is_none());
 }
 
 #[test]
@@ -230,7 +220,7 @@ fn reconcile_relation_candidate_row_rejects_missing_identity_without_labels() {
 }
 
 #[test]
-fn reconcile_entity_candidate_row_prefers_entity_for_label_type_collisions() {
+fn reconcile_entity_candidate_row_preserves_matching_type_key() {
     let mut entity_key_index = crate::services::graph::identity::GraphLabelNodeTypeIndex::new();
     entity_key_index.insert("Register", RuntimeNodeType::Concept);
     entity_key_index.insert("Register", RuntimeNodeType::Entity);
@@ -254,7 +244,7 @@ fn reconcile_entity_candidate_row_prefers_entity_for_label_type_collisions() {
     let reconciled = reconcile_entity_candidate_row(row, &entity_key_index)
         .expect("entity candidate should reconcile");
 
-    assert_eq!(reconciled.normalization_key, "entity:register");
+    assert_eq!(reconciled.normalization_key, "concept:register");
 }
 
 #[test]
@@ -350,12 +340,12 @@ fn apply_entity_key_aliases_to_relation_candidate_rebuilds_assertion() {
 }
 
 #[test]
-fn build_materialized_extract_candidates_recanonicalizes_unicode_node_rows() {
+fn build_materialized_extract_candidates_normalizes_unicode_node_rows() {
     let (revision, chunk_result) = materialization_fixture();
     let node_rows = vec![repositories::extract_repository::ExtractNodeCandidateRow {
         id: Uuid::now_v7(),
         chunk_result_id: chunk_result.id,
-        canonical_key: "entity:".to_string(),
+        identity_key: "entity:".to_string(),
         node_kind: "entity".to_string(),
         display_label: "Acme Print House".to_string(),
         summary: None,
@@ -376,7 +366,7 @@ fn build_materialized_extract_candidates_derives_relation_labels_from_nodes() {
         repositories::extract_repository::ExtractNodeCandidateRow {
             id: Uuid::now_v7(),
             chunk_result_id: chunk_result.id,
-            canonical_key: "entity:".to_string(),
+            identity_key: "entity:".to_string(),
             node_kind: "entity".to_string(),
             display_label: "Acme Print House".to_string(),
             summary: None,
@@ -384,7 +374,7 @@ fn build_materialized_extract_candidates_derives_relation_labels_from_nodes() {
         repositories::extract_repository::ExtractNodeCandidateRow {
             id: Uuid::now_v7(),
             chunk_result_id: chunk_result.id,
-            canonical_key: "concept:register".to_string(),
+            identity_key: "concept:register".to_string(),
             node_kind: "concept".to_string(),
             display_label: "Register".to_string(),
             summary: None,
@@ -393,10 +383,10 @@ fn build_materialized_extract_candidates_derives_relation_labels_from_nodes() {
     let edge_rows = vec![repositories::extract_repository::ExtractEdgeCandidateRow {
         id: Uuid::now_v7(),
         chunk_result_id: chunk_result.id,
-        canonical_key: "entity:--mentions--concept:register".to_string(),
+        identity_key: "entity:--mentions--concept:register".to_string(),
         edge_kind: "mentions".to_string(),
-        from_canonical_key: "entity:".to_string(),
-        to_canonical_key: "concept:register".to_string(),
+        from_identity_key: "entity:".to_string(),
+        to_identity_key: "concept:register".to_string(),
         summary: None,
     }];
 
@@ -416,7 +406,7 @@ fn build_materialized_extract_candidates_derives_relation_labels_from_nodes() {
 }
 
 #[test]
-fn canonical_entity_normalization_key_preserves_unicode_and_node_type() {
+fn entity_identity_normalization_key_preserves_unicode_and_node_type() {
     let entity = GraphEntityCandidate {
         label: "Acme Print House".to_string(),
         node_type: RuntimeNodeType::Entity,
@@ -432,12 +422,12 @@ fn canonical_entity_normalization_key_preserves_unicode_and_node_type() {
         summary: None,
     };
 
-    assert_eq!(canonical_entity_normalization_key(&entity), "entity:acme_print_house");
-    assert_eq!(canonical_entity_normalization_key(&topic), "concept:acme_print_house");
+    assert_eq!(entity_identity_normalization_key(&entity), "entity:acme_print_house");
+    assert_eq!(entity_identity_normalization_key(&topic), "concept:acme_print_house");
 }
 
 #[test]
-fn canonical_relation_assertion_preserves_unicode_entity_keys() {
+fn normalized_relation_assertion_preserves_unicode_entity_keys() {
     let relation = GraphRelationCandidate {
         source_label: "Acme Register".to_string(),
         target_label: "Acme Print House".to_string(),
@@ -446,7 +436,7 @@ fn canonical_relation_assertion_preserves_unicode_entity_keys() {
     };
 
     assert_eq!(
-        canonical_relation_assertion(&relation),
+        normalized_relation_assertion(&relation),
         "entity:acme_register--part_of--entity:acme_print_house"
     );
 }
@@ -480,7 +470,6 @@ fn resolve_entity_evidence_support_prefers_matching_fact_support() {
 
         window_text: None,
 
-        raptor_level: None,
         occurred_at: None,
         occurred_until: None,
     };
@@ -491,7 +480,7 @@ fn resolve_entity_evidence_support_prefers_matching_fact_support() {
         workspace_id: chunk.workspace_id,
         library_id: chunk.library_id,
         fact_kind: TechnicalFactKind::EndpointPath,
-        canonical_value: TechnicalFactValue::Text("/api/status".to_string()),
+        normalized_value: TechnicalFactValue::Text("/api/status".to_string()),
         display_value: "/api/status".to_string(),
         qualifiers: vec![TechnicalFactQualifier {
             key: "method".to_string(),

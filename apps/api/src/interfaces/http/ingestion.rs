@@ -120,7 +120,7 @@ fn parse_ingest_queue_state_filter(raw: &str) -> Result<Vec<String>, ApiError> {
 // ============================================================================
 // Opaque cursors for the ingest jobs/attempts list surfaces.
 //
-// Same shape as the canonical `/v1/content/libraries/{libraryId}/documents`
+// Same shape as the primary `/v1/content/libraries/{libraryId}/documents`
 // cursor: base64(json(...)), opaque from the client's perspective, only
 // valid against the server version that produced it. Any decode failure is
 // surfaced as a `BadRequest` — callers are expected to drop the cursor and
@@ -311,7 +311,7 @@ pub async fn list_jobs(
     };
 
     let (handles, has_more) = state
-        .canonical_services
+        .application_services
         .ingest
         .list_job_handles_page(&state, library.id, cursor, i64::from(limit), &status_filter)
         .await?;
@@ -360,7 +360,7 @@ pub async fn get_job(
     State(state): State<AppState>,
     Path(job_id): Path<Uuid>,
 ) -> Result<Json<IngestJobResponse>, ApiError> {
-    let handle = state.canonical_services.ingest.get_job_handle(&state, job_id).await?;
+    let handle = state.application_services.ingest.get_job_handle(&state, job_id).await?;
     authorize_library_permission(
         &auth,
         handle.job.workspace_id,
@@ -408,7 +408,7 @@ pub async fn list_job_attempts(
     const MAX_LIMIT: u32 = 500;
 
     let span = tracing::Span::current();
-    let job = state.canonical_services.ingest.get_job(&state, job_id).await?;
+    let job = state.application_services.ingest.get_job(&state, job_id).await?;
     authorize_library_permission(&auth, job.workspace_id, job.library_id, POLICY_LIBRARY_READ)?;
 
     let limit = query.limit.unwrap_or(DEFAULT_LIMIT).clamp(1, MAX_LIMIT);
@@ -423,7 +423,7 @@ pub async fn list_job_attempts(
     };
 
     let (items, has_more) = state
-        .canonical_services
+        .application_services
         .ingest
         .list_attempts_page(&state, job_id, cursor, i64::from(limit))
         .await?;
@@ -467,7 +467,7 @@ pub async fn get_attempt(
     State(state): State<AppState>,
     Path(attempt_id): Path<Uuid>,
 ) -> Result<Json<IngestAttemptResponse>, ApiError> {
-    let handle = state.canonical_services.ingest.get_attempt_handle(&state, attempt_id).await?;
+    let handle = state.application_services.ingest.get_attempt_handle(&state, attempt_id).await?;
     authorize_library_permission(
         &auth,
         handle.job.workspace_id,
@@ -501,14 +501,14 @@ pub async fn list_stage_events(
     State(state): State<AppState>,
     Path(attempt_id): Path<Uuid>,
 ) -> Result<Json<IngestStageTimelineResponse>, ApiError> {
-    let handle = state.canonical_services.ingest.get_attempt_handle(&state, attempt_id).await?;
+    let handle = state.application_services.ingest.get_attempt_handle(&state, attempt_id).await?;
     authorize_library_permission(
         &auth,
         handle.job.workspace_id,
         handle.job.library_id,
         POLICY_LIBRARY_READ,
     )?;
-    let stages = state.canonical_services.ingest.list_stage_events(&state, attempt_id).await?;
+    let stages = state.application_services.ingest.list_stage_events(&state, attempt_id).await?;
     let readiness = build_readiness_response(
         &state,
         handle.job.knowledge_document_id,

@@ -3,11 +3,12 @@ use std::collections::{BTreeSet, HashMap};
 use chrono::Utc;
 use uuid::Uuid;
 
+use super::scope_resolution::document_ids_with_focus_value_contained_in_hint;
 use super::{
-    document_ids_with_focus_value_contained_in_hint,
     explicit_document_reference_literal_is_present, explicit_document_reference_literals,
     explicit_target_document_ids_from_values, normalize_document_target_text,
-    query_ir_allows_document_focus_scope, resolve_scoped_target_document_ids,
+    normalized_document_target_candidates, query_ir_allows_document_focus_scope,
+    resolve_scoped_target_document_ids,
 };
 use crate::domains::query_ir::{
     ConversationRefKind, DocumentHint, EntityMention, EntityRole, LiteralKind, LiteralSpan,
@@ -791,7 +792,7 @@ fn explicit_target_document_ids_match_separator_normalized_document_stems() {
 }
 
 #[test]
-fn normalize_document_target_text_splits_colon_boundaries_canonically() {
+fn normalize_document_target_text_splits_colon_boundaries_consistently() {
     assert_eq!(normalize_document_target_text("Provider:Alpha"), "provider alpha");
     assert_eq!(normalize_document_target_text("Provider : Alpha"), "provider alpha");
     assert_eq!(
@@ -819,7 +820,7 @@ fn focus_value_contained_in_hint_prefers_longer_document_candidate() {
 }
 
 #[test]
-fn explicit_target_document_ids_keep_longest_separator_match_canonical() {
+fn explicit_target_document_ids_keep_longest_separator_match_normalized() {
     let generic_id = Uuid::now_v7();
     let specific_id = Uuid::now_v7();
     let matched = explicit_target_document_ids_from_values(
@@ -945,4 +946,82 @@ fn explicit_document_reference_literal_matches_path_basename() {
         "people-100.csv",
         ["exports/archive/people-100.csv"]
     ));
+}
+
+/// The identity derivation must expose every `/` segment, not only the
+/// basename, so a question can name a directory part of a stored path.
+#[test]
+fn explicit_document_reference_literal_matches_every_path_segment() {
+    assert!(explicit_document_reference_literal_is_present(
+        "archive",
+        ["exports/archive/people-100.csv"]
+    ));
+    assert!(explicit_document_reference_literal_is_present(
+        "people-100.csv",
+        ["exports\\archive\\people-100.csv"]
+    ));
+}
+
+/// A colon-joined external key (`connector:key`) must expose both halves.
+#[test]
+fn explicit_document_reference_literal_matches_colon_joined_segments() {
+    assert!(explicit_document_reference_literal_is_present("key", ["connector:key"]));
+    assert!(explicit_document_reference_literal_is_present(
+        "people-100.csv",
+        ["dataset:people-100.csv"]
+    ));
+}
+
+/// Widening the split must not weaken the comparison itself: it stays exact
+/// normalized equality, so a near-miss segment does not match.
+#[test]
+fn explicit_document_reference_literal_rejects_near_miss_segments() {
+    assert!(!explicit_document_reference_literal_is_present(
+        "records-b.csv",
+        ["exports/archive/records-a.csv"]
+    ));
+    assert!(!explicit_document_reference_literal_is_present("keys", ["connector:key"]));
+}
+
+#[test]
+fn normalized_document_target_candidates_split_every_path_and_colon_segment() {
+    let path = normalized_document_target_candidates(["exports/archive/records-a.csv"]);
+    assert!(path.contains(&"records-a.csv".to_string()), "{path:?}");
+    assert!(path.contains(&"archive".to_string()), "{path:?}");
+
+    let colon = normalized_document_target_candidates(["connector:records-a.csv"]);
+    assert!(colon.contains(&"records-a.csv".to_string()), "{colon:?}");
+    assert!(colon.contains(&"connector".to_string()), "{colon:?}");
+}
+
+#[test]
+fn explicit_target_document_ids_resolve_path_and_colon_segments() {
+    let path_id = Uuid::now_v7();
+    assert_eq!(
+        explicit_target_document_ids_from_values(
+            "What is the job title in records-a.csv?",
+            [(path_id, "exports/archive/records-a.csv")],
+        ),
+        BTreeSet::from([path_id]),
+    );
+
+    let colon_id = Uuid::now_v7();
+    assert_eq!(
+        explicit_target_document_ids_from_values(
+            "What does key hold in connector:key?",
+            [(colon_id, "connector:key")],
+        ),
+        BTreeSet::from([colon_id]),
+    );
+}
+
+#[test]
+fn focus_value_contained_in_hint_resolves_path_segment_candidate() {
+    let document_id = Uuid::now_v7();
+    let matched = document_ids_with_focus_value_contained_in_hint(
+        "Open records-a.csv",
+        &[(document_id, "exports/archive/records-a.csv".to_string())],
+    );
+
+    assert_eq!(matched, [document_id].into_iter().collect());
 }

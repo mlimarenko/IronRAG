@@ -26,6 +26,8 @@ pub(crate) struct VisibleLibraryContext {
 
 #[derive(Debug, Clone)]
 pub(crate) struct ResolvedDocumentState {
+    pub(crate) snapshot:
+        crate::infra::repositories::content_document_head_repository::ContentDocumentReadSnapshot,
     pub(crate) document_id: Uuid,
     pub(crate) document_title: String,
     pub(crate) library: CatalogLibraryRow,
@@ -75,13 +77,14 @@ pub(crate) struct McpDocumentAccumulator {
     pub(crate) document_id: Uuid,
     pub(crate) library_id: Uuid,
     pub(crate) workspace_id: Uuid,
-    pub(crate) readable_revision_id: Uuid,
+    pub(crate) readable_revision_id: Option<Uuid>,
     pub(crate) document_title: String,
     /// Per-lane RRF rank accumulator. The exposed document score is its
     /// [`LaneRankFusion::fused_score`], replacing the previous raw-`max`
     /// combine that compared incommensurate per-lane score scales.
     pub(crate) fusion: LaneRankFusion,
     pub(crate) excerpt: Option<String>,
+    excerpt_score: f64,
     pub(crate) excerpt_start_offset: Option<usize>,
     pub(crate) excerpt_end_offset: Option<usize>,
     /// Character offset of the top-scoring chunk inside the full
@@ -96,7 +99,7 @@ pub(crate) struct McpDocumentAccumulator {
 
 impl McpDocumentAccumulator {
     pub(crate) fn from_metadata(
-        row: &crate::infra::repositories::content_repository::ContentDocumentMetadataSearchRow,
+        row: &crate::infra::repositories::content_metadata_search_repository::ContentDocumentMetadataSearchRow,
     ) -> Self {
         let document_title = row
             .revision_title
@@ -111,10 +114,14 @@ impl McpDocumentAccumulator {
             document_title,
             fusion: LaneRankFusion::default(),
             excerpt: None,
+            excerpt_score: f64::MIN,
             excerpt_start_offset: None,
             excerpt_end_offset: None,
-            suggested_start_offset: Some(0),
-            suggested_start_offset_score: row.metadata_score,
+            suggested_start_offset: row.readable_revision_id.map(|_| 0),
+            // Metadata has no body span. Zero is a safe fallback, but it must
+            // never outrank a real structured/chunk anchor whose score lives
+            // on a different retrieval scale.
+            suggested_start_offset_score: f64::MIN,
             content_char_count: None,
             chunk_references: HashMap::new(),
         }
@@ -133,10 +140,11 @@ impl McpDocumentAccumulator {
             document_id: document.document_id,
             library_id: document.library_id,
             workspace_id: document.workspace_id,
-            readable_revision_id: revision.revision_id,
+            readable_revision_id: Some(revision.revision_id),
             document_title,
             fusion: LaneRankFusion::default(),
             excerpt: None,
+            excerpt_score: f64::MIN,
             excerpt_start_offset: None,
             excerpt_end_offset: None,
             suggested_start_offset: None,
@@ -145,6 +153,32 @@ impl McpDocumentAccumulator {
                 .normalized_text
                 .as_ref()
                 .map(|value| value.chars().count()),
+            chunk_references: HashMap::new(),
+        }
+    }
+
+    pub(crate) fn from_structured_block(
+        row: &crate::infra::repositories::content_structured_block_search_repository::ContentStructuredBlockSearchRow,
+    ) -> Self {
+        let document_title = row
+            .document_title
+            .clone()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| row.external_key.clone());
+        Self {
+            document_id: row.document_id,
+            library_id: row.library_id,
+            workspace_id: row.workspace_id,
+            readable_revision_id: Some(row.readable_revision_id),
+            document_title,
+            fusion: LaneRankFusion::default(),
+            excerpt: None,
+            excerpt_score: f64::MIN,
+            excerpt_start_offset: None,
+            excerpt_end_offset: None,
+            suggested_start_offset: None,
+            suggested_start_offset_score: f64::MIN,
+            content_char_count: None,
             chunk_references: HashMap::new(),
         }
     }
@@ -211,15 +245,35 @@ impl McpDocumentAccumulator {
     }
 
     pub(crate) fn populate_excerpt_from_text(&mut self, text: &str, query: &str) {
-        if self.excerpt.is_some() {
-            return;
-        }
-        let query_lower = query.to_lowercase();
-        if let Some((excerpt, start, end, _)) = preview_hit(text, &query_lower) {
+        if let Some((excerpt, start, end, score)) = preview_hit(text, query)
+            && score > self.excerpt_score
+        {
             self.excerpt = Some(excerpt);
-            self.excerpt_start_offset = Some(start);
-            self.excerpt_end_offset = Some(end);
+            self.excerpt_score = score;
+            self.excerpt_start_offset = Some(byte_offset_to_char_offset(text, start));
+            self.excerpt_end_offset = Some(byte_offset_to_char_offset(text, end));
         }
+    }
+
+    /// Builds a bounded, match-centered preview from the chosen block's
+    /// original source text. The returned offsets are block-local, so this path
+    /// deliberately leaves document excerpt offsets unset. The persisted block
+    /// span remains a trustworthy character anchor into the full revision.
+    pub(crate) fn merge_structured_block_match(
+        &mut self,
+        row: &crate::infra::repositories::content_structured_block_search_repository::ContentStructuredBlockSearchRow,
+        query: &str,
+        read_window_chars: usize,
+    ) {
+        if let Some((excerpt, _, _, score)) = preview_hit(&row.source_text, query)
+            && score > self.excerpt_score
+        {
+            self.excerpt = Some(excerpt);
+            self.excerpt_score = score;
+            self.excerpt_start_offset = None;
+            self.excerpt_end_offset = None;
+        }
+        self.merge_chunk_span_anchor(row.span_start, row.text_score, read_window_chars);
     }
 
     pub(crate) fn chunk_reference_ids(&self) -> Vec<Uuid> {
@@ -245,6 +299,14 @@ impl McpDocumentAccumulator {
     }
 }
 
+fn byte_offset_to_char_offset(text: &str, byte_offset: usize) -> usize {
+    let mut boundary = byte_offset.min(text.len());
+    while boundary > 0 && !text.is_char_boundary(boundary) {
+        boundary -= 1;
+    }
+    text[..boundary].chars().count()
+}
+
 pub(crate) fn window_safe_start_offset(
     requested_start: usize,
     total_content_chars: Option<usize>,
@@ -263,7 +325,12 @@ pub(crate) fn window_safe_start_offset(
 
 #[cfg(test)]
 mod tests {
-    use super::window_safe_start_offset;
+    use super::{McpDocumentAccumulator, byte_offset_to_char_offset, window_safe_start_offset};
+    use crate::infra::repositories::{
+        content_metadata_search_repository::ContentDocumentMetadataSearchRow,
+        content_structured_block_search_repository::ContentStructuredBlockSearchRow,
+    };
+    use uuid::Uuid;
 
     #[test]
     fn window_safe_start_keeps_middle_chunk_anchor() {
@@ -284,5 +351,91 @@ mod tests {
     fn window_safe_start_tolerates_unknown_or_empty_content_length() {
         assert_eq!(window_safe_start_offset(900, None, 300), 900);
         assert_eq!(window_safe_start_offset(900, Some(0), 300), 0);
+    }
+
+    #[test]
+    fn structured_block_match_keeps_headline_offsets_unset_and_uses_block_span_anchor() {
+        let row = ContentStructuredBlockSearchRow {
+            document_id: Uuid::from_u128(1),
+            workspace_id: Uuid::from_u128(2),
+            library_id: Uuid::from_u128(3),
+            external_key: "synthetic-document".to_string(),
+            readable_revision_id: Uuid::from_u128(4),
+            document_title: None,
+            source_text: "context search-anchor suffix".to_string(),
+            span_start: Some(240),
+            text_score: 0.5,
+        };
+        let mut accumulator = McpDocumentAccumulator::from_structured_block(&row);
+
+        accumulator.merge_structured_block_match(&row, "search-anchor", 120);
+
+        assert!(
+            accumulator.excerpt.as_deref().is_some_and(|value| value.contains("search-anchor"))
+        );
+        assert_eq!(accumulator.excerpt_start_offset, None);
+        assert_eq!(accumulator.excerpt_end_offset, None);
+        assert_eq!(accumulator.suggested_start_offset, Some(240));
+    }
+
+    #[test]
+    fn populated_chunk_excerpt_uses_character_offsets_after_diacritic_fold() {
+        let normalized_text = format!("{}Résumé suffix", "α".repeat(100));
+        let row = ContentStructuredBlockSearchRow {
+            document_id: Uuid::from_u128(1),
+            workspace_id: Uuid::from_u128(2),
+            library_id: Uuid::from_u128(3),
+            external_key: "synthetic-document".to_string(),
+            readable_revision_id: Uuid::from_u128(4),
+            document_title: None,
+            source_text: String::new(),
+            span_start: None,
+            text_score: 0.5,
+        };
+        let mut accumulator = McpDocumentAccumulator::from_structured_block(&row);
+
+        accumulator.populate_excerpt_from_text(&normalized_text, "resume");
+
+        assert!(accumulator.excerpt.as_deref().is_some_and(|value| value.contains("Résumé")));
+        assert_eq!(accumulator.excerpt_start_offset, Some(60));
+    }
+
+    #[test]
+    fn stronger_body_match_replaces_earlier_metadata_token_excerpt() {
+        let row = ContentDocumentMetadataSearchRow {
+            document_id: Uuid::from_u128(1),
+            workspace_id: Uuid::from_u128(2),
+            library_id: Uuid::from_u128(3),
+            external_key: "synthetic-document".to_string(),
+            readable_revision_id: Some(Uuid::from_u128(4)),
+            revision_title: Some("Upload Proof".to_string()),
+            metadata_score: 150.0,
+            matched_text: "Upload Proof".to_string(),
+        };
+        let mut accumulator = McpDocumentAccumulator::from_metadata(&row);
+
+        accumulator.populate_excerpt_from_text(&row.matched_text, "shared operation proof");
+        assert_eq!(accumulator.excerpt.as_deref(), Some("Upload Proof"));
+
+        accumulator.populate_excerpt_from_text(
+            "Shared operation proof from the authoritative document body.",
+            "shared operation proof",
+        );
+        accumulator.merge_chunk_span_anchor(Some(600), 0.1, 120);
+
+        assert!(
+            accumulator
+                .excerpt
+                .as_deref()
+                .is_some_and(|excerpt| excerpt.contains("Shared operation proof"))
+        );
+        assert_eq!(accumulator.excerpt_start_offset, Some(0));
+        assert_eq!(accumulator.suggested_start_offset, Some(600));
+    }
+
+    #[test]
+    fn byte_offsets_are_converted_to_character_offsets_without_splitting_utf8() {
+        assert_eq!(byte_offset_to_char_offset("αβgamma", 4), 2);
+        assert_eq!(byte_offset_to_char_offset("αβgamma", 3), 1);
     }
 }

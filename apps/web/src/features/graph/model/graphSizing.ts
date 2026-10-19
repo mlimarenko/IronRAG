@@ -62,25 +62,3 @@ export function buildNodeSizer(nodes: GraphNode[]): (node: GraphNode) => number 
     return tier.min + span * rank
   }
 }
-
-type EmphasisLevel = 'selected' | 'neighbor' | 'hovered' | 'hoverNeighbor'
-
-/**
- * Interaction emphasis is RELATIVE to the node's own base size:
- *   - `floor` keeps a selected/hovered node clearly visible even in a dense
- *     ~2 px sea (a hard minimum radius while focused);
- *   - `mult` makes an already-large sparse-graph hub visibly grow, which the
- *     old absolute `Math.max(size, 9)` did not — a 13 px hub stayed 13 px on
- *     selection, so nothing appeared to happen.
- */
-const NODE_SIZE_EMPHASIS: Record<EmphasisLevel, { floor: number; mult: number }> = {
-  selected: { floor: 9, mult: 1.7 },
-  neighbor: { floor: 6.5, mult: 1.4 },
-  hovered: { floor: 11, mult: 1.9 },
-  hoverNeighbor: { floor: 7.5, mult: 1.45 },
-}
-
-export function emphasizeNodeSize(baseSize: number, level: EmphasisLevel): number {
-  const { floor, mult } = NODE_SIZE_EMPHASIS[level]
-  return Math.max(floor, baseSize * mult)
-}

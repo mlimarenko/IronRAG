@@ -7,7 +7,7 @@ use crate::{
 };
 
 use super::{
-    types::{CanonicalAnswerEvidence, RuntimeMatchedChunk},
+    types::{AuthoritativeAnswerEvidence, RuntimeMatchedChunk},
     verification_claims::{
         FormalExactClaim, FormalExactClaimKind, normalize_boundary_verification_text,
         normalize_verification_literal,
@@ -30,8 +30,8 @@ pub(super) fn literal_is_user_supplied_wildcard_scope(
             .any(|prefix| question_wildcard_prefixes.iter().any(|candidate| candidate == prefix))
 }
 
-pub(super) fn has_canonical_grounding_evidence(
-    evidence: &CanonicalAnswerEvidence,
+pub(super) fn has_authoritative_grounding_evidence(
+    evidence: &AuthoritativeAnswerEvidence,
     chunks: &[RuntimeMatchedChunk],
     assistant_grounding: &AssistantGroundingEvidence,
 ) -> bool {
@@ -43,7 +43,7 @@ pub(super) fn has_canonical_grounding_evidence(
 }
 
 pub(super) fn build_verification_corpus(
-    evidence: &CanonicalAnswerEvidence,
+    evidence: &AuthoritativeAnswerEvidence,
     chunks: &[RuntimeMatchedChunk],
     assistant_grounding: &AssistantGroundingEvidence,
 ) -> Vec<String> {
@@ -56,7 +56,7 @@ pub(super) fn build_verification_corpus(
 }
 
 pub(super) fn build_boundary_verification_corpus(
-    evidence: &CanonicalAnswerEvidence,
+    evidence: &AuthoritativeAnswerEvidence,
     chunks: &[RuntimeMatchedChunk],
     assistant_grounding: &AssistantGroundingEvidence,
 ) -> Vec<String> {
@@ -69,15 +69,15 @@ pub(super) fn build_boundary_verification_corpus(
 }
 
 pub(super) fn build_exact_relationship_verification_corpus(
-    evidence: &CanonicalAnswerEvidence,
+    evidence: &AuthoritativeAnswerEvidence,
     chunks: &[RuntimeMatchedChunk],
     assistant_grounding: &AssistantGroundingEvidence,
 ) -> Vec<String> {
     let mut corpus = Vec::new();
     for fact in &evidence.technical_facts {
         push_exact_relationship_records(&mut corpus, &fact.display_value);
-        push_exact_relationship_records(&mut corpus, &fact.canonical_value_text);
-        push_exact_relationship_records(&mut corpus, &fact.canonical_value_exact);
+        push_exact_relationship_records(&mut corpus, &fact.normalized_value_text);
+        push_exact_relationship_records(&mut corpus, &fact.normalized_value_exact);
     }
     for block in &evidence.structured_blocks {
         push_exact_relationship_records(&mut corpus, &block.text);
@@ -112,7 +112,7 @@ fn push_exact_relationship_records(corpus: &mut Vec<String>, value: &str) {
 }
 
 fn build_verification_corpus_with(
-    evidence: &CanonicalAnswerEvidence,
+    evidence: &AuthoritativeAnswerEvidence,
     chunks: &[RuntimeMatchedChunk],
     assistant_grounding: &AssistantGroundingEvidence,
     normalize: fn(&str) -> String,
@@ -120,7 +120,7 @@ fn build_verification_corpus_with(
     let mut corpus = Vec::<String>::new();
     for fact in &evidence.technical_facts {
         corpus.push(normalize(&fact.display_value));
-        corpus.push(normalize(&fact.canonical_value_text));
+        corpus.push(normalize(&fact.normalized_value_text));
         if let Ok(qualifiers) = serde_json::from_value::<
             Vec<crate::shared::extraction::technical_facts::TechnicalFactQualifier>,
         >(fact.qualifiers_json.clone())
@@ -154,7 +154,7 @@ fn build_verification_corpus_with(
     corpus
 }
 
-pub(super) fn literal_is_supported_by_canonical_corpus(
+pub(super) fn literal_is_supported_by_evidence_corpus(
     literal: &str,
     corpus: &[String],
     grounding_corpus: &[String],
@@ -244,7 +244,7 @@ fn numeric_boundary_before(candidate: &str, start: usize) -> bool {
         return false;
     }
     // A sign is part of the value, not punctuation around it: positive `90`
-    // must not be accepted from canonical evidence containing `-90` or `+90`.
+    // must not be accepted from authoritative evidence containing `-90` or `+90`.
     if before.is_some_and(|ch| matches!(ch, '-' | '+')) {
         return false;
     }
@@ -636,7 +636,7 @@ pub(super) fn collect_conflicting_fact_groups(
         let Some(group_id) = fact.conflict_group_id.as_ref() else {
             continue;
         };
-        groups.entry(group_id.clone()).or_default().insert(fact.canonical_value_text.clone());
+        groups.entry(group_id.clone()).or_default().insert(fact.normalized_value_text.clone());
     }
     groups.into_iter().filter(|(_, values)| values.len() > 1).collect()
 }

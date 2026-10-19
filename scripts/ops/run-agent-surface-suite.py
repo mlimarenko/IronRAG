@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run a release-style suite over the canonical agent surface probe."""
+"""Run a release-style suite over the authoritative agent surface probe."""
 
 from __future__ import annotations
 
@@ -105,7 +105,7 @@ class CaseResult:
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Run a multi-scenario suite over the canonical agent surface probe."
+        description="Run a multi-scenario suite over the authoritative agent surface probe."
     )
     parser.add_argument("--suite-path", default=str(DEFAULT_SUITE_PATH))
     parser.add_argument("--base-url", default=DEFAULT_BASE_URL)

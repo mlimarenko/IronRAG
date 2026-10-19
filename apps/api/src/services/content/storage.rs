@@ -2,10 +2,11 @@ mod filesystem;
 mod s3;
 pub mod types;
 
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use anyhow::anyhow;
 use percent_encoding::percent_decode_str;
+use tokio::io::{AsyncRead, AsyncReadExt};
 use uuid::Uuid;
 
 use crate::{
@@ -27,6 +28,30 @@ use self::{
 enum ContentStorageBackend {
     Filesystem(FilesystemContentStorageProvider),
     S3(S3ContentStorageProvider),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum BoundedRevisionSource {
+    Complete(Vec<u8>),
+    LimitExceeded { byte_size: u64 },
+}
+
+async fn read_bounded_bytes<R>(reader: &mut R, max_bytes: usize) -> std::io::Result<Vec<u8>>
+where
+    R: AsyncRead + Unpin,
+{
+    let detection_limit = max_bytes.saturating_add(1);
+    let mut bytes = vec![0; detection_limit];
+    let mut byte_count = 0;
+    while byte_count < detection_limit {
+        let read = reader.read(&mut bytes[byte_count..]).await?;
+        if read == 0 {
+            break;
+        }
+        byte_count += read;
+    }
+    bytes.truncate(byte_count);
+    Ok(bytes)
 }
 
 #[derive(Clone, Debug)]
@@ -203,6 +228,19 @@ impl ContentStorageService {
         build_revision_storage_key(workspace_id, library_id, file_name, checksum)
     }
 
+    /// The storage key [`Self::persist_web_snapshot`] will write for the same
+    /// arguments, so a caller can arm its reclaim guard before the write.
+    #[must_use]
+    pub fn build_web_snapshot_storage_key(
+        workspace_id: Uuid,
+        library_id: Uuid,
+        source_uri: &str,
+        checksum: &str,
+    ) -> String {
+        let file_name = build_web_snapshot_file_name(source_uri);
+        build_revision_storage_key(workspace_id, library_id, &file_name, checksum)
+    }
+
     pub async fn has_revision_source(
         &self,
         storage_key: &str,
@@ -210,6 +248,59 @@ impl ContentStorageService {
         match &self.backend {
             ContentStorageBackend::Filesystem(provider) => provider.has(storage_key).await,
             ContentStorageBackend::S3(provider) => provider.has(storage_key).await,
+        }
+    }
+
+    /// Removes exactly one revision-source object.
+    ///
+    /// This is the compensating action for a staged blob whose admission never
+    /// committed: `PersistedRevisionSourceGuard` reaches it through the
+    /// reclaimer on abnormal drop, and that reclaimer holds the per-library
+    /// content storage advisory lock across the reference check and this delete,
+    /// so no concurrent admission of the same content-addressed key can be
+    /// between its blob write and its commit. The key is accepted only when it
+    /// belongs to the supplied workspace/library (revision keys are
+    /// `content/{workspace}/{library}/{digest}-{name}`), so a mistaken caller
+    /// cannot delete another tenant's object. Returns whether an object was
+    /// removed; deleting an absent key is not an error.
+    ///
+    pub async fn delete_revision_source(
+        &self,
+        workspace_id: Uuid,
+        library_id: Uuid,
+        storage_key: &str,
+    ) -> Result<bool, ContentServiceError> {
+        let expected_prefix = format!("content/{workspace_id}/{library_id}/");
+        if !storage_key.starts_with(&expected_prefix) {
+            return Err(ContentServiceError::InvalidRequest {
+                message: format!(
+                    "content storage key does not belong to workspace {workspace_id} library {library_id}"
+                ),
+            });
+        }
+        match &self.backend {
+            ContentStorageBackend::Filesystem(provider) => provider.delete(storage_key).await,
+            ContentStorageBackend::S3(provider) => provider.delete(storage_key).await,
+        }
+    }
+
+    pub(crate) async fn read_revision_source_bounded(
+        &self,
+        storage_key: &str,
+        max_bytes: usize,
+    ) -> Result<BoundedRevisionSource, ContentServiceError> {
+        if max_bytes == 0 {
+            return Err(ContentServiceError::InvalidRequest {
+                message: "content revision source read limit must be greater than zero".to_string(),
+            });
+        }
+        match &self.backend {
+            ContentStorageBackend::Filesystem(provider) => {
+                provider.read_bounded(storage_key, max_bytes).await
+            }
+            ContentStorageBackend::S3(provider) => {
+                provider.read_bounded(storage_key, max_bytes).await
+            }
         }
     }
 
@@ -225,7 +316,7 @@ impl ContentStorageService {
 
     /// Writes bytes to the exact `storage_key` supplied by the caller.
     ///
-    /// This is used by the canonical library snapshot import path to
+    /// This is used by the library snapshot import path to
     /// restore blobs under the storage keys recorded in the source
     /// deployment, preserving referential integrity with the
     /// `content_revision.storage_key` column. Callers outside the
@@ -241,6 +332,32 @@ impl ContentStorageService {
                 provider.write(storage_key, file_bytes).await
             }
             ContentStorageBackend::S3(provider) => provider.write(storage_key, file_bytes).await,
+        }
+    }
+
+    pub async fn write_revision_source_raw_stream<R>(
+        &self,
+        storage_key: &str,
+        reader: &mut R,
+        max_bytes: u64,
+    ) -> Result<(), ContentServiceError>
+    where
+        R: AsyncRead + Unpin + Send,
+    {
+        validate_raw_storage_key(storage_key)?;
+        if max_bytes == 0 {
+            return Err(ContentServiceError::InvalidRequest {
+                message: "content revision source stream limit must be greater than zero"
+                    .to_string(),
+            });
+        }
+        match &self.backend {
+            ContentStorageBackend::Filesystem(provider) => {
+                provider.write_stream(storage_key, reader, max_bytes).await
+            }
+            ContentStorageBackend::S3(provider) => {
+                provider.write_stream(storage_key, reader, max_bytes).await
+            }
         }
     }
 
@@ -330,6 +447,21 @@ impl ContentStorageService {
     }
 }
 
+fn validate_raw_storage_key(storage_key: &str) -> Result<(), ContentServiceError> {
+    let relative = Path::new(storage_key);
+    if storage_key.trim().is_empty()
+        || relative.is_absolute()
+        || relative.components().any(|component| {
+            matches!(component, Component::CurDir | Component::ParentDir | Component::RootDir)
+        })
+    {
+        return Err(ContentServiceError::InvalidRequest {
+            message: "content storage key must be a non-empty relative path".to_string(),
+        });
+    }
+    Ok(())
+}
+
 fn build_revision_storage_key(
     workspace_id: Uuid,
     library_id: Uuid,
@@ -413,13 +545,15 @@ fn required_s3_setting(name: &str, value: Option<&str>) -> anyhow::Result<String
 #[cfg(test)]
 mod tests {
     use tempfile::tempdir;
+    use tokio::io::AsyncWriteExt;
     use uuid::Uuid;
 
     use crate::domains::deployment::DeploymentTopology;
 
     use super::{
-        ContentStorageService, MAX_STORAGE_FILE_NAME_LEN, build_web_snapshot_file_name,
-        truncate_file_name, types::ContentStorageDiagnostics,
+        BoundedRevisionSource, ContentStorageService, MAX_STORAGE_FILE_NAME_LEN,
+        build_web_snapshot_file_name, read_bounded_bytes, truncate_file_name,
+        types::ContentStorageDiagnostics,
     };
 
     fn filesystem_storage(tempdir: &tempfile::TempDir) -> ContentStorageService {
@@ -465,7 +599,105 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn raw_snapshot_write_overwrites_existing_source_bytes() {
+    async fn delete_revision_source_removes_persisted_object() {
+        let tempdir = tempdir().expect("tempdir");
+        let storage = filesystem_storage(&tempdir);
+        let workspace_id = Uuid::now_v7();
+        let library_id = Uuid::now_v7();
+
+        let storage_key = storage
+            .persist_revision_source(
+                workspace_id,
+                library_id,
+                "reference.md",
+                "sha256:aa11",
+                b"bytes",
+            )
+            .await
+            .expect("persist source");
+        assert!(storage.has_revision_source(&storage_key).await.expect("present"));
+
+        let removed = storage
+            .delete_revision_source(workspace_id, library_id, &storage_key)
+            .await
+            .expect("delete source");
+        assert!(removed, "the first delete must report the object removed");
+        assert!(!storage.has_revision_source(&storage_key).await.expect("absent"));
+
+        let removed_again = storage
+            .delete_revision_source(workspace_id, library_id, &storage_key)
+            .await
+            .expect("delete absent source");
+        assert!(!removed_again, "deleting an absent key is idempotent");
+    }
+
+    #[tokio::test]
+    async fn delete_revision_source_rejects_foreign_scope() {
+        let tempdir = tempdir().expect("tempdir");
+        let storage = filesystem_storage(&tempdir);
+        let workspace_id = Uuid::now_v7();
+        let library_id = Uuid::now_v7();
+        let storage_key = "content/00000000-0000-0000-0000-000000000000/\
+             00000000-0000-0000-0000-000000000000/foreign.bin";
+
+        let error = storage
+            .delete_revision_source(workspace_id, library_id, storage_key)
+            .await
+            .expect_err("foreign key must be rejected");
+        assert!(matches!(
+            error,
+            crate::services::content::error::ContentServiceError::InvalidRequest { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn bounded_revision_source_read_returns_bytes_within_limit() {
+        let tempdir = tempdir().expect("tempdir");
+        let storage = filesystem_storage(&tempdir);
+        let storage_key = "content/test/image.png";
+        storage
+            .write_revision_source_raw(storage_key, b"image bytes")
+            .await
+            .expect("persist image");
+
+        let result = storage
+            .read_revision_source_bounded(storage_key, 11)
+            .await
+            .expect("read bounded image");
+
+        assert_eq!(result, BoundedRevisionSource::Complete(b"image bytes".to_vec()));
+    }
+
+    #[tokio::test]
+    async fn bounded_byte_reader_allocates_only_the_limit_and_detection_byte() {
+        let mut source = std::io::Cursor::new(b"image bytes beyond limit".to_vec());
+
+        let bytes = read_bounded_bytes(&mut source, 5).await.expect("read bounded bytes");
+
+        assert_eq!(bytes, b"image ");
+        assert_eq!(bytes.capacity(), 6);
+    }
+
+    #[tokio::test]
+    async fn bounded_revision_source_read_reports_oversized_source_without_returning_bytes() {
+        let tempdir = tempdir().expect("tempdir");
+        let storage = filesystem_storage(&tempdir);
+        let storage_key = "content/test/oversized-image.png";
+        storage
+            .write_revision_source_raw(storage_key, b"image bytes beyond limit")
+            .await
+            .expect("persist oversized image");
+
+        let result = storage
+            .read_revision_source_bounded(storage_key, 5)
+            .await
+            .expect("inspect bounded image");
+
+        assert_eq!(result, BoundedRevisionSource::LimitExceeded { byte_size: 24 });
+    }
+
+    #[tokio::test]
+    async fn raw_snapshot_stream_write_overwrites_existing_source_bytes() {
         let tempdir = tempdir().expect("tempdir");
         let storage = filesystem_storage(&tempdir);
         let workspace_id = Uuid::now_v7();
@@ -480,14 +712,77 @@ mod tests {
             )
             .await
             .expect("persist stale source");
+        let (mut writer, mut reader) = tokio::io::duplex(16);
+        let write_task = tokio::spawn(async move {
+            writer.write_all(b"snapshot bytes").await.expect("write snapshot bytes");
+        });
 
         storage
-            .write_revision_source_raw(&storage_key, b"snapshot bytes")
+            .write_revision_source_raw_stream(&storage_key, &mut reader, 32)
             .await
-            .expect("overwrite raw source");
+            .expect("overwrite raw source from stream");
+        write_task.await.expect("writer task");
 
         let loaded = storage.read_revision_source(&storage_key).await.expect("read source");
         assert_eq!(loaded, b"snapshot bytes");
+    }
+
+    #[tokio::test]
+    async fn raw_snapshot_stream_write_rejects_input_larger_than_bound_without_promoting() {
+        let tempdir = tempdir().expect("tempdir");
+        let storage = filesystem_storage(&tempdir);
+        let storage_key = "content/test/source.bin";
+        storage
+            .write_revision_source_raw(storage_key, b"existing bytes")
+            .await
+            .expect("persist existing source");
+        let mut reader = std::io::Cursor::new(b"too-large".to_vec());
+
+        let error = storage
+            .write_revision_source_raw_stream(storage_key, &mut reader, 3)
+            .await
+            .expect_err("oversized stream must fail");
+
+        assert!(matches!(
+            error,
+            crate::services::content::error::ContentServiceError::InvalidRequest { .. }
+        ));
+        let loaded = storage.read_revision_source(storage_key).await.expect("read existing source");
+        assert_eq!(loaded, b"existing bytes");
+    }
+
+    #[tokio::test]
+    async fn raw_snapshot_stream_write_rejects_zero_byte_bound() {
+        let tempdir = tempdir().expect("tempdir");
+        let storage = filesystem_storage(&tempdir);
+        let mut reader = std::io::Cursor::new(b"snapshot bytes".to_vec());
+
+        let error = storage
+            .write_revision_source_raw_stream("content/test/source.bin", &mut reader, 0)
+            .await
+            .expect_err("zero-byte bound must fail");
+
+        assert!(matches!(
+            error,
+            crate::services::content::error::ContentServiceError::InvalidRequest { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn raw_snapshot_stream_write_rejects_invalid_storage_key() {
+        let tempdir = tempdir().expect("tempdir");
+        let storage = filesystem_storage(&tempdir);
+        let mut reader = std::io::Cursor::new(b"snapshot bytes".to_vec());
+
+        let error = storage
+            .write_revision_source_raw_stream("../outside.bin", &mut reader, 32)
+            .await
+            .expect_err("invalid storage key must fail");
+
+        assert!(matches!(
+            error,
+            crate::services::content::error::ContentServiceError::InvalidRequest { .. }
+        ));
     }
 
     #[tokio::test]

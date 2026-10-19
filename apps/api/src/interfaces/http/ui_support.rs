@@ -39,6 +39,36 @@ pub(super) fn build_cleared_session_cookie(cookie_name: &str, secure: bool) -> S
         .to_string()
 }
 
+/// Short-lived browser binding for an OIDC authorization attempt. It shares
+/// the UI session's transport policy but is a separate cookie so it cannot be
+/// confused with a credential-bearing application session.
+pub(super) fn build_oidc_attempt_cookie(
+    cookie_name: &str,
+    value: &str,
+    max_age_seconds: u64,
+    secure: bool,
+) -> String {
+    Cookie::build((cookie_name, value.to_string()))
+        .path("/")
+        .http_only(true)
+        .secure(secure)
+        .same_site(SameSite::Lax)
+        .max_age(cookie::time::Duration::seconds(i64::try_from(max_age_seconds).unwrap_or(300)))
+        .build()
+        .to_string()
+}
+
+pub(super) fn build_cleared_oidc_attempt_cookie(cookie_name: &str, secure: bool) -> String {
+    Cookie::build((cookie_name, String::new()))
+        .path("/")
+        .http_only(true)
+        .secure(secure)
+        .same_site(SameSite::Lax)
+        .max_age(cookie::time::Duration::seconds(0))
+        .build()
+        .to_string()
+}
+
 fn comma_header_contains(headers: &HeaderMap, name: &'static str, expected: &str) -> bool {
     headers.get_all(name).iter().any(|value| {
         value.to_str().ok().is_some_and(|raw| {
@@ -67,7 +97,8 @@ mod tests {
     use axum::http::HeaderMap;
 
     use super::{
-        build_cleared_session_cookie, build_session_cookie, session_cookie_secure_for_request,
+        build_cleared_oidc_attempt_cookie, build_cleared_session_cookie, build_oidc_attempt_cookie,
+        build_session_cookie, session_cookie_secure_for_request,
     };
 
     #[test]
@@ -90,6 +121,25 @@ mod tests {
     #[test]
     fn cleared_cookie_matches_secure_session_policy() {
         let cookie = build_cleared_session_cookie("ironrag_ui_session", true);
+
+        assert!(cookie.contains("Max-Age=0"));
+        assert!(cookie.contains("Secure"));
+    }
+
+    #[test]
+    fn oidc_attempt_cookie_is_http_only_lax_and_short_lived() {
+        let cookie = build_oidc_attempt_cookie("ironrag_oidc_attempt", "binding", 300, true);
+
+        assert!(cookie.contains("HttpOnly"));
+        assert!(cookie.contains("SameSite=Lax"));
+        assert!(cookie.contains("Max-Age=300"));
+        assert!(cookie.contains("Secure"));
+        assert!(!cookie.contains("ironrag_ui_session"));
+    }
+
+    #[test]
+    fn cleared_oidc_attempt_cookie_is_immediately_expired() {
+        let cookie = build_cleared_oidc_attempt_cookie("ironrag_oidc_attempt", true);
 
         assert!(cookie.contains("Max-Age=0"));
         assert!(cookie.contains("Secure"));

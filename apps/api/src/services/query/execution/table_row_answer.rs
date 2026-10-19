@@ -9,7 +9,13 @@ use crate::shared::extraction::table_markdown::{
 };
 
 use super::{
-    focused_answer_document_id, requested_initial_table_row_count, retrieve::score_value,
+    focused_answer_document_id, requested_initial_table_row_count,
+    retrieve::score_value,
+    table_row_identity::{
+        best_matching_table_row, normalize_table_header, requested_table_headers,
+        row_identifier_headers_from_question, row_identifier_match_is_distinctive_within_table,
+        selected_row_carries_query_focus,
+    },
     types::RuntimeMatchedChunk,
 };
 
@@ -67,10 +73,10 @@ pub(crate) fn build_table_row_grounded_answer(
         return build_table_value_inventory_answer(&rows);
     }
 
-    build_focused_table_row_field_answer(question, &rows)
+    build_focused_table_row_field_answer(question, ir, &rows, &scoped_chunks)
 }
 
-/// Decodes the canonical row protocol emitted by
+/// Decodes the normalized row protocol emitted by
 /// [`crate::shared::extraction::table_markdown::build_semantic_table_row_text`].
 ///
 /// `Sheet`, `Table`, and `Row` are format markers here, not natural-language
@@ -197,8 +203,16 @@ fn build_initial_table_rows_answer(rows: &[ParsedTableRow], row_count: usize) ->
     Some(lines.join("\n"))
 }
 
-fn build_focused_table_row_field_answer(question: &str, rows: &[ParsedTableRow]) -> Option<String> {
+fn build_focused_table_row_field_answer(
+    question: &str,
+    ir: Option<&QueryIR>,
+    rows: &[ParsedTableRow],
+    chunks: &[&RuntimeMatchedChunk],
+) -> Option<String> {
     let best_row = best_matching_table_row(question, rows)?;
+    if !selected_row_carries_query_focus(ir, best_row, rows, chunks) {
+        return None;
+    }
     let requested_headers = requested_table_headers(question, best_row);
     if requested_headers.is_empty() {
         if raw_pipe_table_row(best_row) {
@@ -207,6 +221,11 @@ fn build_focused_table_row_field_answer(question: &str, rows: &[ParsedTableRow])
         return None;
     }
     let mut selected_headers = row_identifier_headers_from_question(question, best_row);
+    if selected_headers.is_empty()
+        || !row_identifier_match_is_distinctive_within_table(question, best_row, rows)
+    {
+        return None;
+    }
     selected_headers.extend(requested_headers);
     selected_headers.dedup();
 
@@ -630,7 +649,7 @@ fn query_ir_requests_table_column_inventory(ir: Option<&QueryIR>) -> bool {
 
 /// Does the user want the full inventory of values from a table?
 ///
-/// The canonical signal is the compiled IR: an `Enumerate` act scoped
+/// The deciding signal is the compiled IR: an `Enumerate` act scoped
 /// to a `table_row` target type means "list values from this table".
 pub(crate) fn question_asks_table_value_inventory(question: &str, ir: Option<&QueryIR>) -> bool {
     let _ = question;
@@ -643,56 +662,6 @@ pub(crate) fn question_asks_table_value_inventory(question: &str, ir: Option<&Qu
     false
 }
 
-fn best_matching_table_row<'a>(
-    question: &str,
-    rows: &'a [ParsedTableRow],
-) -> Option<&'a ParsedTableRow> {
-    let literals = crate::services::query::planner::extract_keywords_preserving_case(question)
-        .into_iter()
-        .map(|token| token.to_lowercase())
-        .filter(|token| token.len() >= 3)
-        .collect::<Vec<_>>();
-    if literals.is_empty() {
-        return None;
-    }
-
-    let mut ranked = rows
-        .iter()
-        .map(|row| {
-            let literal_score = literals
-                .iter()
-                .filter(|literal| row.flattened_text.contains(literal.as_str()))
-                .map(|literal| {
-                    if literal.contains('@')
-                        || literal.contains('.')
-                        || literal.chars().any(|character| character.is_ascii_digit())
-                    {
-                        12usize
-                    } else {
-                        3usize
-                    }
-                })
-                .sum::<usize>();
-            let matched_cell_score =
-                row_identifier_headers_from_question(question, row).len().saturating_mul(12);
-            let score = literal_score.saturating_add(matched_cell_score);
-            (row, score)
-        })
-        .filter(|(_, score)| *score > 0)
-        .collect::<Vec<_>>();
-    ranked.sort_by(|left, right| {
-        right.1.cmp(&left.1).then_with(|| left.0.row_number.cmp(&right.0.row_number))
-    });
-    let (best_row, best_score) = ranked.first().copied()?;
-    if best_score < 6 {
-        return None;
-    }
-    if ranked.get(1).is_some_and(|(_, second_score)| *second_score == best_score) {
-        return None;
-    }
-    Some(best_row)
-}
-
 fn raw_pipe_table_row(row: &ParsedTableRow) -> bool {
     !row.fields.is_empty()
         && row
@@ -700,79 +669,6 @@ fn raw_pipe_table_row(row: &ParsedTableRow) -> bool {
             .iter()
             .enumerate()
             .all(|(index, (header, _))| header == &format!("col_{}", index + 1))
-}
-
-fn row_identifier_headers_from_question(question: &str, row: &ParsedTableRow) -> Vec<String> {
-    let lowered = question.to_lowercase();
-    let question_tokens = normalized_alnum_tokens(question, 3);
-    row.fields
-        .iter()
-        .filter(|(_, value)| {
-            let normalized_value = value.trim().to_lowercase();
-            if normalized_value.chars().count() < 3 {
-                return false;
-            }
-            lowered.contains(&normalized_value)
-                || normalized_alnum_tokens(value, 3)
-                    .iter()
-                    .any(|token| question_tokens.contains(token))
-        })
-        .map(|(header, _)| normalize_table_header(header))
-        .collect()
-}
-
-fn requested_table_headers(question: &str, row: &ParsedTableRow) -> Vec<String> {
-    let lowered = question.to_lowercase();
-    let question_tokens = normalized_alnum_tokens(question, 2);
-    row.fields
-        .iter()
-        .filter(|(header, _)| table_header_matches_question(header, &lowered, &question_tokens))
-        .map(|(header, _)| normalize_table_header(header))
-        .collect()
-}
-
-pub(crate) fn normalize_table_header(value: &str) -> String {
-    value.trim().to_lowercase()
-}
-
-fn table_header_matches_question(
-    header: &str,
-    lowered_question: &str,
-    question_tokens: &BTreeSet<String>,
-) -> bool {
-    let normalized_header = normalize_table_header(header);
-    if lowered_question.contains(&normalized_header) {
-        return true;
-    }
-    let tokenized_header = split_table_header_for_token_match(header);
-    let header_tokens = normalized_alnum_tokens(&tokenized_header, 2);
-    if header_tokens.is_empty() {
-        return false;
-    }
-    if header_tokens.iter().all(|token| question_tokens.contains(token)) {
-        return true;
-    }
-    header_tokens.len() >= 2
-        && header_tokens.iter().filter(|token| question_tokens.contains(*token)).count() >= 1
-}
-
-fn split_table_header_for_token_match(value: &str) -> String {
-    let chars = value.chars().collect::<Vec<_>>();
-    let mut out = String::with_capacity(value.len());
-    for (idx, ch) in chars.iter().copied().enumerate() {
-        if idx > 0 && ch.is_uppercase() {
-            let prev = chars[idx - 1];
-            let next = chars.get(idx + 1).copied();
-            if prev.is_lowercase()
-                || prev.is_numeric()
-                || (prev.is_uppercase() && next.is_some_and(|candidate| candidate.is_lowercase()))
-            {
-                out.push(' ');
-            }
-        }
-        out.push(ch);
-    }
-    out
 }
 
 #[cfg(test)]

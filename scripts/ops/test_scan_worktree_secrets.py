@@ -2,32 +2,33 @@ from __future__ import annotations
 
 import importlib.util
 from pathlib import Path
-import subprocess
 from tempfile import TemporaryDirectory
 import unittest
 
 
-MODULE_PATH = Path(__file__).with_name("scan_worktree_secrets.py")
-SPEC = importlib.util.spec_from_file_location("scan_worktree_secrets", MODULE_PATH)
-if SPEC is None or SPEC.loader is None:
-    raise RuntimeError("cannot load scan_worktree_secrets module")
-SCAN = importlib.util.module_from_spec(SPEC)
-SPEC.loader.exec_module(SCAN)
+def _load(module_name: str):
+    path = Path(__file__).with_name(f"{module_name}.py")
+    spec = importlib.util.spec_from_file_location(module_name, path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"cannot load {module_name} module")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+SCAN = _load("scan_worktree_secrets")
+GIT_SANDBOX = _load("git_sandbox")
 
 
 class WorktreeSecretScanTests(unittest.TestCase):
     def test_selected_paths_include_current_sources_and_skip_deleted_or_ignored_files(self) -> None:
         with TemporaryDirectory(prefix="ironrag-secret-scan-test-") as temporary_directory:
             root = Path(temporary_directory)
-            subprocess.run(["git", "init", "--quiet"], cwd=root, check=True)
+            GIT_SANDBOX.init_repository(root)
             (root / ".gitignore").write_text("ignored.txt\n", encoding="utf-8")
             (root / "tracked.txt").write_text("tracked\n", encoding="utf-8")
             (root / "deleted.txt").write_text("deleted\n", encoding="utf-8")
-            subprocess.run(
-                ["git", "add", ".gitignore", "tracked.txt", "deleted.txt"],
-                cwd=root,
-                check=True,
-            )
+            GIT_SANDBOX.run_git(["add", ".gitignore", "tracked.txt", "deleted.txt"], cwd=root)
             (root / "deleted.txt").unlink()
             (root / "untracked.txt").write_text("untracked\n", encoding="utf-8")
             (root / "ignored.txt").write_text("ignored\n", encoding="utf-8")

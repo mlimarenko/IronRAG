@@ -3,7 +3,7 @@ export type DirtyStateBaseline = {
   normalizedLoadedMarkdown: string
 }
 
-export function normalizeEditorMarkdown(markdown: string): string {
+function normalizeEditorMarkdown(markdown: string): string {
   return markdown.replace(/\r\n?/g, '\n').trim()
 }
 

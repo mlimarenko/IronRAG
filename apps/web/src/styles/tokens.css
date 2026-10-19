@@ -1,0 +1,157 @@
+@import 'tailwindcss';
+
+:root {
+  --bg: #f7f9fc;
+  --surface: #ffffff;
+  --surface-2: #f0f3f8;
+  --surface-3: #e3e9f2;
+  --text: #1b2638;
+  --muted: #627086;
+  --faint: #627086;
+  --border: #e0e6ef;
+  --border-strong: #c6d0df;
+  --sidebar: #ffffff;
+  --sidebar-2: var(--surface-2);
+  --sidebar-text: var(--text);
+  --accent: #315bcb;
+  --accent-foreground: #ffffff;
+  --accent-hover: #2549ad;
+  --accent-soft: #eaf0ff;
+  --ready: #187a54;
+  --ready-bg: #e7f5ee;
+  --processing: #276eb4;
+  --processing-bg: #e6f0fb;
+  --warning: #8c6414;
+  --warning-bg: #fff4d9;
+  --failed: #b14455;
+  --failed-bg: #fdebef;
+  --neutral-status: var(--muted);
+  --neutral-status-bg: var(--surface-2);
+  --sparse: #7554b5;
+  --sparse-bg: #f1ebfa;
+  --graph-canvas-bg: var(--surface);
+  --graph-canvas-text: var(--text);
+  --graph-overlay-bg: var(--surface-2);
+  --radius-sm: 6px;
+  --radius: 10px;
+  --radius-lg: 10px;
+  --radius-xl: 14px;
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.04);
+  --shadow-md: 0 8px 24px rgba(0, 0, 0, 0.12);
+  --sidebar-width: 224px;
+  --topbar-height: 48px;
+  color-scheme: light;
+  font-family:
+    Inter,
+    ui-sans-serif,
+    -apple-system,
+    BlinkMacSystemFont,
+    'Segoe UI',
+    sans-serif;
+  color: var(--text);
+  background: var(--bg);
+  font-synthesis: none;
+}
+
+:root[data-theme='dark'] {
+  --bg: #151b25;
+  --surface: #1d2633;
+  --surface-2: #263243;
+  --surface-3: #35445a;
+  --text: #edf2fa;
+  --muted: #a7b5c9;
+  --faint: #a7b5c9;
+  --border: #334156;
+  --border-strong: #4e617c;
+  --sidebar: #1a2230;
+  --sidebar-2: var(--surface-2);
+  --accent: #8fb2ff;
+  --accent-foreground: #13203a;
+  --accent-hover: #a9c5ff;
+  --accent-soft: #243657;
+  --ready: #66d4a2;
+  --ready-bg: #183c30;
+  --processing: #80b8ef;
+  --processing-bg: #203952;
+  --warning: #f1c36b;
+  --warning-bg: #40331e;
+  --failed: #f198a7;
+  --failed-bg: #442934;
+  --sparse: #bea3ee;
+  --sparse-bg: #352b4a;
+  --graph-canvas-bg: var(--sidebar);
+  --graph-canvas-text: var(--sidebar-text);
+  --graph-overlay-bg: var(--sidebar-2);
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.15);
+  --shadow-md: 0 8px 24px rgba(0, 0, 0, 0.3);
+  color-scheme: dark;
+}
+
+* {
+  box-sizing: border-box;
+}
+html,
+body,
+#root {
+  min-height: 100%;
+}
+html {
+  background: var(--bg);
+  font-size: 100%;
+}
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-size: 0.875rem;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+button,
+input,
+select,
+textarea {
+  font: inherit;
+}
+button,
+a {
+  -webkit-tap-highlight-color: transparent;
+}
+button {
+  color: inherit;
+}
+a {
+  color: inherit;
+  text-decoration: none;
+}
+button:focus-visible,
+a:focus-visible,
+input:focus-visible,
+select:focus-visible,
+textarea:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+::selection {
+  background: var(--accent-soft);
+}
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-thumb {
+  background: color-mix(in srgb, var(--muted) 35%, transparent);
+  border: 3px solid transparent;
+  border-radius: 10px;
+  background-clip: padding-box;
+}
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}

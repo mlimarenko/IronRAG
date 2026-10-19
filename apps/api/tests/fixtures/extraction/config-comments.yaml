@@ -1,0 +1,8 @@
+services:
+  rabbitmq:
+    image: rabbitmq:3-management
+    ports:
+      # AMQP port: 5672
+      - "5672:5672"
+      # Management UI port: 15672
+      - "15672:15672"

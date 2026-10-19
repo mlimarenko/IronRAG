@@ -27,7 +27,7 @@ pub struct ExtractChunkResult {
 pub struct ExtractNodeCandidate {
     pub id: Uuid,
     pub chunk_result_id: Uuid,
-    pub canonical_key: String,
+    pub identity_key: String,
     pub node_kind: String,
     pub display_label: String,
     pub summary: Option<String>,
@@ -37,10 +37,10 @@ pub struct ExtractNodeCandidate {
 pub struct ExtractEdgeCandidate {
     pub id: Uuid,
     pub chunk_result_id: Uuid,
-    pub canonical_key: String,
+    pub identity_key: String,
     pub edge_kind: String,
-    pub from_canonical_key: String,
-    pub to_canonical_key: String,
+    pub from_identity_key: String,
+    pub to_identity_key: String,
     pub summary: Option<String>,
 }
 

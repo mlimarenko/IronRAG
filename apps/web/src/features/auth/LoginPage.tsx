@@ -1,669 +1,814 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
-import { useQuery } from '@tanstack/react-query'
-import { useTranslation } from 'react-i18next'
-import { useNavigate } from 'react-router-dom'
-import { z } from 'zod'
-import { useApp } from '@/shared/contexts/app-context'
-import { queries } from '@/shared/api'
-import type { BootstrapProviderBindingBundle } from '@/shared/api/auth'
-import type { TFunction } from 'i18next'
+import { useMutation, useQuery } from '@tanstack/react-query'
 import {
-  buildBootstrapAiSetup,
-  canEditProviderBaseUrl,
-  normalizeProviderBaseUrl,
-  resolveProviderCredentialPolicy,
-} from '@/shared/lib/ai-provider'
-import { Button } from '@/shared/components/ui/button'
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from '@/shared/components/ui/select'
-import {
-  Loader2,
-  FileText,
-  Share2,
-  Brain,
-  Database,
   AlertCircle,
-  Sparkles,
-  Globe,
+  ArrowRight,
+  Check,
+  KeyRound,
+  Languages,
+  LoaderCircle,
+  LockKeyhole,
+  Server,
 } from 'lucide-react'
-import { ProviderCredentialFields } from '@/shared/components/ai-provider/ProviderCredentialFields'
-import { ProviderSetupSummary } from '@/shared/components/ai-provider/ProviderSetupSummary'
+import { useEffect, useMemo, useState, type FormEvent } from 'react'
+import { useTranslation } from 'react-i18next'
+import { useLocation, useNavigate, type Location } from 'react-router-dom'
+import { z } from 'zod'
+
+import { usePreferences } from '@/app/preferences-context'
+import { Brand } from '@/app/Brand'
+import { DEFAULT_SIGNED_IN_ROUTE, returnToFromLocation } from '@/app/returnTo'
+import { authApi, getApiProblem, queries } from '@/shared/api'
+import type { BootstrapProviderBindingBundle } from '@/shared/api/auth'
 import type { AiBindingPurpose } from '@/shared/api/generated'
-import { AVAILABLE_LOCALES } from '@/shared/types'
-import {
-  fieldErrorMessage,
-  FormInputField,
-  FormSelectField,
-  nonEmptyString,
-  useTypedForm,
-} from '@/shared/forms'
+import { useApp } from '@/shared/contexts/app-context'
+import { buildBootstrapAiSetup } from '@/shared/lib/ai-provider'
+import { screenPhase } from '@/shared/lib/screenPhase'
+import { Badge, Button } from '@/shared/ui'
+import { loginNoticeKind, ssoErrorFromSearch } from './model/loginNotice'
 
-type BootstrapPurposeMetadata = {
-  labelKey: `login.${string}`
-  descriptionKey: `login.${string}`
+type LoginValues = {
+  login: string
+  password: string
 }
 
-type BootstrapPurposeCoverage = Record<AiBindingPurpose, BootstrapPurposeMetadata>
-
-const bootstrapPurposeMetadata = {
-  extract_text: {
-    labelKey: 'login.purposeExtractText',
-    descriptionKey: 'login.purposeExtractTextDesc',
-  },
-  extract_graph: {
-    labelKey: 'login.purposeExtractGraph',
-    descriptionKey: 'login.purposeExtractGraphDesc',
-  },
-  embed_chunk: {
-    labelKey: 'login.purposeEmbedChunk',
-    descriptionKey: 'login.purposeEmbedChunkDesc',
-  },
-  query_compile: {
-    labelKey: 'login.purposeQueryCompile',
-    descriptionKey: 'login.purposeQueryCompileDesc',
-  },
-  query_answer: {
-    labelKey: 'login.purposeQueryAnswer',
-    descriptionKey: 'login.purposeQueryAnswerDesc',
-  },
-  agent: {
-    labelKey: 'login.purposeAgent',
-    descriptionKey: 'login.purposeAgentDesc',
-  },
-} satisfies BootstrapPurposeCoverage
-
-function providerBundleKey(bundle: BootstrapProviderBindingBundle) {
-  return bundle.providerCatalogId
+type BootstrapValues = {
+  login: string
+  email: string
+  displayName: string
+  password: string
+  providerKey: string
+  apiKey: string
+  baseUrl: string
 }
 
-function credentialSummary(
-  bundle: BootstrapProviderBindingBundle,
-  requiresApiKey: boolean,
-  apiKey: string,
-  t: TFunction,
-): string {
-  if (bundle.credentialSource === 'env') return t('login.summaryCredentialEnv')
-  if (!requiresApiKey) return t('login.summaryCredentialOptional')
-  return apiKey.trim() ? t('login.summaryCredentialProvided') : t('login.summaryCredentialRequired')
+type BootstrapField = keyof BootstrapValues
+type BootstrapErrors = Partial<Record<BootstrapField, string>>
+
+const INITIAL_LOGIN: LoginValues = { login: '', password: '' }
+const INITIAL_BOOTSTRAP: BootstrapValues = {
+  login: '',
+  email: '',
+  displayName: '',
+  password: '',
+  providerKey: '',
+  apiKey: '',
+  baseUrl: '',
 }
 
-function endpointSummary(
-  requiresBaseUrl: boolean,
-  isEditable: boolean,
-  inputBaseUrl: string,
-  defaultBaseUrl: string,
-  t: TFunction,
-): string {
-  if (!requiresBaseUrl) return defaultBaseUrl || t('login.summaryEndpointHosted')
-  if (isEditable) return inputBaseUrl.trim() || t('login.summaryEndpointRequired')
-  return defaultBaseUrl || t('login.summaryEndpointRequired')
-}
+const PURPOSE_TRANSLATIONS = {
+  extract_text: ['login.purposeExtractText', 'login.purposeExtractTextDesc'],
+  extract_graph: ['login.purposeExtractGraph', 'login.purposeExtractGraphDesc'],
+  graph_entity_type: ['login.purposeGraphEntityType', 'login.purposeGraphEntityTypeDesc'],
+  embed_chunk: ['login.purposeEmbedChunk', 'login.purposeEmbedChunkDesc'],
+  query_compile: ['login.purposeQueryCompile', 'login.purposeQueryCompileDesc'],
+  query_rerank: ['login.purposeQueryRerank', 'login.purposeQueryRerankDesc'],
+  query_answer: ['login.purposeQueryAnswer', 'login.purposeQueryAnswerDesc'],
+  agent: ['login.purposeAgent', 'login.purposeAgentDesc'],
+} as const satisfies Record<AiBindingPurpose, readonly [`login.${string}`, `login.${string}`]>
 
-function bindingParameters(binding: { temperature?: number | null; topP?: number | null }): string {
-  const values: string[] = []
-  if (binding.temperature != null) values.push(`temp=${binding.temperature}`)
-  if (binding.topP != null) values.push(`topP=${binding.topP}`)
-  return values.join(' · ')
-}
-
-function bundleState(
+function bootstrapSchema(
   bundle: BootstrapProviderBindingBundle | null,
-  apiKey: string,
-  baseUrl: string,
-  t: TFunction,
-) {
-  const bindings = bundle?.bindings ?? []
-  if (!bundle) {
-    return {
-      bindings,
-      isBaseUrlEditable: false,
-      defaultBaseUrl: '',
-      requiresApiKey: false,
-      requiresBaseUrl: false,
-      isReady: false,
-      summaryRows: [],
-    }
-  }
-  const policy = resolveProviderCredentialPolicy(bundle)
-  const usesEnvironmentCredentials = bundle.credentialSource === 'env'
-  const requiresApiKey = !usesEnvironmentCredentials && policy.apiKeyRequired
-  const requiresBaseUrl = !usesEnvironmentCredentials && policy.baseUrlRequired
-  const isBaseUrlEditable = canEditProviderBaseUrl(bundle)
-  const defaultBaseUrl = normalizeProviderBaseUrl(bundle, bundle.defaultBaseUrl)
-  const isApiKeyReady = !requiresApiKey || Boolean(apiKey.trim())
-  const isBaseUrlReady =
-    !requiresBaseUrl || Boolean(isBaseUrlEditable ? baseUrl.trim() : defaultBaseUrl)
-  return {
-    bindings,
-    isBaseUrlEditable,
-    defaultBaseUrl,
-    requiresApiKey,
-    requiresBaseUrl,
-    isReady: usesEnvironmentCredentials || (isApiKeyReady && isBaseUrlReady),
-    summaryRows: [
-      {
-        label: t('login.summaryCredential'),
-        value: credentialSummary(bundle, requiresApiKey, apiKey, t),
-      },
-      {
-        label: t('login.summaryEndpoint'),
-        value: endpointSummary(requiresBaseUrl, isBaseUrlEditable, baseUrl, defaultBaseUrl, t),
-      },
-      {
-        label: t('login.summaryDiscovery'),
-        value: bundle.modelDiscovery?.mode ?? t('login.summaryUnknown'),
-      },
-      { label: t('login.summaryBindings'), value: String(bindings.length) },
-    ],
-  }
-}
-
-function createBootstrapSchema(
-  bindingBundles: BootstrapProviderBindingBundle[],
-  defaultProviderKey: string,
-  t: TFunction,
+  translate: (key: `login.${string}`) => string,
 ) {
   return z
     .object({
-      login: nonEmptyString(t('login.fillRequired')),
-      password: nonEmptyString(t('login.fillRequired')),
-      displayName: z.string(),
-      providerKey: nonEmptyString(t('login.bootstrapBundleRequired')),
+      login: z
+        .string()
+        .trim()
+        .min(1, translate('login.fillRequired'))
+        .regex(/^[a-z0-9._-]+$/u, translate('login.loginPattern')),
+      email: z.string().trim().email(translate('login.emailInvalid')),
+      displayName: z.string().trim(),
+      password: z.string().min(8, translate('login.passwordMin')),
+      providerKey: z.string().trim().min(1, translate('login.bootstrapBundleRequired')),
       apiKey: z.string(),
       baseUrl: z.string(),
     })
     .superRefine((values, context) => {
-      const providerKey = values.providerKey || defaultProviderKey
-      const bundle = bindingBundles.find((entry) => providerBundleKey(entry) === providerKey)
-      if (!bundle) {
+      if (!bundle || values.providerKey !== bundle.providerCatalogId) {
         context.addIssue({
           code: 'custom',
-          message: t('login.bootstrapBundleRequired'),
+          message: translate('login.bootstrapBundleRequired'),
           path: ['providerKey'],
         })
         return
       }
       if (bundle.credentialSource === 'env') return
 
-      const policy = resolveProviderCredentialPolicy(bundle)
-      if (policy.apiKeyRequired && !values.apiKey.trim()) {
+      if (bundle.credentialPolicy.apiKeyRequired && !values.apiKey.trim()) {
         context.addIssue({
           code: 'custom',
-          message: t('login.providerTokenRequiredHint'),
+          message: translate('login.providerTokenRequiredHint'),
           path: ['apiKey'],
         })
       }
-      const isBaseUrlEditable = canEditProviderBaseUrl(bundle)
-      const defaultBaseUrl = normalizeProviderBaseUrl(bundle, bundle.defaultBaseUrl)
-      if (policy.baseUrlRequired && !(isBaseUrlEditable ? values.baseUrl.trim() : defaultBaseUrl)) {
+
+      const baseUrl = values.baseUrl.trim()
+      if (bundle.credentialPolicy.baseUrlMode === 'required' && !baseUrl) {
         context.addIssue({
           code: 'custom',
-          message: t('login.providerAddressRequiredHint'),
+          message: translate('login.providerAddressRequiredHint'),
+          path: ['baseUrl'],
+        })
+      }
+      if (
+        bundle.credentialPolicy.baseUrlMode === 'fixed' &&
+        bundle.credentialPolicy.baseUrlRequired &&
+        !bundle.defaultBaseUrl
+      ) {
+        context.addIssue({
+          code: 'custom',
+          message: translate('login.providerAddressRequiredHint'),
+          path: ['baseUrl'],
+        })
+      }
+      if (baseUrl && !z.url().safeParse(baseUrl).success) {
+        context.addIssue({
+          code: 'custom',
+          message: translate('login.baseUrlInvalid'),
           path: ['baseUrl'],
         })
       }
     })
 }
 
+function errorMap(error: z.ZodError<BootstrapValues> | undefined): BootstrapErrors {
+  if (!error) return {}
+  const errors: BootstrapErrors = {}
+  for (const issue of error.issues) {
+    const field = issue.path[0]
+    if (
+      typeof field === 'string' &&
+      field in INITIAL_BOOTSTRAP &&
+      !errors[field as BootstrapField]
+    ) {
+      errors[field as BootstrapField] = issue.message
+    }
+  }
+  return errors
+}
+
+function isBootstrapAccessFailure(error: unknown): 'forbidden' | 'claimed' | null {
+  const problem = getApiProblem(error)
+  if (problem?.status === 403) return 'forbidden'
+  if (problem?.status === 409 && problem.code === 'bootstrap_already_claimed') return 'claimed'
+  return null
+}
+
+function Field({
+  id,
+  label,
+  error,
+  hint,
+  ...inputProps
+}: Readonly<
+  {
+    id: string
+    label: string
+    error?: string | undefined
+    hint?: string | undefined
+  } & React.InputHTMLAttributes<HTMLInputElement>
+>) {
+  const descriptionId = error || hint ? `${id}-description` : undefined
+  return (
+    <label className="field" htmlFor={id}>
+      <span>{label}</span>
+      <input
+        {...inputProps}
+        aria-describedby={descriptionId}
+        aria-invalid={Boolean(error)}
+        className="input"
+        id={id}
+      />
+      {(error || hint) && (
+        <small className={error ? 'field-error' : 'field-hint'} id={descriptionId}>
+          {error || hint}
+        </small>
+      )}
+    </label>
+  )
+}
+
+function LoginHeader() {
+  const { t } = useTranslation()
+  const { locale, setLocale } = usePreferences()
+  const nextLocale = locale === 'en' ? 'ru' : 'en'
+
+  return (
+    <header className="login-header">
+      <Brand />
+      <Button
+        aria-label={t('login.languageLabel')}
+        onClick={() => setLocale(nextLocale)}
+        size="sm"
+        type="button"
+        variant="ghost"
+      >
+        <Languages aria-hidden="true" size={16} />
+        {locale === 'en' ? t('login.languageEnglish') : t('login.languageRussian')}
+      </Button>
+    </header>
+  )
+}
+
+function oidcLoginHref(returnTo: string): string {
+  return `/v1/iam/oidc/login?${new URLSearchParams({ returnTo }).toString()}`
+}
+
+function returnToForSso(location: Location): string {
+  // When the app sent a visitor here from a protected page, or a rejected
+  // single sign-on brought them back with the page they were heading for, that
+  // is the most useful same-origin destination. A direct visit to /login falls
+  // back to the canonical landing page instead of creating a /login loop.
+  const candidate = returnToFromLocation(location)
+
+  // A fragment never reaches the server and is not part of an HTTP redirect
+  // target. Keep the path and query only, which is what the OIDC callback can
+  // safely restore after the same-origin round trip.
+  return candidate.split('#', 1)[0] || DEFAULT_SIGNED_IN_ROUTE
+}
+
+/**
+ * The single sign-on verdict from the address, read once. The parameter is
+ * then dropped from the address so a reload or a later password sign-in does
+ * not keep repeating it, while `returnTo` stays for the retry.
+ */
+function useSsoErrorFromAddress(location: Location) {
+  const navigate = useNavigate()
+  const [ssoError] = useState(() => ssoErrorFromSearch(location.search))
+  useEffect(() => {
+    if (ssoErrorFromSearch(location.search) === null) return
+    const remaining = new URLSearchParams(location.search)
+    remaining.delete('ssoError')
+    const search = remaining.toString()
+    void navigate(
+      { pathname: location.pathname, search: search ? `?${search}` : '' },
+      { replace: true, state: location.state },
+    )
+  }, [location.pathname, location.search, location.state, navigate])
+  return ssoError
+}
+
+function LoginForm({
+  notice,
+  ssoAvailable,
+  ssoHref,
+}: Readonly<{
+  notice: string
+  ssoAvailable: boolean
+  ssoHref: string
+}>) {
+  const { t } = useTranslation()
+  const { login } = useApp()
+  const [values, setValues] = useState(INITIAL_LOGIN)
+  const [formError, setFormError] = useState('')
+  const loginMutation = useMutation({
+    mutationFn: ({ login: loginValue, password }: LoginValues) => login(loginValue, password),
+    onError: (error: unknown) => {
+      setFormError(
+        getApiProblem(error)?.status === 401 ? t('login.invalid') : t('login.loginFailed'),
+      )
+    },
+  })
+
+  const handleSubmit = (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault()
+    setFormError('')
+    if (!values.login.trim() || !values.password) {
+      setFormError(t('login.fillAllFields'))
+      return
+    }
+    loginMutation.mutate({ ...values, login: values.login.trim() })
+  }
+
+  return (
+    <form className="login-form" onSubmit={handleSubmit}>
+      <LoginHeader />
+      <h1>{t('login.signIn')}</h1>
+      {(formError || notice) && (
+        <div className="login-error" role="alert">
+          <AlertCircle aria-hidden="true" size={15} />
+          {formError || notice}
+        </div>
+      )}
+      <Field
+        autoComplete="username"
+        autoFocus
+        id="login"
+        label={t('login.loginField')}
+        name="login"
+        onChange={(event) => setValues((current) => ({ ...current, login: event.target.value }))}
+        placeholder={t('login.loginPlaceholder')}
+        value={values.login}
+      />
+      <Field
+        autoComplete="current-password"
+        id="password"
+        label={t('login.password')}
+        name="password"
+        onChange={(event) => setValues((current) => ({ ...current, password: event.target.value }))}
+        placeholder={t('login.passwordPlaceholder')}
+        type="password"
+        value={values.password}
+      />
+      <Button disabled={loginMutation.isPending} type="submit" variant="primary">
+        {loginMutation.isPending ? (
+          <LoaderCircle aria-hidden="true" className="spin" size={15} />
+        ) : (
+          <ArrowRight aria-hidden="true" size={15} />
+        )}
+        {t('login.submit')}
+      </Button>
+      {ssoAvailable && (
+        <>
+          <div aria-hidden="true" className="login-auth-separator">
+            <span>{t('login.ssoSeparator')}</span>
+          </div>
+          <a className="button button--secondary button--md login-sso-button" href={ssoHref}>
+            <KeyRound aria-hidden="true" size={15} />
+            {t('login.ssoSignIn')}
+          </a>
+        </>
+      )}
+    </form>
+  )
+}
+
+// Whether the endpoint half of a bootstrap credential is satisfied. `required`
+// means the operator must type one; a `fixed` endpoint the provider declares
+// required must have been shipped with a default; anything else is optional.
+function endpointReadiness(bundle: BootstrapProviderBindingBundle, typedBaseUrl: string): boolean {
+  const policy = bundle.credentialPolicy
+  if (policy.baseUrlMode === 'required') return Boolean(typedBaseUrl.trim())
+  if (policy.baseUrlMode === 'fixed' && policy.baseUrlRequired) {
+    return Boolean(bundle.defaultBaseUrl)
+  }
+  return true
+}
+
+function providerReadiness(
+  bundle: BootstrapProviderBindingBundle,
+  values: BootstrapValues,
+): boolean {
+  if (bundle.credentialSource === 'env') return true
+  const keyReady = !bundle.credentialPolicy.apiKeyRequired || Boolean(values.apiKey.trim())
+  return keyReady && endpointReadiness(bundle, values.baseUrl)
+}
+
+// Which sentence the summary shows about the credential itself.
+function credentialSummaryKey(
+  bundle: BootstrapProviderBindingBundle,
+  typedApiKey: string,
+): 'env' | 'provided' | 'required' | 'optional' {
+  if (bundle.credentialSource === 'env') return 'env'
+  if (typedApiKey.trim()) return 'provided'
+  return bundle.credentialPolicy.apiKeyRequired ? 'required' : 'optional'
+}
+
+function ProviderSummary({
+  bundle,
+  values,
+}: Readonly<{ bundle: BootstrapProviderBindingBundle; values: BootstrapValues }>) {
+  const { t } = useTranslation()
+  const ready = providerReadiness(bundle, values)
+  const credential = {
+    env: t('login.summaryCredentialEnv'),
+    provided: t('login.summaryCredentialProvided'),
+    required: t('login.summaryCredentialRequired'),
+    optional: t('login.summaryCredentialOptional'),
+  }[credentialSummaryKey(bundle, values.apiKey)]
+  const endpointFallback =
+    bundle.credentialPolicy.baseUrlMode === 'required'
+      ? t('login.summaryEndpointRequired')
+      : t('login.summaryEndpointHosted')
+  const endpoint =
+    bundle.credentialPolicy.baseUrlMode === 'fixed'
+      ? (bundle.defaultBaseUrl ?? t('login.summaryEndpointHosted'))
+      : values.baseUrl.trim() || endpointFallback
+  const discoveryKey = {
+    shared: 'login.summaryDiscoveryShared',
+    credential: 'login.summaryDiscoveryCredential',
+    unsupported: 'login.summaryDiscoveryUnsupported',
+  } as const
+
+  return (
+    <div className="bootstrap-summary">
+      <div className="bootstrap-summary__heading">
+        <div>
+          <strong>{bundle.displayName}</strong>
+          <span>
+            {bundle.credentialSource === 'env'
+              ? t('login.bundleConfiguredInEnv')
+              : t('login.bundleReadyPreview')}
+          </span>
+        </div>
+        <Badge tone={ready ? 'ready' : 'warning'}>
+          {ready ? t('login.summaryReady') : t('login.summaryNeedsInput')}
+        </Badge>
+      </div>
+      <dl>
+        <div>
+          <dt>{t('login.summaryCredential')}</dt>
+          <dd>{credential}</dd>
+        </div>
+        <div>
+          <dt>{t('login.summaryEndpoint')}</dt>
+          <dd>{endpoint}</dd>
+        </div>
+        <div>
+          <dt>{t('login.summaryDiscovery')}</dt>
+          <dd>{t(discoveryKey[bundle.modelDiscovery.mode])}</dd>
+        </div>
+        <div>
+          <dt>{t('login.summaryBindings')}</dt>
+          <dd>{bundle.bindings.length}</dd>
+        </div>
+      </dl>
+    </div>
+  )
+}
+
+function ProviderFields({
+  bundle,
+  errors,
+  touched,
+  values,
+  update,
+}: Readonly<{
+  bundle: BootstrapProviderBindingBundle
+  errors: BootstrapErrors
+  touched: ReadonlySet<BootstrapField>
+  values: BootstrapValues
+  update: (field: BootstrapField, value: string) => void
+}>) {
+  const { t } = useTranslation()
+  if (bundle.credentialSource === 'env') {
+    return (
+      <div className="bootstrap-preconfigured">
+        <Check aria-hidden="true" size={16} />
+        <div>
+          <strong>{t('login.preconfigured')}</strong>
+          <span>{t('login.bundleConfiguredInEnv')}</span>
+        </div>
+      </div>
+    )
+  }
+
+  const mode = bundle.credentialPolicy.baseUrlMode
+  return (
+    <div className="field-grid bootstrap-provider-fields">
+      <Field
+        autoComplete="off"
+        error={touched.has('apiKey') ? errors.apiKey : undefined}
+        id="bootstrap-api-key"
+        label={
+          bundle.credentialPolicy.apiKeyRequired
+            ? t('login.apiKey')
+            : t('login.providerTokenOptional')
+        }
+        name="apiKey"
+        onBlur={() => update('apiKey', values.apiKey)}
+        onChange={(event) => update('apiKey', event.target.value)}
+        type="password"
+        value={values.apiKey}
+      />
+      {mode === 'fixed' ? (
+        <Field
+          id="bootstrap-base-url"
+          label={t('login.providerAddress')}
+          readOnly
+          value={bundle.defaultBaseUrl ?? ''}
+          hint={t('login.providerAddressFixedHint')}
+        />
+      ) : (
+        <Field
+          error={touched.has('baseUrl') ? errors.baseUrl : undefined}
+          id="bootstrap-base-url"
+          label={
+            mode === 'required' ? t('login.providerAddress') : t('login.providerAddressOptional')
+          }
+          name="baseUrl"
+          onBlur={() => update('baseUrl', values.baseUrl)}
+          onChange={(event) => update('baseUrl', event.target.value)}
+          type="url"
+          value={values.baseUrl}
+        />
+      )}
+    </div>
+  )
+}
+
+function BootstrapForm({
+  bundles,
+  loading,
+  statusError,
+  onAccessFailure,
+}: Readonly<{
+  bundles: BootstrapProviderBindingBundle[]
+  loading: boolean
+  statusError: string
+  onAccessFailure: (kind: 'forbidden' | 'claimed') => void
+}>) {
+  const { t } = useTranslation()
+  const { bootstrapSetup } = useApp()
+  const bundlesPhase = screenPhase({ loading, failed: false, empty: bundles.length === 0 })
+  const [values, setValues] = useState(INITIAL_BOOTSTRAP)
+  const [touched, setTouched] = useState<ReadonlySet<BootstrapField>>(new Set())
+  const [formError, setFormError] = useState('')
+
+  const effectiveProviderKey = values.providerKey || bundles[0]?.providerCatalogId || ''
+  const selectedBundle =
+    bundles.find((bundle) => bundle.providerCatalogId === effectiveProviderKey) ?? null
+  const effectiveValues =
+    values.providerKey === effectiveProviderKey
+      ? values
+      : { ...values, providerKey: effectiveProviderKey }
+  const validation = bootstrapSchema(selectedBundle, t).safeParse(effectiveValues)
+  const errors = errorMap(validation.error)
+  const isReady = selectedBundle ? providerReadiness(selectedBundle, effectiveValues) : false
+
+  const setupMutation = useMutation({
+    mutationFn: async (validValues: BootstrapValues) => {
+      if (!selectedBundle) throw new Error(t('login.bootstrapBundleRequired'))
+      const aiSetup = buildBootstrapAiSetup(selectedBundle, validValues.apiKey, validValues.baseUrl)
+      await bootstrapSetup({
+        login: validValues.login.trim(),
+        email: validValues.email.trim(),
+        password: validValues.password,
+        ...(validValues.displayName.trim() ? { displayName: validValues.displayName.trim() } : {}),
+        ...(aiSetup ? { aiSetup } : {}),
+      })
+    },
+    onError: (error: unknown) => {
+      const accessFailure = isBootstrapAccessFailure(error)
+      if (accessFailure) {
+        onAccessFailure(accessFailure)
+        return
+      }
+      setFormError(t('login.setupFailed'))
+    },
+  })
+
+  const update = (field: BootstrapField, value: string) => {
+    setValues((current) => ({ ...current, [field]: value }))
+    setTouched((current) => new Set(current).add(field))
+  }
+
+  const selectProvider = (providerKey: string) => {
+    setValues((current) => ({ ...current, providerKey, apiKey: '', baseUrl: '' }))
+    setTouched((current) => new Set(current).add('providerKey'))
+    setFormError('')
+  }
+
+  const handleSubmit = (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault()
+    setTouched(new Set(Object.keys(INITIAL_BOOTSTRAP) as BootstrapField[]))
+    setFormError('')
+    if (!validation.success || !isReady) return
+    setupMutation.mutate(validation.data)
+  }
+
+  return (
+    <form className="bootstrap-flow" onSubmit={handleSubmit}>
+      <LoginHeader />
+      <h1>{t('login.initialSetup')}</h1>
+      <p>{t('login.initialSetupDesc')}</p>
+      {(formError || statusError) && (
+        <div className="login-error" role="alert">
+          <AlertCircle aria-hidden="true" size={15} />
+          {formError || statusError}
+        </div>
+      )}
+
+      <section className="bootstrap-section">
+        <div className="bootstrap-section__heading">
+          <LockKeyhole aria-hidden="true" size={16} />
+          <strong>{t('login.adminAccount')}</strong>
+        </div>
+        <div className="field-grid">
+          <Field
+            autoComplete="username"
+            error={touched.has('login') ? errors.login : undefined}
+            id="admin-login"
+            label={t('login.adminLogin')}
+            name="login"
+            onBlur={() => update('login', values.login)}
+            onChange={(event) => update('login', event.target.value)}
+            placeholder={t('login.loginPlaceholder')}
+            value={values.login}
+          />
+          <Field
+            autoComplete="email"
+            error={touched.has('email') ? errors.email : undefined}
+            id="admin-email"
+            label={t('login.email')}
+            name="email"
+            onBlur={() => update('email', values.email)}
+            onChange={(event) => update('email', event.target.value)}
+            placeholder={t('login.emailPlaceholder')}
+            type="email"
+            value={values.email}
+          />
+          <Field
+            autoComplete="name"
+            error={touched.has('displayName') ? errors.displayName : undefined}
+            id="admin-display-name"
+            label={`${t('login.displayName')} (${t('login.optional')})`}
+            name="displayName"
+            onBlur={() => update('displayName', values.displayName)}
+            onChange={(event) => update('displayName', event.target.value)}
+            placeholder={t('login.adminNamePlaceholder')}
+            value={values.displayName}
+          />
+          <Field
+            autoComplete="new-password"
+            error={touched.has('password') ? errors.password : undefined}
+            id="admin-password"
+            label={t('login.password')}
+            name="password"
+            onBlur={() => update('password', values.password)}
+            onChange={(event) => update('password', event.target.value)}
+            placeholder={t('login.passwordPlaceholder')}
+            type="password"
+            value={values.password}
+          />
+        </div>
+      </section>
+
+      <section className="bootstrap-section">
+        <div className="bootstrap-section__heading">
+          <Server aria-hidden="true" size={16} />
+          <strong>{t('login.aiConfig')}</strong>
+        </div>
+        <p className="bootstrap-section__description">{t('login.providerHelp')}</p>
+        {bundlesPhase === 'loading' && (
+          <div className="bootstrap-placeholder">
+            <LoaderCircle aria-hidden="true" className="spin" size={16} />
+            {t('login.bootstrapStatusLoading')}
+          </div>
+        )}
+        {bundlesPhase === 'empty' && (
+          <div className="bootstrap-placeholder">{t('login.noBootstrapBundles')}</div>
+        )}
+        {bundlesPhase === 'ready' && (
+          <>
+            <div className="provider-cards">
+              {bundles.map((bundle) => {
+                const active = bundle.providerCatalogId === selectedBundle?.providerCatalogId
+                const ready = providerReadiness(
+                  bundle,
+                  active ? effectiveValues : INITIAL_BOOTSTRAP,
+                )
+                return (
+                  <button
+                    aria-pressed={active}
+                    className={active ? 'is-active' : ''}
+                    key={bundle.providerCatalogId}
+                    onClick={() => selectProvider(bundle.providerCatalogId)}
+                    type="button"
+                  >
+                    <div>
+                      <strong>{bundle.displayName}</strong>
+                      <Badge tone={bundle.credentialSource === 'env' ? 'ready' : 'warning'}>
+                        {bundle.credentialSource === 'env'
+                          ? t('login.preconfigured')
+                          : t('login.needsInput')}
+                      </Badge>
+                    </div>
+                    <small>{ready ? t('login.summaryReady') : t('login.summaryNeedsInput')}</small>
+                  </button>
+                )
+              })}
+            </div>
+            {selectedBundle && (
+              <>
+                <ProviderFields
+                  bundle={selectedBundle}
+                  errors={errors}
+                  touched={touched}
+                  update={update}
+                  values={effectiveValues}
+                />
+                <ProviderSummary bundle={selectedBundle} values={effectiveValues} />
+                <div className="bootstrap-bindings">
+                  {selectedBundle.bindings.map((binding) => {
+                    const [labelKey, descriptionKey] = PURPOSE_TRANSLATIONS[binding.bindingPurpose]
+                    return (
+                      <div key={binding.bindingPurpose}>
+                        <Check aria-hidden="true" size={14} />
+                        <div>
+                          <strong>{t(labelKey)}</strong>
+                          <span>{t(descriptionKey)}</span>
+                        </div>
+                        <code>{binding.modelName}</code>
+                      </div>
+                    )
+                  })}
+                </div>
+              </>
+            )}
+          </>
+        )}
+      </section>
+
+      <Button
+        disabled={loading || setupMutation.isPending || !validation.success || !isReady}
+        type="submit"
+        variant="primary"
+      >
+        {setupMutation.isPending ? (
+          <LoaderCircle aria-hidden="true" className="spin" size={15} />
+        ) : (
+          <ArrowRight aria-hidden="true" size={15} />
+        )}
+        {setupMutation.isPending ? t('login.completeSetupPending') : t('login.completeSetup')}
+      </Button>
+      {/* Validating the key and reading the provider catalogue can take half a
+          minute; say so, otherwise the first run looks frozen. */}
+      {setupMutation.isPending && (
+        <p className="login-progress-note" aria-live="polite">
+          {t('login.completeSetupNote')}
+        </p>
+      )}
+    </form>
+  )
+}
+
 export default function LoginPage() {
   const { t } = useTranslation()
-  const { login, bootstrapSetup, isBootstrapRequired, locale, setLocale } = useApp()
-  const navigate = useNavigate()
-
-  const [error, setError] = useState('')
-  const [bootstrapFormError, setBootstrapFormError] = useState('')
-
+  const location = useLocation()
+  const { isBootstrapRequired, isLoading, isSessionExpired, sessionError, ssoAvailable } = useApp()
+  const ssoError = useSsoErrorFromAddress(location)
+  const [loginNotice, setLoginNotice] = useState('')
+  const [forceLogin, setForceLogin] = useState(false)
+  const bootstrapQueryOptions = queries.getIamBootstrapOptions()
+  const bootstrapEnabled = isBootstrapRequired && !forceLogin
   const bootstrapQuery = useQuery({
-    ...queries.getBootstrapStatusOptions(),
-    enabled: isBootstrapRequired,
+    queryKey: bootstrapQueryOptions.queryKey,
+    queryFn: authApi.getIamBootstrap,
+    enabled: bootstrapEnabled,
+    retry: false,
   })
+  const queryAccessFailure = isBootstrapAccessFailure(bootstrapQuery.error)
+  const showBootstrap = bootstrapEnabled && !queryAccessFailure
 
-  const bootstrapStatusError = bootstrapQuery.error ? t('login.bootstrapStatusFetchFailed') : ''
-  const bindingBundles = useMemo<BootstrapProviderBindingBundle[]>(() => {
-    if (!bootstrapQuery.data) return []
-    return bootstrapQuery.data.aiSetup?.bindingBundles ?? []
-  }, [bootstrapQuery.data])
-  const defaultProviderKey = bindingBundles[0] ? providerBundleKey(bindingBundles[0]) : ''
-  const loginSchema = useMemo(
-    () =>
-      z.object({
-        login: nonEmptyString(t('login.fillAllFields')),
-        password: nonEmptyString(t('login.fillAllFields')),
-      }),
-    [t],
+  const handleAccessFailure = (kind: 'forbidden' | 'claimed') => {
+    setForceLogin(true)
+    setLoginNotice(
+      kind === 'claimed' ? t('login.bootstrapConflict') : t('login.bootstrapForbidden'),
+    )
+  }
+
+  const bundles = useMemo(
+    () => bootstrapQuery.data?.aiSetup?.bindingBundles ?? [],
+    [bootstrapQuery.data],
   )
-  const bootstrapSchema = useMemo(
-    () => createBootstrapSchema(bindingBundles, defaultProviderKey, t),
-    [bindingBundles, defaultProviderKey, t],
-  )
-  const loginForm = useTypedForm({
-    schema: loginSchema,
-    defaultValues: { login: '', password: '' },
-  })
-  const bootstrapForm = useTypedForm({
-    schema: bootstrapSchema,
-    defaultValues: {
-      login: '',
-      password: '',
-      displayName: '',
-      providerKey: '',
-      apiKey: '',
-      baseUrl: '',
-    },
-    mode: 'onChange',
-  })
-  const bootstrapProviderKey = bootstrapForm.watch('providerKey')
-  const bootstrapApiKey = bootstrapForm.watch('apiKey')
-  const bootstrapBaseUrl = bootstrapForm.watch('baseUrl')
-  const { getValues: getBootstrapValues, setValue: setBootstrapValue } = bootstrapForm
-  const lastBootstrapProviderKey = useRef('')
+  const bootstrapStatusError =
+    bootstrapQuery.error && !isBootstrapAccessFailure(bootstrapQuery.error)
+      ? t('login.bootstrapStatusFetchFailed')
+      : ''
 
-  useEffect(() => {
-    if (!isBootstrapRequired || !defaultProviderKey || getBootstrapValues('providerKey')) {
-      return
-    }
-    setBootstrapValue('providerKey', defaultProviderKey, {
-      shouldDirty: false,
-      shouldValidate: true,
-    })
-  }, [defaultProviderKey, getBootstrapValues, isBootstrapRequired, setBootstrapValue])
-
-  const effectiveProviderKey =
-    bootstrapProviderKey &&
-    bindingBundles.some((bundle) => providerBundleKey(bundle) === bootstrapProviderKey)
-      ? bootstrapProviderKey
-      : defaultProviderKey
-
-  useEffect(() => {
-    if (!effectiveProviderKey || lastBootstrapProviderKey.current === effectiveProviderKey) {
-      return
-    }
-    lastBootstrapProviderKey.current = effectiveProviderKey
-    setBootstrapValue('apiKey', '', { shouldDirty: false, shouldValidate: true })
-    setBootstrapValue('baseUrl', '', { shouldDirty: false, shouldValidate: true })
-  }, [effectiveProviderKey, setBootstrapValue])
-
-  const selectedBundle =
-    bindingBundles.find((bundle) => providerBundleKey(bundle) === effectiveProviderKey) ?? null
-  const selectedState = bundleState(selectedBundle, bootstrapApiKey, bootstrapBaseUrl, t)
-  const selectedBundleBindings = selectedState.bindings
-  const selectedBundleReady = selectedState.isReady
-  const bootstrapConfigLoading = bootstrapQuery.isLoading && !bootstrapQuery.data
-  const bootstrapSubmitDisabled =
-    bootstrapForm.formState.isSubmitting ||
-    bootstrapConfigLoading ||
-    !bootstrapForm.formState.isValid
-  const selectedBundleSummaryRows = selectedState.summaryRows
-  const bootstrapError = bootstrapFormError || bootstrapStatusError
-  const bootstrapApiKeyError = fieldErrorMessage(bootstrapForm.formState.errors, 'apiKey')
-  const bootstrapBaseUrlError = fieldErrorMessage(bootstrapForm.formState.errors, 'baseUrl')
-  const bootstrapApiKeyErrorProps =
-    bootstrapApiKeyError === undefined ? {} : { apiKeyError: bootstrapApiKeyError }
-  const bootstrapBaseUrlErrorProps =
-    bootstrapBaseUrlError === undefined ? {} : { baseUrlError: bootstrapBaseUrlError }
-
-  const handleLogin = loginForm.submitWithMutation(
-    {
-      mutateAsync: async (values) => {
-        setError('')
-        await login(values.login, values.password)
-        await navigate('/dashboard')
-      },
-    },
-    {
-      errorMessage: t('login.loginFailed'),
-      onError: () => setError(t('login.loginFailed')),
-    },
-  )
-
-  const handleBootstrap = bootstrapForm.submitWithMutation(
-    {
-      mutateAsync: async (values) => {
-        if (bootstrapConfigLoading) {
-          throw new Error(t('login.bootstrapStatusLoading'))
-        }
-        const bundle =
-          bindingBundles.find((entry) => providerBundleKey(entry) === values.providerKey) ??
-          bindingBundles.find((entry) => providerBundleKey(entry) === defaultProviderKey) ??
-          null
-        if (!bundle) {
-          throw new Error(t('login.bootstrapBundleRequired'))
-        }
-        setBootstrapFormError('')
-        const aiSetup = buildBootstrapAiSetup(bundle, values.apiKey, values.baseUrl)
-        await bootstrapSetup({
-          login: values.login,
-          password: values.password,
-          displayName: values.displayName.trim(),
-          ...(aiSetup ? { aiSetup } : {}),
-        })
-        await navigate('/dashboard')
-      },
-    },
-    {
-      errorMessage: t('login.setupFailed'),
-      onError: () => setBootstrapFormError(t('login.setupFailed')),
-    },
-  )
   return (
-    <div className="min-h-screen flex bg-background">
-      {/* Left: Product explainer — same dark shell chrome as the app sidebar */}
-      <div
-        className="hidden lg:flex lg:w-[460px] xl:w-[520px] flex-col justify-center p-12 relative overflow-hidden ambient-bg"
-        style={{ background: 'hsl(var(--shell-bg))' }}
-      >
-        <div className="space-y-10 relative z-10">
-          <div>
-            <div className="flex items-center gap-3 mb-5">
-              <img src="/favicon.svg" alt="" aria-hidden="true" className="h-9 w-auto shrink-0" />
-              <h1 className="text-2xl font-bold tracking-tight text-shell-foreground">IronRAG</h1>
-            </div>
-            <p className="text-sm leading-relaxed max-w-[320px] text-shell-muted">
-              {t('login.tagline')}
-            </p>
+    <main className="login-page">
+      <section className="login-panel">
+        {isLoading && (
+          <div className="login-loading" aria-live="polite">
+            <LoaderCircle aria-hidden="true" className="spin" size={20} />
+            <span>{t('login.loading')}</span>
           </div>
-          <div className="space-y-5">
-            {[
-              { icon: FileText, title: t('login.featureDocs'), desc: t('login.featureDocsDesc') },
+        )}
+        {!isLoading && showBootstrap && (
+          <BootstrapForm
+            bundles={bundles}
+            loading={bootstrapQuery.isLoading}
+            onAccessFailure={handleAccessFailure}
+            statusError={bootstrapStatusError}
+          />
+        )}
+        {!isLoading && !showBootstrap && (
+          <LoginForm
+            notice={
+              loginNotice ||
               {
-                icon: Database,
-                title: t('login.featureEntities'),
-                desc: t('login.featureEntitiesDesc'),
-              },
-              { icon: Share2, title: t('login.featureGraph'), desc: t('login.featureGraphDesc') },
-              { icon: Brain, title: t('login.featureAi'), desc: t('login.featureAiDesc') },
-            ].map((item) => (
-              <div key={item.title} className="flex gap-4 group">
-                <div className="mt-0.5 flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-shell-hover text-shell-active ring-1 ring-shell-border transition-transform duration-200 group-hover:scale-105">
-                  <item.icon className="h-4 w-4" />
-                </div>
-                <div>
-                  <div className="text-[13px] font-semibold text-shell-foreground">
-                    {item.title}
-                  </div>
-                  <div className="text-xs leading-relaxed mt-1 text-shell-muted">{item.desc}</div>
-                </div>
-              </div>
-            ))}
-          </div>
-        </div>
-      </div>
-
-      {/* Right: Login form */}
-      <div className="flex-1 flex items-center justify-center p-6 ambient-bg">
-        <div className="w-full max-w-md space-y-6 relative z-10">
-          <div className="lg:hidden text-center mb-8">
-            <div className="flex items-center justify-center gap-2.5 mb-2">
-              <img src="/favicon.svg" alt="" aria-hidden="true" className="h-8 w-auto shrink-0" />
-              <h1 className="text-xl font-bold tracking-tight">IronRAG</h1>
-            </div>
-            <p className="text-sm text-muted-foreground">{t('login.knowledgeSystemLogin')}</p>
-          </div>
-
-          {/* Locale selector */}
-          <div className="flex justify-end">
-            <Select value={locale} onValueChange={setLocale}>
-              <SelectTrigger className="h-8 w-auto min-w-[120px] text-xs gap-1.5">
-                <Globe className="h-3 w-3 text-muted-foreground shrink-0" />
-                <SelectValue>
-                  {AVAILABLE_LOCALES.find((l) => l.code === locale)?.nativeLabel ?? locale}
-                </SelectValue>
-              </SelectTrigger>
-              <SelectContent align="end">
-                {AVAILABLE_LOCALES.map((l) => (
-                  <SelectItem key={l.code} value={l.code}>
-                    <span className="font-medium">{l.nativeLabel}</span>
-                    <span className="text-muted-foreground ml-1.5">({l.label})</span>
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-          </div>
-
-          {!isBootstrapRequired ? (
-            <div className="space-y-5 animate-fade-in">
-              <div>
-                <h2 className="text-xl font-bold tracking-tight">{t('login.signIn')}</h2>
-                <p className="text-sm text-muted-foreground mt-1.5 leading-relaxed">
-                  {t('login.signInDesc')}
-                </p>
-              </div>
-              {error && (
-                <div
-                  role="alert"
-                  aria-live="polite"
-                  className="inline-error flex items-center gap-2.5 text-destructive"
-                >
-                  <AlertCircle className="h-4 w-4 shrink-0" /> {error}
-                </div>
-              )}
-              <div className="space-y-4">
-                <FormInputField
-                  formState={loginForm.formState}
-                  id="login"
-                  label={t('login.loginField')}
-                  name="login"
-                  registration={loginForm.register('login')}
-                  placeholder={t('login.loginPlaceholder')}
-                  autoFocus
-                />
-                <FormInputField
-                  formState={loginForm.formState}
-                  id="password"
-                  label={t('login.password')}
-                  name="password"
-                  registration={loginForm.register('password')}
-                  type="password"
-                  placeholder="••••••••"
-                  onKeyDown={async (event) => {
-                    if (event.key === 'Enter') await handleLogin()
-                  }}
-                />
-              </div>
-              <Button
-                className="w-full h-11"
-                onClick={handleLogin}
-                disabled={loginForm.formState.isSubmitting}
-              >
-                {loginForm.formState.isSubmitting && (
-                  <Loader2 className="h-4 w-4 mr-2 animate-spin" />
-                )}
-                {t('login.signInBtn')}
-              </Button>
-            </div>
-          ) : (
-            <div className="space-y-5 animate-fade-in">
-              <div>
-                <h2 className="text-xl font-bold tracking-tight">{t('login.initialSetup')}</h2>
-                <p className="text-sm text-muted-foreground mt-1.5 leading-relaxed">
-                  {t('login.initialSetupDesc')}
-                </p>
-              </div>
-              {bootstrapError && (
-                <div
-                  role="alert"
-                  aria-live="polite"
-                  className="inline-error flex items-center gap-2.5 text-destructive"
-                >
-                  <AlertCircle className="h-4 w-4 shrink-0" /> {bootstrapError}
-                </div>
-              )}
-
-              {/* Admin credentials section */}
-              <div className="space-y-4 p-5 rounded-xl border bg-card shadow-soft">
-                <div className="section-label">{t('login.adminAccount')}</div>
-                <div className="space-y-3">
-                  <FormInputField
-                    formState={bootstrapForm.formState}
-                    id="admin-login"
-                    label={
-                      <>
-                        {t('login.adminLogin')} <span className="text-destructive">*</span>
-                      </>
-                    }
-                    name="login"
-                    registration={bootstrapForm.register('login')}
-                    placeholder={t('login.loginPlaceholder')}
-                  />
-                  <FormInputField
-                    formState={bootstrapForm.formState}
-                    id="admin-name"
-                    label={
-                      <>
-                        {t('login.displayName')}{' '}
-                        <span className="text-muted-foreground font-normal">
-                          ({t('login.optional')})
-                        </span>
-                      </>
-                    }
-                    name="displayName"
-                    registration={bootstrapForm.register('displayName')}
-                    placeholder={t('login.adminNamePlaceholder')}
-                  />
-                  <FormInputField
-                    formState={bootstrapForm.formState}
-                    id="admin-password"
-                    label={
-                      <>
-                        {t('login.password')} <span className="text-destructive">*</span>
-                      </>
-                    }
-                    name="password"
-                    registration={bootstrapForm.register('password')}
-                    type="password"
-                    placeholder="••••••••"
-                  />
-                </div>
-              </div>
-
-              {/* AI bootstrap section */}
-              <div className="space-y-3">
-                <div className="section-label px-1 flex items-center gap-2">
-                  <Sparkles className="h-3 w-3" /> {t('login.aiConfig')}
-                </div>
-                <div className="p-4 border rounded-xl space-y-4 bg-card shadow-soft">
-                  <FormSelectField
-                    control={bootstrapForm.control}
-                    disabled={bindingBundles.length === 0}
-                    formState={bootstrapForm.formState}
-                    id="bootstrap-provider"
-                    label={t('admin.provider')}
-                    name="providerKey"
-                    placeholder={t('admin.selectProvider')}
-                    triggerClassName="h-10 text-sm"
-                  >
-                    {bindingBundles.map((bundle) => (
-                      <SelectItem key={providerBundleKey(bundle)} value={providerBundleKey(bundle)}>
-                        {bundle.displayName}
-                      </SelectItem>
-                    ))}
-                  </FormSelectField>
-                  <ProviderCredentialFields
-                    provider={selectedBundle}
-                    idPrefix="bootstrap-provider"
-                    apiKey={bootstrapApiKey}
-                    baseUrl={bootstrapBaseUrl}
-                    labels={{
-                      apiKeyRequired: t('login.apiKey'),
-                      apiKeyOptional: t('login.providerTokenOptional'),
-                      apiKeyPlaceholder: t('login.apiKey'),
-                      apiKeyRequiredHint: t('login.providerTokenRequiredHint'),
-                      baseUrlRequired: t('login.providerAddress'),
-                      baseUrlOptional: t('login.providerAddressOptional'),
-                      baseUrlRequiredHint: t('login.providerAddressRequiredHint'),
-                      fixedBaseUrlHint: t('login.providerAddressFixedHint'),
-                    }}
-                    {...bootstrapApiKeyErrorProps}
-                    {...bootstrapBaseUrlErrorProps}
-                    onApiKeyChange={(value) =>
-                      setBootstrapValue('apiKey', value, {
-                        shouldDirty: true,
-                        shouldValidate: true,
-                      })
-                    }
-                    onBaseUrlChange={(value) =>
-                      setBootstrapValue('baseUrl', value, {
-                        shouldDirty: true,
-                        shouldValidate: true,
-                      })
-                    }
-                  />
-                  {selectedBundle && (
-                    <div className="space-y-3">
-                      <ProviderSetupSummary
-                        title={selectedBundle.displayName}
-                        description={
-                          selectedBundle.credentialSource === 'env'
-                            ? t('login.bundleConfiguredInEnv')
-                            : t('login.bundleReadyPreview')
-                        }
-                        ready={selectedBundleReady}
-                        readyLabel={t('login.summaryReady')}
-                        attentionLabel={t('login.summaryNeedsInput')}
-                        rows={selectedBundleSummaryRows}
-                      />
-                      <div className="space-y-2">
-                        {selectedBundleBindings.map((binding) => {
-                          const purposeMeta = bootstrapPurposeMetadata[binding.bindingPurpose]
-                          const parameters = bindingParameters(binding)
-                          return (
-                            <div
-                              key={binding.bindingPurpose}
-                              className="rounded-lg border border-border/50 bg-background/70 px-3 py-2"
-                            >
-                              <div className="flex flex-wrap items-center justify-between gap-2">
-                                <div className="min-w-0">
-                                  <div className="text-sm font-medium [overflow-wrap:anywhere]">
-                                    {t(purposeMeta.labelKey)}
-                                  </div>
-                                  <div className="text-xs text-muted-foreground [overflow-wrap:anywhere]">
-                                    {t(purposeMeta.descriptionKey)}
-                                  </div>
-                                </div>
-                                <div className="min-w-0 text-xs font-mono text-foreground [overflow-wrap:anywhere]">
-                                  {binding.modelName}
-                                </div>
-                              </div>
-                              {parameters && (
-                                <div className="text-xs text-muted-foreground mt-1.5 [overflow-wrap:anywhere]">
-                                  {parameters}
-                                </div>
-                              )}
-                            </div>
-                          )
-                        })}
-                      </div>
-                    </div>
-                  )}
-                  {!selectedBundle && (
-                    <div className="rounded-xl border border-dashed border-border/70 bg-surface-sunken p-4 text-sm text-muted-foreground">
-                      {bootstrapConfigLoading
-                        ? t('login.bootstrapStatusLoading')
-                        : t('login.noBootstrapBundles')}
-                    </div>
-                  )}
-                </div>
-              </div>
-
-              <Button
-                className="w-full h-11"
-                onClick={handleBootstrap}
-                disabled={bootstrapSubmitDisabled}
-              >
-                {bootstrapForm.formState.isSubmitting && (
-                  <Loader2 className="h-4 w-4 mr-2 animate-spin" />
-                )}
-                {t('login.completeSetup')}
-              </Button>
-            </div>
-          )}
-        </div>
-      </div>
-    </div>
+                // Same sentence for every rejected single sign-on of a kind: the
+                // address says which of the two happened and nothing more.
+                ssoDenied: t('login.ssoDenied'),
+                ssoFailed: t('login.ssoFailed'),
+                // One message for the whole app when the session runs out — the
+                // reason the user is looking at this screen outranks whatever
+                // individual request happened to fail first.
+                expired: t('login.sessionExpired'),
+                claimed: t('login.bootstrapConflict'),
+                forbidden: t('login.bootstrapForbidden'),
+                unavailable: t('login.sessionUnavailable'),
+                none: '',
+              }[loginNoticeKind({ isSessionExpired, queryAccessFailure, sessionError, ssoError })]
+            }
+            ssoAvailable={ssoAvailable}
+            ssoHref={oidcLoginHref(returnToForSso(location))}
+          />
+        )}
+      </section>
+    </main>
   )
 }

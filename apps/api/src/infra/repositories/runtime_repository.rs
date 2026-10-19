@@ -1,5 +1,5 @@
 use chrono::{DateTime, Utc};
-use sqlx::{FromRow, PgPool};
+use sqlx::{Executor, FromRow, PgPool, Postgres};
 use uuid::Uuid;
 
 use crate::domains::agent_runtime::{
@@ -222,7 +222,11 @@ pub async fn create_runtime_execution(
          ) values (
             $1, $2::runtime_execution_owner_kind, $3, $4::runtime_task_kind,
             $5::surface_kind, $6, $7, $8::runtime_lifecycle_state,
-            $9::runtime_stage_kind, $10, $11, $12, $13, $14, $15, now(), null
+            $9::runtime_stage_kind, $10, $11, $12, $13, $14, $15, now(),
+            case
+                when $8::runtime_lifecycle_state in ('accepted', 'running') then null
+                else now()
+            end
          )
          returning
             id,
@@ -294,8 +298,8 @@ pub async fn get_runtime_execution_by_id(
     .transpose()
 }
 
-pub async fn update_runtime_execution(
-    postgres: &PgPool,
+pub async fn update_runtime_execution<'e>(
+    executor: impl Executor<'e, Database = Postgres>,
     runtime_execution_id: Uuid,
     input: &UpdateRuntimeExecution<'_>,
 ) -> Result<Option<RuntimeExecutionRow>, sqlx::Error> {
@@ -333,7 +337,7 @@ pub async fn update_runtime_execution(
     .bind(input.failure_code)
     .bind(input.failure_summary_redacted)
     .bind(input.completed_at)
-    .fetch_optional(postgres)
+    .fetch_optional(executor)
     .await?;
     row.map(map_runtime_execution_row).transpose()
 }
@@ -375,8 +379,8 @@ pub async fn list_runtime_executions_by_owner(
     .collect()
 }
 
-pub async fn create_runtime_stage_record(
-    postgres: &PgPool,
+pub async fn create_runtime_stage_record<'e>(
+    executor: impl Executor<'e, Database = Postgres>,
     input: &NewRuntimeStageRecord<'_>,
 ) -> Result<RuntimeStageRecordRow, sqlx::Error> {
     let row = sqlx::query_as::<_, RuntimeStageRecordRowRecord>(
@@ -416,7 +420,7 @@ pub async fn create_runtime_stage_record(
     .bind(input.output_summary_json.clone())
     .bind(input.failure_code)
     .bind(input.failure_summary_redacted)
-    .fetch_one(postgres)
+    .fetch_one(executor)
     .await?;
     map_runtime_stage_record_row(row)
 }
@@ -452,8 +456,8 @@ pub async fn list_runtime_stage_records(
     .collect()
 }
 
-pub async fn create_runtime_action_record(
-    postgres: &PgPool,
+pub async fn create_runtime_action_record<'e>(
+    executor: impl Executor<'e, Database = Postgres>,
     input: &NewRuntimeActionRecord<'_>,
 ) -> Result<RuntimeActionRecordRow, sqlx::Error> {
     let row = sqlx::query_as::<_, RuntimeActionRecordRowRecord>(
@@ -486,7 +490,7 @@ pub async fn create_runtime_action_record(
     .bind(input.tool_name)
     .bind(input.usage_json.clone())
     .bind(input.summary_json.clone())
-    .fetch_one(postgres)
+    .fetch_one(executor)
     .await?;
     map_runtime_action_record_row(row)
 }
@@ -520,8 +524,8 @@ pub async fn list_runtime_action_records(
     .collect()
 }
 
-pub async fn create_runtime_policy_decision(
-    postgres: &PgPool,
+pub async fn create_runtime_policy_decision<'e>(
+    executor: impl Executor<'e, Database = Postgres>,
     input: &NewRuntimePolicyDecision<'_>,
 ) -> Result<RuntimePolicyDecisionRow, sqlx::Error> {
     let row = sqlx::query_as::<_, RuntimePolicyDecisionRowRecord>(
@@ -551,7 +555,7 @@ pub async fn create_runtime_policy_decision(
     .bind(input.decision_kind)
     .bind(input.reason_code)
     .bind(input.reason_summary_redacted)
-    .fetch_one(postgres)
+    .fetch_one(executor)
     .await?;
     map_runtime_policy_decision_row(row)
 }

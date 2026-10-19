@@ -1,0 +1,16 @@
+[advisories]
+ignore = [
+    # RUSTSEC-2026-0235: rust_decimal 1.42.1 is the current upstream release
+    # and intentionally pins its optional rkyv integration to ^0.7.46, while
+    # the advisory is fixed only in rkyv >=0.8.17. IronRAG does not enable that
+    # integration: `cargo tree --locked -e features -i rkyv@0.7.46` is empty.
+    # Review and remove by 2026-09-13, or earlier when rust_decimal changes the
+    # constraint to a patched rkyv release.
+    "RUSTSEC-2026-0235",
+    # RUSTSEC-2023-0071: rsa 0.9.10 Marvin Attack, `patched = []`. IronRAG uses
+    # rsa only for public-key ID-token verification through openidconnect and
+    # the test-support mock IdP; no production RSA private-key operation runs.
+    # Review and remove by 2027-03-19, or earlier when upstream ships
+    # constant-time padding.
+    "RUSTSEC-2023-0071",
+]

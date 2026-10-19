@@ -17,12 +17,11 @@ use uuid::Uuid;
 use crate::{
     app::state::AppState,
     domains::content::{
-        ContentDocumentHead, ContentDocumentSummary, ContentRevision, ContentSourceAccess,
-        ContentSourceAccessKind,
+        ContentDocumentSummary, ContentRevision, ContentSourceAccess, ContentSourceAccessKind,
     },
     interfaces::http::{
         auth::AuthContext,
-        authorization::{POLICY_DOCUMENTS_READ, load_canonical_content_document_and_authorize},
+        authorization::{POLICY_DOCUMENTS_READ, load_content_document_and_authorize},
         router_support::ApiError,
     },
     services::content::source_access::describe_content_source,
@@ -52,7 +51,10 @@ pub enum SourceRepresentation {
     path = "/v1/content/documents/{documentId}/source",
     tag = "content",
     operation_id = "getContentDocumentSource",
-    params(("documentId" = uuid::Uuid, Path, description = "Document identifier")),
+    params(
+        ("documentId" = uuid::Uuid, Path, description = "Document identifier"),
+        ("revisionId" = Option<Uuid>, Query, description = "Revision to download; defaults to the document's current revision"),
+    ),
     responses(
         (status = 200, description = "Original document source bytes", content_type = "application/octet-stream", body = String),
         (status = 401, description = "Caller is not authenticated"),
@@ -66,28 +68,58 @@ pub async fn download_document_source(
     Path(document_id): Path<Uuid>,
     Query(query): Query<SourceDownloadQuery>,
 ) -> Result<Response, ApiError> {
-    let _ = load_canonical_content_document_and_authorize(
-        &auth,
-        &state,
-        document_id,
-        POLICY_DOCUMENTS_READ,
-    )
-    .await?;
-    let summary = state.canonical_services.content.get_document(&state, document_id).await?;
+    let _ = load_content_document_and_authorize(&auth, &state, document_id, POLICY_DOCUMENTS_READ)
+        .await?;
+    let summary = state.application_services.content.get_document(&state, document_id).await?;
     let revision =
         resolve_source_download_revision(&state, document_id, &summary, query.revision_id).await?;
-    let descriptor = describe_content_source(
+    let mut descriptor = describe_content_source(
         revision.document_id,
         Some(revision.id),
-        &revision.content_source_kind,
-        revision.source_uri.as_deref(),
-        revision.storage_key.as_deref(),
-        revision.title.as_deref(),
-        &summary.document.external_key,
+        crate::services::content::source_access::ContentSourceInputs {
+            content_source_kind: &revision.content_source_kind,
+            source_uri: revision.source_uri.as_deref(),
+            storage_key: revision.storage_key.as_deref(),
+            title: revision.title.as_deref(),
+            external_key: &summary.document.external_key,
+        },
+    );
+    descriptor.file_name =
+        crate::infra::repositories::content_fingerprint_repository::get_current_source_file_name(
+            &state.persistence.postgres,
+            document_id,
+            revision.id,
+        )
+        .await
+        .map_err(|error| ApiError::internal_with_log(error, "source identity lookup failed"))?
+        .ok_or_else(|| ApiError::resource_not_found("document source", document_id))?;
+    descriptor.file_name = crate::services::content::source_access::sanitize_download_file_name(
+        &descriptor.file_name,
+        "download",
     );
 
+    let response = render_document_source(&state, &revision, &descriptor, &query).await?;
+    if !crate::infra::repositories::content_fingerprint_repository::revision_is_current(
+        &state.persistence.postgres,
+        document_id,
+        revision.id,
+    )
+    .await
+    .map_err(|error| ApiError::internal_with_log(error, "source visibility lookup failed"))?
+    {
+        return Err(ApiError::resource_not_found("document source", document_id));
+    }
+    Ok(response)
+}
+
+async fn render_document_source(
+    state: &AppState,
+    revision: &ContentRevision,
+    descriptor: &crate::services::content::source_access::ContentSourceDescriptor,
+    query: &SourceDownloadQuery,
+) -> Result<Response, ApiError> {
     if query.representation == Some(SourceRepresentation::EditorMarkdown) {
-        return download_editor_markdown_source(&state, &revision, &descriptor).await;
+        return download_editor_markdown_source(state, revision, descriptor).await;
     }
 
     if let Some(ContentSourceAccess { kind: ContentSourceAccessKind::ExternalUrl, href }) =
@@ -98,15 +130,15 @@ pub async fn download_document_source(
 
     if descriptor.access.is_none() {
         if let Some(rendered_source) = state
-            .canonical_services
+            .application_services
             .content
-            .render_revision_text_source(&state, revision.id)
+            .render_revision_text_source(state, revision.id)
             .await?
         {
             let disposition = format!("attachment; filename=\"{}\"", descriptor.file_name);
             return Ok((
                 [
-                    (header::CONTENT_TYPE, revision.mime_type),
+                    (header::CONTENT_TYPE, revision.mime_type.clone()),
                     (header::CONTENT_DISPOSITION, disposition),
                 ],
                 Body::from(rendered_source),
@@ -118,22 +150,22 @@ pub async fn download_document_source(
 
     let storage_key =
         revision.storage_key.clone().filter(|value| !value.trim().is_empty()).or(state
-            .canonical_services
+            .application_services
             .content
-            .resolve_revision_storage_key(&state, revision.id)
+            .resolve_revision_storage_key(state, revision.id)
             .await?);
     let disposition = format!("attachment; filename=\"{}\"", descriptor.file_name);
 
     let Some(storage_key) = storage_key else {
         if let Some(rendered_source) = state
-            .canonical_services
+            .application_services
             .content
-            .render_revision_text_source(&state, revision.id)
+            .render_revision_text_source(state, revision.id)
             .await?
         {
             return Ok((
                 [
-                    (header::CONTENT_TYPE, revision.mime_type),
+                    (header::CONTENT_TYPE, revision.mime_type.clone()),
                     (header::CONTENT_DISPOSITION, disposition),
                 ],
                 Body::from(rendered_source),
@@ -152,13 +184,41 @@ pub async fn download_document_source(
         return Ok(Redirect::temporary(&href).into_response());
     }
 
-    let bytes =
-        state.content_storage.read_revision_source(&storage_key).await.map_err(ApiError::from)?;
-    Ok((
-        [(header::CONTENT_TYPE, revision.mime_type), (header::CONTENT_DISPOSITION, disposition)],
-        Body::from(bytes),
-    )
-        .into_response())
+    match state.content_storage.read_revision_source(&storage_key).await {
+        Ok(bytes) => Ok((
+            [
+                (header::CONTENT_TYPE, revision.mime_type.clone()),
+                (header::CONTENT_DISPOSITION, disposition),
+            ],
+            Body::from(bytes),
+        )
+            .into_response()),
+        // The blob the database still points to can go missing independently
+        // of the revision (for example an infrastructure-level storage
+        // incident) without that ever being an error in the ingest or storage
+        // write path itself. Reconstructing from the stored normalized text
+        // keeps the endpoint useful instead of 500ing on a fact the caller
+        // cannot act on; only genuinely unrecoverable revisions fail closed.
+        Err(crate::services::content::error::ContentServiceError::NotFound { .. }) => {
+            if let Some(rendered_source) = state
+                .application_services
+                .content
+                .render_revision_text_source(state, revision.id)
+                .await?
+            {
+                return Ok((
+                    [
+                        (header::CONTENT_TYPE, revision.mime_type.clone()),
+                        (header::CONTENT_DISPOSITION, disposition),
+                    ],
+                    Body::from(rendered_source),
+                )
+                    .into_response());
+            }
+            Err(ApiError::resource_not_found("document source", revision.id))
+        }
+        Err(error) => Err(ApiError::from(error)),
+    }
 }
 
 async fn resolve_source_download_revision(
@@ -167,14 +227,15 @@ async fn resolve_source_download_revision(
     summary: &ContentDocumentSummary,
     requested_revision_id: Option<Uuid>,
 ) -> Result<ContentRevision, ApiError> {
-    let revision_id = requested_revision_id
-        .or_else(|| summary.head.as_ref().and_then(ContentDocumentHead::effective_revision_id))
-        .or_else(|| summary.active_revision.as_ref().map(|revision| revision.id))
-        .ok_or_else(|| {
-            ApiError::BadRequest(
-                "document has no available revision source to download".to_string(),
-            )
-        })?;
+    let revision_id =
+        crate::infra::repositories::content_fingerprint_repository::get_current_revision_id(
+            &state.persistence.postgres,
+            document_id,
+        )
+        .await
+        .map_err(|error| ApiError::internal_with_log(error, "source visibility lookup failed"))?
+        .filter(|current| requested_revision_id.is_none_or(|requested| requested == *current))
+        .ok_or_else(|| ApiError::resource_not_found("document source", document_id))?;
 
     if let Some(active_revision) = summary.active_revision.as_ref()
         && active_revision.id == revision_id
@@ -183,12 +244,11 @@ async fn resolve_source_download_revision(
     }
 
     state
-        .canonical_services
+        .application_services
         .content
-        .list_revisions(state, document_id)
+        .get_current_revision(state, document_id)
         .await?
-        .into_iter()
-        .find(|revision| revision.id == revision_id)
+        .filter(|revision| revision.id == revision_id)
         .ok_or_else(|| ApiError::resource_not_found("revision", revision_id))
 }
 
@@ -200,7 +260,11 @@ async fn download_editor_markdown_source(
     let rendered_source = match read_stored_editor_text_source(state, revision).await? {
         Some(stored_source) => Some(stored_source),
         None => {
-            state.canonical_services.content.render_revision_text_source(state, revision.id).await?
+            state
+                .application_services
+                .content
+                .render_revision_text_source(state, revision.id)
+                .await?
         }
     }
     .map(|source| normalize_editor_markdown_source(revision, &source));
@@ -224,7 +288,7 @@ async fn read_stored_editor_text_source(
     state: &AppState,
     revision: &ContentRevision,
 ) -> Result<Option<String>, ApiError> {
-    if !is_canonical_text_editor_source(&revision.mime_type) {
+    if !is_text_editor_source(&revision.mime_type) {
         return Ok(None);
     }
     let Some(storage_key) =
@@ -239,7 +303,7 @@ async fn read_stored_editor_text_source(
         .map_err(|_| ApiError::BadRequest("stored source is not valid utf-8 text".to_string()))
 }
 
-fn is_canonical_text_editor_source(mime_type: &str) -> bool {
+fn is_text_editor_source(mime_type: &str) -> bool {
     let normalized =
         mime_type.split(';').next().map(str::trim).unwrap_or_default().to_ascii_lowercase();
     matches!(normalized.as_str(), "text/markdown" | "text/x-markdown")

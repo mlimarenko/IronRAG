@@ -1,6 +1,6 @@
 //! Delivery worker stage for one outbound webhook attempt.
 //!
-//! The canonical ingest queue invokes this module for `webhook_delivery` jobs.
+//! The ingest queue invokes this module for `webhook_delivery` jobs.
 //! Every side effect is fenced by `(attempt_id, job_id, delivery_lease_token)`;
 //! a worker whose lease was reclaimed may finish its HTTP request, but cannot
 //! overwrite the winner or enqueue another retry.
@@ -16,12 +16,13 @@ use tracing::{info, warn};
 
 use crate::{
     app::state::AppState,
-    domains::webhook::canonical_delivery_payload_from_parts,
+    domains::webhook::delivery_payload_from_persisted_parts,
     infra::repositories::{
         ingest_repository::{IngestJobRow, NewIngestJob},
         webhook_repository::{
             self, WebhookDeliveryAttemptRow, WebhookDeliveryClaimOutcome,
             WebhookDeliveryCompletion, WebhookRetryHandoff, WebhookRetryHandoffOutcome,
+            WebhookSubscriptionRow,
         },
     },
     services::webhook::{
@@ -68,6 +69,39 @@ pub enum WebhookDeliveryJobOutcome {
 struct DeliveryIngestLease<'a> {
     ingest_attempt_id: uuid::Uuid,
     expected_queue_lease_token: &'a str,
+}
+
+/// Everything a terminal delivery write needs except the failing outcome
+/// itself: the owned attempt, the queue job it fences, and the ingest lease
+/// that must be terminalized in the same retry-handoff transaction.
+#[derive(Clone, Copy)]
+struct DeliveryAttemptContext<'a> {
+    attempt: &'a WebhookDeliveryAttemptRow,
+    job_id: uuid::Uuid,
+    ingest_lease: Option<DeliveryIngestLease<'a>>,
+    lease_token: uuid::Uuid,
+    attempt_number: i32,
+}
+
+/// Outcome of resolving the subscription target: either a prepared target, or
+/// a terminal delivery outcome already recorded by the caller.
+enum TargetResolution {
+    Ready(PreparedWebhookTarget),
+    Failed(WebhookDeliveryJobOutcome),
+}
+
+/// A signed, header-populated request plus the plaintext custom headers that
+/// must stay alive (and be zeroized) until the response is classified.
+struct PreparedDeliveryRequest {
+    request: reqwest::RequestBuilder,
+    custom_headers: custom_headers::SensitiveWebhookHeaders,
+}
+
+/// Result of local request preparation: a ready request, or the static failure
+/// and retryability decision that terminalizes the attempt.
+enum DeliveryPreparation {
+    Ready(Box<PreparedDeliveryRequest>),
+    Failed { failure: WebhookDeliveryFailure, retryable: bool },
 }
 
 impl PreparedWebhookTarget {
@@ -170,54 +204,27 @@ async fn run_webhook_delivery_job_with_target_policy(
     // Claim before policy resolution or any fallible local preparation. Every
     // branch below can therefore terminalize through the same ownership CAS,
     // and concurrent duplicate workers perform no outbound request.
-    let (attempt, subscription) = match webhook_repository::claim_attempt_for_delivery(
-        &state.persistence.postgres,
-        pending_attempt.id,
-        job.id,
-    )
-    .await
-    .context("failed to claim webhook delivery attempt")?
-    {
-        WebhookDeliveryClaimOutcome::Claimed { attempt, subscription } => (attempt, subscription),
-        WebhookDeliveryClaimOutcome::InFlight { attempt_id, retry_at } => {
-            return Err(WebhookServiceError::DeliveryLeaseInFlight {
-                attempt_id,
-                job_id: job.id,
-                retry_at,
-            });
-        }
-        WebhookDeliveryClaimOutcome::Terminal { attempt_id, delivery_state } => {
-            info!(
-                %attempt_id,
-                job_id = %job.id,
-                %delivery_state,
-                "webhook delivery attempt was already terminal; completing duplicate queue work"
-            );
-            return Ok(WebhookDeliveryJobOutcome::NeedsIngestFinalization);
-        }
-        WebhookDeliveryClaimOutcome::Canceled => {
-            info!(
-                attempt_id = %pending_attempt.id,
-                job_id = %job.id,
-                "webhook delivery claim was canceled before HTTP could start"
-            );
-            return Ok(WebhookDeliveryJobOutcome::NeedsIngestFinalization);
-        }
+    let Some((attempt, subscription)) =
+        claim_delivery_attempt(state, job, &pending_attempt).await?
+    else {
+        return Ok(WebhookDeliveryJobOutcome::NeedsIngestFinalization);
     };
     let lease_token =
         attempt.delivery_lease_token.ok_or_else(|| WebhookServiceError::StateConflict {
             message: "claimed webhook delivery is missing its ownership token".to_string(),
         })?;
-    let attempt_number = attempt.attempt_number + 1;
+    let context = DeliveryAttemptContext {
+        attempt: &attempt,
+        job_id: job.id,
+        ingest_lease,
+        lease_token,
+        attempt_number: attempt.attempt_number + 1,
+    };
 
     if !subscription.active {
         return finish_delivery_failure(
             state,
-            &attempt,
-            job,
-            ingest_lease,
-            lease_token,
-            attempt_number,
+            &context,
             None,
             WebhookDeliveryFailure::new(WebhookDeliveryFailureCode::SubscriptionInactive),
             false,
@@ -226,127 +233,28 @@ async fn run_webhook_delivery_job_with_target_policy(
     }
 
     let allow_http = std::env::var("IRONRAG_WEBHOOK_ALLOW_HTTP").is_ok_and(|value| value == "1");
-    let resolved_target = tokio::select! {
-        () = cancellation_token.cancelled() => {
-            release_canceled_delivery_claim(state, &attempt, job.id, lease_token).await?;
-            return Err(WebhookServiceError::DeliveryCanceled {
-                attempt_id: attempt.id,
-                job_id: job.id,
-            });
-        }
-        resolved = prepare_webhook_target(&subscription.target_url, allow_http, target_policy) => {
-            match resolved {
-            Ok(value) => value,
-            Err(error) => {
-                let terminal = error.is_terminal_policy_rejection();
-                let failure = if terminal {
-                    WebhookDeliveryFailure::new(WebhookDeliveryFailureCode::TargetPolicyRejected)
-                } else {
-                    WebhookDeliveryFailure::new(WebhookDeliveryFailureCode::TargetResolutionFailed)
-                };
-                return finish_delivery_failure(
-                    state,
-                    &attempt,
-                    job,
-                    ingest_lease,
-                    lease_token,
-                    attempt_number,
-                    None,
-                    failure,
-                    !terminal,
-                )
-                .await;
-            }
-            }
+    let resolved_target = match resolve_webhook_target(
+        state,
+        &context,
+        &subscription.target_url,
+        allow_http,
+        target_policy,
+        cancellation_token,
+    )
+    .await?
+    {
+        TargetResolution::Ready(target) => target,
+        TargetResolution::Failed(outcome) => return Ok(outcome),
+    };
+
+    let preparation =
+        prepare_delivery_request(state, &context, &subscription, &resolved_target).await;
+    let (request, custom_headers) = match preparation {
+        DeliveryPreparation::Ready(prepared) => (prepared.request, prepared.custom_headers),
+        DeliveryPreparation::Failed { failure, retryable } => {
+            return finish_delivery_failure(state, &context, None, failure, retryable).await;
         }
     };
-
-    let Some((body_bytes, event_type_header, event_id_header)) =
-        encode_canonical_delivery(&attempt)
-    else {
-        return finish_delivery_failure(
-            state,
-            &attempt,
-            job,
-            ingest_lease,
-            lease_token,
-            attempt_number,
-            None,
-            WebhookDeliveryFailure::new(WebhookDeliveryFailureCode::PayloadEncodingFailed),
-            false,
-        )
-        .await;
-    };
-
-    let Ok(signing_secret) = state.credential_cipher.decrypt(
-        SecretPurpose::WebhookSigningSecret,
-        subscription.id,
-        &subscription.secret,
-    ) else {
-        return finish_delivery_failure(
-            state,
-            &attempt,
-            job,
-            ingest_lease,
-            lease_token,
-            attempt_number,
-            None,
-            credential_unavailable_failure(),
-            true,
-        )
-        .await;
-    };
-    let timestamp = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-    let signature_header =
-        signature::sign(signing_secret.expose_secret().as_bytes(), timestamp, &body_bytes);
-    drop(signing_secret);
-
-    let Ok(client) = resolved_target.build_client() else {
-        return finish_delivery_failure(
-            state,
-            &attempt,
-            job,
-            ingest_lease,
-            lease_token,
-            attempt_number,
-            None,
-            WebhookDeliveryFailure::new(WebhookDeliveryFailureCode::ClientSetupFailed),
-            true,
-        )
-        .await;
-    };
-    let Ok(custom_headers) = custom_headers::decrypt_and_validate_stored(
-        &state.credential_cipher,
-        subscription.id,
-        &subscription.custom_headers_json,
-    ) else {
-        return finish_delivery_failure(
-            state,
-            &attempt,
-            job,
-            ingest_lease,
-            lease_token,
-            attempt_number,
-            None,
-            credential_unavailable_failure(),
-            true,
-        )
-        .await;
-    };
-
-    let mut request = client
-        .post(resolved_target.url().clone())
-        .header("Content-Type", "application/json")
-        .header(signature::header_name(), signature_header)
-        .header(WEBHOOK_EVENT_TYPE_HEADER, event_type_header)
-        .header(WEBHOOK_EVENT_ID_HEADER, event_id_header)
-        .body(body_bytes);
-    for (name, value) in custom_headers.iter() {
-        request = request.header(name, value);
-    }
     let response = tokio::select! {
         () = cancellation_token.cancelled() => {
             drop(custom_headers);
@@ -362,66 +270,224 @@ async fn run_webhook_delivery_job_with_target_policy(
 
     match response {
         Ok(response) => {
-            let status = i32::from(response.status().as_u16());
-            // Drain a bounded response body for connection reuse, but never
-            // persist remote-controlled response text. Once a response status
-            // exists it is the authoritative delivery result; cancellation may
-            // stop the optional drain but must not make the request replay.
-            tokio::select! {
-                () = cancellation_token.cancelled() => {}
-                _ = read_response_text_excerpt_with_limit(
-                    response,
-                    MAX_WEBHOOK_RESPONSE_BODY_BYTES,
-                    WEBHOOK_RESPONSE_EXCERPT_CHARS,
-                ) => {}
-            }
-            let success = (200..300).contains(&status);
-            if success {
-                record_owned_delivery_result(
-                    state,
-                    &attempt,
-                    job.id,
-                    lease_token,
-                    attempt_number,
-                    status,
-                )
-                .await?;
-                Ok(WebhookDeliveryJobOutcome::NeedsIngestFinalization)
-            } else {
-                let retryable = matches!(status, 408 | 429 | 500..=599);
-                finish_delivery_failure(
-                    state,
-                    &attempt,
-                    job,
-                    ingest_lease,
-                    lease_token,
-                    attempt_number,
-                    Some(status),
-                    WebhookDeliveryFailure::new(WebhookDeliveryFailureCode::RemoteHttpStatus),
-                    retryable,
-                )
-                .await
-            }
+            handle_delivery_response(state, &context, response, cancellation_token).await
         }
         Err(error) => {
-            let failure = classify_transport_failure(&error);
-            finish_delivery_failure(
-                state,
-                &attempt,
-                job,
-                ingest_lease,
-                lease_token,
-                attempt_number,
-                None,
-                failure,
-                true,
-            )
-            .await
+            finish_delivery_failure(state, &context, None, classify_transport_failure(&error), true)
+                .await
         }
     }
 }
 
-fn encode_canonical_delivery(
+/// Claims the delivery attempt for this queue job, or reports that the work is
+/// already terminal. Cancellation performed atomically by the repository is
+/// treated the same as a terminal replay: the queue job is complete.
+async fn claim_delivery_attempt(
+    state: &Arc<AppState>,
+    job: &IngestJobRow,
+    pending_attempt: &WebhookDeliveryAttemptRow,
+) -> Result<
+    Option<(Box<WebhookDeliveryAttemptRow>, Box<WebhookSubscriptionRow>)>,
+    WebhookServiceError,
+> {
+    match webhook_repository::claim_attempt_for_delivery(
+        &state.persistence.postgres,
+        pending_attempt.id,
+        job.id,
+    )
+    .await
+    .context("failed to claim webhook delivery attempt")?
+    {
+        WebhookDeliveryClaimOutcome::Claimed { attempt, subscription } => {
+            Ok(Some((attempt, subscription)))
+        }
+        WebhookDeliveryClaimOutcome::InFlight { attempt_id, retry_at } => {
+            Err(WebhookServiceError::DeliveryLeaseInFlight { attempt_id, job_id: job.id, retry_at })
+        }
+        WebhookDeliveryClaimOutcome::Terminal { attempt_id, delivery_state } => {
+            log_duplicate_terminal_claim(job.id, attempt_id, &delivery_state);
+            Ok(None)
+        }
+        WebhookDeliveryClaimOutcome::Canceled => {
+            log_claim_canceled_before_http(pending_attempt.id, job.id);
+            Ok(None)
+        }
+    }
+}
+
+fn log_duplicate_terminal_claim(job_id: uuid::Uuid, attempt_id: uuid::Uuid, delivery_state: &str) {
+    info!(
+        %attempt_id,
+        job_id = %job_id,
+        %delivery_state,
+        "webhook delivery attempt was already terminal; completing duplicate queue work"
+    );
+}
+
+fn log_claim_canceled_before_http(attempt_id: uuid::Uuid, job_id: uuid::Uuid) {
+    info!(
+        attempt_id = %attempt_id,
+        job_id = %job_id,
+        "webhook delivery claim was canceled before HTTP could start"
+    );
+}
+
+/// Resolves the subscription target under the configured policy. Cancellation
+/// releases the claim and returns a canceled error; a resolution failure is
+/// terminalized through the shared failure handler.
+async fn resolve_webhook_target(
+    state: &Arc<AppState>,
+    context: &DeliveryAttemptContext<'_>,
+    raw_url: &str,
+    allow_http: bool,
+    target_policy: WebhookTargetPolicy,
+    cancellation_token: &CancellationToken,
+) -> Result<TargetResolution, WebhookServiceError> {
+    let resolved = tokio::select! {
+        () = cancellation_token.cancelled() => None,
+        resolved = prepare_webhook_target(raw_url, allow_http, target_policy) => Some(resolved),
+    };
+    let Some(resolved) = resolved else {
+        release_canceled_delivery_claim(
+            state,
+            context.attempt,
+            context.job_id,
+            context.lease_token,
+        )
+        .await?;
+        return Err(WebhookServiceError::DeliveryCanceled {
+            attempt_id: context.attempt.id,
+            job_id: context.job_id,
+        });
+    };
+    match resolved {
+        Ok(target) => Ok(TargetResolution::Ready(target)),
+        Err(error) => {
+            let terminal = error.is_terminal_policy_rejection();
+            let failure = if terminal {
+                WebhookDeliveryFailure::new(WebhookDeliveryFailureCode::TargetPolicyRejected)
+            } else {
+                WebhookDeliveryFailure::new(WebhookDeliveryFailureCode::TargetResolutionFailed)
+            };
+            let outcome = finish_delivery_failure(state, context, None, failure, !terminal).await?;
+            Ok(TargetResolution::Failed(outcome))
+        }
+    }
+}
+
+/// Encodes the persisted delivery, signs it, and builds the request. Any
+/// failure short-circuits to the static code and retryability decision the
+/// caller records; no DB write happens here.
+async fn prepare_delivery_request(
+    state: &Arc<AppState>,
+    context: &DeliveryAttemptContext<'_>,
+    subscription: &WebhookSubscriptionRow,
+    resolved_target: &PreparedWebhookTarget,
+) -> DeliveryPreparation {
+    let Some((body_bytes, event_type_header, event_id_header)) =
+        encode_persisted_delivery(context.attempt)
+    else {
+        return DeliveryPreparation::Failed {
+            failure: WebhookDeliveryFailure::new(WebhookDeliveryFailureCode::PayloadEncodingFailed),
+            retryable: false,
+        };
+    };
+
+    let Ok(signing_secret) = state.credential_cipher.decrypt(
+        SecretPurpose::WebhookSigningSecret,
+        subscription.id,
+        &subscription.secret,
+    ) else {
+        return DeliveryPreparation::Failed {
+            failure: credential_unavailable_failure(),
+            retryable: true,
+        };
+    };
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let signature_header =
+        signature::sign(signing_secret.expose_secret().as_bytes(), timestamp, &body_bytes);
+    drop(signing_secret);
+
+    let Ok(client) = resolved_target.build_client() else {
+        return DeliveryPreparation::Failed {
+            failure: WebhookDeliveryFailure::new(WebhookDeliveryFailureCode::ClientSetupFailed),
+            retryable: true,
+        };
+    };
+    let Ok(custom_headers) = custom_headers::decrypt_and_validate_stored(
+        &state.credential_cipher,
+        subscription.id,
+        &subscription.custom_headers_json,
+    ) else {
+        return DeliveryPreparation::Failed {
+            failure: credential_unavailable_failure(),
+            retryable: true,
+        };
+    };
+
+    let mut request = client
+        .post(resolved_target.url().clone())
+        .header("Content-Type", "application/json")
+        .header(signature::header_name(), signature_header)
+        .header(WEBHOOK_EVENT_TYPE_HEADER, event_type_header)
+        .header(WEBHOOK_EVENT_ID_HEADER, event_id_header)
+        .body(body_bytes);
+    for (name, value) in custom_headers.iter() {
+        request = request.header(name, value);
+    }
+    DeliveryPreparation::Ready(Box::new(PreparedDeliveryRequest { request, custom_headers }))
+}
+
+/// Classifies one HTTP response. A status exists, so it is the authoritative
+/// result: 2xx records success, anything else terminalizes with retryability
+/// derived from the status alone.
+async fn handle_delivery_response(
+    state: &Arc<AppState>,
+    context: &DeliveryAttemptContext<'_>,
+    response: reqwest::Response,
+    cancellation_token: &CancellationToken,
+) -> Result<WebhookDeliveryJobOutcome, WebhookServiceError> {
+    let status = i32::from(response.status().as_u16());
+    // Drain a bounded response body for connection reuse, but never persist
+    // remote-controlled response text. Once a response status exists it is the
+    // authoritative delivery result; cancellation may stop the optional drain
+    // but must not make the request replay.
+    tokio::select! {
+        () = cancellation_token.cancelled() => {}
+        _ = read_response_text_excerpt_with_limit(
+            response,
+            MAX_WEBHOOK_RESPONSE_BODY_BYTES,
+            WEBHOOK_RESPONSE_EXCERPT_CHARS,
+        ) => {}
+    }
+    let success = (200..300).contains(&status);
+    if success {
+        record_owned_delivery_result(
+            state,
+            context.attempt,
+            context.job_id,
+            context.lease_token,
+            context.attempt_number,
+            status,
+        )
+        .await?;
+        return Ok(WebhookDeliveryJobOutcome::NeedsIngestFinalization);
+    }
+    let retryable = matches!(status, 408 | 429 | 500..=599);
+    finish_delivery_failure(
+        state,
+        context,
+        Some(status),
+        WebhookDeliveryFailure::new(WebhookDeliveryFailureCode::RemoteHttpStatus),
+        retryable,
+    )
+    .await
+}
+
+fn encode_persisted_delivery(
     attempt: &WebhookDeliveryAttemptRow,
 ) -> Option<(Vec<u8>, HeaderValue, HeaderValue)> {
     if !attempt.payload_json.is_object()
@@ -432,7 +498,7 @@ fn encode_canonical_delivery(
     let library_id = attempt.library_id?;
     let event_type_header = HeaderValue::from_str(&attempt.event_type).ok()?;
     let event_id_header = HeaderValue::from_str(&attempt.event_id).ok()?;
-    let payload = canonical_delivery_payload_from_parts(
+    let payload = delivery_payload_from_persisted_parts(
         &attempt.payload_json,
         &attempt.event_type,
         &attempt.event_id,
@@ -484,100 +550,69 @@ async fn record_owned_delivery_result(
     .await
     .context("failed to record webhook delivery result")?;
     if recorded.is_some() {
-        info!(
-            attempt_id = %attempt.id,
-            job_id = %job_id,
-            response_status,
-            attempt_number,
-            "webhook delivery attempt completed"
-        );
+        log_delivery_completed(attempt.id, job_id, response_status, attempt_number);
     } else {
-        info!(
-            attempt_id = %attempt.id,
-            job_id = %job_id,
-            "discarded webhook success from a worker that no longer owns the delivery"
-        );
+        log_delivery_result_discarded(attempt.id, job_id);
     }
     Ok(())
 }
 
+fn log_delivery_completed(
+    attempt_id: uuid::Uuid,
+    job_id: uuid::Uuid,
+    response_status: i32,
+    attempt_number: i32,
+) {
+    info!(
+        attempt_id = %attempt_id,
+        job_id = %job_id,
+        response_status,
+        attempt_number,
+        "webhook delivery attempt completed"
+    );
+}
+
+fn log_delivery_result_discarded(attempt_id: uuid::Uuid, job_id: uuid::Uuid) {
+    info!(
+        attempt_id = %attempt_id,
+        job_id = %job_id,
+        "discarded webhook success from a worker that no longer owns the delivery"
+    );
+}
+
 async fn finish_delivery_failure(
     state: &Arc<AppState>,
-    attempt: &WebhookDeliveryAttemptRow,
-    job: &IngestJobRow,
-    ingest_lease: Option<DeliveryIngestLease<'_>>,
-    lease_token: uuid::Uuid,
-    attempt_number: i32,
+    context: &DeliveryAttemptContext<'_>,
     response_status: Option<i32>,
     failure: WebhookDeliveryFailure,
     retryable: bool,
 ) -> Result<WebhookDeliveryJobOutcome, WebhookServiceError> {
+    let attempt = context.attempt;
     let retry_library_id = attempt.library_id;
-    let should_retry = retryable && attempt_number < MAX_ATTEMPTS && retry_library_id.is_some();
-    let next_attempt_at = should_retry.then(|| next_attempt_at(attempt_number));
+    let should_retry =
+        retryable && context.attempt_number < MAX_ATTEMPTS && retry_library_id.is_some();
+    let next_attempt_at = should_retry.then(|| next_attempt_at(context.attempt_number));
     let delivery_state =
-        if retryable && attempt_number >= MAX_ATTEMPTS { "abandoned" } else { "failed" };
+        if retryable && context.attempt_number >= MAX_ATTEMPTS { "abandoned" } else { "failed" };
     let completion = WebhookDeliveryCompletion {
         attempt_id: attempt.id,
-        job_id: job.id,
-        lease_token,
+        job_id: context.job_id,
+        lease_token: context.lease_token,
         delivery_state,
-        attempt_number,
+        attempt_number: context.attempt_number,
         response_status,
         error_code: Some(failure.code().as_str()),
         error_summary: Some(failure.summary()),
         next_attempt_at,
     };
 
-    let (recorded, outcome) = if let (true, Some(retry_library_id)) =
-        (should_retry, retry_library_id)
-    {
-        let retry_job = build_retry_job(attempt, retry_library_id, attempt_number, next_attempt_at);
-        if let Some(ingest_lease) = ingest_lease {
-            match webhook_repository::record_webhook_delivery_failure_and_handoff_retry(
-                &state.persistence.postgres,
-                &completion,
-                &WebhookRetryHandoff {
-                    ingest_attempt_id: ingest_lease.ingest_attempt_id,
-                    expected_queue_lease_token: ingest_lease.expected_queue_lease_token,
-                },
-                &retry_job,
-            )
-            .await
-            .context("failed to atomically hand off webhook retry queue ownership")?
-            {
-                WebhookRetryHandoffOutcome::RetryScheduled(recorded) => {
-                    (Some(recorded), WebhookDeliveryJobOutcome::IngestAlreadyFinalized)
-                }
-                WebhookRetryHandoffOutcome::CompletionRecorded(recorded) => {
-                    (Some(recorded), WebhookDeliveryJobOutcome::NeedsIngestFinalization)
-                }
-                WebhookRetryHandoffOutcome::OwnershipLost => {
-                    (None, WebhookDeliveryJobOutcome::NeedsIngestFinalization)
-                }
-            }
-        } else {
-            #[cfg(feature = "test-support")]
-            {
-                let recorded =
-                    webhook_repository::record_webhook_delivery_failure_and_enqueue_retry_detached(
-                        &state.persistence.postgres,
-                        &completion,
-                        &retry_job,
-                    )
-                    .await
-                    .context("failed to record detached test webhook retry")?;
-                (recorded, WebhookDeliveryJobOutcome::NeedsIngestFinalization)
-            }
-            #[cfg(not(feature = "test-support"))]
-            {
-                return Err(WebhookServiceError::StateConflict {
-                    message: "webhook retry is missing its current ingest lease".to_string(),
-                });
-            }
+    let (recorded, outcome) = match (should_retry, retry_library_id) {
+        (true, Some(retry_library_id)) => {
+            let retry_job =
+                build_retry_job(attempt, retry_library_id, context.attempt_number, next_attempt_at);
+            record_retry_handoff(state, context, &completion, &retry_job).await?
         }
-    } else {
-        (
+        _ => (
             webhook_repository::record_webhook_delivery_result(
                 &state.persistence.postgres,
                 &completion,
@@ -585,28 +620,105 @@ async fn finish_delivery_failure(
             .await
             .context("failed to record webhook delivery failure")?,
             WebhookDeliveryJobOutcome::NeedsIngestFinalization,
-        )
+        ),
     };
 
     if recorded.is_some() {
-        warn!(
-            attempt_id = %attempt.id,
-            subscription_id = %attempt.subscription_id,
-            job_id = %job.id,
-            attempt_number,
+        log_delivery_failure_recorded(
+            attempt,
+            context.job_id,
+            &failure,
+            context.attempt_number,
             retryable,
-            failure_code = failure.code().as_str(),
-            "webhook delivery attempt failed"
         );
     } else {
-        info!(
-            attempt_id = %attempt.id,
-            job_id = %job.id,
-            failure_code = failure.code().as_str(),
-            "discarded webhook failure from a worker that no longer owns the delivery"
-        );
+        log_delivery_failure_discarded(attempt, context.job_id, &failure);
     }
     Ok(outcome)
+}
+
+/// Records a retryable failure and hands the queue retry off in the same
+/// transaction as terminalizing the current ingest lease. The detached
+/// (test-only, no ingest lease) path enqueues a replacement job directly.
+async fn record_retry_handoff(
+    state: &Arc<AppState>,
+    context: &DeliveryAttemptContext<'_>,
+    completion: &WebhookDeliveryCompletion<'_>,
+    retry_job: &NewIngestJob,
+) -> Result<(Option<WebhookDeliveryAttemptRow>, WebhookDeliveryJobOutcome), WebhookServiceError> {
+    let Some(ingest_lease) = context.ingest_lease else {
+        #[cfg(feature = "test-support")]
+        {
+            let recorded =
+                webhook_repository::record_webhook_delivery_failure_and_enqueue_retry_detached(
+                    &state.persistence.postgres,
+                    completion,
+                    retry_job,
+                )
+                .await
+                .context("failed to record detached test webhook retry")?;
+            return Ok((recorded, WebhookDeliveryJobOutcome::NeedsIngestFinalization));
+        }
+        #[cfg(not(feature = "test-support"))]
+        {
+            return Err(WebhookServiceError::StateConflict {
+                message: "webhook retry is missing its current ingest lease".to_string(),
+            });
+        }
+    };
+    let outcome = webhook_repository::record_webhook_delivery_failure_and_handoff_retry(
+        &state.persistence.postgres,
+        completion,
+        &WebhookRetryHandoff {
+            ingest_attempt_id: ingest_lease.ingest_attempt_id,
+            expected_queue_lease_token: ingest_lease.expected_queue_lease_token,
+        },
+        retry_job,
+    )
+    .await
+    .context("failed to atomically hand off webhook retry queue ownership")?;
+    Ok(match outcome {
+        WebhookRetryHandoffOutcome::RetryScheduled(recorded) => {
+            (Some(recorded), WebhookDeliveryJobOutcome::IngestAlreadyFinalized)
+        }
+        WebhookRetryHandoffOutcome::CompletionRecorded(recorded) => {
+            (Some(recorded), WebhookDeliveryJobOutcome::NeedsIngestFinalization)
+        }
+        WebhookRetryHandoffOutcome::OwnershipLost => {
+            (None, WebhookDeliveryJobOutcome::NeedsIngestFinalization)
+        }
+    })
+}
+
+fn log_delivery_failure_recorded(
+    attempt: &WebhookDeliveryAttemptRow,
+    job_id: uuid::Uuid,
+    failure: &WebhookDeliveryFailure,
+    attempt_number: i32,
+    retryable: bool,
+) {
+    warn!(
+        attempt_id = %attempt.id,
+        subscription_id = %attempt.subscription_id,
+        job_id = %job_id,
+        attempt_number,
+        retryable,
+        failure_code = failure.code().as_str(),
+        "webhook delivery attempt failed"
+    );
+}
+
+fn log_delivery_failure_discarded(
+    attempt: &WebhookDeliveryAttemptRow,
+    job_id: uuid::Uuid,
+    failure: &WebhookDeliveryFailure,
+) {
+    info!(
+        attempt_id = %attempt.id,
+        job_id = %job_id,
+        failure_code = failure.code().as_str(),
+        "discarded webhook failure from a worker that no longer owns the delivery"
+    );
 }
 
 async fn release_canceled_delivery_claim(
@@ -735,7 +847,7 @@ mod tests {
     use serde_json::json;
     use uuid::Uuid;
 
-    use super::{credential_unavailable_failure, encode_canonical_delivery};
+    use super::{credential_unavailable_failure, encode_persisted_delivery};
     use crate::infra::repositories::webhook_repository::WebhookDeliveryAttemptRow;
 
     fn synthetic_attempt() -> WebhookDeliveryAttemptRow {
@@ -778,12 +890,12 @@ mod tests {
     }
 
     #[test]
-    fn delivery_rebuilds_canonical_body_and_event_headers_from_relational_fields() {
+    fn delivery_rebuilds_persisted_body_and_event_headers_from_relational_fields() {
         let attempt = synthetic_attempt();
 
         let (body, event_type_header, event_id_header) =
-            encode_canonical_delivery(&attempt).expect("valid attempt");
-        let payload: serde_json::Value = serde_json::from_slice(&body).expect("canonical JSON");
+            encode_persisted_delivery(&attempt).expect("valid attempt");
+        let payload: serde_json::Value = serde_json::from_slice(&body).expect("normalized JSON");
 
         assert_eq!(payload["event_type"], attempt.event_type);
         assert_eq!(payload["event_id"], attempt.event_id);
@@ -798,10 +910,10 @@ mod tests {
     fn delivery_rejects_non_object_or_header_unsafe_legacy_metadata() {
         let mut attempt = synthetic_attempt();
         attempt.payload_json = json!(["not", "an", "object"]);
-        assert!(encode_canonical_delivery(&attempt).is_none());
+        assert!(encode_persisted_delivery(&attempt).is_none());
 
         attempt.payload_json = json!({});
         attempt.event_id = "revision.ready:unsafe\r\nX-Injected: yes".to_string();
-        assert!(encode_canonical_delivery(&attempt).is_none());
+        assert!(encode_persisted_delivery(&attempt).is_none());
     }
 }

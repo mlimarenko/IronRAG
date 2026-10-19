@@ -1,18 +1,17 @@
 //! `repair knowledge-projection-metadata` — reconcile drifted knowledge-plane
-//! metadata from its canonical content-plane source.
+//! metadata from stored content.
 //!
-//! The readable-content parity gate compares canonical document and revision
-//! metadata field-by-field against the knowledge projection. Historical
-//! backfills that touched only the canonical side (for example a
-//! `document_hint` backfill) leave the projection permanently stale, and one
-//! drifted field wedges the whole library in
-//! `query_content_projection_converging`.
+//! The readable-snapshot status compares document and revision metadata
+//! field-by-field. Historical backfills that touched only stored content leave
+//! the projection stale and cause answers to carry a catching-up warning.
 //!
-//! This repair copies exactly the fields the parity gate compares — document:
-//! `external_key`, `parent_document_id`, `document_role`; revision:
+//! Content is authoritative for lifecycle as well as metadata. This repair copies
+//! document fields `external_key`, `parent_document_id`, `document_role`,
+//! `document_state`, `deleted_at`; revision fields:
 //! `revision_number`, `revision_kind`, `source_uri`, `document_hint`,
-//! `mime_type`, `checksum`, `title`, `byte_size` — from canonical rows to
-//! their projection counterparts, readable heads only, only where a field
+//! `mime_type`, `checksum`, `title`, `byte_size` — from stored rows to
+//! their existing, same-scope projection counterparts for active, non-deleted
+//! content, only where a field
 //! actually differs. Chunk-level divergence (text, spans, checksums) is out of
 //! scope on purpose: stale chunk text means the projection genuinely needs
 //! re-ingest, not a metadata copy. The library source-truth generation is
@@ -66,20 +65,29 @@ pub async fn knowledge_projection_metadata(
             document_rows = documents,
             revision_rows = revisions,
             dry_run,
-            "knowledge projection metadata reconciled from canonical content",
+            "knowledge projection metadata reconciled from authoritative content rows",
         );
     }
     Ok(report)
 }
 
 const DRIFTED_DOCUMENT_PREDICATE: &str = "k.library_id = $1
+       and cd.workspace_id = k.workspace_id
+       and cd.library_id = k.library_id
        and cd.document_state = 'active'
        and cd.deleted_at is null
        and (cd.external_key is distinct from k.external_key
             or cd.parent_document_id is distinct from k.parent_document_id
-            or cd.document_role::text is distinct from k.document_role)";
+            or cd.document_role::text is distinct from k.document_role
+            or cd.document_state::text is distinct from k.document_state
+            or cd.deleted_at is distinct from k.deleted_at)";
 
 const DRIFTED_REVISION_PREDICATE: &str = "kr.library_id = $1
+       and cd.workspace_id = kr.workspace_id
+       and cd.library_id = kr.library_id
+       and cr.workspace_id = kr.workspace_id
+       and cr.library_id = kr.library_id
+       and cr.document_id = kr.document_id
        and cd.document_state = 'active'
        and cd.deleted_at is null
        and (cr.revision_number::bigint is distinct from kr.revision_number
@@ -138,7 +146,9 @@ async fn reconcile_library(
         "update knowledge_document k
          set external_key = cd.external_key,
              parent_document_id = cd.parent_document_id,
-             document_role = cd.document_role::text
+             document_role = cd.document_role::text,
+             document_state = cd.document_state::text,
+             deleted_at = cd.deleted_at
          from content_document cd
          where cd.id = k.document_id and {DRIFTED_DOCUMENT_PREDICATE}",
     )))

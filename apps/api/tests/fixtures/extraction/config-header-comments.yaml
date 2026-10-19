@@ -1,0 +1,17 @@
+# Runtime units:
+#   - Gateway Node: External request routing and session handoff (port 7301)
+#   - Ledger Node: Event persistence and audit lookup (port 7302)
+#   - Relay Node: Background notifications and message delivery (port 7303)
+services:
+  gateway:
+    image: example/gateway:1
+    ports:
+      - "7301:7301"
+  ledger:
+    image: example/ledger:1
+    ports:
+      - "7302:7302"
+  relay:
+    image: example/relay:1
+    ports:
+      - "7303:7303"

@@ -8,10 +8,14 @@ use aws_sdk_s3::{
     primitives::ByteStream,
     types::{Delete, ObjectIdentifier},
 };
+use tokio::{
+    fs,
+    io::{AsyncRead, AsyncReadExt},
+};
 use uuid::Uuid;
 
 use super::{
-    StashedContentDirectory,
+    BoundedRevisionSource, StashedContentDirectory, read_bounded_bytes,
     types::{ContentStorageProbe, ContentStorageProbeStatus, ContentStorageS3Settings},
 };
 use crate::services::content::error::ContentServiceError;
@@ -110,6 +114,50 @@ impl S3ContentStorageProvider {
         Ok(())
     }
 
+    pub(super) async fn write_stream<R>(
+        &self,
+        storage_key: &str,
+        reader: &mut R,
+        max_bytes: u64,
+    ) -> Result<(), ContentServiceError>
+    where
+        R: AsyncRead + Unpin,
+    {
+        let (file, temp_path) = tempfile::NamedTempFile::new()
+            .context("failed to create temporary content source for object storage upload")?
+            .into_parts();
+        let temp_path_buf = temp_path.to_path_buf();
+        let write_result = async {
+            let mut output = fs::File::from_std(file);
+            let copied =
+                tokio::io::copy(&mut reader.take(max_bytes.saturating_add(1)), &mut output)
+                    .await
+                    .context("failed to stage content revision source for object storage upload")?;
+            if copied > max_bytes {
+                return Err(ContentServiceError::InvalidRequest {
+                    message: format!("content revision source exceeds the {max_bytes}-byte limit"),
+                });
+            }
+            output.sync_all().await.context("failed to sync staged content revision source")?;
+            drop(output);
+            let body = ByteStream::from_path(&temp_path_buf)
+                .await
+                .context("failed to stream staged content revision source")?;
+            self.client
+                .put_object()
+                .bucket(&self.bucket)
+                .key(self.absolute_object_key(storage_key))
+                .body(body)
+                .send()
+                .await
+                .with_context(|| format!("failed to write object storage key {storage_key}"))?;
+            Ok(())
+        }
+        .await;
+        drop(temp_path);
+        write_result
+    }
+
     pub(super) async fn has(&self, storage_key: &str) -> Result<bool, ContentServiceError> {
         let response = self
             .client
@@ -133,6 +181,67 @@ impl S3ContentStorageProvider {
                 }
             }
         }
+    }
+
+    /// Removes exactly one stored object, reusing [`Self::delete_objects`].
+    /// Returns whether the object existed before deletion; a missing object is
+    /// not an error, so reclaiming an orphan is idempotent.
+    pub(super) async fn delete(&self, storage_key: &str) -> Result<bool, ContentServiceError> {
+        let existed = self.has(storage_key).await?;
+        let absolute_key = self.absolute_object_key(storage_key);
+        self.delete_objects(std::slice::from_ref(&absolute_key)).await?;
+        Ok(existed)
+    }
+
+    pub(super) async fn read_bounded(
+        &self,
+        storage_key: &str,
+        max_bytes: usize,
+    ) -> Result<BoundedRevisionSource, ContentServiceError> {
+        let max_bytes_u64 = u64::try_from(max_bytes).unwrap_or(u64::MAX);
+        let response = self
+            .client
+            .get_object()
+            .bucket(&self.bucket)
+            .key(self.absolute_object_key(storage_key))
+            .range(format!("bytes=0-{max_bytes_u64}"))
+            .send()
+            .await
+            .with_context(|| format!("failed to fetch object storage key {storage_key}"))?;
+        let (range_start, range_end, byte_size) =
+            response.content_range().and_then(parse_content_range).ok_or_else(|| {
+                anyhow!("object storage returned an invalid ranged response for {storage_key}")
+            })?;
+        let response_length =
+            response.content_length().and_then(|value| u64::try_from(value).ok()).ok_or_else(
+                || anyhow!("object storage omitted ranged response length for {storage_key}"),
+            )?;
+        let expected_length = range_end.saturating_sub(range_start).saturating_add(1);
+        if range_start != 0
+            || range_end > max_bytes_u64
+            || range_end >= byte_size
+            || response_length != expected_length
+        {
+            return Err(anyhow!(
+                "object storage returned an inconsistent ranged response for {storage_key}"
+            )
+            .into());
+        }
+        if byte_size > max_bytes_u64 {
+            return Ok(BoundedRevisionSource::LimitExceeded { byte_size });
+        }
+
+        let mut body = response.body.into_async_read();
+        let bytes = read_bounded_bytes(&mut body, max_bytes)
+            .await
+            .with_context(|| format!("failed to read object storage body for {storage_key}"))?;
+        if u64::try_from(bytes.len()).ok() != Some(response_length) {
+            return Err(anyhow!(
+                "object storage body length did not match ranged response for {storage_key}"
+            )
+            .into());
+        }
+        Ok(BoundedRevisionSource::Complete(bytes))
     }
 
     pub(super) async fn read(&self, storage_key: &str) -> Result<Vec<u8>, ContentServiceError> {
@@ -354,10 +463,34 @@ impl S3ContentStorageProvider {
     }
 }
 
+fn parse_content_range(value: &str) -> Option<(u64, u64, u64)> {
+    let value = value.strip_prefix("bytes ")?;
+    let (range, total) = value.split_once('/')?;
+    let (start, end) = range.split_once('-')?;
+    Some((start.parse().ok()?, end.parse().ok()?, total.parse().ok()?))
+}
+
 fn normalize_prefix(value: String) -> String {
     trim_prefix(&value).trim_end_matches('/').to_string()
 }
 
 fn trim_prefix(value: &str) -> &str {
     value.trim().trim_start_matches('/')
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_content_range;
+
+    #[test]
+    fn parses_valid_s3_content_range() {
+        assert_eq!(parse_content_range("bytes 0-5/24"), Some((0, 5, 24)));
+    }
+
+    #[test]
+    fn rejects_missing_or_unknown_content_range() {
+        assert_eq!(parse_content_range("bytes 0-5/*"), None);
+        assert_eq!(parse_content_range("0-5/24"), None);
+        assert_eq!(parse_content_range("bytes */24"), None);
+    }
 }

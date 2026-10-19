@@ -1,4 +1,4 @@
-import type Graph from 'graphology'
+import type { LayoutGraphApi } from './layoutGraph'
 import type { GraphLayoutType } from '@/features/graph/model/config'
 
 type GroupedNodes = {
@@ -19,17 +19,17 @@ type GridMeasure = {
   height: number
 }
 
-function getNodeLabel(graph: Graph, node: string): string {
+function getNodeLabel(graph: LayoutGraphApi, node: string): string {
   const label = graph.getNodeAttribute(node, 'label')
   return typeof label === 'string' ? label : node
 }
 
-function getNodeType(graph: Graph, node: string): string {
+function getNodeType(graph: LayoutGraphApi, node: string): string {
   const type = graph.getNodeAttribute(node, 'nodeType')
   return typeof type === 'string' && type.length > 0 ? type : 'entity'
 }
 
-function getAllNodes(graph: Graph): string[] {
+function getAllNodes(graph: LayoutGraphApi): string[] {
   const nodes: string[] = []
   graph.forEachNode((node) => {
     nodes.push(node)
@@ -37,7 +37,7 @@ function getAllNodes(graph: Graph): string[] {
   return nodes
 }
 
-function sortNodesByImportance(graph: Graph, nodes: string[]): string[] {
+function sortNodesByImportance(graph: LayoutGraphApi, nodes: string[]): string[] {
   return [...nodes].sort((left, right) => {
     const degreeDelta = graph.degree(right) - graph.degree(left)
     if (degreeDelta !== 0) return degreeDelta
@@ -51,7 +51,7 @@ function sortNodesByImportance(graph: Graph, nodes: string[]): string[] {
   })
 }
 
-function groupNodesByType(graph: Graph): GroupedNodes[] {
+function groupNodesByType(graph: LayoutGraphApi): GroupedNodes[] {
   const groups = new Map<string, string[]>()
 
   graph.forEachNode((node, attrs) => {
@@ -112,7 +112,7 @@ function measureGrid(
 }
 
 function layoutNodeGrid(
-  graph: Graph,
+  graph: LayoutGraphApi,
   nodes: string[],
   centerX: number,
   centerY: number,
@@ -148,7 +148,7 @@ function ringCapacity(radius: number): number {
 }
 
 function layoutNodesInSector(
-  graph: Graph,
+  graph: LayoutGraphApi,
   nodes: string[],
   startAngle: number,
   endAngle: number,
@@ -185,7 +185,7 @@ function layoutNodesInSector(
   }
 }
 
-function layoutSectors(graph: Graph): void {
+function layoutSectors(graph: LayoutGraphApi): void {
   if (graph.order === 0) return
 
   const groups = groupNodesByType(graph)
@@ -215,7 +215,7 @@ function layoutSectors(graph: Graph): void {
   })
 }
 
-function layoutBands(graph: Graph): void {
+function layoutBands(graph: LayoutGraphApi): void {
   if (graph.order === 0) return
 
   const groups = groupNodesByType(graph)
@@ -277,7 +277,7 @@ function layoutBands(graph: Graph): void {
   })
 }
 
-function layoutRings(graph: Graph): void {
+function layoutRings(graph: LayoutGraphApi): void {
   if (graph.order === 0) return
 
   const groups = groupNodesByType(graph)
@@ -333,7 +333,7 @@ function layoutRings(graph: Graph): void {
   })
 }
 
-function layoutClusters(graph: Graph): void {
+function layoutClusters(graph: LayoutGraphApi): void {
   if (graph.order === 0) return
 
   const groups = groupNodesByType(graph)
@@ -355,7 +355,7 @@ function layoutClusters(graph: Graph): void {
   })
 }
 
-function layoutHubs(graph: Graph): void {
+function layoutHubs(graph: LayoutGraphApi): void {
   if (graph.order === 0) return
 
   const nodes = sortNodesByImportance(graph, getAllNodes(graph))
@@ -423,7 +423,7 @@ function layoutHubs(graph: Graph): void {
   })
 }
 
-function layoutSources(graph: Graph): void {
+function layoutSources(graph: LayoutGraphApi): void {
   if (graph.order === 0) return
 
   const groups = groupNodesByType(graph)
@@ -471,7 +471,7 @@ function layoutSources(graph: Graph): void {
   })
 }
 
-function collectDepthLayers(graph: Graph, seeds: string[], maxDepth: number): string[][] {
+function collectDepthLayers(graph: LayoutGraphApi, seeds: string[], maxDepth: number): string[][] {
   const layers = Array.from({ length: maxDepth + 2 }, () => [] as string[])
   const depthByNode = new Map<string, number>()
   const queue: string[] = []
@@ -504,7 +504,7 @@ function collectDepthLayers(graph: Graph, seeds: string[], maxDepth: number): st
   return layers.map((layer) => sortNodesByImportance(graph, layer))
 }
 
-function layoutFlow(graph: Graph): void {
+function layoutFlow(graph: LayoutGraphApi): void {
   if (graph.order === 0) return
 
   const nodes = sortNodesByImportance(graph, getAllNodes(graph))
@@ -539,7 +539,7 @@ function layoutFlow(graph: Graph): void {
 }
 
 function assignRadialSectors(
-  graph: Graph,
+  graph: LayoutGraphApi,
   seeds: string[],
   maxDepth: number,
 ): Map<string, { seedIndex: number; depth: number }> {
@@ -580,7 +580,7 @@ function assignRadialSectors(
   return assignments
 }
 
-function layoutRadial(graph: Graph): void {
+function layoutRadial(graph: LayoutGraphApi): void {
   if (graph.order === 0) return
 
   const nodes = sortNodesByImportance(graph, getAllNodes(graph))
@@ -637,7 +637,7 @@ function layoutRadial(graph: Graph): void {
   })
 }
 
-function layoutCirclepack(graph: Graph): void {
+function layoutCirclepack(graph: LayoutGraphApi): void {
   if (graph.order === 0) return
 
   const groups = groupNodesByType(graph)
@@ -696,7 +696,7 @@ function layoutCirclepack(graph: Graph): void {
   })
 }
 
-function findConnectedComponents(graph: Graph): string[][] {
+function findConnectedComponents(graph: LayoutGraphApi): string[][] {
   const visited = new Set<string>()
   const components: string[][] = []
   // Reused across seeds to avoid reallocating a fresh queue for every
@@ -768,7 +768,7 @@ function packComponentCircle(placed: PackedCircle[], radius: number): PackedCirc
 }
 
 function layoutComponentNodes(
-  graph: Graph,
+  graph: LayoutGraphApi,
   nodes: string[],
   centerX: number,
   centerY: number,
@@ -878,7 +878,7 @@ function packComponentPlacements(
 }
 
 function layoutPlacedComponents(
-  graph: Graph,
+  graph: LayoutGraphApi,
   placements: ComponentPlacement[],
   bounds: ComponentPackBounds,
 ): void {
@@ -895,7 +895,7 @@ function layoutPlacedComponents(
   }
 }
 
-function layoutLargeComponentSet(graph: Graph, components: LayoutComponent[]): void {
+function layoutLargeComponentSet(graph: LayoutGraphApi, components: LayoutComponent[]): void {
   const gapBetweenCells = 18
   const targetRowWidth = calculateComponentPackWidth(components, gapBetweenCells)
   const { placements, bounds } = packComponentPlacements(
@@ -906,7 +906,7 @@ function layoutLargeComponentSet(graph: Graph, components: LayoutComponent[]): v
   layoutPlacedComponents(graph, placements, bounds)
 }
 
-function layoutComponents(graph: Graph): void {
+function layoutComponents(graph: LayoutGraphApi): void {
   if (graph.order === 0) return
 
   // `findConnectedComponents` already returns components sorted by size
@@ -962,7 +962,7 @@ function layoutComponents(graph: Graph): void {
  * Hash-based so repeated switches to 'force' start from the same seed (stable),
  * and the spread scales with sqrt(order) to keep initial density sane.
  */
-function layoutForceSeed(graph: Graph): void {
+function layoutForceSeed(graph: LayoutGraphApi): void {
   if (graph.order === 0) return
   const spread = Math.max(60, Math.sqrt(graph.order) * 12)
   graph.forEachNode((node) => {
@@ -973,7 +973,7 @@ function layoutForceSeed(graph: Graph): void {
   })
 }
 
-export function applyGraphLayout(graph: Graph, layout: GraphLayoutType): void {
+export function applyGraphLayout(graph: LayoutGraphApi, layout: GraphLayoutType): void {
   switch (layout) {
     case 'sectors':
       layoutSectors(graph)

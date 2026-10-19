@@ -7,7 +7,9 @@ use crate::{
     services::{
         ingest::{cancellation::StageError, error::IngestServiceError},
         knowledge::error::KnowledgeServiceError,
+        query::execution::retrieval_plan::RetrievalPlanningError,
     },
+    shared::provider_failure::{ProviderFailure, ProviderFailureKind},
 };
 
 #[derive(Debug, Error)]
@@ -20,8 +22,8 @@ pub enum QueryServiceError {
     BindingNotConfigured { message: String },
     #[error("query state conflict: {message}")]
     StateConflict { message: String },
-    #[error("query provider unavailable: {message}")]
-    ProviderUnavailable { message: String },
+    #[error("query provider {}: {}", .0.kind_label(), .0)]
+    Provider(ProviderFailure),
     #[error("query cache unavailable: {message}")]
     CacheUnavailable { message: String },
     #[error("query operation cancelled")]
@@ -38,6 +40,10 @@ impl From<anyhow::Error> for QueryServiceError {
     fn from(error: anyhow::Error) -> Self {
         let error = match error.downcast::<Self>() {
             Ok(error) => return error,
+            Err(error) => error,
+        };
+        let error = match error.downcast::<RetrievalPlanningError>() {
+            Ok(error) => return error.into(),
             Err(error) => error,
         };
         let error = match error.downcast::<ProviderCallError>() {
@@ -76,7 +82,10 @@ impl QueryServiceError {
             Self::NotFound { .. } => "QueryServiceError::NotFound",
             Self::BindingNotConfigured { .. } => "QueryServiceError::BindingNotConfigured",
             Self::StateConflict { .. } => "QueryServiceError::StateConflict",
-            Self::ProviderUnavailable { .. } => "QueryServiceError::ProviderUnavailable",
+            Self::Provider(failure) => match failure.kind() {
+                ProviderFailureKind::Unavailable => "QueryServiceError::ProviderUnavailable",
+                ProviderFailureKind::QuotaExhausted => "QueryServiceError::ProviderQuotaExhausted",
+            },
             Self::CacheUnavailable { .. } => "QueryServiceError::CacheUnavailable",
             Self::Cancelled => "QueryServiceError::Cancelled",
             Self::DeadlineExceeded => "QueryServiceError::DeadlineExceeded",
@@ -94,13 +103,24 @@ impl QueryServiceError {
     /// failures must wipe partial state because reuse may be unsafe.
     #[must_use]
     pub const fn preserves_partial_vectors(&self) -> bool {
-        matches!(self, Self::ProviderUnavailable { .. })
+        matches!(self, Self::Provider(_))
+    }
+}
+
+impl From<RetrievalPlanningError> for QueryServiceError {
+    fn from(error: RetrievalPlanningError) -> Self {
+        match error {
+            RetrievalPlanningError::MissingStoredConfig
+            | RetrievalPlanningError::InvalidStoredConfig(_) => {
+                Self::StateConflict { message: error.to_string() }
+            }
+        }
     }
 }
 
 impl From<ProviderCallError> for QueryServiceError {
     fn from(error: ProviderCallError) -> Self {
-        Self::ProviderUnavailable { message: error.to_string() }
+        Self::Provider(ProviderFailure::from(error))
     }
 }
 
@@ -113,9 +133,7 @@ impl From<IngestServiceError> for QueryServiceError {
             IngestServiceError::BindingNotConfigured { message } => {
                 Self::BindingNotConfigured { message }
             }
-            IngestServiceError::ProviderUnavailable { message } => {
-                Self::ProviderUnavailable { message }
-            }
+            IngestServiceError::Provider(failure) => Self::Provider(failure),
             IngestServiceError::StateConflict { message } => Self::StateConflict { message },
             IngestServiceError::Cancelled => Self::Cancelled,
             IngestServiceError::Repository(error) => Self::Repository(error),
@@ -131,7 +149,8 @@ impl From<KnowledgeServiceError> for QueryServiceError {
                 Self::LibraryNotFound { library_id }
             }
             KnowledgeServiceError::NotFound { message } => Self::NotFound { message },
-            KnowledgeServiceError::GraphNotReady { message } => Self::StateConflict { message },
+            KnowledgeServiceError::GraphNotReady { message }
+            | KnowledgeServiceError::GraphIntegrity { message } => Self::StateConflict { message },
             KnowledgeServiceError::CacheUnavailable { message } => {
                 Self::CacheUnavailable { message }
             }
@@ -151,7 +170,9 @@ impl From<ApiError> for QueryServiceError {
     fn from(error: ApiError) -> Self {
         match error {
             ApiError::NotFound(message) => Self::NotFound { message },
-            ApiError::ProviderFailure(message) => Self::ProviderUnavailable { message },
+            ApiError::ProviderFailure(message) => {
+                Self::Provider(ProviderFailure::unavailable(message))
+            }
             ApiError::GatewayTimeout { .. } => Self::DeadlineExceeded,
             ApiError::KnowledgeNotReady(message)
             | ApiError::Conflict(message)
@@ -172,7 +193,11 @@ impl From<ApiError> for QueryServiceError {
 #[cfg(test)]
 mod tests {
     use super::QueryServiceError;
-    use crate::integrations::retry::ProviderCallError;
+    use crate::shared::provider_failure::ProviderFailure;
+    use crate::{
+        integrations::retry::ProviderCallError,
+        services::query::execution::retrieval_plan::RetrievalPlanningError,
+    };
     use uuid::Uuid;
 
     // BUG B: only explicitly typed provider failures preserve partial vectors;
@@ -180,7 +205,7 @@ mod tests {
     #[test]
     fn only_provider_unavailable_preserves_partial_vectors() {
         assert!(
-            QueryServiceError::ProviderUnavailable { message: "embedding 429".to_string() }
+            QueryServiceError::Provider(ProviderFailure::unavailable("embedding 429"))
                 .preserves_partial_vectors()
         );
         assert!(!QueryServiceError::Cancelled.preserves_partial_vectors());
@@ -196,6 +221,15 @@ mod tests {
             !QueryServiceError::LibraryNotFound { library_id: Uuid::now_v7() }
                 .preserves_partial_vectors()
         );
+    }
+
+    #[test]
+    fn retrieval_config_integrity_error_is_a_typed_state_conflict() {
+        let error = QueryServiceError::from(anyhow::Error::new(
+            RetrievalPlanningError::MissingStoredConfig,
+        ));
+
+        assert!(matches!(error, QueryServiceError::StateConflict { .. }));
     }
 
     #[test]
@@ -223,8 +257,8 @@ mod tests {
         let error = QueryServiceError::from(error);
         assert!(matches!(
             &error,
-            QueryServiceError::ProviderUnavailable { message }
-                if message == "opaque provider failure"
+            QueryServiceError::Provider(failure)
+                if failure.message() == "opaque provider failure"
         ));
         assert!(error.preserves_partial_vectors());
     }

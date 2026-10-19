@@ -1,0 +1,40 @@
+%PDF-1.4
+1 0 obj
+<< /Type /Catalog /Pages 2 0 R >>
+endobj
+2 0 obj
+<< /Type /Pages /Kids [3 0 R] /Count 1 >>
+endobj
+3 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>
+endobj
+4 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>
+endobj
+5 0 obj
+<< /Length 468 >>
+stream
+BT /F1 12 Tf 50 760 Td 16 TL
+(Aurora Capacity Summary \(signed extract\)) Tj T*
+(The application tier scales between 3 and 12 nodes.) Tj T*
+(The quorum tier is fixed at 5 nodes and is never autoscaled.) Tj T*
+(The ingest spool tier runs exactly 2 nodes in every ring.) Tj T*
+(End-to-end latency budget: 250 ms. Quorum commit budget: 40 ms.) Tj T*
+(Peak ring power draw: 42 kW per cage.) Tj T*
+(Spool retention: 36 hours at 18 MB/s peak, 2.4 TB NVMe per node.) Tj T*
+ET
+endstream
+endobj
+xref
+0 6
+0000000000 65535 f 
+0000000009 00000 n 
+0000000058 00000 n 
+0000000115 00000 n 
+0000000241 00000 n 
+0000000311 00000 n 
+trailer
+<< /Size 6 /Root 1 0 R >>
+startxref
+830
+%%EOF

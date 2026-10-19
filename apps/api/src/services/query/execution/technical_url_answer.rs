@@ -2,7 +2,7 @@ use crate::domains::query_ir::QueryIR;
 use crate::shared::extraction::technical_facts::TechnicalFactKind;
 
 use super::{
-    CanonicalAnswerEvidence, RuntimeMatchedChunk, concise_document_subject_label,
+    AuthoritativeAnswerEvidence, RuntimeMatchedChunk, concise_document_subject_label,
     fact_lookup::{best_matching_fact, build_document_labels},
     focused_answer_document_id,
     question_intent::{
@@ -24,7 +24,7 @@ struct ExactUrlLiteralMatch {
 pub(super) fn build_exact_url_answer(
     question: &str,
     query_ir: &QueryIR,
-    evidence: &CanonicalAnswerEvidence,
+    evidence: &AuthoritativeAnswerEvidence,
     chunks: &[RuntimeMatchedChunk],
 ) -> Option<String> {
     let intents = classify_question_or_ir_intents(question, query_ir);
@@ -53,7 +53,7 @@ pub(super) fn build_exact_url_answer(
 fn select_exact_url_literal(
     question: &str,
     query_ir: &QueryIR,
-    evidence: &CanonicalAnswerEvidence,
+    evidence: &AuthoritativeAnswerEvidence,
     chunks: &[RuntimeMatchedChunk],
     wants_wsdl: bool,
 ) -> Option<ExactUrlLiteralMatch> {

@@ -1,0 +1,14 @@
+{
+  "audit-grid.spec.ts": 5,
+  "branding.spec.ts": 5,
+  "data-grid.spec.ts": 11,
+  "dashboard.spec.ts": 57,
+  "dialog-actions.spec.ts": 16,
+  "documents-grid.spec.ts": 10,
+  "documents-revision-download.spec.ts": 4,
+  "label-clipping.spec.ts": 7,
+  "libraries-grid.spec.ts": 2,
+  "library-queue.spec.ts": 15,
+  "minimal-ui.spec.ts": 9,
+  "sidebar-labels.spec.ts": 4
+}

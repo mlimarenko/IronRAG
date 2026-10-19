@@ -99,6 +99,11 @@ pub struct BootstrapAiSetup {
 pub struct BootstrapStatus {
     /// Whether an owner account must still be created.
     pub setup_required: bool,
+    /// Whether the deployment has a complete, validated `OpenID` Connect sign-in configuration.
+    ///
+    /// This is intentionally an availability signal only. `IdP` group membership
+    /// authorizes entry to the application, but never grants an application role.
+    pub sso_available: bool,
     /// AI setup options when configuration is available.
     pub ai_setup: Option<BootstrapAiSetup>,
 }
@@ -113,78 +118,6 @@ pub enum SessionMode {
     BootstrapRequired,
     /// A valid authenticated session is present.
     Authenticated,
-}
-
-#[derive(Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
-#[serde(rename_all = "camelCase")]
-/// Credentials and persistence preference submitted for sign-in.
-pub struct LoginRequest {
-    /// Account login identifier.
-    pub login: String,
-    /// Account password; debug output always redacts it.
-    pub password: String,
-    /// Whether the session should use the longer persistence policy.
-    pub remember_me: bool,
-}
-
-impl std::fmt::Debug for LoginRequest {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter
-            .debug_struct("LoginRequest")
-            .field("login", &self.login)
-            .field("password", &"<redacted>")
-            .field("remember_me", &self.remember_me)
-            .finish()
-    }
-}
-
-#[derive(Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
-#[serde(rename_all = "camelCase")]
-/// Provider credentials supplied while creating the initial account.
-pub struct BootstrapSetupAi {
-    /// Provider implementation selected for initial bindings.
-    pub provider_kind: String,
-    /// Optional provider API key; debug output always redacts it.
-    pub api_key: Option<String>,
-    /// Optional provider endpoint; debug output always redacts it.
-    pub base_url: Option<String>,
-}
-
-impl std::fmt::Debug for BootstrapSetupAi {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter
-            .debug_struct("BootstrapSetupAi")
-            .field("provider_kind", &self.provider_kind)
-            .field("api_key", &self.api_key.as_ref().map(|_| "<redacted>"))
-            .field("base_url", &self.base_url.as_ref().map(|_| "<redacted>"))
-            .finish()
-    }
-}
-
-#[derive(Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
-#[serde(rename_all = "camelCase")]
-/// Initial owner account and optional AI provider configuration.
-pub struct BootstrapSetupRequest {
-    /// Login identifier for the initial owner.
-    pub login: String,
-    /// Optional human-readable owner name.
-    pub display_name: Option<String>,
-    /// Password for the initial owner; debug output always redacts it.
-    pub password: String,
-    /// Optional provider configuration applied during setup.
-    pub ai_setup: Option<BootstrapSetupAi>,
-}
-
-impl std::fmt::Debug for BootstrapSetupRequest {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter
-            .debug_struct("BootstrapSetupRequest")
-            .field("login", &self.login)
-            .field("display_name", &self.display_name)
-            .field("password", &"<redacted>")
-            .field("ai_setup", &self.ai_setup)
-            .finish()
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
@@ -211,26 +144,6 @@ pub struct AuthenticatedSession {
     pub expires_at: DateTime<Utc>,
     /// User authenticated by the session.
     pub user: SessionUser,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
-#[serde(rename_all = "camelCase")]
-/// Session and localization selected after a successful sign-in.
-pub struct LoginResponse {
-    /// Newly authenticated session.
-    pub session: AuthenticatedSession,
-    /// Locale selected for the signed-in user interface.
-    pub locale: UiLocale,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
-#[serde(rename_all = "camelCase")]
-/// Result of ending the current session.
-pub struct LogoutResponse {
-    /// Session that was revoked, when one was present.
-    pub revoked_session_id: Option<Uuid>,
-    /// Time at which sign-out completed.
-    pub signed_out_at: DateTime<Utc>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
@@ -269,7 +182,7 @@ pub struct PrincipalProfile {
 
 /// System role assigned to a user principal (viewer < operator < admin).
 ///
-/// Canonical source for the UI shell's capability gating. Mirrors the
+/// Authoritative source for the UI shell's capability gating. Mirrors the
 /// `public.iam_system_role` PG enum and the `ShellRole` shell-bootstrap field.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
@@ -318,7 +231,7 @@ pub struct WorkspaceMembership {
 #[serde(rename_all = "snake_case")]
 /// Resource scopes to which a permission grant can apply.
 pub enum GrantResourceKind {
-    /// The entire system.
+    /// The `IronRAG` instance as a whole.
     System,
     /// One workspace.
     Workspace,
@@ -342,6 +255,8 @@ pub enum GrantResourceKind {
 #[serde(rename_all = "snake_case")]
 /// Actions that may be granted to a principal.
 pub enum PermissionKind {
+    /// Administer instance-wide IAM.
+    IamAdmin,
     /// Administer a workspace.
     WorkspaceAdmin,
     /// Read workspace metadata.
@@ -366,8 +281,6 @@ pub enum PermissionKind {
     OpsRead,
     /// Read audit events.
     AuditRead,
-    /// Administer identities and grants.
-    IamAdmin,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
@@ -402,39 +315,4 @@ pub struct IamMe {
     pub workspace_memberships: Vec<WorkspaceMembership>,
     /// Permissions effective for the principal.
     pub effective_grants: Vec<TokenGrant>,
-}
-
-#[cfg(test)]
-mod secret_debug_tests {
-    use super::{BootstrapSetupAi, BootstrapSetupRequest, LoginRequest};
-
-    #[test]
-    fn auth_contract_debug_redacts_password_key_and_url_credentials() {
-        let login = LoginRequest {
-            login: "owner".into(),
-            password: "login-password-regression".into(),
-            remember_me: true,
-        };
-        let bootstrap = BootstrapSetupRequest {
-            login: "owner".into(),
-            display_name: None,
-            password: "bootstrap-password-regression".into(),
-            ai_setup: Some(BootstrapSetupAi {
-                provider_kind: "synthetic".into(),
-                api_key: Some("provider-key-regression".into()),
-                base_url: Some("https://user:url-secret@host.example/?token=query-secret".into()),
-            }),
-        };
-
-        let debug = format!("{login:?} {bootstrap:?}");
-        for secret in [
-            "login-password-regression",
-            "bootstrap-password-regression",
-            "provider-key-regression",
-            "url-secret",
-            "query-secret",
-        ] {
-            assert!(!debug.contains(secret), "Debug exposed {secret}");
-        }
-    }
 }

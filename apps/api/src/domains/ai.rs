@@ -47,6 +47,7 @@ pub struct ProviderCatalogEntry {
     pub capabilities: ProviderCapabilities,
     pub runtime: ProviderRuntimeProfile,
     pub ui_hints: serde_json::Value,
+    pub purpose_gaps: Vec<crate::domains::provider_profiles::ProviderPurposeGap>,
     pub profile: ProviderProfile,
 }
 
@@ -55,13 +56,33 @@ pub struct ModelCatalogEntry {
     pub id: Uuid,
     pub provider_catalog_id: Uuid,
     pub model_name: String,
-    pub capability_kind: String,
-    pub modality_kind: String,
     pub lifecycle_state: String,
     pub metadata_json: serde_json::Value,
     pub allowed_binding_purposes: Vec<AiBindingPurpose>,
     pub context_window: Option<i32>,
     pub max_output_tokens: Option<i32>,
+    pub pricing: ModelPricing,
+}
+
+/// One model a provider reports as reachable with a given account, read from
+/// the fields the provider itself publishes on its model-listing endpoint. A
+/// router's catalogue changes weekly, so the seeded catalog cannot hold it and
+/// this is the only way an operator can see what their plan actually exposes.
+///
+/// Every field below is copied from a declared provider field or left absent —
+/// nothing here is inferred from the model's name.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct DiscoveredProviderModel {
+    pub model_name: String,
+    pub context_window: Option<i32>,
+    pub max_output_tokens: Option<i32>,
+    /// What the provider says the model accepts (`text`, `image`, ...). Empty
+    /// means the provider did not say, which is not the same as text-only.
+    pub input_modalities: Vec<String>,
+    /// Present only when the provider published rates. Absent means unknown,
+    /// and a caller that needs a price must say so rather than record zero.
+    pub pricing: Option<ModelPricing>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, utoipa::ToSchema)]
@@ -79,37 +100,118 @@ pub struct ResolvedModelCatalogEntry {
     pub available_account_ids: Vec<Uuid>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
-pub struct PriceCatalogEntry {
-    pub id: Uuid,
-    pub model_catalog_id: Uuid,
-    pub billing_unit: String,
-    pub price_variant_key: String,
-    pub request_input_tokens_min: Option<i32>,
-    pub request_input_tokens_max: Option<i32>,
-    pub unit_price: Decimal,
+/// Vendor rates carried by every model row, in the model's currency per one
+/// million tokens. Zero is an honest price (local models, embedding output);
+/// an absent price is unrepresentable, which is the point: the separate
+/// price-catalog entity rotted apart from the models actually in use.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelPricing {
     pub currency_code: String,
-    pub effective_from: DateTime<Utc>,
-    pub effective_to: Option<DateTime<Utc>>,
-    pub catalog_scope: String,
-    pub workspace_id: Option<Uuid>,
+    pub input_price_per_1m: Decimal,
+    pub cached_input_price_per_1m: Decimal,
+    pub cache_write_input_price_per_1m: Decimal,
+    pub output_price_per_1m: Decimal,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub long_context: Option<ModelLongContextPricing>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
-pub struct AiBinding {
-    pub id: Uuid,
-    pub scope_kind: AiScopeKind,
-    pub workspace_id: Option<Uuid>,
-    pub library_id: Option<Uuid>,
-    pub binding_purpose: AiBindingPurpose,
-    pub account_id: Uuid,
-    pub model_catalog_id: Uuid,
-    pub system_prompt: Option<String>,
-    pub temperature: Option<f64>,
-    pub top_p: Option<f64>,
-    pub max_output_tokens_override: Option<i32>,
-    pub extra_parameters_json: serde_json::Value,
-    pub binding_state: String,
+/// Rates applied when a request's input exceeds the threshold. All fields are
+/// present together or the tier does not exist.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelLongContextPricing {
+    pub threshold_tokens: i32,
+    pub input_price_per_1m: Decimal,
+    pub cached_input_price_per_1m: Decimal,
+    pub output_price_per_1m: Decimal,
+}
+
+impl ModelPricing {
+    /// # Errors
+    /// Returns a message naming the first invalid field: negative rate,
+    /// non-positive threshold, or an unsupported currency code shape.
+    pub fn validate(&self) -> Result<(), String> {
+        let currency = self.currency_code.trim();
+        if currency.len() != 3 || !currency.chars().all(|c| c.is_ascii_uppercase()) {
+            return Err("currencyCode must be a three-letter uppercase ISO code".to_string());
+        }
+        for (name, value) in [
+            ("inputPricePer1m", self.input_price_per_1m),
+            ("cachedInputPricePer1m", self.cached_input_price_per_1m),
+            ("cacheWriteInputPricePer1m", self.cache_write_input_price_per_1m),
+            ("outputPricePer1m", self.output_price_per_1m),
+        ] {
+            if value.is_sign_negative() {
+                return Err(format!("{name} must not be negative"));
+            }
+        }
+        if let Some(tier) = &self.long_context {
+            if tier.threshold_tokens <= 0 {
+                return Err("longContext.thresholdTokens must be positive".to_string());
+            }
+            for (name, value) in [
+                ("longContext.inputPricePer1m", tier.input_price_per_1m),
+                ("longContext.cachedInputPricePer1m", tier.cached_input_price_per_1m),
+                ("longContext.outputPricePer1m", tier.output_price_per_1m),
+            ] {
+                if value.is_sign_negative() {
+                    return Err(format!("{name} must not be negative"));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Rate for one billing unit, honoring the long-context tier when the
+    /// request's input size crosses the threshold. Unknown units price at
+    /// zero rather than failing billing persistence.
+    #[must_use]
+    pub fn unit_price(&self, billing_unit: &str, request_input_tokens: Option<i32>) -> Decimal {
+        let long_context = self.long_context.as_ref().filter(|tier| {
+            request_input_tokens.is_some_and(|tokens| tokens > tier.threshold_tokens)
+        });
+        match billing_unit {
+            "per_1m_input_tokens" => {
+                long_context.map_or(self.input_price_per_1m, |tier| tier.input_price_per_1m)
+            }
+            "per_1m_cached_input_tokens" => long_context
+                .map_or(self.cached_input_price_per_1m, |tier| tier.cached_input_price_per_1m),
+            "per_1m_cache_write_input_tokens" => self.cache_write_input_price_per_1m,
+            "per_1m_output_tokens" => {
+                long_context.map_or(self.output_price_per_1m, |tier| tier.output_price_per_1m)
+            }
+            _ => Decimal::ZERO,
+        }
+    }
+}
+
+#[macro_export]
+macro_rules! ai_binding_type {
+    ($(#[$attribute:meta])* $visibility:vis struct $name:ident) => {
+        $(#[$attribute])*
+        $visibility struct $name {
+            pub id: uuid::Uuid,
+            pub scope_kind: $crate::domains::ai::AiScopeKind,
+            pub workspace_id: Option<uuid::Uuid>,
+            pub library_id: Option<uuid::Uuid>,
+            pub binding_purpose: $crate::domains::ai::AiBindingPurpose,
+            pub account_id: uuid::Uuid,
+            pub provider_catalog_id: uuid::Uuid,
+            pub model_catalog_id: uuid::Uuid,
+            pub system_prompt: Option<String>,
+            pub temperature: Option<f64>,
+            pub top_p: Option<f64>,
+            pub max_output_tokens_override: Option<i32>,
+            pub extra_parameters_json: serde_json::Value,
+            pub binding_state: String,
+        }
+    };
+}
+
+crate::ai_binding_type! {
+    #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+    pub struct AiBinding
 }
 
 #[derive(Clone, Serialize, Deserialize, utoipa::ToSchema)]

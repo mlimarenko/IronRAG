@@ -10,16 +10,26 @@ pub(crate) struct ContentSourceDescriptor {
     pub file_name: String,
 }
 
+/// The revision-level fields that determine a content source's display name and
+/// whether it can be downloaded. A persisted revision carries these together,
+/// so they travel as one unit rather than as five positional arguments.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct ContentSourceInputs<'a> {
+    pub content_source_kind: &'a str,
+    pub source_uri: Option<&'a str>,
+    pub storage_key: Option<&'a str>,
+    pub title: Option<&'a str>,
+    pub external_key: &'a str,
+}
+
 #[must_use]
 pub(crate) fn describe_content_source(
     document_id: Uuid,
     revision_id: Option<Uuid>,
-    content_source_kind: &str,
-    source_uri: Option<&str>,
-    storage_key: Option<&str>,
-    title: Option<&str>,
-    external_key: &str,
+    inputs: ContentSourceInputs<'_>,
 ) -> ContentSourceDescriptor {
+    let ContentSourceInputs { content_source_kind, source_uri, storage_key, title, external_key } =
+        inputs;
     let file_name =
         derive_revision_source_file_name(content_source_kind, source_uri, title, external_key);
     let access = if content_source_kind.trim() == "web_page" {
@@ -60,7 +70,7 @@ pub(crate) fn derive_storage_backed_content_file_name(
     }
 }
 
-fn sanitize_download_file_name(value: &str, fallback: &str) -> String {
+pub(crate) fn sanitize_download_file_name(value: &str, fallback: &str) -> String {
     let sanitized = value
         .split(['/', '\\'])
         .next_back()
@@ -186,7 +196,9 @@ mod tests {
 
     use crate::domains::content::ContentSourceAccessKind;
 
-    use super::{derive_storage_backed_content_file_name, describe_content_source};
+    use super::{
+        ContentSourceInputs, derive_storage_backed_content_file_name, describe_content_source,
+    };
 
     #[test]
     fn upload_documents_use_stable_application_download_path() {
@@ -195,11 +207,13 @@ mod tests {
         let descriptor = describe_content_source(
             document_id,
             Some(revision_id),
-            "upload",
-            Some("upload://runtime-upload-check.pdf"),
-            None,
-            Some("Ignored title"),
-            "fallback.bin",
+            ContentSourceInputs {
+                content_source_kind: "upload",
+                source_uri: Some("upload://runtime-upload-check.pdf"),
+                storage_key: None,
+                title: Some("Ignored title"),
+                external_key: "fallback.bin",
+            },
         );
 
         assert_eq!(descriptor.file_name, "runtime-upload-check.pdf");
@@ -217,11 +231,13 @@ mod tests {
         let descriptor = describe_content_source(
             document_id,
             Some(Uuid::now_v7()),
-            "web_page",
-            Some("https://example.com/guide"),
-            Some("content/demo"),
-            Some("Guide"),
-            "fallback.bin",
+            ContentSourceInputs {
+                content_source_kind: "web_page",
+                source_uri: Some("https://example.com/guide"),
+                storage_key: Some("content/demo"),
+                title: Some("Guide"),
+                external_key: "fallback.bin",
+            },
         );
 
         assert_eq!(descriptor.file_name, "guide");
@@ -237,11 +253,13 @@ mod tests {
         let descriptor = describe_content_source(
             document_id,
             Some(revision_id),
-            "append",
-            Some("append://inline"),
-            None,
-            Some("Inline notes"),
-            "fallback.bin",
+            ContentSourceInputs {
+                content_source_kind: "append",
+                source_uri: Some("append://inline"),
+                storage_key: None,
+                title: Some("Inline notes"),
+                external_key: "fallback.bin",
+            },
         );
 
         assert_eq!(descriptor.file_name, "Inline notes");
@@ -258,18 +276,20 @@ mod tests {
         let descriptor = describe_content_source(
             Uuid::now_v7(),
             Some(Uuid::now_v7()),
-            "upload",
-            Some("upload://../../quarterly-report.pdf"),
-            Some("content/demo"),
-            None,
-            "fallback.bin",
+            ContentSourceInputs {
+                content_source_kind: "upload",
+                source_uri: Some("upload://../../quarterly-report.pdf"),
+                storage_key: Some("content/demo"),
+                title: None,
+                external_key: "fallback.bin",
+            },
         );
 
         assert_eq!(descriptor.file_name, "quarterly-report.pdf");
     }
 
     #[test]
-    fn storage_backed_file_name_uses_same_canonical_derivation() {
+    fn storage_backed_file_name_uses_same_persisted_derivation() {
         let file_name = derive_storage_backed_content_file_name(
             "replace",
             Some("upload://../../quarterly-report.pdf"),
@@ -284,11 +304,13 @@ mod tests {
         let descriptor = describe_content_source(
             Uuid::now_v7(),
             Some(Uuid::now_v7()),
-            "edit",
-            Some("edit://Quarterly report.md"),
-            Some("content/demo"),
-            Some("Quarterly report"),
-            "fallback.bin",
+            ContentSourceInputs {
+                content_source_kind: "edit",
+                source_uri: Some("edit://Quarterly report.md"),
+                storage_key: Some("content/demo"),
+                title: Some("Quarterly report"),
+                external_key: "fallback.bin",
+            },
         );
 
         assert_eq!(descriptor.file_name, "Quarterly report.md");

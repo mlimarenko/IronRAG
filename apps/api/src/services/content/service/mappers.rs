@@ -7,7 +7,10 @@ use crate::{
     infra::knowledge_rows::{
         KnowledgeDocumentRow, KnowledgeRevisionRow, KnowledgeStructuredRevisionRow,
     },
-    infra::repositories::{content_repository, ingest_repository},
+    infra::repositories::{
+        content_document_repository, content_mutation_repository, content_revision_repository,
+        ingest_repository,
+    },
     services::ingest::service::IngestJobHandle,
 };
 
@@ -33,7 +36,9 @@ pub(super) fn map_knowledge_document_row(row: &KnowledgeDocumentRow) -> ContentD
     }
 }
 
-pub(super) fn map_document_row(row: content_repository::ContentDocumentRow) -> ContentDocument {
+pub(super) fn map_document_row(
+    row: content_document_repository::ContentDocumentRow,
+) -> ContentDocument {
     ContentDocument {
         id: row.id,
         workspace_id: row.workspace_id,
@@ -44,7 +49,9 @@ pub(super) fn map_document_row(row: content_repository::ContentDocumentRow) -> C
     }
 }
 
-pub(super) fn map_revision_row(row: content_repository::ContentRevisionRow) -> ContentRevision {
+pub(super) fn map_revision_row(
+    row: content_revision_repository::ContentRevisionRow,
+) -> ContentRevision {
     ContentRevision {
         id: row.id,
         document_id: row.document_id,
@@ -130,7 +137,7 @@ pub(super) fn map_web_page_provenance_row(
         run_id: Some(row.run_id),
         candidate_id: Some(row.id),
         source_uri: row.final_url.clone().or_else(|| row.discovered_url.clone()),
-        canonical_url: row.canonical_url.clone().or_else(|| row.final_url.clone()),
+        preferred_url: row.preferred_url.clone().or_else(|| row.final_url.clone()),
     }
 }
 
@@ -154,7 +161,9 @@ pub(super) fn map_structured_revision_data(
     }
 }
 
-pub(super) fn map_mutation_row(row: content_repository::ContentMutationRow) -> ContentMutation {
+pub(super) fn map_mutation_row(
+    row: content_mutation_repository::ContentMutationRow,
+) -> ContentMutation {
     ContentMutation {
         id: row.id,
         workspace_id: row.workspace_id,
@@ -199,7 +208,7 @@ pub(super) fn map_document_pipeline_job(handle: IngestJobHandle) -> ContentDocum
 }
 
 pub(super) fn map_mutation_item_row(
-    row: content_repository::ContentMutationItemRow,
+    row: content_mutation_repository::ContentMutationItemRow,
 ) -> ContentMutationItem {
     ContentMutationItem {
         id: row.id,

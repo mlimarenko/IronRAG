@@ -40,7 +40,7 @@ impl fmt::Display for UrlIdentityError {
 
 impl std::error::Error for UrlIdentityError {}
 
-/// Normalizes the configured seed URL into its canonical HTTP or HTTPS form.
+/// Normalizes the configured seed URL into its primary HTTP or HTTPS form.
 ///
 /// # Errors
 ///
@@ -50,7 +50,7 @@ pub fn normalize_seed_url(seed_url: &str) -> Result<String, UrlIdentityError> {
 }
 
 /// Normalizes an absolute HTTP or HTTPS URL by removing its fragment and
-/// canonicalizing host and scheme details. Query parameters are preserved.
+/// normalizing host and scheme details. Query parameters are preserved.
 ///
 /// # Errors
 ///

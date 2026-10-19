@@ -5,16 +5,6 @@ use uuid::Uuid;
 
 use crate::domains::agent_runtime::RuntimeTaskKind;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
-#[serde(rename_all = "snake_case")]
-pub enum PricingCapability {
-    Indexing,
-    Embedding,
-    Answer,
-    Vision,
-    GraphExtract,
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum PricingBillingUnit {
@@ -41,47 +31,80 @@ impl PricingBillingUnit {
     }
 }
 
+/// Whether a reported cost covers every provider call in its scope.
+///
+/// A price catalog entry is operator-configured, so a call can produce usage
+/// with no charge. Without this status a caller cannot tell an execution that
+/// genuinely cost nothing from one whose price was never configured — both
+/// report a zero total.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
-pub enum PricingResolutionStatus {
-    Priced,
-    Unpriced,
-    UsageMissing,
-    PricingMissing,
+pub enum CostCoverageStatus {
+    /// Every provider call in scope is priced. The total is the full cost.
+    Complete,
+    /// Some calls are priced and some are not. The total is a lower bound.
+    Partial,
+    /// No call in scope is priced while unpriced calls exist. The total
+    /// carries no information about what the scope cost.
+    Unknown,
 }
 
-impl PricingResolutionStatus {
+impl CostCoverageStatus {
+    /// Derives coverage from the priced/unpriced split of one scope.
+    #[must_use]
+    pub const fn from_call_counts(
+        provider_call_count: i64,
+        unpriced_provider_call_count: i64,
+    ) -> Self {
+        if unpriced_provider_call_count <= 0 {
+            Self::Complete
+        } else if unpriced_provider_call_count >= provider_call_count {
+            Self::Unknown
+        } else {
+            Self::Partial
+        }
+    }
+
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
-            Self::Priced => "priced",
-            Self::Unpriced => "unpriced",
-            Self::UsageMissing => "usage_missing",
-            Self::PricingMissing => "pricing_missing",
+            Self::Complete => "complete",
+            Self::Partial => "partial",
+            Self::Unknown => "unknown",
         }
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, utoipa::ToSchema)]
+/// Whether a cost read reflects every committed provider call in its scope.
+///
+/// Independent of [`CostCoverageStatus`], which is a *pricing* fact: a scope
+/// can be fully priced yet still be reconciling a provider call that has not
+/// been folded into its rollup, and the reverse. A `Reconciling` read withholds
+/// its cost fields instead of serving a stale aggregate as exact.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
-pub enum StageAttributionSource {
-    StageNative,
-    Reconciled,
+pub enum CostRollupFreshness {
+    /// Every committed provider call in scope is folded into the rollup.
+    Current,
+    /// At least one owning execution's rollup lags a committed provider call,
+    /// so the reported cost aggregate would be stale if served.
+    Reconciling,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
-#[serde(rename_all = "camelCase")]
-pub struct UsageStageOwnership {
-    pub ingestion_run_id: Uuid,
-    pub stage_event_id: Uuid,
-    pub stage: String,
-    pub attribution_source: StageAttributionSource,
-}
+impl CostRollupFreshness {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Current => "current",
+            Self::Reconciling => "reconciling",
+        }
+    }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum RuntimeStageBillingPolicy {
-    Billable { capability: PricingCapability, billing_unit: PricingBillingUnit },
-    NonBillable,
+    /// Derives freshness from the owning scope's rollup-health probe.
+    #[must_use]
+    pub const fn from_rollup_dirty(rollup_dirty: bool) -> Self {
+        if rollup_dirty { Self::Reconciling } else { Self::Current }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, utoipa::ToSchema)]
@@ -93,7 +116,7 @@ pub enum BillingExecutionOwnerKind {
 }
 
 impl BillingExecutionOwnerKind {
-    /// Canonical `billing_owning_execution_kind` Postgres enum key. Also
+    /// Exact `billing_owning_execution_kind` Postgres enum key. Also
     /// used as the wire string for `executionKind` HTTP path segments (kept
     /// in sync with the `#[serde(rename_all = "snake_case")]` above, which
     /// axum's `Path` extractor uses directly to parse this type from a
@@ -132,7 +155,6 @@ pub struct BillingProviderCall {
 pub struct BillingCharge {
     pub id: Uuid,
     pub usage_id: Uuid,
-    pub price_catalog_id: Uuid,
     pub currency_code: String,
     pub unit_price: Decimal,
     pub total_price: Decimal,
@@ -148,56 +170,46 @@ pub struct BillingExecutionCost {
     pub total_cost: Decimal,
     pub currency_code: String,
     pub provider_call_count: i32,
+    pub unpriced_provider_call_count: i32,
+    pub cost_coverage: CostCoverageStatus,
     pub updated_at: DateTime<Utc>,
 }
 
-#[must_use]
-pub fn runtime_stage_billing_policy(stage: &str) -> RuntimeStageBillingPolicy {
-    match stage {
-        "extracting_content" => RuntimeStageBillingPolicy::Billable {
-            capability: PricingCapability::Vision,
-            billing_unit: PricingBillingUnit::Per1MTokens,
-        },
-        "embedding_chunks" => RuntimeStageBillingPolicy::Billable {
-            capability: PricingCapability::Embedding,
-            billing_unit: PricingBillingUnit::Per1MInputTokens,
-        },
-        "extracting_graph" => RuntimeStageBillingPolicy::Billable {
-            capability: PricingCapability::GraphExtract,
-            billing_unit: PricingBillingUnit::Per1MTokens,
-        },
-        _ => RuntimeStageBillingPolicy::NonBillable,
+#[cfg(test)]
+mod cost_coverage_tests {
+    use super::CostCoverageStatus;
+
+    #[test]
+    fn coverage_separates_free_scopes_from_unpriced_ones() {
+        // No calls at all: the zero total is the whole truth.
+        assert_eq!(CostCoverageStatus::from_call_counts(0, 0), CostCoverageStatus::Complete);
+        // Every call priced.
+        assert_eq!(CostCoverageStatus::from_call_counts(4, 0), CostCoverageStatus::Complete);
+        // Some priced, some not: the total is a lower bound.
+        assert_eq!(CostCoverageStatus::from_call_counts(4, 1), CostCoverageStatus::Partial);
+        // Nothing priced: a zero total says nothing about what was spent.
+        assert_eq!(CostCoverageStatus::from_call_counts(4, 4), CostCoverageStatus::Unknown);
+    }
+
+    #[test]
+    fn coverage_is_unknown_when_unpriced_calls_exceed_the_counted_calls() {
+        // Defensive: a rollup recomputed between the two counts must not
+        // report better coverage than it can prove.
+        assert_eq!(CostCoverageStatus::from_call_counts(2, 5), CostCoverageStatus::Unknown);
     }
 }
 
-#[must_use]
-pub fn stage_native_ownership(
-    ingestion_run_id: Uuid,
-    stage_event_id: Uuid,
-    stage: &str,
-) -> UsageStageOwnership {
-    UsageStageOwnership {
-        ingestion_run_id,
-        stage_event_id,
-        stage: stage.to_string(),
-        attribution_source: StageAttributionSource::StageNative,
-    }
-}
+#[cfg(test)]
+mod cost_rollup_freshness_tests {
+    use super::CostRollupFreshness;
 
-#[must_use]
-pub fn decorate_payload_with_stage_ownership(
-    mut payload: serde_json::Value,
-    ownership: &UsageStageOwnership,
-) -> serde_json::Value {
-    let ownership_json = serde_json::to_value(ownership).unwrap_or_else(|_| serde_json::json!({}));
-    match payload.as_object_mut() {
-        Some(object) => {
-            object.insert("stage_ownership".to_string(), ownership_json);
-            payload
-        }
-        None => serde_json::json!({
-            "value": payload,
-            "stage_ownership": ownership,
-        }),
+    #[test]
+    fn freshness_is_independent_of_pricing_coverage() {
+        // A clean generation is `current` no matter what the coverage says; a
+        // dirty one is `reconciling` and withholds its cost fields.
+        assert_eq!(CostRollupFreshness::from_rollup_dirty(false), CostRollupFreshness::Current);
+        assert_eq!(CostRollupFreshness::from_rollup_dirty(true), CostRollupFreshness::Reconciling);
+        assert_eq!(CostRollupFreshness::Current.as_str(), "current");
+        assert_eq!(CostRollupFreshness::Reconciling.as_str(), "reconciling");
     }
 }

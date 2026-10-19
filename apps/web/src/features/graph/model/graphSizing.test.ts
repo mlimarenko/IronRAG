@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'vitest'
 import type { GraphNode } from '@/shared/types'
-import { buildNodeSizer, emphasizeNodeSize } from './graphSizing'
+import { buildNodeSizer } from './graphSizing'
 
 function node(edgeCount: number, id = `n-${edgeCount}-${Math.round(edgeCount * 7)}`): GraphNode {
   return {
@@ -69,18 +69,5 @@ describe('buildNodeSizer — connectivity encoding', () => {
     const flat = [node(3, 'x'), node(3, 'y'), node(3, 'z')]
     const sizer = buildNodeSizer(flat)
     for (const n of flat) expect(Number.isFinite(sizer(n))).toBe(true)
-  })
-})
-
-describe('emphasizeNodeSize', () => {
-  test('applies a hard floor so a tiny dense-graph node still pops', () => {
-    expect(emphasizeNodeSize(2, 'selected')).toBe(9)
-    expect(emphasizeNodeSize(2, 'hovered')).toBe(11)
-  })
-
-  test('grows an already-large sparse-graph hub proportionally', () => {
-    // A 13 px hub used to stay 13 on selection (Math.max(13, 9)); now it grows.
-    expect(emphasizeNodeSize(13, 'selected')).toBeCloseTo(13 * 1.7)
-    expect(emphasizeNodeSize(13, 'hovered')).toBeCloseTo(13 * 1.9)
   })
 })

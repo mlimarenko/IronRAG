@@ -631,12 +631,20 @@ mod tests {
 
     #[test]
     fn distributed_session_scripts_are_owned_ttl_bounded_and_scan_free() {
+        assert_session_process_and_ttl_bounds();
+        assert_session_scripts_are_owned_and_scan_free();
+    }
+
+    fn assert_session_process_and_ttl_bounds() {
         assert_eq!(MCP_GET_STREAM_PROCESS_LIMIT, 64);
         assert_eq!(MCP_GET_STREAM_PER_PRINCIPAL_PROCESS_LIMIT, 4);
         assert_eq!(MCP_SESSION_PROCESS_LIMIT, 1_024);
         assert_eq!(MCP_SESSION_PER_PRINCIPAL_PROCESS_LIMIT, 32);
         assert!(MCP_GET_STREAM_MAX_LIFETIME <= MCP_SESSION_TTL);
         assert!(MCP_SESSION_TERMINATION_TTL >= super::super::MCP_TOOL_CALL_DEADLINE);
+    }
+
+    fn assert_session_scripts_are_owned_and_scan_free() {
         assert!(MCP_SESSION_REGISTER_SCRIPT.contains("NX"));
         assert!(MCP_SESSION_REGISTER_SCRIPT.contains("PX"));
         assert!(MCP_SESSION_VALIDATE_SCRIPT.contains("PEXPIRE"));

@@ -1,14 +1,10 @@
 //! `OpenAPI` document construction (utoipa code-first).
 //!
-//! Single source of truth for the `IronRAG` HTTP contract. Sub-sprint 1a
-//! scaffolds the [`ApiDoc`] struct with shared metadata and security schemes.
-//! Paths and components are registered incrementally in sub-sprints
-//! 1b (DTOs via `#[derive(ToSchema)]`) and 1c (handlers via
-//! `#[utoipa::path(...)]` + `OpenApiRouter::routes`).
-//!
-//! Once 1c is complete, [`ApiDoc::openapi`] yields the same surface that
-//! today's hand-maintained `apps/api/contracts/ironrag.openapi.yaml` carries,
-//! and sub-sprint 1d emits it to `apps/api/contracts/openapi.gen.yaml`.
+//! Single source of truth for the `IronRAG` HTTP contract. [`ApiDoc`] carries
+//! the shared metadata and security schemes; DTOs register via
+//! `#[derive(ToSchema)]` and handlers via `#[utoipa::path(...)]` +
+//! `OpenApiRouter::routes`. [`ApiDoc::openapi`] yields the served surface,
+//! emitted to `apps/api/contracts/openapi.gen.yaml`.
 
 use utoipa::openapi::path::{Operation, PathItem};
 use utoipa::{
@@ -34,12 +30,8 @@ const OPERATION_PURPOSES: &[(&[&str], &str)] = &[
         "Manages library-level AI runtime bindings. A binding assigns an account and model to a purpose (embedding, query answering, graph extraction, and other AI purposes) for one library, with tuning parameters (system prompt, temperature, top-p, output token budget) stored inline.",
     ),
     (
-        &["AiPrice"],
-        "Manages AI price catalog overrides. Billing and cost dashboards use these rows to attribute provider calls and estimate execution cost.",
-    ),
-    (
         &["AiModel", "AiProvider"],
-        "Reads the AI provider catalog used by the admin configuration screens. Operators use this metadata to choose providers, models, capabilities, and binding targets.",
+        "Reads the AI provider catalog used by the admin configuration screens. Operators use this metadata to choose providers, models, capabilities, pricing, and binding targets. Every model row carries its vendor rates; billing prices provider calls directly from the model.",
     ),
     (
         &["Billing", "Cost", "Charges"],
@@ -58,20 +50,12 @@ const OPERATION_PURPOSES: &[(&[&str], &str)] = &[
         "Manages web-ingest runs. These endpoints submit seed URLs, inspect crawl/materialization results, list candidate pages, and cancel active web ingestion.",
     ),
     (
-        &["ContentMutation", "Mutation"],
-        "Manages document mutation receipts. Use these endpoints to create or inspect append, replace, delete, and other asynchronous document lifecycle operations.",
-    ),
-    (
         &["ContentDocument", "Document", "Chunks"],
         "Manages document content and derived document views. These endpoints are used by document workspaces, upload flows, source viewers, revision history, and document-level diagnostics.",
     ),
     (
         &["IamToken", "Token"],
         "Manages API tokens and token lifecycle. Operators use these endpoints to mint, list, revoke, or delete bearer tokens for users, services, and MCP clients.",
-    ),
-    (
-        &["IamGrant", "Grant"],
-        "Manages IAM grants. Grants assign scoped permissions to principals so UI users, API tokens, and automation can access only the intended workspaces and libraries.",
     ),
     (
         &["IamSession", "Bootstrap", "login", "logout"],
@@ -98,8 +82,8 @@ const OPERATION_PURPOSES: &[(&[&str], &str)] = &[
         "Manages outbound webhook subscriptions and delivery attempts. External systems use these subscriptions to receive document and revision lifecycle notifications.",
     ),
     (
-        &["AdminSurface"],
-        "Returns the admin shell aggregate. The admin UI uses this endpoint to load configuration, readiness, IAM, and model-catalog state with fewer round trips.",
+        &["AdminLibrary"],
+        "Returns the bounded, searchable library page rendered by the administration console.",
     ),
     (
         &["OpenApi"],
@@ -166,8 +150,19 @@ const OPERATION_ID_USAGES: &[(&str, &str)] = &[
         (url = "/", description = "Same origin (paths include /v1)"),
     ),
     components(schemas(
+        crate::interfaces::http::audit::AuditSearchHintsInput,
+        crate::interfaces::http::audit::AuditCreatedAtRangeInput,
+        crate::interfaces::http::admin::AdminLibrarySortKey,
+        crate::interfaces::http::admin::AdminLibrarySortOrder,
+        ironrag_contracts::admin::AdminLibraryColumnFilters,
+        ironrag_contracts::admin::AdminLibrarySearchHints,
+        ironrag_contracts::admin::AdminLibraryCostSearch,
+        ironrag_contracts::admin::AdminLibraryFacetColumn,
+        crate::interfaces::http::content::types::DocumentIndexingFilter,
         crate::interfaces::http::content::types::DocumentListSortKey,
         crate::interfaces::http::content::types::DocumentListSortOrder,
+        crate::interfaces::http::content::types::DocumentColumnFilters,
+        crate::interfaces::http::content::types::DocumentSearchRanges,
     )),
     modifiers(&ContractDocAddon),
     security(("bearerAuth" = [])),
@@ -175,6 +170,7 @@ const OPERATION_ID_USAGES: &[(&str, &str)] = &[
         (name = "system"),
         (name = "catalog"),
         (name = "iam"),
+        (name = "provisioning"),
         (name = "ai"),
         (name = "knowledge"),
         (name = "ingest"),
@@ -193,8 +189,10 @@ const OPERATION_ID_USAGES: &[(&str, &str)] = &[
         crate::interfaces::http::health::readiness,
         crate::interfaces::http::health::version,
         crate::interfaces::http::health::release_update,
-        crate::interfaces::http::admin::get_admin_surface,
+        crate::interfaces::http::admin::list_admin_libraries,
+        crate::interfaces::http::admin::list_admin_library_facets,
         crate::interfaces::http::audit::list_audit_events,
+        crate::interfaces::http::audit::list_audit_event_facets,
         crate::interfaces::http::ops::get_async_operation,
         crate::interfaces::http::ops::get_library_state,
         crate::interfaces::http::ops::bulk_ingest_queue_action,
@@ -246,12 +244,12 @@ const OPERATION_ID_USAGES: &[(&str, &str)] = &[
         crate::interfaces::http::ai::get_provider,
         crate::interfaces::http::ai::update_provider,
         crate::interfaces::http::ai::delete_provider,
+        crate::interfaces::http::ai::list_available_provider_models,
         crate::interfaces::http::ai::list_models,
         crate::interfaces::http::ai::create_model,
         crate::interfaces::http::ai::get_model,
         crate::interfaces::http::ai::update_model,
         crate::interfaces::http::ai::delete_model,
-        crate::interfaces::http::ai::list_prices,
         crate::interfaces::http::ai::list_accounts,
         crate::interfaces::http::ai::create_account,
         crate::interfaces::http::ai::get_account,
@@ -267,6 +265,8 @@ const OPERATION_ID_USAGES: &[(&str, &str)] = &[
         crate::interfaces::http::iam::session::login_session,
         crate::interfaces::http::iam::session::get_session,
         crate::interfaces::http::iam::session::logout_session,
+        crate::interfaces::http::iam::oidc::oidc_login,
+        crate::interfaces::http::iam::oidc::oidc_callback,
         crate::interfaces::http::iam::get_me,
         crate::interfaces::http::iam::list_users,
         crate::interfaces::http::iam::create_user,
@@ -274,22 +274,39 @@ const OPERATION_ID_USAGES: &[(&str, &str)] = &[
         crate::interfaces::http::iam::set_user_role,
         crate::interfaces::http::iam::get_user_access,
         crate::interfaces::http::iam::set_user_access,
+        crate::interfaces::http::iam::list_service_identities,
+        crate::interfaces::http::iam::create_service_identity,
+        crate::interfaces::http::iam::get_service_identity,
+        crate::interfaces::http::iam::patch_service_identity,
+        crate::interfaces::http::iam::rotate_service_identity,
+        crate::interfaces::http::iam::revoke_service_identity,
+        crate::interfaces::http::iam::delete_service_identity,
+        crate::interfaces::http::provisioning::create_workspace,
+        crate::interfaces::http::provisioning::delete_workspace,
+        crate::interfaces::http::provisioning::create_library,
+        crate::interfaces::http::provisioning::delete_library,
+        crate::interfaces::http::provisioning::get_deletion_operation,
+        crate::interfaces::http::provisioning::create_key,
+        crate::interfaces::http::provisioning::list_keys,
+        crate::interfaces::http::provisioning::revoke_key,
         crate::interfaces::http::iam::list_tokens,
         crate::interfaces::http::iam::mint_token,
         crate::interfaces::http::iam::get_token,
         crate::interfaces::http::iam::patch_token,
         crate::interfaces::http::iam::delete_token,
-        crate::interfaces::http::iam::revoke_token,
         crate::interfaces::http::knowledge::library::list_context_bundles,
         crate::interfaces::http::knowledge::library::get_library_summary,
         crate::interfaces::http::knowledge::library::get_context_bundle,
         crate::interfaces::http::knowledge::library::list_library_generations,
         crate::interfaces::http::knowledge::get_graph,
+        crate::interfaces::http::knowledge::get_graph_reextract_progress,
+        crate::interfaces::http::knowledge::enqueue_graph_reextract_batch,
         crate::interfaces::http::knowledge::get_entity,
         crate::interfaces::http::knowledge::list_relations,
         crate::interfaces::http::knowledge::get_relation,
         crate::interfaces::http::knowledge::search::search_library,
         crate::interfaces::http::content::list_documents,
+        crate::interfaces::http::content::list_document_facets,
         crate::interfaces::http::content::list_chunks,
         crate::interfaces::http::content::create_document,
         crate::interfaces::http::content::get_document,
@@ -299,6 +316,7 @@ const OPERATION_ID_USAGES: &[(&str, &str)] = &[
         crate::interfaces::http::content::delete_document,
         crate::interfaces::http::content::list_revisions,
         crate::interfaces::http::content::create_revision,
+        crate::interfaces::http::content::create_visibility_intent,
         crate::interfaces::http::content::reprocess_document,
         crate::interfaces::http::content::batch::batch_delete_documents,
         crate::interfaces::http::content::batch::batch_cancel_documents,
@@ -314,10 +332,6 @@ const OPERATION_ID_USAGES: &[(&str, &str)] = &[
         crate::interfaces::http::content::snapshot::import_library_snapshot,
         crate::interfaces::http::ai::update_account,
         crate::interfaces::http::ai::delete_account,
-        crate::interfaces::http::ai::create_price_override,
-        crate::interfaces::http::ai::get_price_override,
-        crate::interfaces::http::ai::update_price_override,
-        crate::interfaces::http::ai::delete_price_override,
         crate::interfaces::http::ai::delete_binding,
         crate::interfaces::http::catalog::update_library,
         crate::interfaces::http::catalog::update_library_recognition_policy,
@@ -517,8 +531,147 @@ fn operation_usage_by_method(method: &str, operation_id: &str, tag: Option<&str>
 
 #[cfg(test)]
 mod tests {
-    use super::ApiDoc;
+    use super::{ApiDoc, operation_purpose, operation_usage};
     use utoipa::OpenApi;
+
+    #[test]
+    fn visibility_contract_intent_operation_and_required_nullable_token() {
+        let contract = serde_json::to_value(ApiDoc::openapi()).expect("OpenAPI serializes");
+        let operation =
+            &contract["paths"]["/v1/content/documents/{documentId}/visibility-intents"]["post"];
+        assert_eq!(operation["operationId"], "createContentVisibilityIntent");
+        for status in ["201", "200"] {
+            assert!(operation["responses"].get(status).is_some());
+        }
+        let schema = &contract["components"]["schemas"]["CreateVisibilityIntentRequest"];
+        assert_eq!(schema["additionalProperties"], false);
+        let required = schema["required"].as_array().expect("required intent fields");
+        for name in ["idempotencyKey", "sourceIdentity", "materializationToken", "replacement"] {
+            assert!(required.iter().any(|field| field == name), "{name}");
+        }
+        assert!(
+            contract["components"]["schemas"]["VersionResponse"]["properties"]
+                .get("contentVisibilityContract")
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn publication_metadata_is_required_and_nullable() {
+        let contract = serde_json::to_value(ApiDoc::openapi()).expect("OpenAPI serializes");
+        for (name, fields) in [
+            ("DocumentSummary", &["fileName", "fileType", "fileSize"][..]),
+            ("ContentDocumentListItem", &["fileName", "fileType", "fileSize"][..]),
+            ("ContentDocumentDetailResponse", &["fileName"][..]),
+        ] {
+            let schema = &contract["components"]["schemas"][name];
+            let required = schema["required"].as_array().expect("required document fields");
+            for &field in fields {
+                assert!(required.iter().any(|value| value == field), "{name}.{field}");
+                let types = schema["properties"][field]["type"]
+                    .as_array()
+                    .expect("nullable publication metadata");
+                assert!(types.iter().any(|value| value == "null"), "{name}.{field}");
+            }
+        }
+    }
+
+    #[test]
+    fn payload_admission_schemas_exclude_retired_policy_and_bind_intent() {
+        let contract = serde_json::to_value(ApiDoc::openapi()).expect("OpenAPI serializes");
+        let schemas = &contract["components"]["schemas"];
+        for name in [
+            "CreateDocumentMultipartRequest",
+            "CreateRevisionMultipartRequest",
+            "CreateDocumentRequest",
+            "CreateRevisionRequest",
+            "ReprocessDocumentRequest",
+            "ContentMutationDetailResponse",
+        ] {
+            let schema = &schemas[name];
+            assert!(!schema.is_null(), "missing schema {name}");
+            assert!(schema["properties"].get("visibility_policy").is_none(), "{name}");
+            assert!(schema["properties"].get("visibilityPolicy").is_none(), "{name}");
+        }
+        let replacement = &schemas["CreateRevisionMultipartRequest"]["properties"];
+        assert!(replacement.get("visibility_intent_id").is_some());
+        assert!(schemas.get("AdmissionVisibilityPolicy").is_none());
+    }
+
+    #[test]
+    fn operation_purpose_preserves_precedence_and_fallbacks() {
+        let cases = [
+            ("getAiAccountLibrary", None, "Manages stored AI provider accounts"),
+            ("getContentWebIngestDocument", None, "Manages web-ingest runs"),
+            ("getIamSessionIngest", None, "Manages browser authentication"),
+            ("getKnowledgeRuntime", None, "Reads the knowledge model"),
+            ("unknownOperation", Some("system"), "Reads service health"),
+            ("unknownOperation", Some("other"), "Executes an IronRAG HTTP API operation"),
+        ];
+
+        for (operation_id, tag, expected_prefix) in cases {
+            assert!(
+                operation_purpose(operation_id, tag).starts_with(expected_prefix),
+                "unexpected purpose for {operation_id}",
+            );
+        }
+    }
+
+    #[test]
+    fn operation_usage_preserves_precedence_and_fallbacks() {
+        let cases = [
+            (
+                "/v1/items/source",
+                "GET",
+                "listItems",
+                Some("automation"),
+                "Call it when the UI or an integration needs the original stored source file",
+            ),
+            (
+                "/v1/items/snapshot",
+                "POST",
+                "createSnapshot",
+                None,
+                "Call it to import a previously exported library archive",
+            ),
+            ("/v1/ready", "GET", "listReadiness", None, "Call it from load balancers"),
+            (
+                "/v1/items",
+                "POST",
+                "listItems",
+                None,
+                "Call it for paginated or filtered table views",
+            ),
+            (
+                "/v1/items",
+                "DELETE",
+                "updateItem",
+                None,
+                "Call it to replace or partially update server-owned configuration",
+            ),
+            (
+                "/v1/items",
+                "GET",
+                "executeItem",
+                Some("automation"),
+                "Call it from agents or automation clients",
+            ),
+            (
+                "/v1/items",
+                "GET",
+                "executeItem",
+                Some("other"),
+                "Use the documented parameters and request body schema",
+            ),
+        ];
+
+        for (path, method, operation_id, tag, expected_prefix) in cases {
+            assert!(
+                operation_usage(path, method, operation_id, tag).starts_with(expected_prefix),
+                "unexpected usage for {method} {path} ({operation_id})",
+            );
+        }
+    }
 
     #[test]
     fn openapi_skeleton_is_valid_3_1() {
@@ -542,11 +695,13 @@ mod tests {
             "/v1/health",
             "/v1/ready",
             "/v1/version",
-            "/v1/version/update",
+            "/v1/version/latest",
             // admin
-            "/v1/admin/surface",
+            "/v1/admin/libraries",
+            "/v1/admin/libraries/facets",
             // audit
             "/v1/audit/events",
+            "/v1/audit/events/facets",
         ] {
             assert!(
                 paths.contains_key(expected),
@@ -565,7 +720,7 @@ mod tests {
             "VersionResponse",
             "ReleaseUpdateResponse",
             "DeploymentReadinessSnapshot",
-            "AdminSurface",
+            "AdminLibraryPageResponse",
             "AuditEventPageResponse",
         ] {
             assert!(
@@ -573,6 +728,63 @@ mod tests {
                 "schema {expected} must be exported via response refs",
             );
         }
+    }
+
+    #[test]
+    fn graph_reextract_operator_contract_is_registered() {
+        let doc = ApiDoc::openapi();
+        let path = doc
+            .paths
+            .paths
+            .get("/v1/knowledge/libraries/{libraryId}/graph/reextract")
+            .expect("graph re-extraction path must be published");
+
+        assert_eq!(
+            path.get.as_ref().and_then(|operation| operation.operation_id.as_deref()),
+            Some("getKnowledgeGraphReextractProgress"),
+        );
+        assert_eq!(
+            path.post.as_ref().and_then(|operation| operation.operation_id.as_deref()),
+            Some("enqueueKnowledgeGraphReextractBatch"),
+        );
+        assert!(
+            path.post.as_ref().and_then(|operation| operation.request_body.as_ref()).is_some(),
+            "graph re-extraction POST must publish its request body",
+        );
+
+        let get_responses = &path.get.as_ref().expect("GET operation present").responses.responses;
+        assert!(get_responses.contains_key("404"), "GET must document a missing library");
+        let post_responses =
+            &path.post.as_ref().expect("POST operation present").responses.responses;
+        assert!(post_responses.contains_key("400"), "POST must document batch validation");
+        assert!(post_responses.contains_key("404"), "POST must document a missing library");
+        assert!(
+            post_responses.contains_key("200"),
+            "graph re-extraction POST must advertise the synchronous 200 enqueue result",
+        );
+        assert!(
+            !post_responses.contains_key("202"),
+            "graph re-extraction POST must not advertise a 202 acceptance it does not implement",
+        );
+
+        let schemas = &doc.components.as_ref().expect("components present").schemas;
+        for expected in [
+            "GraphReextractBatchRequest",
+            "GraphReextractBatchResponse",
+            "GraphReextractProgressResponse",
+        ] {
+            assert!(
+                schemas.contains_key(expected),
+                "schema {expected} must be exported by the graph re-extraction contract",
+            );
+        }
+
+        let contract = serde_json::to_value(doc).expect("OpenAPI document must serialize");
+        let batch_size = contract
+            .pointer("/components/schemas/GraphReextractBatchRequest/properties/batchSize")
+            .expect("batchSize schema must be published");
+        assert_eq!(batch_size.get("minimum"), Some(&serde_json::json!(1)));
+        assert_eq!(batch_size.get("maximum"), Some(&serde_json::json!(256)));
     }
 
     #[test]

@@ -42,7 +42,7 @@ enum QueryProviderCallRecovery {
 
 pub(crate) type QueryProviderCallCompletionTask = tokio::task::JoinHandle<Result<(), ApiError>>;
 
-/// Owns an in-flight canonical completion plus the exact response usage needed
+/// Owns an in-flight provider-call completion plus the exact response usage needed
 /// to retry it after a deadline, cancellation, join failure, or database error.
 pub(crate) struct PendingQueryProviderCallCompletion {
     state: AppState,
@@ -133,7 +133,7 @@ fn spawn_known_usage_completion_reconciliation(
         };
         if needs_completion_retry
             && let Err(error) = state
-                .canonical_services
+                .application_services
                 .billing
                 .complete_reserved_provider_call_deferred_rollup_with_retry(
                     &state,
@@ -177,7 +177,7 @@ impl QueryProviderCallReservation {
 
         let provider_call_id = Uuid::now_v7();
         state
-            .canonical_services
+            .application_services
             .billing
             .reserve_execution_provider_call_with_id(
                 state,
@@ -209,9 +209,9 @@ impl QueryProviderCallReservation {
         self.provider_call_id
     }
 
-    /// Persist canonical usage and the completed state before any caller may
+    /// Persist exact usage and the completed state before any caller may
     /// persist a terminal query outcome. Derived cost repair is intentionally
-    /// deferred; the canonical completion transaction is awaited here.
+    /// deferred; the provider-call completion transaction is awaited here.
     pub(crate) async fn complete(
         &mut self,
         usage_json: &serde_json::Value,
@@ -239,7 +239,7 @@ impl QueryProviderCallReservation {
             });
         }
         self.state
-            .canonical_services
+            .application_services
             .billing
             .complete_reserved_provider_call_deferred_rollup_with_retry(
                 &self.state,
@@ -268,7 +268,7 @@ impl QueryProviderCallReservation {
             }
         }
         self.state
-            .canonical_services
+            .application_services
             .billing
             .finish_reserved_provider_call_without_usage(
                 &self.state,
@@ -309,7 +309,7 @@ impl Drop for QueryProviderCallReservation {
         let provider_call_id = self.provider_call_id;
         runtime.spawn(async move {
             if let Err(error) = state
-                .canonical_services
+                .application_services
                 .billing
                 .finish_reserved_provider_call_without_usage(
                     &state,

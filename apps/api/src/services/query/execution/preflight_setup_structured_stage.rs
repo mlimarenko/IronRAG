@@ -10,8 +10,8 @@ use crate::{
 };
 
 use super::super::{
-    CanonicalAnswerEvidence, RuntimeMatchedChunk,
-    retrieve::canonical_document_revision_id,
+    AuthoritativeAnswerEvidence, RuntimeMatchedChunk,
+    retrieve::current_document_revision_id,
     technical_literals::{extract_package_command_literals, extract_parameter_literals},
 };
 use super::{
@@ -25,15 +25,29 @@ use super::{
 const SETUP_PREFLIGHT_STRUCTURED_BLOCK_LIMIT: usize = 96;
 const SETUP_PREFLIGHT_DOCUMENT_LIMIT: usize = 5;
 
+/// Inputs of the setup-preflight structured-block augmentation: the query turn,
+/// its document index and the scoped preflight chunks the blocks are read from.
+pub(super) struct SetupPreflightStructuredRequest<'a> {
+    pub(super) state: &'a AppState,
+    pub(super) question: &'a str,
+    pub(super) query_ir: &'a QueryIR,
+    pub(super) document_index: &'a HashMap<Uuid, KnowledgeDocumentRow>,
+    pub(super) preflight_answer_chunks: &'a [RuntimeMatchedChunk],
+    pub(super) scoped_document_ids: Option<&'a HashSet<Uuid>>,
+}
+
 pub(super) async fn augment_setup_preflight_structured_blocks(
-    state: &AppState,
-    question: &str,
-    query_ir: &QueryIR,
-    document_index: &HashMap<Uuid, KnowledgeDocumentRow>,
-    preflight_answer_chunks: &[RuntimeMatchedChunk],
-    scoped_document_ids: Option<&HashSet<Uuid>>,
-    preflight_evidence: &mut CanonicalAnswerEvidence,
+    request: SetupPreflightStructuredRequest<'_>,
+    preflight_evidence: &mut AuthoritativeAnswerEvidence,
 ) -> anyhow::Result<()> {
+    let SetupPreflightStructuredRequest {
+        state,
+        question,
+        query_ir,
+        document_index,
+        preflight_answer_chunks,
+        scoped_document_ids,
+    } = request;
     if !query_ir_requests_setup_literal_context(query_ir)
         && !query_ir_requests_low_confidence_setup_preflight(query_ir, preflight_answer_chunks)
     {
@@ -71,7 +85,7 @@ pub(super) async fn augment_setup_preflight_structured_blocks(
             .document_store
             .list_setup_structured_blocks_by_revision(revision_id, candidate_limit, candidate_limit)
             .await
-            .context("failed to load setup structured blocks for canonical preflight")?;
+            .context("failed to load setup structured blocks for evidence preflight")?;
         loaded_block_count = loaded_block_count.saturating_add(revision_blocks.len());
         added_block_count =
             added_block_count.saturating_add(merge_setup_preflight_structured_blocks(
@@ -87,7 +101,7 @@ pub(super) async fn augment_setup_preflight_structured_blocks(
             loaded_block_count,
             added_block_count,
             structured_block_count = preflight_evidence.structured_blocks.len(),
-            "setup structured blocks added to canonical preflight evidence"
+            "setup structured blocks added to evidence preflight evidence"
         );
     }
     Ok(())
@@ -126,11 +140,11 @@ fn setup_preflight_revision_id(
         .iter()
         .find(|chunk| chunk.document_id == document_id)
         .map(|chunk| chunk.revision_id)
-        .or_else(|| document_index.get(&document_id).and_then(canonical_document_revision_id))
+        .or_else(|| document_index.get(&document_id).and_then(current_document_revision_id))
 }
 
 pub(in crate::services::query::execution) fn merge_setup_preflight_structured_blocks(
-    preflight_evidence: &mut CanonicalAnswerEvidence,
+    preflight_evidence: &mut AuthoritativeAnswerEvidence,
     document_id: Uuid,
     revision_blocks: Vec<KnowledgeStructuredBlockRow>,
     limit: usize,

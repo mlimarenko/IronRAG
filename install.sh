@@ -34,6 +34,11 @@ set -euo pipefail
 #       --profile <name>           Resource profile micro|small|medium|large
 #                                  (also IRONRAG_PROFILE). Default: auto from host RAM.
 #       --admin-login <name>       Bootstrap admin login (also IRONRAG_ADMIN_LOGIN).
+#       --admin-email <address>    Bootstrap admin email (also IRONRAG_ADMIN_EMAIL).
+#                                  The API takes the admin bootstrap only as a
+#                                  login + email + password triple, so login and
+#                                  email are asked together and the password
+#                                  (env only) completes them.
 #       --plan-only                Detect + size + print the plan; write nothing,
 #                                  deploy nothing, touch no network. Great for review.
 #       --recompute-resources      On a re-run, recompute resource caps from the host
@@ -341,7 +346,7 @@ rand_hex_bytes() {
   LC_ALL=C tr -dc 'a-f0-9' </dev/urandom | head -c "$((nbytes * 2))"
 }
 
-# Canonical standard-base64 encoding of exactly 32 random bytes. The value is
+# Normalized standard-base64 encoding of exactly 32 random bytes. The value is
 # written directly to .env and never printed.
 rand_credential_master_key() {
   if command -v openssl >/dev/null 2>&1; then
@@ -389,12 +394,12 @@ validate_removed_provider_api_key_env_names() {
   done < <(compgen -e)
 }
 
-# Validates and canonicalizes the provider map without ever placing its value
+# Validates and normalizes the provider map without ever placing its value
 # in argv or diagnostics. Python is required only when an env-managed provider
 # map is actually configured; users who configure credentials in the UI do not
 # need it. Exact provider-kind keys are preserved, sorted, and duplicate keys
 # fail closed.
-canonicalize_provider_api_keys_b64() {
+normalize_provider_api_keys_b64() {
   local encoded_map="$1"
   [ -n "$encoded_map" ] || { printf ''; return 0; }
   if ! command -v python3 >/dev/null 2>&1; then
@@ -430,7 +435,7 @@ try:
     if len(decoded) > MAX_JSON_BYTES:
         raise ValueError("decoded map is too large")
     if base64.b64encode(decoded).decode("ascii") != encoded:
-        raise ValueError("non-canonical base64")
+        raise ValueError("non-normalized base64")
     value = json.loads(decoded.decode("utf-8"), object_pairs_hook=unique_object)
     if not isinstance(value, dict):
         raise ValueError("not an object")
@@ -445,14 +450,14 @@ try:
             raise ValueError("invalid provider kind character")
         if len(api_key.encode("utf-8")) > MAX_CREDENTIAL_BYTES:
             raise ValueError("credential is too large")
-    canonical_json = json.dumps(
+    normalized_json = json.dumps(
         value, ensure_ascii=False, sort_keys=True, separators=(",", ":")
     ).encode("utf-8")
-    sys.stdout.write(base64.b64encode(canonical_json).decode("ascii"))
+    sys.stdout.write(base64.b64encode(normalized_json).decode("ascii"))
 except (OSError, UnicodeError, ValueError, json.JSONDecodeError, TypeError, binascii.Error):
     raise SystemExit(2)
 ' 2>/dev/null; then
-    err "${PROVIDER_API_KEYS_JSON_B64_ENV} must be canonical standard-base64 of a JSON object mapping exact provider kinds to string credentials."
+    err "${PROVIDER_API_KEYS_JSON_B64_ENV} must be normalized standard-base64 of a JSON object mapping exact provider kinds to string credentials."
     return 2
   fi
 }
@@ -468,6 +473,29 @@ env_value_nonempty() {
   local v
   v="$(env_get "$1" "$2")"
   [ -n "${v//[[:space:]]/}" ]
+}
+
+# The API takes the bootstrap admin only as a login + email + password triple:
+# `validate_ui_bootstrap_admin_settings` accepts all three set or all three
+# unset, and every role loads that validation, so a partial trio makes the
+# `startup` container exit and `wait_for_startup_authority` stop the whole
+# stack. Check the staged .env before it is promoted; a field the operator did
+# not re-enter keeps its existing value, so the file — not the resolved
+# variables — is the resulting state the app will read.
+require_admin_bootstrap_triple() {
+  local env_file="$1" key missing=""
+  for key in \
+    IRONRAG_UI_BOOTSTRAP_ADMIN_LOGIN \
+    IRONRAG_UI_BOOTSTRAP_ADMIN_EMAIL \
+    IRONRAG_UI_BOOTSTRAP_ADMIN_PASSWORD
+  do
+    env_value_nonempty "$key" "$env_file" || missing="${missing}${missing:+ }${key}"
+  done
+  [ -n "$missing" ] || return 0
+  err "admin bootstrap must set login, email and password together (all three or none)."
+  say "  Missing in ${env_file}: ${missing}" >&2
+  say "  Set IRONRAG_ADMIN_LOGIN, IRONRAG_ADMIN_EMAIL and IRONRAG_ADMIN_PASSWORD, or omit all three to create the first account in the UI." >&2
+  return 3
 }
 
 image_tag_for_version() {
@@ -711,12 +739,11 @@ sync_frontend_origin_to_port() {
   env_file_set "IRONRAG_FRONTEND_ORIGIN" "http://127.0.0.1:${port},http://localhost:${port}" "$file"
 }
 
-# ─── Startup watcher (unchanged behaviour) ──────────────────────────────────
+# ─── Startup watcher ─────────────────────────────────────────────────────────
 # Watch the one-shot startup container before bringing up app services. Some
 # Compose versions block forever on `service_completed_successfully` dependents
-# when startup restarts, so the installer owns the wait loop and prints the real
-# failure (including the migration-checksum-drift recovery steps) instead of
-# leaving `ironrag-startup-1 Waiting`.
+# when startup restarts, so the installer owns the wait loop and reports the
+# actual startup failure instead of leaving `ironrag-startup-1 Waiting`.
 wait_for_startup_authority() {
   local install_dir="$1"
   local wait_seconds="${IRONRAG_STARTUP_WAIT_SECS:-300}"
@@ -732,57 +759,6 @@ wait_for_startup_authority() {
 
     local startup_logs
     startup_logs="$(docker logs "$startup_id" 2>&1 | tail -n 200)"
-
-    local drift_line
-    drift_line="$(printf '%s\n' "$startup_logs" | grep -m 1 -E 'migration [0-9]+ was previously applied but has been modified' || true)"
-    if [ -n "$drift_line" ]; then
-      local version padded_version
-      version="$(printf '%s\n' "$drift_line" | grep -oE '[0-9]+' | head -n 1)"
-      padded_version="$(printf '%04d' "$version")"
-      cat >&2 <<DRIFT_ERR
-ERROR: ironrag-startup-1 keeps restarting because the bundled
-       schema for migration ${version} doesn't match the one applied
-       to this database. sqlx refuses to start until the recorded
-       checksum matches the file in the running image.
-       This happens when an existing deployment pulls a release that
-       touched a previously-applied migration.
-
-       Resolve in three steps:
-
-       1. Extract and apply the canonical idempotent migration file:
-
-            docker compose -f ${install_dir}/docker-compose.yml run --rm --no-deps \\
-              --entrypoint sh backend \\
-              -c 'cat /app/migrations/${padded_version}_*.sql' \\
-              >/tmp/ironrag-migration-${version}.sql
-
-            docker compose -f ${install_dir}/docker-compose.yml exec -T \\
-              postgres psql -U postgres -d ironrag \\
-              </tmp/ironrag-migration-${version}.sql
-
-       2. Compute the new checksum for migration ${version} from the
-          running backend image:
-
-            docker compose -f ${install_dir}/docker-compose.yml run --rm --no-deps \\
-              --entrypoint sha384sum backend \\
-              /app/migrations/${padded_version}_*.sql
-
-       3. Update the row in _sqlx_migrations:
-
-            docker compose -f ${install_dir}/docker-compose.yml exec \\
-              postgres psql -U postgres -d ironrag -c \\
-              "UPDATE _sqlx_migrations SET checksum = decode('<NEW_HEX>','hex') WHERE version = ${version};"
-
-       Then restart the stack:
-
-            docker compose -f ${install_dir}/docker-compose.yml restart \\
-              startup backend worker
-
-       Stack is stopped now to avoid a silent restart loop.
-DRIFT_ERR
-      (cd "$install_dir" && docker compose stop startup backend worker frontend >/dev/null 2>&1 || true)
-      return 1
-    fi
 
     local state status exit_code restart_count
     state="$(docker inspect "$startup_id" -f '{{.State.Status}}|{{.State.ExitCode}}|{{.RestartCount}}' 2>/dev/null || echo 'unknown|1|0')"
@@ -834,11 +810,21 @@ print_configuration_summary() {
   else
     ok "Existing .env preserved; secrets and your tuned values unchanged."
   fi
-  if env_value_nonempty "IRONRAG_UI_BOOTSTRAP_ADMIN_PASSWORD" "$env_file"; then
-    info "Admin: bootstrapped from .env (IRONRAG_UI_BOOTSTRAP_ADMIN_LOGIN / _PASSWORD)."
-  else
-    info "Admin: create the first account in the UI on first visit."
-  fi
+  local admin_fields_set=0 key
+  for key in IRONRAG_UI_BOOTSTRAP_ADMIN_LOGIN IRONRAG_UI_BOOTSTRAP_ADMIN_EMAIL IRONRAG_UI_BOOTSTRAP_ADMIN_PASSWORD; do
+    env_value_nonempty "$key" "$env_file" && admin_fields_set=$((admin_fields_set + 1))
+  done
+  case "$admin_fields_set" in
+    3)
+      info "Admin: bootstrapped from .env (IRONRAG_UI_BOOTSTRAP_ADMIN_LOGIN / _EMAIL / _PASSWORD)."
+      ;;
+    0)
+      info "Admin: create the first account in the UI on first visit."
+      ;;
+    *)
+      warn "Admin: .env holds a partial IRONRAG_UI_BOOTSTRAP_ADMIN_* trio; the API refuses to start until login, email and password are all set or all unset."
+      ;;
+  esac
   local found=""
   env_value_nonempty "$PROVIDER_API_KEYS_JSON_B64_ENV" "$env_file" && found="yes"
   if [ -n "$found" ]; then
@@ -867,6 +853,8 @@ Flags:
       --profile <name>           Resource profile: micro | small | medium | large
                                  (default: auto-detected from host RAM).
       --admin-login <name>       Bootstrap admin login (default: create it in the UI).
+      --admin-email <address>    Bootstrap admin email; the API requires the
+                                 bootstrap login, email and password together.
       --plan-only                Detect + size + print the plan; write/deploy nothing.
       --recompute-resources      On a re-run, recompute resource caps from the host.
       --reset-volumes            Wipe stale data volumes when minting a fresh .env.
@@ -876,9 +864,13 @@ Environment variables (answer every prompt without a TTY):
   IRONRAG_PORT                   Published HTTP port.
   IRONRAG_PROFILE                Resource profile (micro|small|medium|large).
   IRONRAG_ADMIN_LOGIN            Bootstrap admin login.
+  IRONRAG_ADMIN_EMAIL            Bootstrap admin email.
   IRONRAG_ADMIN_PASSWORD         Bootstrap admin password (secret; env only).
+                                 Login, email and password are required together
+                                 (all three or none): the API refuses to start
+                                 with a partial bootstrap admin.
   IRONRAG_AI_PROVIDER_API_KEYS_JSON_B64
-                                 Canonical standard-base64 of a JSON object
+                                 Normalized standard-base64 of a JSON object
                                  mapping exact provider kinds to API keys.
   IRONRAG_NONINTERACTIVE=1       Same as --non-interactive.
   IRONRAG_RESET_VOLUMES=1        Same as --reset-volumes.
@@ -893,7 +885,8 @@ variables or a pre-seeded .env only — never as flags, because argv is visible 
 other processes (ps, /proc/<pid>/cmdline) and leaks into shell history and CI logs.
 
 The wizard inspects the host (CPU + RAM), recommends a resource profile, and
-prompts for port and admin bootstrap. Provider keys come from the validated map
+prompts for port and the optional admin bootstrap (login, email and password
+together). Provider keys come from the validated map
 above or the UI. A re-run preserves existing .env secrets and tuned caps while
 advancing official IronRAG image pins to the selected release tag.
 
@@ -916,6 +909,7 @@ parse_args() {
   FLAG_PORT=""
   FLAG_PROFILE=""
   FLAG_ADMIN_LOGIN=""
+  FLAG_ADMIN_EMAIL=""
   local positional=()
   # need_value <flag-name> <next-arg-or-empty>: require a non-flag operand.
   need_value() {
@@ -927,7 +921,7 @@ parse_args() {
     case "$1" in
       -y|--yes|--non-interactive) FORCE_NONINTERACTIVE=1 ;;
       --interactive) FORCE_INTERACTIVE=1 ;;
-      --plan-only|--dry-run) PLAN_ONLY=1 ;;
+      --plan-only) PLAN_ONLY=1 ;;
       --recompute-resources) RECOMPUTE_RESOURCES=1 ;;
       --reset-volumes) IRONRAG_RESET_VOLUMES=1 ;;
       --port) need_value "$1" "${2:-}"; FLAG_PORT="$2"; shift ;;
@@ -936,6 +930,8 @@ parse_args() {
       --profile=*) FLAG_PROFILE="${1#*=}" ;;
       --admin-login) need_value "$1" "${2:-}"; FLAG_ADMIN_LOGIN="$2"; shift ;;
       --admin-login=*) FLAG_ADMIN_LOGIN="${1#*=}" ;;
+      --admin-email) need_value "$1" "${2:-}"; FLAG_ADMIN_EMAIL="$2"; shift ;;
+      --admin-email=*) FLAG_ADMIN_EMAIL="${1#*=}" ;;
       -h|--help) usage; exit 0 ;;
       --) shift; while [ "$#" -gt 0 ]; do positional+=("$1"); shift; done; break ;;
       -*) err "unknown flag: $1"; usage; exit 2 ;;
@@ -1027,10 +1023,12 @@ run_main() {
   require_resolved "port" "$port" 1 "--port <p> or IRONRAG_PORT"
   IRONRAG_PORT="$port"
 
-  # ── Step 3: admin bootstrap. Login via flag/env/prompt; password is a secret
-  #    so it has no flag tier (env / prompt only). Non-interactive with no
-  #    flag/env leaves both empty => no admin write (unchanged behaviour). ──
-  local admin_login="" admin_pass=""
+  # ── Step 3: admin bootstrap. The API accepts the bootstrap admin only as a
+  #    complete login + email + password triple, so the wizard collects that
+  #    triple: login and email via flag/env/prompt, password as a secret (env /
+  #    prompt only). Non-interactive with no flag/env leaves the triple empty =>
+  #    no admin write and the first account is created in the UI. ──
+  local admin_login="" admin_email="" admin_pass=""
   declare -A NEW_PROVIDER=()
   if [ "$INTERACTIVE" = "1" ]; then
     say ""
@@ -1040,7 +1038,12 @@ run_main() {
   resolve_value admin_login "$FLAG_ADMIN_LOGIN" "${IRONRAG_ADMIN_LOGIN:-}" \
     "  Admin login" ""
   if [ -n "$admin_login" ]; then
+    resolve_value admin_email "$FLAG_ADMIN_EMAIL" "${IRONRAG_ADMIN_EMAIL:-}" \
+      "  Admin email" ""
     resolve_secret admin_pass "${IRONRAG_ADMIN_PASSWORD:-}" "  Admin password" ""
+  elif [ -n "$FLAG_ADMIN_EMAIL" ] || [ -n "${IRONRAG_ADMIN_EMAIL:-}" ] \
+    || [ -n "${IRONRAG_ADMIN_PASSWORD:-}" ]; then
+    warn "admin email/password ignored without an admin login; set IRONRAG_ADMIN_LOGIN or --admin-login to bootstrap an account."
   fi
   if [ "$INTERACTIVE" = "1" ]; then
     info "${C_DIM}Provider credentials: pre-seed ${PROVIDER_API_KEYS_JSON_B64_ENV} or configure them in the UI.${C_RESET}"
@@ -1098,11 +1101,41 @@ run_main() {
     if [ "${IRONRAG_INSTALL_SKIP_DEPLOY:-0}" != "1" ]; then
       local stale_volumes=""
       if command -v docker >/dev/null 2>&1; then
-        local vol
-        for vol in ironrag_postgres_data ironrag_content_storage_data; do
-          if docker volume inspect "$vol" >/dev/null 2>&1; then
-            stale_volumes="${stale_volumes}${stale_volumes:+ }${vol}"
-          fi
+        local compose_project
+        compose_project="${COMPOSE_PROJECT_NAME:-$(basename "${INSTALL_DIR%/}")}"
+        compose_project="$(
+          printf '%s' "$compose_project" \
+            | tr '[:upper:]' '[:lower:]' \
+            | tr -cd 'a-z0-9_-' \
+            | sed 's/^[-_]*//'
+        )"
+        # Volumes from before compose labelled them. They belong to the default
+        # project only, so this must not fire for an install under any other
+        # name: on a host that already runs one IronRAG stack, a second install
+        # into its own directory would otherwise refuse and offer to delete the
+        # first one's database.
+        if [ "$compose_project" = "ironrag" ]; then
+          local vol
+          for vol in ironrag_postgres_data ironrag_content_storage_data; do
+            if docker volume inspect "$vol" >/dev/null 2>&1; then
+              stale_volumes="${stale_volumes}${stale_volumes:+ }${vol}"
+            fi
+          done
+        fi
+        local logical_volume
+        for logical_volume in postgres_data content_storage_data; do
+          while IFS= read -r vol; do
+            [ -n "$vol" ] || continue
+            case " $stale_volumes " in
+              *" $vol "*) ;;
+              *) stale_volumes="${stale_volumes}${stale_volumes:+ }${vol}" ;;
+            esac
+          done < <(
+            docker volume ls \
+              --filter "label=com.docker.compose.project=${compose_project}" \
+              --filter "label=com.docker.compose.volume=${logical_volume}" \
+              --format '{{.Name}}' 2>/dev/null || true
+          )
         done
       fi
       if [ -n "$stale_volumes" ]; then
@@ -1126,12 +1159,15 @@ run_main() {
     env_file_set "IRONRAG_POSTGRES_PASSWORD" "$(rand_hex_bytes 24)" "$env_file"
     env_file_set "IRONRAG_BOOTSTRAP_TOKEN" "$(rand_hex_bytes 24)" "$env_file"
     env_file_set "IRONRAG_CREDENTIAL_MASTER_KEY" "$(rand_credential_master_key)" "$env_file"
-    # A fresh install has no older pods, so encrypted writes are safe from the
-    # first start. Existing upgrades preserve their explicit staged value.
-    env_file_set "IRONRAG_CREDENTIAL_ENCRYPTION_WRITE_ENABLED" "true" "$env_file"
     ok "Created ${env_file} with fresh machine secrets."
   else
     ok "Existing ${env_file} found — preserving it."
+    # Credential encryption is mandatory: the API refuses to start without a
+    # master key. Back-fill one for upgrades whose .env predates the key.
+    if [ -z "$(env_get "IRONRAG_CREDENTIAL_MASTER_KEY" "$env_file")" ]; then
+      env_file_set "IRONRAG_CREDENTIAL_MASTER_KEY" "$(rand_credential_master_key)" "$env_file"
+      warn "Generated a missing IRONRAG_CREDENTIAL_MASTER_KEY in ${env_file}. If this stack already stored credentials, rewrap them with 'migrate credential-secrets --apply' on the previous version before upgrading."
+    fi
   fi
 
   # Reject the removed provider-specific convention before any staged write.
@@ -1153,10 +1189,10 @@ run_main() {
     existing="$(env_get "$key" "$env_file")"
     env_val="${!key:-}"
     if [ -n "$env_val" ]; then
-      env_val="$(canonicalize_provider_api_keys_b64 "$env_val")" || exit $?
+      env_val="$(normalize_provider_api_keys_b64 "$env_val")" || exit $?
       [ "$env_val" != "$existing" ] && NEW_PROVIDER["$key"]="$env_val"
     elif [ -n "$existing" ]; then
-      canonicalize_provider_api_keys_b64 "$existing" >/dev/null || exit $?
+      normalize_provider_api_keys_b64 "$existing" >/dev/null || exit $?
     fi
   done
 
@@ -1170,7 +1206,10 @@ run_main() {
     printf '  %-18s %s\n' "Resource profile" "${REC_PROFILE}"
     printf '  %-18s %s\n' "HTTP port" "${IRONRAG_PORT}"
     if [ -n "$admin_login" ]; then
+      local review_email="$admin_email"
+      [ -n "$review_email" ] || review_email="$(env_get IRONRAG_UI_BOOTSTRAP_ADMIN_EMAIL "$env_file")"
       printf '  %-18s %s\n' "Admin login" "${admin_login}"
+      printf '  %-18s %s\n' "Admin email" "${review_email:-unchanged}"
       printf '  %-18s %s\n' "Admin password" "$( [ -n "$admin_pass" ] && echo 'set' || echo 'unchanged' )"
     else
       printf '  %-18s %s\n' "Admin" "create in the UI on first visit"
@@ -1213,10 +1252,16 @@ run_main() {
     kill -TERM "$$"
   fi
 
-  # Admin bootstrap (only when freshly provided this run).
+  # Admin bootstrap (only when freshly provided this run): written as one
+  # complete triple. `admin_email`/`admin_pass` may be empty on a re-run where
+  # the operator re-typed the login but kept the stored values; those survive in
+  # the staged copy, and require_admin_bootstrap_triple then checks the
+  # resulting .env, refusing a partial trio before it is promoted.
   if [ -n "$admin_login" ]; then
     env_file_set "IRONRAG_UI_BOOTSTRAP_ADMIN_LOGIN" "$admin_login" "$env_file"
+    [ -n "$admin_email" ] && env_file_set "IRONRAG_UI_BOOTSTRAP_ADMIN_EMAIL" "$admin_email" "$env_file"
     [ -n "$admin_pass" ] && env_file_set "IRONRAG_UI_BOOTSTRAP_ADMIN_PASSWORD" "$admin_pass" "$env_file"
+    require_admin_bootstrap_triple "$env_file" || exit $?
   fi
 
   # Provider keys the operator changed this run. Guard the empty-array

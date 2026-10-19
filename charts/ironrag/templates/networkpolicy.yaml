@@ -36,7 +36,7 @@ spec:
   ingress:
     - ports:
         - protocol: TCP
-          port: 80
+          port: http
 {{- end }}
 {{- range $component, $rules := .Values.networkPolicy.extraIngress }}
 {{- if $rules }}

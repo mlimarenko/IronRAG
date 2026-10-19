@@ -81,6 +81,13 @@ export type ServerSentEventsResult<TData = unknown, TReturn = void, TNext = unkn
 
 type SseState = Readonly<{ lastEventId?: string; retryDelay: number }>;
 
+type SseFrameState = Readonly<{
+  dataLines: string[];
+  eventName?: string;
+  lastEventId?: string;
+  retryDelay: number;
+}>;
+
 type ParsedSseChunk<TData> = Readonly<{
   event: StreamEvent<TData>;
   hasData: boolean;
@@ -88,7 +95,7 @@ type ParsedSseChunk<TData> = Readonly<{
   state: SseState;
 }>;
 
-function parseSseField(state: Readonly<{ dataLines: string[]; eventName?: string; lastEventId?: string; retryDelay: number }>, line: string) {
+function parseSseField(state: SseFrameState, line: string): SseFrameState {
   if (line.startsWith('data:')) return { ...state, dataLines: [...state.dataLines, line.replace(/^data:\s*/, '')] };
   if (line.startsWith('event:')) return { ...state, eventName: line.replace(/^event:\s*/, '') };
   if (line.startsWith('id:')) return { ...state, lastEventId: line.replace(/^id:\s*/, '') };
@@ -105,8 +112,8 @@ function parseSseData(dataLines: string[]): Readonly<{ data: unknown; isJson: bo
 }
 
 function parseSseChunk<TData>(chunk: string, previous: SseState): ParsedSseChunk<TData> {
-  const initial = { dataLines: [], retryDelay: previous.retryDelay, ...(previous.lastEventId !== undefined ? { lastEventId: previous.lastEventId } : {}) };
-  const parsed = chunk.split('\n').reduce(
+  const initial: SseFrameState = { dataLines: [], retryDelay: previous.retryDelay, ...(previous.lastEventId !== undefined ? { lastEventId: previous.lastEventId } : {}) };
+  const parsed = chunk.split('\n').reduce<SseFrameState>(
     (state, line) => parseSseField(state, line),
     initial,
   );

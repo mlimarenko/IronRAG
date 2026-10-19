@@ -4,13 +4,14 @@ use uuid::Uuid;
 
 use crate::services::query::text_match::{near_token_overlap_count, normalized_alnum_tokens};
 use crate::{
-    domains::query_ir::QueryIR,
+    domains::query_ir::{EntityRole, QueryIR},
+    infra::knowledge_rows::{KnowledgeStructuredBlockRow, KnowledgeTechnicalFactRow},
     shared::extraction::technical_facts::{TechnicalFactKind, TechnicalFactQualifier},
     shared::extraction::text_render::repair_technical_layout_noise,
 };
 
 use super::{
-    CanonicalAnswerEvidence, concise_document_subject_label,
+    AuthoritativeAnswerEvidence, concise_document_subject_label,
     document_target::{focused_answer_document_id, question_requests_multi_document_scope},
     fact_lookup::{best_matching_fact, build_document_labels},
     question_intent::{
@@ -29,7 +30,7 @@ use super::{
 pub(crate) fn build_multi_document_endpoint_answer_from_facts(
     question: &str,
     query_ir: &QueryIR,
-    evidence: &CanonicalAnswerEvidence,
+    evidence: &AuthoritativeAnswerEvidence,
     chunks: &[RuntimeMatchedChunk],
 ) -> Option<String> {
     if !query_ir_allows_deterministic_endpoint_lookup(query_ir) {
@@ -43,6 +44,9 @@ pub(crate) fn build_multi_document_endpoint_answer_from_facts(
     if question_keywords.is_empty() {
         return None;
     }
+    let focus_segments = endpoint_support_focus_segments(query_ir, &question_keywords);
+    let question_focus = question_keywords.iter().cloned().collect::<BTreeSet<_>>();
+    let subject_focus = endpoint_subject_focus_terms(query_ir);
 
     let per_document_chunks = chunks_by_document(chunks);
     let mut ordered_document_ids = Vec::<Uuid>::new();
@@ -75,19 +79,22 @@ pub(crate) fn build_multi_document_endpoint_answer_from_facts(
                     )
                     && endpoint_fact_has_query_focused_support(
                         fact,
+                        evidence,
                         chunks,
-                        query_ir,
-                        &question_keywords,
+                        &focus_segments,
                     )
             },
             |fact, document_label| {
-                endpoint_fact_score(
-                    &fact.display_value,
-                    document_label.unwrap_or_default(),
-                    fact.document_id,
-                    Some(document_id),
-                    &question_keywords,
-                )
+                endpoint_fact_score(EndpointFactScoreRequest {
+                    fact,
+                    evidence,
+                    document_label: document_label.unwrap_or_default(),
+                    candidate_document_id: fact.document_id,
+                    focused_document_id: Some(document_id),
+                    question_keywords: &question_keywords,
+                    question_focus: &question_focus,
+                    subject_focus: &subject_focus,
+                })
             },
         );
         let Some(endpoint_match) = endpoint_match else {
@@ -108,7 +115,7 @@ pub(crate) fn build_multi_document_endpoint_answer_from_facts(
 pub(crate) fn build_single_endpoint_answer_from_facts(
     question: &str,
     query_ir: &QueryIR,
-    evidence: &CanonicalAnswerEvidence,
+    evidence: &AuthoritativeAnswerEvidence,
     chunks: &[RuntimeMatchedChunk],
 ) -> Option<String> {
     if !query_ir_allows_deterministic_endpoint_lookup(query_ir) {
@@ -123,6 +130,9 @@ pub(crate) fn build_single_endpoint_answer_from_facts(
     if question_keywords.is_empty() {
         return None;
     }
+    let focus_segments = endpoint_support_focus_segments(query_ir, &question_keywords);
+    let question_focus = question_keywords.iter().cloned().collect::<BTreeSet<_>>();
+    let subject_focus = endpoint_subject_focus_terms(query_ir);
 
     let document_labels = build_document_labels(chunks);
     let endpoint_match = best_matching_fact(
@@ -133,16 +143,19 @@ pub(crate) fn build_single_endpoint_answer_from_facts(
             !query_ir_disallows_graph_id_like_endpoint_candidate(
                 query_ir,
                 fact.display_value.as_str(),
-            ) && endpoint_fact_has_query_focused_support(fact, chunks, query_ir, &question_keywords)
+            ) && endpoint_fact_has_query_focused_support(fact, evidence, chunks, &focus_segments)
         },
         |fact, document_label| {
-            endpoint_fact_score(
-                &fact.display_value,
-                document_label.unwrap_or_default(),
-                fact.document_id,
+            endpoint_fact_score(EndpointFactScoreRequest {
+                fact,
+                evidence,
+                document_label: document_label.unwrap_or_default(),
+                candidate_document_id: fact.document_id,
                 focused_document_id,
-                &question_keywords,
-            )
+                question_keywords: &question_keywords,
+                question_focus: &question_focus,
+                subject_focus: &subject_focus,
+            })
         },
     )?;
 
@@ -155,31 +168,60 @@ pub(crate) fn build_single_endpoint_answer_from_facts(
     Some(format!("The endpoint is {literal}."))
 }
 
-fn endpoint_fact_score(
-    endpoint: &str,
-    document_label: &str,
-    candidate_document_id: Uuid,
-    focused_document_id: Option<Uuid>,
-    question_keywords: &[String],
-) -> usize {
-    let lowered_endpoint = endpoint.to_lowercase();
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct EndpointFactScore {
+    document_focus: isize,
+    question_coverage: usize,
+    subject_coverage: usize,
+    surface_coverage: usize,
+}
+
+/// Inputs of one endpoint-fact relevance score: the candidate fact, the
+/// query-focused terms it is matched against and the document scope it belongs to.
+pub(super) struct EndpointFactScoreRequest<'a> {
+    pub(super) fact: &'a KnowledgeTechnicalFactRow,
+    pub(super) evidence: &'a AuthoritativeAnswerEvidence,
+    pub(super) document_label: &'a str,
+    pub(super) candidate_document_id: Uuid,
+    pub(super) focused_document_id: Option<Uuid>,
+    pub(super) question_keywords: &'a [String],
+    pub(super) question_focus: &'a BTreeSet<String>,
+    pub(super) subject_focus: &'a BTreeSet<String>,
+}
+
+fn endpoint_fact_score(request: EndpointFactScoreRequest<'_>) -> EndpointFactScore {
+    let EndpointFactScoreRequest {
+        fact,
+        evidence,
+        document_label,
+        candidate_document_id,
+        focused_document_id,
+        question_keywords,
+        question_focus,
+        subject_focus,
+    } = request;
+    let lowered_endpoint = fact.display_value.to_lowercase();
     let lowered_label = document_label.to_lowercase();
-    usize::try_from(document_focus_preference(candidate_document_id, focused_document_id))
-        .unwrap_or_default()
-        + question_keywords
-            .iter()
-            .map(|keyword| {
-                usize::from(lowered_label.contains(keyword)) * 20
-                    + usize::from(lowered_endpoint.contains(keyword)) * 8
-            })
-            .sum::<usize>()
+    let surface_coverage = question_keywords
+        .iter()
+        .map(|keyword| {
+            usize::from(lowered_label.contains(keyword)) * 20
+                + usize::from(lowered_endpoint.contains(keyword)) * 8
+        })
+        .sum::<usize>();
+    EndpointFactScore {
+        document_focus: document_focus_preference(candidate_document_id, focused_document_id),
+        question_coverage: endpoint_fact_support_coverage(fact, evidence, question_focus),
+        subject_coverage: endpoint_fact_support_coverage(fact, evidence, subject_focus),
+        surface_coverage,
+    }
 }
 
 fn endpoint_fact_has_query_focused_support(
-    fact: &crate::infra::knowledge_rows::KnowledgeTechnicalFactRow,
+    fact: &KnowledgeTechnicalFactRow,
+    evidence: &AuthoritativeAnswerEvidence,
     chunks: &[RuntimeMatchedChunk],
-    query_ir: &QueryIR,
-    question_keywords: &[String],
+    focus_segments: &[BTreeSet<String>],
 ) -> bool {
     let endpoint_literal = repair_technical_layout_noise(&fact.display_value).to_lowercase();
     if endpoint_literal.trim().is_empty() {
@@ -190,11 +232,12 @@ fn endpoint_fact_has_query_focused_support(
         .iter()
         .filter(|chunk| {
             chunk.document_id == fact.document_id
+                && chunk.revision_id == fact.revision_id
                 && chunk.chunk_kind.as_deref() != Some(SOURCE_PROFILE_CHUNK_KIND)
         })
         .collect::<Vec<_>>();
     if same_document_chunks.is_empty() {
-        return true;
+        return fact.support_block_ids.is_empty() && fact.support_chunk_ids.is_empty();
     }
 
     let endpoint_chunks = same_document_chunks
@@ -205,18 +248,128 @@ fn endpoint_fact_has_query_focused_support(
         return false;
     }
 
-    let focus_segments = endpoint_support_focus_segments(query_ir, question_keywords);
     if focus_segments.is_empty() {
         return true;
     }
 
-    endpoint_chunks.iter().any(|chunk| {
+    let chunk_has_focus = endpoint_chunks.iter().any(|chunk| {
         let chunk_tokens = normalized_alnum_tokens(&endpoint_support_text(chunk), 3);
         focus_segments.iter().any(|segment| {
             let required_overlap = segment.len().clamp(1, 2);
             near_token_overlap_count(segment, &chunk_tokens) >= required_overlap
         })
-    })
+    });
+    if !chunk_has_focus {
+        return false;
+    }
+
+    let support_blocks = endpoint_fact_support_blocks(fact, evidence);
+    if support_blocks.is_empty() {
+        return fact.support_block_ids.is_empty();
+    }
+    let own_coverage = support_blocks
+        .iter()
+        .map(|block| endpoint_block_focus_coverage(block, focus_segments))
+        .max()
+        .unwrap_or_default();
+    if own_coverage == 0 {
+        return false;
+    }
+
+    endpoint_fact_related_sibling_blocks(fact, evidence)
+        .into_iter()
+        .map(|block| endpoint_block_focus_coverage(block, focus_segments))
+        .max()
+        .is_none_or(|sibling_coverage| own_coverage >= sibling_coverage)
+}
+
+fn endpoint_fact_support_coverage(
+    fact: &KnowledgeTechnicalFactRow,
+    evidence: &AuthoritativeAnswerEvidence,
+    focus_terms: &BTreeSet<String>,
+) -> usize {
+    if focus_terms.is_empty() {
+        return 0;
+    }
+    endpoint_fact_support_blocks(fact, evidence)
+        .into_iter()
+        .map(|block| endpoint_block_term_coverage(block, focus_terms))
+        .max()
+        .unwrap_or_default()
+}
+
+fn endpoint_fact_support_blocks<'a>(
+    fact: &KnowledgeTechnicalFactRow,
+    evidence: &'a AuthoritativeAnswerEvidence,
+) -> Vec<&'a KnowledgeStructuredBlockRow> {
+    evidence
+        .structured_blocks
+        .iter()
+        .filter(|block| {
+            block.document_id == fact.document_id
+                && block.revision_id == fact.revision_id
+                && fact.support_block_ids.contains(&block.block_id)
+        })
+        .collect()
+}
+
+fn endpoint_fact_related_sibling_blocks<'a>(
+    fact: &KnowledgeTechnicalFactRow,
+    evidence: &'a AuthoritativeAnswerEvidence,
+) -> Vec<&'a KnowledgeStructuredBlockRow> {
+    let support_chunk_block_ids = evidence
+        .chunk_rows
+        .iter()
+        .filter(|chunk| {
+            chunk.document_id == fact.document_id
+                && chunk.revision_id == fact.revision_id
+                && (fact.support_chunk_ids.contains(&chunk.chunk_id)
+                    || chunk
+                        .support_block_ids
+                        .iter()
+                        .any(|block_id| fact.support_block_ids.contains(block_id)))
+        })
+        .flat_map(|chunk| chunk.support_block_ids.iter().copied())
+        .collect::<HashSet<_>>();
+
+    evidence
+        .structured_blocks
+        .iter()
+        .filter(|block| {
+            block.document_id == fact.document_id
+                && block.revision_id == fact.revision_id
+                && !fact.support_block_ids.contains(&block.block_id)
+                && support_chunk_block_ids.contains(&block.block_id)
+        })
+        .collect()
+}
+
+fn endpoint_block_focus_coverage(
+    block: &KnowledgeStructuredBlockRow,
+    focus_segments: &[BTreeSet<String>],
+) -> usize {
+    let evidence_text = format!(
+        "{} {} {}",
+        block.heading_trail.join(" "),
+        block.section_path.join(" "),
+        block.text
+    );
+    let block_tokens = normalized_alnum_tokens(&repair_technical_layout_noise(&evidence_text), 3);
+    focus_segments.iter().map(|segment| near_token_overlap_count(segment, &block_tokens)).sum()
+}
+
+fn endpoint_block_term_coverage(
+    block: &KnowledgeStructuredBlockRow,
+    focus_terms: &BTreeSet<String>,
+) -> usize {
+    let evidence_text = format!(
+        "{} {} {}",
+        block.heading_trail.join(" "),
+        block.section_path.join(" "),
+        block.text
+    );
+    let block_tokens = normalized_alnum_tokens(&repair_technical_layout_noise(&evidence_text), 3);
+    near_token_overlap_count(focus_terms, &block_tokens)
 }
 
 fn endpoint_support_text(chunk: &RuntimeMatchedChunk) -> String {
@@ -235,15 +388,29 @@ fn endpoint_support_focus_segments(
         .map(|value| normalized_alnum_tokens(value, 3))
         .filter(|tokens| !tokens.is_empty())
         .collect::<Vec<_>>();
-    if segments.is_empty() && !question_keywords.is_empty() {
-        segments.push(question_keywords.iter().cloned().collect());
+    let question_segment = question_keywords.iter().cloned().collect::<BTreeSet<_>>();
+    if !question_segment.is_empty() && !segments.contains(&question_segment) {
+        segments.push(question_segment);
     }
     segments
 }
 
+fn endpoint_subject_focus_terms(query_ir: &QueryIR) -> BTreeSet<String> {
+    let mut terms = query_ir
+        .target_entities
+        .iter()
+        .filter(|entity| entity.role == EntityRole::Subject)
+        .flat_map(|entity| normalized_alnum_tokens(&entity.label, 3))
+        .collect::<BTreeSet<_>>();
+    if let Some(document_focus) = query_ir.document_focus.as_ref() {
+        terms.extend(normalized_alnum_tokens(&document_focus.hint, 3));
+    }
+    terms
+}
+
 fn endpoint_method_literal(
     endpoint_fact: &crate::infra::knowledge_rows::KnowledgeTechnicalFactRow,
-    evidence: &CanonicalAnswerEvidence,
+    evidence: &AuthoritativeAnswerEvidence,
 ) -> Option<String> {
     let qualifiers = serde_json::from_value::<Vec<TechnicalFactQualifier>>(
         endpoint_fact.qualifiers_json.clone(),

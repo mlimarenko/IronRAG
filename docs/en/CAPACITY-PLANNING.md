@@ -17,19 +17,6 @@ IRONRAG_DB_MEMORY_LIMIT=6144M \
   docker compose up -d
 ```
 
-## Container DNS
-
-The Compose stack gives application containers explicit recursive DNS defaults
-so outbound provider endpoints resolve consistently even when the host's Docker
-daemon inherited a local resolver that containers cannot reach. Override them
-when your environment requires a private resolver:
-
-```bash
-IRONRAG_DOCKER_DNS_PRIMARY=192.0.2.53 \
-  IRONRAG_DOCKER_DNS_SECONDARY=192.0.2.54 \
-  docker compose up -d
-```
-
 ## Host profiles
 
 | Profile | Host | Corpus shape | Notes |
@@ -95,6 +82,7 @@ vector kind are logical filters inside the relation. pgvector therefore runs
 filtered HNSW searches with strict iterative scanning and explicit bounds:
 
 ```text
+IRONRAG_PG_HNSW_BUILD_BUDGET_BYTES=3000000000
 IRONRAG_PG_HNSW_EF_SEARCH=400
 IRONRAG_PG_HNSW_MAX_SCAN_TUPLES=50000
 IRONRAG_PG_HNSW_SCAN_MEM_MULTIPLIER=2
@@ -154,15 +142,35 @@ The provider gateway applies a second, endpoint-scoped backpressure layer:
 IRONRAG_PROVIDER_CONCURRENCY_MAX_OUTBOUND=16
 IRONRAG_PROVIDER_CONCURRENCY_QUERY_RESERVED=4
 IRONRAG_PROVIDER_CONCURRENCY_ACQUIRE_TIMEOUT_MS=30000
+IRONRAG_PROVIDER_RATE_LIMIT_REQUESTS_PER_SECOND=8
+IRONRAG_PROVIDER_RATE_LIMIT_BURST=16
+IRONRAG_PROVIDER_RETRY_MAX_ATTEMPTS=3
+IRONRAG_PROVIDER_RETRY_INITIAL_BACKOFF_MS=200
+IRONRAG_PROVIDER_RETRY_MAX_BACKOFF_MS=5000
 ```
 
 Ingest can use only the shared 12 permits, so it cannot starve interactive
-queries. Permit waits are bounded and fail closed. `0`/`0` is the only valid
-unlimited configuration; a reserve equal to the maximum is rejected at
-startup because it would deadlock ingest.
+queries. Each endpoint also has an independent token bucket. Retry delays use
+bounded exponential backoff with jitter and respect valid `Retry-After`
+headers up to the configured maximum. Permit and token waits are bounded and
+fail closed. `0`/`0` disables a budget; a concurrency reserve equal to the
+maximum is rejected at startup because it would deadlock ingest.
+
+The budget is **per process**, not global. Every API replica, every worker,
+and every `ironrag-maintenance` or `ironrag-cli` invocation keeps its own
+in-memory registry. The rate a provider actually sees is therefore
+`running processes × IRONRAG_PROVIDER_RATE_LIMIT_REQUESTS_PER_SECOND`; size
+that product against the provider's quota, not the single-process number.
+
+Setting `IRONRAG_PROVIDER_CONCURRENCY_MAX_OUTBOUND=0` does not opt an
+endpoint out of the registry, because the rate limiter is on by default and
+needs an entry of its own. Such endpoints count against
+`IRONRAG_PROVIDER_CONCURRENCY_REGISTRY_MAX_ENTRIES`, which fails closed when
+it is full. Set both the concurrency maximum and the requests-per-second to
+`0` for an endpoint that must stay entirely unmetered.
 
 Each worker also applies a memory-derived local claim cap from its cgroup soft
-limit before it asks Postgres for more canonical ingest jobs. This keeps
+limit before it asks Postgres for more ingest jobs. This keeps
 memory-heavy extraction or graph-merge jobs from stacking in one process on a
 swapless host. Raising `IRONRAG_WORKER_REPLICAS` or the ingest caps is useful
 only when the host, worker memory limit, database connection budget, and
@@ -183,6 +191,188 @@ has enough headroom for the larger process count. With the default budget, extra
 workers mostly spread work and memory isolation across processes; query serving
 scales with the backend, not the worker count.
 
+The 16-connection per-process cap is gone: `IRONRAG_DATABASE_MAX_CONNECTIONS`
+is divided across API+worker replicas and that quotient is the process budget.
+Outermost retrieval turns also pass a bounded admission semaphore
+(`IRONRAG_QUERY_TURN_MAX_CONCURRENT` default 32, queue 80, 15s wait). A burst
+that exceeds the queue is rejected with retryable HTTP 503
+`query_admission_rejected` instead of waiting until the 180s turn budget or
+exhausting the SQLx pool. Matching-terms retrieval uses `pg_trgm` expression
+indexes on `lower(normalized_text)`, `lower(content_text)`, and
+`lower(coalesce(window_text, ''))`. The candidate join is a `UNION` of
+per-column `LIKE` arms driven from bound `'%term%'` patterns; do not fold
+those arms into one `OR` and then join requested revisions first — that plan
+ignores `gin_trgm` and seq-filters every chunk in the revision set. Do not
+reintroduce a `simple` tsquery prefilter, which misses substring matches
+inside URL/`key=value` lexemes.
+
+Bundled Postgres defaults stay conservative for a 1 GiB container:
+`max_connections=100`, `shared_buffers=128MB`, `work_mem=4MB`. Raise the
+container memory limit before raising `shared_buffers` or `work_mem`.
+
+### Sizing Postgres memory to your hardware
+
+Scale the three compose variables together from the database container's
+memory limit (`IRONRAG_DB_MEMORY_LIMIT`):
+
+| DB container limit | `IRONRAG_POSTGRES_SHARED_BUFFERS` | `IRONRAG_POSTGRES_WORK_MEM` | `IRONRAG_POSTGRES_SHM_SIZE` |
+| --- | --- | --- | --- |
+| 1 GiB (default) | 128MB | 4MB | 256mb |
+| 4 GiB | 1GB | 8MB | 1g |
+| 6 GiB | 3GB | 12MB | 2g |
+| 12 GiB | 6GB | 16MB | 2g |
+| 24 GiB+ | 8–12GB | 32MB | 4g |
+
+The rules behind the table:
+
+- **`shared_buffers` ≈ 40–50 % of the container limit.** The rest of the
+  cgroup holds each backend's private memory and the kernel page cache for
+  reads that miss the buffer pool (page cache is charged to the container's
+  cgroup too, but it is reclaimable, so it does not OOM the container).
+- **`work_mem` is charged per sort/hash node per backend**, so it multiplies
+  by concurrency in a way `shared_buffers` does not. At
+  `max_connections=300`, 32 MB puts the worst case far past a 6 GiB
+  container; prefer growing `shared_buffers` first.
+- **`shm_size` sizes `/dev/shm`**, which holds dynamic shared memory for
+  parallel queries — its demand follows `work_mem` × parallel workers, not
+  `shared_buffers`. 2 GiB is ample for the defaults; raise it if parallel
+  aggregates start failing with `could not resize shared memory segment`.
+- Whatever you raise, verify the effective values from inside the server —
+  these settings arrive on the postmaster command line, so `ALTER SYSTEM`
+  cannot change them and `pg_settings.source` says `command line`:
+
+  ```sql
+  select name, setting, source from pg_settings
+  where name in ('shared_buffers', 'work_mem', 'max_connections');
+  ```
+
+The goal of all of it is the cache hit ratio (query above): on a stage node
+whose corpus dwarfed its memory, moving `shared_buffers` from 1 GB to 3 GB and
+tuning the async-I/O settings below carried a 100-concurrent-turn benchmark
+from 34 to 52 completions inside the same admission limits. Prefer a larger
+`shared_buffers` over a larger `work_mem` once concurrency is high. At `max_connections=300`, a 32 MB `work_mem` puts
+the worst case far past a 6 GiB container.
+
+### Concurrent query serving is bound by disk reads, not CPU
+
+Once the corpus no longer fits in `shared_buffers`, retrieval latency under
+concurrency is dominated by physical reads, and the symptom is misleading: the
+**application** looks idle. On a stage node serving 100 concurrent turns the
+backend used 0.18 of 8 cores while Postgres accumulated ~2300 s of statement
+time — it was blocked on the disk, not computing. CPU utilisation cannot
+distinguish "waiting on the network" from "waiting on a read"; compare
+accumulated statement time against provider call time before concluding a
+workload is provider-bound.
+
+Check the cache hit ratio before tuning anything else:
+
+```sql
+select round(100.0 * sum(heap_blks_hit)
+             / nullif(sum(heap_blks_hit + heap_blks_read), 0), 1) as hit_pct
+from pg_statio_user_tables;
+```
+
+Below ~95 % means the working set does not fit and every query pays disk
+latency. Raising `shared_buffers` narrows the gap but cannot close it when the
+database is tens of times larger than the container.
+
+### PostgreSQL 18 asynchronous I/O
+
+PostgreSQL 18 reads sequential scans, **bitmap heap scans**, and vacuum
+asynchronously. IronRAG's trigram and full-text lanes are bitmap heap scans, so
+they are exactly the shape that benefits, and the shipped defaults
+(`io_method=worker`, `io_workers=3`, `effective_io_concurrency=16`) are sized
+for a small host.
+
+| Setting | Default | Suggested for a disk-bound node | Why |
+| --- | --- | --- | --- |
+| `io_workers` | 3 | 8 | Three workers cannot keep a concurrent bitmap-scan workload's read queue full. |
+| `effective_io_concurrency` | 16 | 256 (SSD/NVMe) | Read-ahead depth for bitmap heap scans. |
+| `maintenance_io_concurrency` | 16 | 64 | Same, for vacuum and index builds. |
+| `random_page_cost` | 4.0 | 1.1 (SSD/NVMe) | The 4.0 default encodes seek time on **rotating** disks and pushes the planner away from index scans. Confirm the device first: `lsblk -d -o NAME,ROTA` (`ROTA=0` is solid state). |
+| `track_io_timing` | off | on | Without it `pg_stat_io` and `EXPLAIN (BUFFERS)` cannot attribute read time. |
+
+`io_method=io_uring` differs from `worker`, but **Docker's default
+seccomp profile blocks the io_uring syscalls**: Postgres refuses to start with
+`could not setup io_uring queue: Operation not permitted`. Using it requires a
+custom seccomp profile on the container, which is a deliberate security
+decision — `worker` with more `io_workers` needs no such exemption.
+
+Recovering from a failed `io_method` is awkward, because the server will not
+start to accept an `ALTER SYSTEM` that undoes it. Edit
+`postgresql.auto.conf` in the data volume directly while the container is down.
+
+### Expression indexes lose their statistics on REINDEX
+
+An index built on an expression carries its own statistics, and the planner has
+nothing else to estimate that expression's selectivity with. `REINDEX INDEX
+CONCURRENTLY` builds a *new* index and swaps it in, so those statistics are
+gone until the next `ANALYZE` — autovacuum may not come for hours, and the
+window is silent.
+
+Measured on a stage node, one `LIKE ANY(...)` over a concatenated-text trigram
+index with no expression statistics: the planner estimated **140 rows** where
+the scan returned **47 724**, a 341x underestimate that propagates into every
+join above it. A plain `ANALYZE` on the table brought the estimate to 10 676 —
+still low, but within a factor the planner can work with.
+
+```sql
+-- expression indexes whose statistics are missing
+select t.relname as table, c.relname as index
+from pg_class c
+join pg_index i on i.indexrelid = c.oid
+join pg_class t on t.oid = i.indrelid
+where i.indexprs is not null
+  and not exists (select 1 from pg_stats s where s.tablename = c.relname);
+```
+
+Always follow a `REINDEX` of an expression index with `ANALYZE` on its table.
+
+Note that `reltuples` on a GIN index is not a reliable health signal: values
+far above the table's row count are normal for indexes over large concatenated
+expressions, and reindexing may raise the number rather than lower it. Judge
+these indexes by the planner's row estimates, not by `reltuples`.
+
+## Compose deployment variants
+
+All variants live in the single `docker-compose.yml`, selected by env and one
+profile (see the file header for the full list):
+
+```bash
+# With S3-compatible storage (bundled s4core), via the `s4` profile
+COMPOSE_PROFILES=s4 \
+  IRONRAG_CONTENT_STORAGE_PROVIDER=s3 \
+  IRONRAG_DEPENDENCY_OBJECT_STORAGE_MODE=bundled \
+  IRONRAG_CONTENT_STORAGE_TOPOLOGY=shared_cluster \
+  docker compose up -d
+
+# Local source build. IRONRAG_VERSION is the build identity
+# baked into the image and reported by /v1/version; the build fails without it
+# instead of shipping a placeholder. `make docker-local-build` derives it from
+# git automatically.
+IRONRAG_VERSION=$(git describe --always --abbrev=40 --dirty --match '') \
+  IRONRAG_BACKEND_IMAGE=ironrag-backend:local \
+  IRONRAG_FRONTEND_IMAGE=ironrag-frontend:local \
+  docker compose build backend frontend
+IRONRAG_BACKEND_IMAGE=ironrag-backend:local \
+  IRONRAG_FRONTEND_IMAGE=ironrag-frontend:local \
+  docker compose up -d
+```
+
+### Helm (Kubernetes)
+
+```bash
+helm upgrade --install ironrag charts/ironrag \
+  --namespace ironrag --create-namespace \
+  --set-string app.providerSecrets.provider_alpha="${PROVIDER_API_KEY}" \
+  --wait --timeout 20m
+```
+
+By default the chart deploys the API, worker, and web images with the
+`v<appVersion>` image tag derived from `Chart.appVersion`. Override
+`api.image.tag`, `worker.image.tag`, and `web.image.tag` only when pinning a
+different published image. Bundled dependencies match Docker Compose:
+`pgvector/pgvector:pg18` and `redis:8.10.1`.
+
 See also: [AI bindings](./AI-BINDINGS.md) (embedding dimension changes),
-[Helm chart](../../charts/ironrag/values.yaml) (resource presets),
-[README — deployment](../../README.md#other-deployment-options).
+[Install](./INSTALL.md), [Helm chart](../../charts/ironrag/values.yaml).

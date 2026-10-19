@@ -17,11 +17,11 @@ use crate::{
 /// vector binding and rebuild all library vector material that must share those
 /// indexes.
 ///
-/// Wraps the canonical `search.rebuild_vector_plane_for_library` so the
+/// Wraps the shared `search.rebuild_vector_plane_for_library` so the
 /// CLI surface mirrors the in-process service call.
 pub async fn vector_plane(state: &AppState, source_library_id: Uuid) -> anyhow::Result<()> {
     let outcome = state
-        .canonical_services
+        .application_services
         .search
         .rebuild_vector_plane_for_library(state, source_library_id)
         .await
@@ -41,7 +41,7 @@ pub async fn vector_plane(state: &AppState, source_library_id: Uuid) -> anyhow::
     Ok(())
 }
 
-/// Re-run the canonical runtime-graph projection for one library, or for
+/// Re-run the active runtime-graph projection for one library, or for
 /// every library when `library_filter` is `None`.
 ///
 /// Batch mode tolerates `StateConflict` errors per-library (graph source
@@ -60,37 +60,19 @@ pub async fn runtime_graph(state: &AppState, library_filter: Option<Uuid>) -> an
 
     let mut conflict_count = 0usize;
     for library in libraries {
-        info!(
-            library_id = %library.id,
-            workspace_id = %library.workspace_id,
-            library_name = %library.display_name,
-            "rebuilding runtime graph"
-        );
-        let outcome =
-            match state.canonical_services.graph.rebuild_library_graph(state, library.id).await {
-                Ok(outcome) => outcome,
-                Err(GraphServiceError::StateConflict { message }) if batch_mode => {
-                    conflict_count = conflict_count.saturating_add(1);
-                    warn!(
-                        library_id = %library.id,
-                        message = %message,
-                        "runtime graph rebuild skipped library because graph state is inconsistent",
-                    );
-                    continue;
-                }
-                Err(error) => {
-                    return Err(anyhow::Error::new(error)).with_context(|| {
-                        format!("failed to rebuild graph for library {}", library.id)
-                    });
-                }
-            };
-        info!(
-            library_id = %library.id,
-            projection_version = outcome.projection_version,
-            node_count = outcome.node_count,
-            edge_count = outcome.edge_count,
-            "runtime graph rebuild completed",
-        );
+        log_rebuilding_runtime_graph(&library);
+        match rebuild_one_library_graph(state, &library).await {
+            Ok(()) => {}
+            Err(GraphServiceError::StateConflict { message }) if batch_mode => {
+                conflict_count = conflict_count.saturating_add(1);
+                log_runtime_graph_rebuild_skipped(&library, &message);
+            }
+            Err(error) => {
+                return Err(anyhow::Error::new(error)).with_context(|| {
+                    format!("failed to rebuild graph for library {}", library.id)
+                });
+            }
+        }
     }
 
     if conflict_count > 0 {
@@ -99,6 +81,49 @@ pub async fn runtime_graph(state: &AppState, library_filter: Option<Uuid>) -> an
         );
     }
     Ok(())
+}
+
+/// Re-project one library's runtime graph and report the produced counters.
+async fn rebuild_one_library_graph(
+    state: &AppState,
+    library: &catalog_repository::CatalogLibraryRow,
+) -> Result<(), GraphServiceError> {
+    let outcome = state.application_services.graph.rebuild_library_graph(state, library.id).await?;
+    log_runtime_graph_rebuild_completed(library.id, &outcome);
+    Ok(())
+}
+
+fn log_rebuilding_runtime_graph(library: &catalog_repository::CatalogLibraryRow) {
+    info!(
+        library_id = %library.id,
+        workspace_id = %library.workspace_id,
+        library_name = %library.display_name,
+        "rebuilding runtime graph"
+    );
+}
+
+fn log_runtime_graph_rebuild_completed(
+    library_id: Uuid,
+    outcome: &crate::services::graph::projection::GraphProjectionOutcome,
+) {
+    info!(
+        library_id = %library_id,
+        projection_version = outcome.projection_version,
+        node_count = outcome.node_count,
+        edge_count = outcome.edge_count,
+        "runtime graph rebuild completed",
+    );
+}
+
+fn log_runtime_graph_rebuild_skipped(
+    library: &catalog_repository::CatalogLibraryRow,
+    message: &str,
+) {
+    warn!(
+        library_id = %library.id,
+        message = %message,
+        "runtime graph rebuild skipped library because graph state is inconsistent",
+    );
 }
 
 /// Re-embed every entity node in `library_id` into the per-dim
@@ -112,7 +137,7 @@ pub async fn runtime_graph(state: &AppState, library_filter: Option<Uuid>) -> an
 pub async fn entity_embeddings(state: &AppState, library_id: Uuid) -> anyhow::Result<usize> {
     // Fail-loud guard: check the binding before the heavy rebuild path.
     let binding = state
-        .canonical_services
+        .application_services
         .ai_catalog
         .resolve_active_runtime_binding(state, library_id, AiBindingPurpose::EmbedChunk)
         .await
@@ -124,7 +149,7 @@ pub async fn entity_embeddings(state: &AppState, library_id: Uuid) -> anyhow::Re
     }
 
     let vectors_upserted = state
-        .canonical_services
+        .application_services
         .search
         .rebuild_graph_node_embeddings(state, library_id)
         .await

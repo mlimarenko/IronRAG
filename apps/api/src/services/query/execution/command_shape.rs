@@ -48,6 +48,72 @@ pub(super) fn procedure_line_has_list_marker(line: &str) -> bool {
     trimmed.starts_with(['-', '*', '•']) || strip_explicit_numeric_order_marker(trimmed).is_some()
 }
 
+/// Rejects formal source-code shapes that can resemble shell invocations.
+/// The checks use delimiters, member-access structure, and assignment shape;
+/// they do not depend on programming-language keywords.
+pub(super) fn shellish_line_has_source_syntax(line: &str) -> bool {
+    let trimmed = strip_leading_procedure_order_marker(line).trim().trim_matches('`').trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    trimmed.starts_with([')', ']', '}'])
+        || trimmed.starts_with("\"\"\"")
+        || trimmed.starts_with("'''")
+        || delimiters_are_unbalanced(trimmed)
+        || line_has_member_access_source_shape(trimmed)
+}
+
+fn delimiters_are_unbalanced(line: &str) -> bool {
+    let mut stack = Vec::new();
+    for character in line.chars() {
+        match character {
+            '(' | '[' | '{' => stack.push(character),
+            ')' | ']' | '}' => {
+                let expected = match character {
+                    ')' => '(',
+                    ']' => '[',
+                    '}' => '{',
+                    _ => unreachable!(),
+                };
+                if stack.pop() != Some(expected) {
+                    return true;
+                }
+            }
+            _ => {}
+        }
+    }
+    !stack.is_empty()
+}
+
+fn line_has_member_access_source_shape(line: &str) -> bool {
+    let tokens = line.split_whitespace().collect::<Vec<_>>();
+    let Some(head) = tokens.first().copied() else {
+        return false;
+    };
+    let member_call = head.contains('.') && head.contains('(');
+    let member_assignment =
+        tokens.get(1).is_some_and(|token| *token == "=") && dotted_identifier_shape(head);
+    member_call || member_assignment
+}
+
+fn dotted_identifier_shape(value: &str) -> bool {
+    let mut segments = value.split('.');
+    let Some(first) = segments.next() else {
+        return false;
+    };
+    let Some(second) = segments.next() else {
+        return false;
+    };
+    identifier_segment_shape(first)
+        && identifier_segment_shape(second)
+        && segments.all(identifier_segment_shape)
+}
+
+fn identifier_segment_shape(value: &str) -> bool {
+    !value.is_empty()
+        && value.chars().all(|character| character.is_alphanumeric() || character == '_')
+}
+
 fn strip_explicit_numeric_order_marker(trimmed: &str) -> Option<&str> {
     let mut chars = trimmed.char_indices().peekable();
     let mut has_digit = false;
@@ -278,9 +344,9 @@ pub(super) fn shellish_token_is_command_argument_signal(token: &str) -> bool {
 mod tests {
     use super::{
         procedure_line_has_command_start, procedure_line_has_list_marker,
-        shellish_inline_token_starts_command, shellish_tokens_from_text,
-        shellish_tokens_start_command, strip_leading_numeric_order_marker,
-        strip_leading_procedure_order_marker,
+        shellish_inline_token_starts_command, shellish_line_has_source_syntax,
+        shellish_tokens_from_text, shellish_tokens_start_command,
+        strip_leading_numeric_order_marker, strip_leading_procedure_order_marker,
     };
 
     #[test]
@@ -308,6 +374,24 @@ mod tests {
             let tokens = shellish_tokens_from_text(text);
             assert!(!shellish_tokens_start_command(&tokens), "{tokens:?}");
             assert!(!procedure_line_has_command_start(text), "{text}");
+        }
+    }
+
+    #[test]
+    fn source_syntax_is_rejected_by_formal_shape() {
+        for text in [
+            "super().__init__(",
+            "self.raw_data = raw_data",
+            "str(self.raw_data).encode()",
+            ").hexdigest()[:16]",
+            "\"\"\"A docstring\"\"\"",
+        ] {
+            assert!(shellish_line_has_source_syntax(text), "{text}");
+        }
+        for text in
+            ["runner-tool --mode=strict", "runner.py --mode=strict", "./runner.sh /work/input.bin"]
+        {
+            assert!(!shellish_line_has_source_syntax(text), "{text}");
         }
     }
 

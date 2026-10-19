@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashSet};
 
 use uuid::Uuid;
 
@@ -37,6 +37,11 @@ struct QueryAuthorizedLibraryScope {
     all_libraries: bool,
     workspace_ids: Vec<Uuid>,
     library_ids: Vec<Uuid>,
+}
+
+pub(crate) struct VisibleCatalogSummary {
+    pub workspace_count: usize,
+    pub library_ids: Vec<Uuid>,
 }
 
 #[must_use]
@@ -264,50 +269,33 @@ pub(crate) async fn visible_libraries(
     Ok(libraries.into_iter().map(|item| item.descriptor).collect())
 }
 
-/// Concurrent (workspaces, libraries) load for MCP capability snapshots.
-///
-/// Used by the hot capability/initialize path to avoid issuing two
-/// sequential round-trips and the old workspace-level N+1 library
-/// fetch. Both lists are derived from the same underlying queries
-/// `load_visible_workspace_rows` and `load_visible_library_contexts`,
-/// which are run in parallel via `tokio::try_join!`.
-pub(crate) async fn visible_catalog(
+/// Loads only the counts and library ids required by MCP capability snapshots.
+/// The two ID-only catalog reads run concurrently; detailed descriptors,
+/// ingestion readiness, document coverage, and write flags remain exclusive to
+/// the catalog tools that report them.
+pub(crate) async fn visible_catalog_summary(
     auth: &AuthContext,
     state: &AppState,
-) -> Result<(Vec<McpWorkspaceDescriptor>, Vec<McpLibraryDescriptor>), ApiError> {
-    let (workspace_rows, libraries) = tokio::try_join!(
-        load_visible_workspace_rows(auth, state),
-        load_visible_library_contexts(auth, state, None),
-    )?;
+) -> Result<VisibleCatalogSummary, ApiError> {
+    let (workspace_ids, libraries) = tokio::try_join!(
+        catalog_repository::list_workspace_ids(&state.persistence.postgres),
+        catalog_repository::list_library_identities(&state.persistence.postgres),
+    )
+    .map_err(|error| ApiError::internal_with_log(error, "internal"))?;
+    let visible_workspace_ids = workspace_ids
+        .into_iter()
+        .filter(|workspace_id| authorize_workspace_discovery(auth, *workspace_id).is_ok())
+        .collect::<HashSet<_>>();
+    let library_ids = libraries
+        .into_iter()
+        .filter(|library| {
+            visible_workspace_ids.contains(&library.workspace_id)
+                && authorize_library_discovery(auth, library.workspace_id, library.id).is_ok()
+        })
+        .map(|library| library.id)
+        .collect();
 
-    // Group library descriptors by workspace so per-workspace counts
-    // are derived in memory rather than via additional queries.
-    let mut libs_by_workspace: std::collections::HashMap<Uuid, Vec<&McpLibraryDescriptor>> =
-        std::collections::HashMap::with_capacity(workspace_rows.len());
-    for library in &libraries {
-        libs_by_workspace
-            .entry(library.descriptor.workspace_id)
-            .or_default()
-            .push(&library.descriptor);
-    }
-
-    let mut workspaces = Vec::with_capacity(workspace_rows.len());
-    for workspace in workspace_rows {
-        let workspace_libs = libs_by_workspace.remove(&workspace.id).unwrap_or_default();
-        let can_write_any_library = workspace_libs.iter().any(|item| item.supports_write);
-        workspaces.push(McpWorkspaceDescriptor {
-            workspace_id: workspace.id,
-            catalog_ref: workspace_catalog_ref(&workspace.slug),
-            name: workspace.display_name,
-            status: workspace.lifecycle_state,
-            visible_library_count: workspace_libs.len(),
-            can_write_any_library,
-        });
-    }
-
-    let library_descriptors: Vec<McpLibraryDescriptor> =
-        libraries.into_iter().map(|item| item.descriptor).collect();
-    Ok((workspaces, library_descriptors))
+    Ok(VisibleCatalogSummary { workspace_count: visible_workspace_ids.len(), library_ids })
 }
 
 pub(crate) async fn create_workspace(
@@ -328,7 +316,7 @@ pub(crate) async fn create_workspace(
         .to_string();
 
     let workspace = state
-        .canonical_services
+        .application_services
         .catalog
         .create_workspace(
             state,
@@ -373,7 +361,7 @@ pub(crate) async fn create_library(
         .to_string();
 
     let library = state
-        .canonical_services
+        .application_services
         .catalog
         .create_library(
             state,
@@ -401,7 +389,7 @@ pub(crate) async fn create_library(
         .ok_or_else(|| ApiError::resource_not_found("library", library.id))?;
     let recognition_policy = parse_library_recognition_policy(&row)?;
     let readiness = state
-        .canonical_services
+        .application_services
         .catalog
         .get_library_ingestion_readiness(state, row.id, &recognition_policy)
         .await?;
@@ -469,7 +457,7 @@ pub(crate) async fn update_workspace(
     };
 
     state
-        .canonical_services
+        .application_services
         .catalog
         .update_workspace(
             state,
@@ -519,7 +507,7 @@ pub(crate) async fn update_library(
     };
 
     state
-        .canonical_services
+        .application_services
         .catalog
         .update_library(
             state,
@@ -541,7 +529,7 @@ pub(crate) async fn update_library(
         .ok_or_else(|| ApiError::resource_not_found("library", current.id))?;
     let recognition_policy = parse_library_recognition_policy(&row)?;
     let readiness = state
-        .canonical_services
+        .application_services
         .catalog
         .get_library_ingestion_readiness(state, row.id, &recognition_policy)
         .await?;
@@ -602,7 +590,7 @@ pub(crate) async fn describe_libraries(
         .map(|workspace| (workspace.id, workspace.slug))
         .collect::<std::collections::HashMap<_, _>>();
     let readiness_by_library = state
-        .canonical_services
+        .application_services
         .catalog
         .list_library_ingestion_readiness(state, &parse_library_recognition_policies(&libraries)?)
         .await?;
@@ -655,7 +643,7 @@ pub(crate) async fn describe_library(
     let supports_write =
         auth.has_library_permission(library.workspace_id, library.id, POLICY_LIBRARY_WRITE);
     let coverage = state
-        .canonical_services
+        .application_services
         .knowledge
         .get_library_knowledge_coverage(state, library.id)
         .await?;
@@ -733,8 +721,7 @@ mod tests {
         interfaces::http::{
             auth::{AuthGrant, AuthTokenKind},
             authorization::{
-                PERMISSION_IAM_ADMIN, PERMISSION_LIBRARY_READ, PERMISSION_LIBRARY_WRITE,
-                PERMISSION_QUERY_RUN,
+                PERMISSION_LIBRARY_READ, PERMISSION_LIBRARY_WRITE, PERMISSION_QUERY_RUN,
             },
         },
     };
@@ -818,28 +805,6 @@ mod tests {
                 library_ids: Vec::new(),
             }
         );
-
-        let system_grant =
-            auth_with_grants(vec![grant(111, "system", None, None, PERMISSION_IAM_ADMIN)]);
-        assert!(query_authorized_library_scope(&system_grant).all_libraries);
-    }
-
-    #[test]
-    fn query_authorized_scope_deduplicates_ids_and_ignores_malformed_grants() {
-        let workspace_id = Uuid::from_u128(30);
-        let library_id = Uuid::from_u128(31);
-        let auth = auth_with_grants(vec![
-            grant(120, "workspace", Some(workspace_id), None, PERMISSION_QUERY_RUN),
-            grant(121, "workspace", Some(workspace_id), None, PERMISSION_QUERY_RUN),
-            grant(122, "library", None, Some(library_id), PERMISSION_QUERY_RUN),
-            grant(123, "library", None, None, PERMISSION_QUERY_RUN),
-            grant(124, "workspace", None, None, PERMISSION_QUERY_RUN),
-        ]);
-
-        let scope = query_authorized_library_scope(&auth);
-
-        assert_eq!(scope.workspace_ids, vec![workspace_id]);
-        assert_eq!(scope.library_ids, vec![library_id]);
     }
 
     #[test]

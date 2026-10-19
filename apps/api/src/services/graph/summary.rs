@@ -1,13 +1,14 @@
 use std::collections::{BTreeSet, HashMap};
 
 use anyhow::Context;
+use sqlx::PgConnection;
 use uuid::Uuid;
 
 use crate::{
     app::state::AppState,
     domains::graph_quality::GraphSummaryConfidenceStatus,
     infra::repositories::{
-        self, RuntimeGraphEdgeRow, RuntimeGraphEvidenceRow, RuntimeGraphNodeRow, catalog_repository,
+        self, RuntimeGraphEdgeRow, RuntimeGraphEvidenceRow, RuntimeGraphNodeRow,
     },
     services::graph::{error::GraphServiceError, projection::active_projection_version},
 };
@@ -91,6 +92,42 @@ impl GraphSummaryRefreshRequest {
     }
 }
 
+fn log_graph_summary_refresh_stale(
+    library_id: Uuid,
+    expected_source_truth_version: i64,
+    observed_source_truth_version: i64,
+) {
+    tracing::warn!(
+        %library_id,
+        expected_source_truth_version,
+        observed_source_truth_version,
+        "skipping active graph summary refresh because a newer lifecycle publication committed",
+    );
+}
+
+fn log_graph_summary_refresh_rollback_failure(library_id: Uuid, rollback_error: &sqlx::Error) {
+    tracing::warn!(
+        %library_id,
+        ?rollback_error,
+        "failed to release graph summary source-generation guard after refresh error",
+    );
+}
+
+fn log_graph_summary_refresh_skipped(
+    library_id: Uuid,
+    affected_targets: usize,
+    refresh: &GraphSummaryRefreshRequest,
+) {
+    tracing::info!(
+        %library_id,
+        affected_targets,
+        inline_limit = INLINE_SUMMARY_REFRESH_TARGET_LIMIT,
+        targeted = refresh.is_targeted(),
+        broad = refresh.broad_refresh,
+        "skipping inline active graph summary generation for large graph publication",
+    );
+}
+
 impl GraphSummaryService {
     /// Applies deferred summary work only while the lifecycle publication's
     /// source generation is still current. `FOR SHARE` holds the parent row
@@ -110,8 +147,8 @@ impl GraphSummaryService {
             .begin()
             .await
             .context("failed to begin graph summary source-generation guard")?;
-        let observed_source_truth_version = sqlx::query_scalar::<_, i64>(
-            "select coalesce(source_truth_version, 1)
+        let generation = sqlx::query_as::<_, (i64, Uuid)>(
+            "select coalesce(source_truth_version, 1), workspace_id
              from catalog_library
              where id = $1
              for share",
@@ -120,19 +157,19 @@ impl GraphSummaryService {
         .fetch_optional(&mut *generation_guard)
         .await
         .context("failed to lock graph summary source generation")?
-        .ok_or(GraphServiceError::LibraryNotFound { library_id })?
-        .max(1);
+        .ok_or(GraphServiceError::LibraryNotFound { library_id })?;
+        let observed_source_truth_version = generation.0.max(1);
+        let workspace_id = generation.1;
 
         if observed_source_truth_version != expected_source_truth_version {
             generation_guard
                 .rollback()
                 .await
                 .context("failed to release stale graph summary source-generation guard")?;
-            tracing::warn!(
-                %library_id,
+            log_graph_summary_refresh_stale(
+                library_id,
                 expected_source_truth_version,
                 observed_source_truth_version,
-                "skipping canonical summary refresh because a newer lifecycle publication committed",
             );
             return Ok(PublishedGraphSummaryRefreshOutcome::GenerationMismatch {
                 observed_source_truth_version,
@@ -140,34 +177,9 @@ impl GraphSummaryService {
         }
 
         let refresh = pending.bind_source_truth_version(expected_source_truth_version);
-        let apply_result = async {
-            let invalidated = self.invalidate_summaries(state, library_id, &refresh).await?;
-            let affected_targets = affected_summary_target_count(state, library_id, &refresh)
-                .await
-                .context("failed to count post-publication canonical summary targets")?;
-            let refreshed = if self
-                .should_batch_refresh(affected_targets, INLINE_SUMMARY_REFRESH_TARGET_LIMIT)
-            {
-                self.refresh_summaries(state, library_id, &refresh).await?
-            } else {
-                if affected_targets > 0 {
-                    tracing::info!(
-                        %library_id,
-                        affected_targets,
-                        inline_limit = INLINE_SUMMARY_REFRESH_TARGET_LIMIT,
-                        targeted = refresh.is_targeted(),
-                        broad = refresh.broad_refresh,
-                        "skipping inline canonical summary generation for large graph publication",
-                    );
-                }
-                0
-            };
-            Ok::<_, GraphServiceError>(PublishedGraphSummaryRefreshOutcome::Applied {
-                invalidated,
-                refreshed,
-            })
-        }
-        .await;
+        let apply_result = self
+            .apply_summary_refresh_locked(&mut generation_guard, workspace_id, library_id, &refresh)
+            .await;
 
         match apply_result {
             Ok(outcome) => {
@@ -179,28 +191,48 @@ impl GraphSummaryService {
             }
             Err(error) => {
                 if let Err(rollback_error) = generation_guard.rollback().await {
-                    tracing::warn!(
-                        %library_id,
-                        ?rollback_error,
-                        "failed to release graph summary source-generation guard after refresh error",
-                    );
+                    log_graph_summary_refresh_rollback_failure(library_id, &rollback_error);
                 }
                 Err(error)
             }
         }
     }
 
+    /// Applies invalidation and the conditional inline refresh on the held guard.
+    async fn apply_summary_refresh_locked(
+        &self,
+        connection: &mut PgConnection,
+        workspace_id: Uuid,
+        library_id: Uuid,
+        refresh: &GraphSummaryRefreshRequest,
+    ) -> Result<PublishedGraphSummaryRefreshOutcome, GraphServiceError> {
+        let invalidated = self.invalidate_summaries(connection, library_id, refresh).await?;
+        let affected_targets = affected_summary_target_count(&mut *connection, library_id, refresh)
+            .await
+            .context("failed to count post-publication active graph summary targets")?;
+        let refreshed =
+            if self.should_batch_refresh(affected_targets, INLINE_SUMMARY_REFRESH_TARGET_LIMIT) {
+                self.refresh_summaries(&mut *connection, workspace_id, library_id, refresh).await?
+            } else {
+                if affected_targets > 0 {
+                    log_graph_summary_refresh_skipped(library_id, affected_targets, refresh);
+                }
+                0
+            };
+        Ok(PublishedGraphSummaryRefreshOutcome::Applied { invalidated, refreshed })
+    }
+
     async fn invalidate_summaries(
         &self,
-        state: &AppState,
+        connection: &mut PgConnection,
         library_id: Uuid,
         refresh: &GraphSummaryRefreshRequest,
     ) -> Result<u64, GraphServiceError> {
         let source_truth_version = refresh.source_truth_version;
 
         if refresh.is_targeted() {
-            Ok(repositories::supersede_runtime_graph_canonical_summaries_for_targets(
-                &state.persistence.postgres,
+            Ok(repositories::supersede_runtime_graph_summaries_for_targets_with_executor(
+                &mut *connection,
                 library_id,
                 source_truth_version,
                 &refresh.node_ids,
@@ -208,16 +240,18 @@ impl GraphSummaryService {
             )
             .await
             .context(
-                "failed to supersede targeted canonical summaries after source-truth change",
+                "failed to supersede targeted active graph summaries after source-truth change",
             )?)
         } else if refresh.broad_refresh {
-            Ok(repositories::supersede_runtime_graph_canonical_summaries_for_library(
-                &state.persistence.postgres,
+            Ok(repositories::supersede_runtime_graph_summaries_for_library_with_executor(
+                &mut *connection,
                 library_id,
                 source_truth_version,
             )
             .await
-            .context("failed to supersede library canonical summaries after source-truth change")?)
+            .context(
+                "failed to supersede library active graph summaries after source-truth change",
+            )?)
         } else {
             Ok(0)
         }
@@ -230,28 +264,21 @@ impl GraphSummaryService {
 
     async fn refresh_summaries(
         &self,
-        state: &AppState,
+        connection: &mut PgConnection,
+        workspace_id: Uuid,
         library_id: Uuid,
         refresh: &GraphSummaryRefreshRequest,
     ) -> Result<u64, GraphServiceError> {
         let source_truth_version = refresh.source_truth_version;
 
-        let Some(library) =
-            catalog_repository::get_library_by_id(&state.persistence.postgres, library_id)
-                .await
-                .context("failed to load library while refreshing canonical summaries")?
-        else {
-            return Err(GraphServiceError::LibraryNotFound { library_id });
-        };
-
         let snapshot =
-            repositories::get_runtime_graph_snapshot(&state.persistence.postgres, library_id)
+            repositories::get_runtime_graph_snapshot_with_executor(&mut *connection, library_id)
                 .await
                 .context("failed to load runtime graph snapshot while refreshing summaries")?;
         let projection_version = active_projection_version(snapshot.as_ref());
 
-        let nodes = load_target_nodes(state, library_id, projection_version, refresh).await?;
-        let edges = load_target_edges(state, library_id, projection_version, refresh).await?;
+        let nodes = load_target_nodes(connection, library_id, projection_version, refresh).await?;
+        let edges = load_target_edges(connection, library_id, projection_version, refresh).await?;
         if nodes.is_empty() && edges.is_empty() {
             return Ok(0);
         }
@@ -266,14 +293,15 @@ impl GraphSummaryService {
             .into_iter()
             .collect::<Vec<_>>();
         if !missing_endpoint_ids.is_empty() {
-            let endpoint_nodes = repositories::list_admitted_runtime_graph_nodes_by_ids(
-                &state.persistence.postgres,
-                library_id,
-                projection_version,
-                &missing_endpoint_ids,
-            )
-            .await
-            .context("failed to load endpoint nodes for canonical edge summaries")?;
+            let endpoint_nodes =
+                repositories::list_admitted_runtime_graph_nodes_by_ids_with_executor(
+                    &mut *connection,
+                    library_id,
+                    projection_version,
+                    &missing_endpoint_ids,
+                )
+                .await
+                .context("failed to load endpoint nodes for normalized edge summaries")?;
             for node in endpoint_nodes {
                 node_label_index.insert(node.id, node.label);
             }
@@ -281,8 +309,8 @@ impl GraphSummaryService {
 
         let mut refreshed = 0u64;
         for node in &nodes {
-            let evidence = repositories::list_runtime_graph_evidence_by_target(
-                &state.persistence.postgres,
+            let evidence = repositories::list_runtime_graph_evidence_by_target_with_executor(
+                &mut *connection,
                 library_id,
                 "node",
                 node.id,
@@ -291,10 +319,10 @@ impl GraphSummaryService {
             .with_context(|| format!("failed to load active evidence for node {}", node.id))?;
             let (summary_text, confidence_status, warning_text) =
                 build_node_summary(node, &evidence);
-            repositories::upsert_runtime_graph_canonical_summary(
-                &state.persistence.postgres,
-                &repositories::UpsertRuntimeGraphCanonicalSummaryInput {
-                    workspace_id: library.workspace_id,
+            repositories::upsert_runtime_graph_target_summary_with_connection(
+                connection,
+                &repositories::UpsertRuntimeGraphTargetSummaryInput {
+                    workspace_id,
                     library_id,
                     target_kind: "node".to_string(),
                     target_id: node.id,
@@ -307,13 +335,15 @@ impl GraphSummaryService {
                 },
             )
             .await
-            .with_context(|| format!("failed to upsert canonical summary for node {}", node.id))?;
+            .with_context(|| {
+                format!("failed to upsert active graph summary for node {}", node.id)
+            })?;
             refreshed += 1;
         }
 
         for edge in &edges {
-            let evidence = repositories::list_runtime_graph_evidence_by_target(
-                &state.persistence.postgres,
+            let evidence = repositories::list_runtime_graph_evidence_by_target_with_executor(
+                &mut *connection,
                 library_id,
                 "edge",
                 edge.id,
@@ -330,10 +360,10 @@ impl GraphSummaryService {
                 .unwrap_or_else(|| edge.to_node_id.to_string());
             let (summary_text, confidence_status, warning_text) =
                 build_edge_summary(edge, &from_label, &to_label, &evidence);
-            repositories::upsert_runtime_graph_canonical_summary(
-                &state.persistence.postgres,
-                &repositories::UpsertRuntimeGraphCanonicalSummaryInput {
-                    workspace_id: library.workspace_id,
+            repositories::upsert_runtime_graph_target_summary_with_connection(
+                connection,
+                &repositories::UpsertRuntimeGraphTargetSummaryInput {
+                    workspace_id,
                     library_id,
                     target_kind: "edge".to_string(),
                     target_id: edge.id,
@@ -346,7 +376,9 @@ impl GraphSummaryService {
                 },
             )
             .await
-            .with_context(|| format!("failed to upsert canonical summary for edge {}", edge.id))?;
+            .with_context(|| {
+                format!("failed to upsert active graph summary for edge {}", edge.id)
+            })?;
             refreshed += 1;
         }
 
@@ -355,7 +387,7 @@ impl GraphSummaryService {
 }
 
 async fn affected_summary_target_count(
-    state: &AppState,
+    connection: &mut PgConnection,
     library_id: Uuid,
     refresh: &GraphSummaryRefreshRequest,
 ) -> anyhow::Result<usize> {
@@ -366,7 +398,7 @@ async fn affected_summary_target_count(
         return Ok(0);
     }
     let snapshot =
-        repositories::get_runtime_graph_snapshot(&state.persistence.postgres, library_id)
+        repositories::get_runtime_graph_snapshot_with_executor(&mut *connection, library_id)
             .await
             .context("failed to load runtime graph snapshot for summary refresh sizing")?;
     let Some(snapshot) = snapshot else {
@@ -378,14 +410,14 @@ async fn affected_summary_target_count(
 }
 
 async fn load_target_nodes(
-    state: &AppState,
+    connection: &mut PgConnection,
     library_id: Uuid,
     projection_version: i64,
     refresh: &GraphSummaryRefreshRequest,
 ) -> anyhow::Result<Vec<RuntimeGraphNodeRow>> {
     if refresh.is_targeted() {
-        repositories::list_admitted_runtime_graph_nodes_by_ids(
-            &state.persistence.postgres,
+        repositories::list_admitted_runtime_graph_nodes_by_ids_with_executor(
+            &mut *connection,
             library_id,
             projection_version,
             &refresh.node_ids,
@@ -393,8 +425,8 @@ async fn load_target_nodes(
         .await
         .context("failed to load targeted graph nodes for summary refresh")
     } else {
-        repositories::list_admitted_runtime_graph_nodes_by_library(
-            &state.persistence.postgres,
+        repositories::list_admitted_runtime_graph_nodes_by_library_with_executor(
+            &mut *connection,
             library_id,
             projection_version,
         )
@@ -404,14 +436,14 @@ async fn load_target_nodes(
 }
 
 async fn load_target_edges(
-    state: &AppState,
+    connection: &mut PgConnection,
     library_id: Uuid,
     projection_version: i64,
     refresh: &GraphSummaryRefreshRequest,
 ) -> anyhow::Result<Vec<RuntimeGraphEdgeRow>> {
     if refresh.is_targeted() {
-        repositories::list_admitted_runtime_graph_edges_by_ids(
-            &state.persistence.postgres,
+        repositories::list_admitted_runtime_graph_edges_by_ids_with_executor(
+            &mut *connection,
             library_id,
             projection_version,
             &refresh.edge_ids,
@@ -419,8 +451,8 @@ async fn load_target_edges(
         .await
         .context("failed to load targeted graph edges for summary refresh")
     } else {
-        repositories::list_admitted_runtime_graph_edges_by_library(
-            &state.persistence.postgres,
+        repositories::list_admitted_runtime_graph_edges_by_library_with_executor(
+            &mut *connection,
             library_id,
             projection_version,
         )
@@ -652,7 +684,7 @@ mod tests {
         let node = RuntimeGraphNodeRow {
             id: Uuid::nil(),
             library_id: Uuid::nil(),
-            canonical_key: "entity:budget".to_string(),
+            identity_key: "entity:budget".to_string(),
             label: "Budget".to_string(),
             node_type: "entity".to_string(),
             aliases_json: serde_json::json!(["Budget"]),
@@ -679,7 +711,7 @@ mod tests {
             from_node_id: Uuid::nil(),
             to_node_id: Uuid::now_v7(),
             relation_type: "reports_to".to_string(),
-            canonical_key: "entity:a--reports_to--entity:b".to_string(),
+            identity_key: "entity:a--reports_to--entity:b".to_string(),
             summary: None,
             weight: None,
             support_count: 1,

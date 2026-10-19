@@ -1,63 +1,45 @@
-use std::{sync::Arc, time::Instant};
+use std::{sync::Arc, time::Duration};
 
-use tokio::{sync::broadcast, task::JoinSet, time};
-use tokio_util::sync::CancellationToken;
-use tracing::{error, info, warn};
-use uuid::Uuid;
-
-use crate::{
-    app::state::AppState,
-    infra::{persistence, repositories::ingest_repository},
+use tokio::{
+    sync::broadcast,
+    task::{JoinHandle, JoinSet},
+    time,
 };
+use tokio_util::sync::CancellationToken;
+use tracing::{error, info};
+
+use crate::{app::state::AppState, infra::persistence};
 
 use super::{
-    CANONICAL_LEASE_RECOVERY_INTERVAL, CANONICAL_STALE_LEASE_SECONDS,
-    CANONICAL_STARTUP_LEASE_RECOVERY_SECONDS, WORKER_POLL_INTERVAL, execute_canonical_ingest_job,
-    fail_canonical_ingest_job,
+    claim::{
+        ClaimLimits, IngestJobOutcome, fill_available_job_slots, memory_bound_process_claim_limit,
+    },
+    failure::fail_ingest_job,
+    maintenance::{
+        reclaim_orphaned_leases_on_startup, run_graph_backfill_loop, run_graph_maintenance_loop,
+        run_ingest_lease_recovery_loop, spawn_external_stale_lease_reaper,
+    },
 };
 
-const PROCESS_CLAIM_MEMORY_RESERVED_MIB: u64 = 256;
-const PROCESS_CLAIM_MEMORY_PER_JOB_MIB: u64 = 512;
+/// How often each worker polls the ingest queue for new jobs.
+const WORKER_POLL_INTERVAL: Duration = Duration::from_secs(2);
 
-pub(super) async fn run_ingestion_worker_pool(
-    state: Arc<AppState>,
-    mut shutdown: broadcast::Receiver<()>,
-) {
-    let global_limit = state.settings.ingestion_max_parallel_jobs_global.max(1);
-    let process_db_limit = persistence::worker_process_db_job_limit(&state.settings);
-    let workspace_limit = state.settings.ingestion_max_parallel_jobs_per_workspace.max(1);
-    let library_limit = state.settings.ingestion_max_parallel_jobs_per_library.max(1);
-    let memory_soft_limit_mib = crate::shared::telemetry::resolve_memory_soft_limit_mib(
-        state.settings.ingestion_memory_soft_limit_mib,
-    );
-    let configured_process_claim_limit = global_limit.min(process_db_limit).max(1);
-    let memory_bound_process_claim_limit = memory_bound_process_claim_limit(memory_soft_limit_mib);
-    let process_claim_limit =
-        configured_process_claim_limit.min(memory_bound_process_claim_limit).max(1);
-    let memory_soft_limit_source = if state.settings.ingestion_memory_soft_limit_mib > 0 {
-        "config"
-    } else if memory_soft_limit_mib > 0 {
-        "auto:cgroup"
-    } else {
-        "disabled"
-    };
+#[must_use]
+pub fn spawn_ingestion_worker(
+    state: AppState,
+    shutdown: broadcast::Receiver<()>,
+) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        run_ingestion_worker_pool(Arc::new(state), shutdown).await;
+    })
+}
+
+async fn run_ingestion_worker_pool(state: Arc<AppState>, mut shutdown: broadcast::Receiver<()>) {
+    let capacity = ingestion_dispatcher_capacity(&state);
     let shutdown_cancellation_token = CancellationToken::new();
-    let mut next_worker_index = 0usize;
     let mut active_jobs = JoinSet::new();
-
     state.worker_runtime.mark_idle().await;
-    info!(
-        global_limit,
-        process_claim_limit,
-        configured_process_claim_limit,
-        memory_bound_process_claim_limit,
-        process_db_limit,
-        workspace_limit,
-        library_limit,
-        memory_soft_limit_mib,
-        memory_soft_limit_source,
-        "starting canonical ingestion dispatcher",
-    );
+    log_dispatcher_start(&capacity);
 
     // Startup sweep: reclaim any `leased` rows orphaned by a previous process
     // that crashed or was restarted before it could finalize. This closes the
@@ -68,18 +50,18 @@ pub(super) async fn run_ingestion_worker_pool(
     reclaim_orphaned_leases_on_startup(&state).await;
 
     let lease_recovery_handle =
-        tokio::spawn(run_canonical_lease_recovery_loop(state.clone(), shutdown.resubscribe()));
+        tokio::spawn(run_ingest_lease_recovery_loop(state.clone(), shutdown.resubscribe()));
 
     // Periodic self-healing pass for documents stuck with `ready` extraction
     // but no graph node — see services/graph/backfill.rs for the background.
-    // The per-job hook in worker.rs only fires when ingest traffic is flowing;
+    // The per-job hook in pipeline.rs only fires when ingest traffic is flowing;
     // on an idle queue this loop makes sure the gap still closes on its own.
     let graph_backfill_handle =
         tokio::spawn(run_graph_backfill_loop(state.clone(), shutdown.resubscribe()));
     let graph_maintenance_handle =
         tokio::spawn(run_graph_maintenance_loop(state.clone(), shutdown.resubscribe()));
 
-    // Canonical out-of-band stale-lease reaper. Unlike the in-tokio
+    // Out-of-band stale-lease reaper. Unlike the in-tokio
     // recovery loop above, this runs on a dedicated OS thread with its
     // own mini tokio runtime and its own pg pool handle. Whenever the
     // main runtime becomes saturated by CPU-bound ingest work (graph
@@ -91,37 +73,14 @@ pub(super) async fn run_ingestion_worker_pool(
     // with the main connection pool that the stuck worker is holding.
     spawn_external_stale_lease_reaper(state.persistence.heartbeat_postgres.clone());
 
-    loop {
-        fill_available_job_slots(
-            state.clone(),
-            &mut active_jobs,
-            &mut next_worker_index,
-            process_claim_limit,
-            global_limit,
-            workspace_limit,
-            library_limit,
-            memory_soft_limit_mib,
-            &shutdown_cancellation_token,
-        )
-        .await;
-        sync_worker_runtime_snapshot(&state, active_jobs.len()).await;
-
-        tokio::select! {
-            _ = shutdown.recv() => {
-                shutdown_cancellation_token.cancel();
-                info!("stopping canonical ingestion dispatcher");
-                break;
-            }
-            maybe_result = active_jobs.join_next(), if !active_jobs.is_empty() => {
-                if let Some(result) = maybe_result {
-                    handle_job_join_result(&state, result).await;
-                }
-            }
-            () = time::sleep(WORKER_POLL_INTERVAL) => {
-                state.worker_runtime.touch().await;
-            }
-        }
-    }
+    dispatch_until_shutdown(
+        &state,
+        &mut shutdown,
+        &shutdown_cancellation_token,
+        &mut active_jobs,
+        capacity.limits,
+    )
+    .await;
 
     while let Some(result) = active_jobs.join_next().await {
         handle_job_join_result(&state, result).await;
@@ -129,149 +88,182 @@ pub(super) async fn run_ingestion_worker_pool(
 
     state.worker_runtime.mark_idle().await;
 
+    join_maintenance_tasks(
+        &state,
+        lease_recovery_handle,
+        graph_backfill_handle,
+        graph_maintenance_handle,
+    )
+    .await;
+}
+
+struct IngestDispatcherCapacity {
+    limits: ClaimLimits,
+    process_db_limit: usize,
+    configured_process_claim_limit: usize,
+    memory_bound_process_claim_limit: usize,
+    memory_soft_limit_source: &'static str,
+}
+
+fn ingestion_dispatcher_capacity(state: &AppState) -> IngestDispatcherCapacity {
+    let global_limit = state.settings.ingestion_max_parallel_jobs_global.max(1);
+    let process_db_limit = persistence::worker_process_db_job_limit(&state.settings);
+    let memory_soft_limit_mib = crate::shared::telemetry::resolve_memory_soft_limit_mib(
+        state.settings.ingestion_memory_soft_limit_mib,
+    );
+    let configured_process_claim_limit = global_limit.min(process_db_limit).max(1);
+    let memory_bound_process_claim_limit = memory_bound_process_claim_limit(memory_soft_limit_mib);
+    let limits = ClaimLimits {
+        process_claim_limit: configured_process_claim_limit
+            .min(memory_bound_process_claim_limit)
+            .max(1),
+        global_limit,
+        workspace_limit: state.settings.ingestion_max_parallel_jobs_per_workspace.max(1),
+        library_limit: state.settings.ingestion_max_parallel_jobs_per_library.max(1),
+        memory_soft_limit_mib,
+    };
+    IngestDispatcherCapacity {
+        limits,
+        process_db_limit,
+        configured_process_claim_limit,
+        memory_bound_process_claim_limit,
+        memory_soft_limit_source: memory_soft_limit_source(
+            state.settings.ingestion_memory_soft_limit_mib,
+            memory_soft_limit_mib,
+        ),
+    }
+}
+
+fn log_dispatcher_start(capacity: &IngestDispatcherCapacity) {
+    let ClaimLimits {
+        global_limit,
+        process_claim_limit,
+        workspace_limit,
+        library_limit,
+        memory_soft_limit_mib,
+    } = capacity.limits;
+    let IngestDispatcherCapacity {
+        process_db_limit,
+        configured_process_claim_limit,
+        memory_bound_process_claim_limit,
+        memory_soft_limit_source,
+        ..
+    } = *capacity;
+    info!(
+        global_limit,
+        process_claim_limit,
+        configured_process_claim_limit,
+        memory_bound_process_claim_limit,
+        process_db_limit,
+        workspace_limit,
+        library_limit,
+        memory_soft_limit_mib,
+        memory_soft_limit_source,
+        "starting ingestion dispatcher"
+    );
+}
+
+fn memory_soft_limit_source(configured_mib: u64, resolved_mib: u64) -> &'static str {
+    if configured_mib > 0 {
+        "config"
+    } else if resolved_mib > 0 {
+        "auto:cgroup"
+    } else {
+        "disabled"
+    }
+}
+
+async fn dispatch_until_shutdown(
+    state: &Arc<AppState>,
+    shutdown: &mut broadcast::Receiver<()>,
+    shutdown_cancellation_token: &CancellationToken,
+    active_jobs: &mut JoinSet<IngestJobOutcome>,
+    limits: ClaimLimits,
+) {
+    let mut next_worker_index = 0usize;
+    loop {
+        fill_available_job_slots(
+            state.clone(),
+            active_jobs,
+            &mut next_worker_index,
+            ClaimLimits {
+                process_claim_limit: limits.process_claim_limit,
+                global_limit: limits.global_limit,
+                workspace_limit: limits.workspace_limit,
+                library_limit: limits.library_limit,
+                memory_soft_limit_mib: limits.memory_soft_limit_mib,
+            },
+            shutdown_cancellation_token,
+        )
+        .await;
+        sync_worker_runtime_snapshot(state, active_jobs.len()).await;
+        if !wait_for_dispatcher_event(state, shutdown, shutdown_cancellation_token, active_jobs)
+            .await
+        {
+            break;
+        }
+    }
+}
+
+async fn wait_for_dispatcher_event(
+    state: &Arc<AppState>,
+    shutdown: &mut broadcast::Receiver<()>,
+    shutdown_cancellation_token: &CancellationToken,
+    active_jobs: &mut JoinSet<IngestJobOutcome>,
+) -> bool {
+    tokio::select! {
+        _ = shutdown.recv() => {
+            stop_ingest_dispatcher(shutdown_cancellation_token);
+            false
+        }
+        maybe_result = active_jobs.join_next(), if !active_jobs.is_empty() => {
+            if let Some(result) = maybe_result {
+                handle_job_join_result(state, result).await;
+            }
+            true
+        }
+        () = time::sleep(WORKER_POLL_INTERVAL) => {
+            state.worker_runtime.touch().await;
+            true
+        }
+    }
+}
+
+fn stop_ingest_dispatcher(shutdown_cancellation_token: &CancellationToken) {
+    shutdown_cancellation_token.cancel();
+    info!("stopping ingestion dispatcher");
+}
+
+async fn join_maintenance_tasks(
+    state: &AppState,
+    lease_recovery_handle: JoinHandle<()>,
+    graph_backfill_handle: JoinHandle<()>,
+    graph_maintenance_handle: JoinHandle<()>,
+) {
+    join_lease_recovery_task(state, lease_recovery_handle).await;
+    join_graph_backfill_task(graph_backfill_handle).await;
+    join_graph_maintenance_task(graph_maintenance_handle).await;
+}
+
+async fn join_graph_backfill_task(graph_backfill_handle: JoinHandle<()>) {
+    if let Err(error) = graph_backfill_handle.await {
+        error!(?error, "graph backfill loop crashed");
+    }
+}
+
+async fn join_graph_maintenance_task(graph_maintenance_handle: JoinHandle<()>) {
+    if let Err(error) = graph_maintenance_handle.await {
+        error!(?error, "graph maintenance loop crashed");
+    }
+}
+
+async fn join_lease_recovery_task(state: &AppState, lease_recovery_handle: JoinHandle<()>) {
     if let Err(error) = lease_recovery_handle.await {
         state
             .worker_runtime
             .mark_error(format!("ingestion lease recovery task crashed: {error}"))
             .await;
         error!(?error, "ingestion lease recovery task crashed");
-    }
-    if let Err(error) = graph_backfill_handle.await {
-        error!(?error, "graph backfill loop crashed");
-    }
-    if let Err(error) = graph_maintenance_handle.await {
-        error!(?error, "graph maintenance loop crashed");
-    }
-}
-
-struct CanonicalJobOutcome {
-    job_id: Uuid,
-    worker_id: String,
-    job_kind: String,
-    library_id: Uuid,
-    started_at: Instant,
-    result: anyhow::Result<()>,
-}
-
-fn canonical_worker_id(service_name: &str, worker_index: usize) -> String {
-    format!("{service_name}:canonical:{worker_index}:{}", Uuid::now_v7())
-}
-
-fn memory_bound_process_claim_limit(memory_soft_limit_mib: u64) -> usize {
-    if memory_soft_limit_mib == 0 {
-        return usize::MAX;
-    }
-    let job_slots = memory_soft_limit_mib
-        .saturating_sub(PROCESS_CLAIM_MEMORY_RESERVED_MIB)
-        .checked_div(PROCESS_CLAIM_MEMORY_PER_JOB_MIB)
-        .unwrap_or(0);
-    usize::try_from(job_slots.max(1)).unwrap_or(usize::MAX)
-}
-
-async fn fill_available_job_slots(
-    state: Arc<AppState>,
-    active_jobs: &mut JoinSet<CanonicalJobOutcome>,
-    next_worker_index: &mut usize,
-    process_claim_limit: usize,
-    global_limit: usize,
-    workspace_limit: usize,
-    library_limit: usize,
-    memory_soft_limit_mib: u64,
-    shutdown_cancellation_token: &CancellationToken,
-) {
-    // The SQL query still enforces the deployment-wide global cap. This loop
-    // adds the per-process cap derived from the worker's DB pools so one
-    // replica cannot lease more jobs than its heartbeat/main pools can serve.
-    while active_jobs.len() < process_claim_limit {
-        // Memory-aware backpressure. The static parallelism limits above are
-        // the *ceiling* — actual concurrency also drops automatically when
-        // the worker process RSS approaches the soft limit, so a burst of
-        // heavy docs cannot stack past the cgroup. When one of the in-flight
-        // jobs finishes and frees memory, the dispatcher resumes claiming.
-        if memory_soft_limit_mib > 0
-            && !active_jobs.is_empty()
-            && let Some(rss_bytes) = crate::shared::telemetry::current_process_rss_bytes()
-        {
-            let rss_mib = rss_bytes / (1024 * 1024);
-            if rss_mib >= memory_soft_limit_mib {
-                warn!(
-                    rss_mib,
-                    memory_soft_limit_mib,
-                    active_jobs = active_jobs.len(),
-                    "ingest dispatcher holding claims: worker RSS over soft limit",
-                );
-                break;
-            }
-        }
-        state.worker_runtime.touch().await;
-        let queue_lease_token = format!("queue-{}", Uuid::now_v7());
-        let queue_lease_owner =
-            canonical_worker_id(&state.settings.service_name, *next_worker_index);
-        match ingest_repository::claim_next_queued_ingest_job(
-            &state.persistence.postgres,
-            &queue_lease_token,
-            &queue_lease_owner,
-            library_limit as i64,
-            workspace_limit as i64,
-            global_limit as i64,
-        )
-        .await
-        {
-            Ok(Some(job)) => {
-                let started_at = Instant::now();
-                let job_id = job.id;
-                let job_kind = job.job_kind.clone();
-                let library_id = job.library_id;
-                let worker_id = queue_lease_owner;
-                *next_worker_index = next_worker_index.saturating_add(1);
-                info!(
-                    %worker_id,
-                    %job_id,
-                    job_kind = %job_kind,
-                    library_id = %library_id,
-                    "claimed canonical ingest job",
-                );
-                active_jobs.spawn({
-                    let state = state.clone();
-                    let worker_id = worker_id.clone();
-                    let job_cancellation_token = shutdown_cancellation_token.child_token();
-                    async move {
-                        // Each ingest job runs in its own spawned task, so the
-                        // provider-budget lane must be established here: the
-                        // task-local lane does not cross the `spawn` boundary.
-                        // Marking ingest keeps its fan-out off the
-                        // query-reserved budget.
-                        let result = Box::pin(crate::integrations::provider_budget::with_lane(
-                            crate::integrations::provider_budget::ProviderLane::Ingest,
-                            execute_canonical_ingest_job(
-                                state,
-                                &worker_id,
-                                job,
-                                job_cancellation_token,
-                            ),
-                        ))
-                        .await;
-                        CanonicalJobOutcome {
-                            job_id,
-                            worker_id,
-                            job_kind,
-                            library_id,
-                            started_at,
-                            result,
-                        }
-                    }
-                });
-            }
-            Ok(None) => break,
-            Err(error) => {
-                state
-                    .worker_runtime
-                    .mark_error(format!("failed to claim canonical ingest job: {error}"))
-                    .await;
-                warn!(?error, "failed to claim canonical ingest job");
-                break;
-            }
-        }
     }
 }
 
@@ -281,15 +273,12 @@ async fn sync_worker_runtime_snapshot(state: &Arc<AppState>, active_job_count: u
         return;
     }
 
-    state
-        .worker_runtime
-        .mark_active(format!("processing {active_job_count} canonical ingest jobs"))
-        .await;
+    state.worker_runtime.mark_active(format!("processing {active_job_count} ingest jobs")).await;
 }
 
 async fn handle_job_join_result(
     state: &Arc<AppState>,
-    result: Result<CanonicalJobOutcome, tokio::task::JoinError>,
+    result: Result<IngestJobOutcome, tokio::task::JoinError>,
 ) {
     match result {
         Ok(outcome) => handle_job_outcome(state, outcome).await,
@@ -303,7 +292,7 @@ async fn handle_job_join_result(
     }
 }
 
-async fn handle_job_outcome(state: &Arc<AppState>, outcome: CanonicalJobOutcome) {
+async fn handle_job_outcome(state: &Arc<AppState>, outcome: IngestJobOutcome) {
     match outcome.result {
         Ok(()) => {
             state.worker_runtime.touch().await;
@@ -311,7 +300,7 @@ async fn handle_job_outcome(state: &Arc<AppState>, outcome: CanonicalJobOutcome)
         Err(error) => {
             state
                 .worker_runtime
-                .mark_error(format!("canonical ingest job {} failed: {error}", outcome.job_id))
+                .mark_error(format!("ingest job {} failed: {error}", outcome.job_id))
                 .await;
             let elapsed_ms = outcome.started_at.elapsed().as_millis();
             error!(
@@ -321,284 +310,22 @@ async fn handle_job_outcome(state: &Arc<AppState>, outcome: CanonicalJobOutcome)
                 library_id = %outcome.library_id,
                 elapsed_ms,
                 ?error,
-                "canonical ingest job failed",
+                "ingest job failed",
             );
-            fail_canonical_ingest_job(state, outcome.job_id, &outcome.worker_id, &error).await;
+            fail_ingest_job(state, outcome.job_id, &outcome.worker_id, &error).await;
         }
-    }
-}
-
-/// One-shot startup reclamation. Runs synchronously before the dispatcher
-/// starts claiming new jobs so the first thing the new process does is flush
-/// any orphaned `leased` rows from the crashed/restarted predecessor. Uses a
-/// shorter threshold than the steady-state loop because at boot we know this
-/// process holds zero active leases — two missed heartbeats is already enough
-/// evidence that the old owner is gone.
-async fn reclaim_orphaned_leases_on_startup(state: &Arc<AppState>) {
-    let threshold = chrono::Duration::seconds(CANONICAL_STARTUP_LEASE_RECOVERY_SECONDS);
-    match ingest_repository::recover_stale_canonical_leases(&state.persistence.postgres, threshold)
-        .await
-    {
-        Ok(0) => {
-            info!("startup lease sweep: no orphaned canonical leases to reclaim");
-        }
-        Ok(recovered) => {
-            warn!(
-                recovered,
-                threshold_seconds = CANONICAL_STARTUP_LEASE_RECOVERY_SECONDS,
-                "startup lease sweep: reclaimed orphaned canonical ingest leases after worker pool boot"
-            );
-        }
-        Err(error) => {
-            error!(
-                ?error,
-                "startup lease sweep failed; dispatcher will proceed and rely on the periodic recovery loop"
-            );
-        }
-    }
-}
-
-/// Tick interval for the idle-path graph backfill loop. Chosen to comfortably
-/// exceed the per-library backfill debounce (60 s) so the loop never races the
-/// per-job hook, while still catching up within a few minutes on an idle
-/// queue.
-const GRAPH_BACKFILL_TICK: std::time::Duration = std::time::Duration::from_mins(2);
-const GRAPH_MAINTENANCE_TICK: std::time::Duration = std::time::Duration::from_mins(5);
-
-async fn run_graph_backfill_loop(state: Arc<AppState>, mut shutdown: broadcast::Receiver<()>) {
-    info!("starting graph backfill loop");
-    loop {
-        tokio::select! {
-            _ = shutdown.recv() => {
-                info!("stopping graph backfill loop");
-                break;
-            }
-            () = time::sleep(GRAPH_BACKFILL_TICK) => {
-                if !ingest_queue_is_idle(&state).await {
-                    continue;
-                }
-                let libraries = match sqlx::query_scalar::<_, Uuid>(
-                    "select id from catalog_library",
-                )
-                .fetch_all(&state.persistence.postgres)
-                .await
-                {
-                    Ok(rows) => rows,
-                    Err(error) => {
-                        warn!(?error, "graph backfill loop failed to list libraries");
-                        continue;
-                    }
-                };
-                for library_id in libraries {
-                    if crate::services::graph::backfill::try_acquire_graph_backfill_slot(library_id)
-                        && let Err(error) = crate::services::graph::backfill::run_library_graph_backfill(
-                            &state,
-                            library_id,
-                        )
-                        .await
-                        {
-                            warn!(%library_id, ?error, "graph backfill tick failed");
-                        }
-                    // Re-extract pass covers the World B case: readable
-                    // documents whose active revision has NO extraction
-                    // records at all. Its own 300 s debounce slot gates
-                    // the LLM budget separately from the much cheaper
-                    // backfill pass.
-                    if crate::services::graph::backfill::try_acquire_graph_reextract_slot(library_id)
-                        && let Err(error) = crate::services::graph::backfill::run_library_graph_reextract(
-                            &state,
-                            library_id,
-                        )
-                        .await
-                        {
-                            warn!(%library_id, ?error, "graph re-extract tick failed");
-                        }
-                }
-            }
-        }
-    }
-}
-
-async fn run_graph_maintenance_loop(state: Arc<AppState>, mut shutdown: broadcast::Receiver<()>) {
-    info!("starting graph maintenance loop");
-    loop {
-        tokio::select! {
-            _ = shutdown.recv() => {
-                info!("stopping graph maintenance loop");
-                break;
-            }
-            () = time::sleep(GRAPH_MAINTENANCE_TICK) => {
-                if !ingest_queue_is_idle(&state).await {
-                    continue;
-                }
-                let libraries = match sqlx::query_scalar::<_, Uuid>(
-                    "select id from catalog_library",
-                )
-                .fetch_all(&state.persistence.postgres)
-                .await
-                {
-                    Ok(rows) => rows,
-                    Err(error) => {
-                        warn!(?error, "graph maintenance loop failed to list libraries");
-                        continue;
-                    }
-                };
-                for library_id in libraries {
-                    if crate::services::graph::maintenance::try_acquire_graph_maintenance_slot(library_id) {
-                        run_graph_maintenance_pass(&state, library_id).await;
-                    }
-                }
-            }
-        }
-    }
-}
-
-async fn ingest_queue_is_idle(state: &AppState) -> bool {
-    if !state.worker_runtime.is_idle().await {
-        return false;
-    }
-
-    match sqlx::query_scalar::<_, i64>(
-        "select count(*)::bigint from ingest_job where queue_state in ('queued', 'leased')",
-    )
-    .fetch_one(&state.persistence.heartbeat_postgres)
-    .await
-    {
-        Ok(in_flight_jobs) => in_flight_jobs == 0,
-        Err(error) => {
-            warn!(?error, "failed to inspect ingest queue before idle graph tick");
-            false
-        }
-    }
-}
-
-async fn run_graph_maintenance_pass(state: &AppState, library_id: Uuid) {
-    if let Err(error) =
-        crate::services::graph::community_detection::detect_after_ingestion(state, library_id).await
-    {
-        warn!(%library_id, ?error, "community detection maintenance failed");
-        return;
-    }
-
-    if let Err(error) =
-        crate::services::graph::community_detection::generate_community_summaries(state, library_id)
-            .await
-    {
-        warn!(%library_id, ?error, "community summary maintenance failed");
-    }
-}
-
-async fn run_canonical_lease_recovery_loop(
-    state: Arc<AppState>,
-    mut shutdown: broadcast::Receiver<()>,
-) {
-    info!("starting canonical lease recovery loop");
-    loop {
-        tokio::select! {
-            _ = shutdown.recv() => {
-                info!("stopping canonical lease recovery loop");
-                break;
-            }
-            () = time::sleep(CANONICAL_LEASE_RECOVERY_INTERVAL) => {
-                let threshold = chrono::Duration::seconds(CANONICAL_STALE_LEASE_SECONDS);
-                match ingest_repository::recover_stale_canonical_leases(
-                    &state.persistence.postgres,
-                    threshold,
-                ).await {
-                    Ok(0) => {}
-                    Ok(recovered) => {
-                        warn!(recovered, "recovered stale canonical ingest job leases");
-                    }
-                    Err(error) => {
-                        warn!(?error, "failed to recover stale canonical leases");
-                    }
-                }
-            }
-        }
-    }
-}
-
-/// External stale-lease reaper running on a dedicated OS thread with a
-/// minimal `current_thread` tokio runtime. This exists to survive the
-/// failure mode where the main runtime becomes fully saturated by
-/// CPU-bound ingest work and every in-tokio control task (heartbeat,
-/// cancellation poll, periodic recovery loop above) starves. Because
-/// this thread is an OS thread outside the main runtime, the scheduler
-/// always gives it CPU and it always gets to run its reaper query —
-/// releasing orphaned leases even when the worker has gone hot-stuck
-/// in `merge_chunk_graph_candidates` or similar.
-///
-/// Uses the dedicated `heartbeat_postgres` pool so it never contends
-/// with the main pool the stuck worker is holding.
-fn spawn_external_stale_lease_reaper(heartbeat_pool: sqlx::PgPool) {
-    const REAP_TICK: std::time::Duration = std::time::Duration::from_secs(15);
-    const REAP_THRESHOLD_SECS: i64 = 90;
-    let spawn_result = std::thread::Builder::new()
-        .name("ironrag-lease-reaper".to_string())
-        .spawn(move || {
-            let runtime = match tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-            {
-                Ok(rt) => rt,
-                Err(error) => {
-                    error!(%error, "external stale-lease reaper failed to start runtime");
-                    return;
-                }
-            };
-            runtime.block_on(async move {
-                info!(
-                    tick_secs = REAP_TICK.as_secs(),
-                    threshold_secs = REAP_THRESHOLD_SECS,
-                    "external stale-lease reaper running on dedicated OS thread",
-                );
-                loop {
-                    tokio::time::sleep(REAP_TICK).await;
-                    let threshold = chrono::Duration::seconds(REAP_THRESHOLD_SECS);
-                    match ingest_repository::recover_stale_canonical_leases(
-                        &heartbeat_pool,
-                        threshold,
-                    )
-                    .await
-                    {
-                        Ok(0) => {}
-                        Ok(recovered) => {
-                            warn!(
-                                recovered,
-                                "external reaper released stale canonical ingest job leases — the main tokio runtime was likely saturated, investigate merge/reconcile for hot loops"
-                            );
-                        }
-                        Err(error) => {
-                            warn!(?error, "external stale-lease reaper query failed");
-                        }
-                    }
-                }
-            });
-        });
-    if let Err(error) = spawn_result {
-        error!(
-            %error,
-            "failed to spawn external stale-lease reaper thread; canonical lease recovery will still run on the tokio side, but the dedicated OS-thread safety net is disabled until the worker restarts"
-        );
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::memory_bound_process_claim_limit;
+    use super::memory_soft_limit_source;
 
     #[test]
-    fn memory_bound_process_claim_limit_serializes_tiny_workers() {
-        assert_eq!(memory_bound_process_claim_limit(691), 1);
-    }
-
-    #[test]
-    fn memory_bound_process_claim_limit_scales_with_soft_limit() {
-        assert_eq!(memory_bound_process_claim_limit(2304), 4);
-    }
-
-    #[test]
-    fn memory_bound_process_claim_limit_is_disabled_without_soft_limit() {
-        assert_eq!(memory_bound_process_claim_limit(0), usize::MAX);
+    fn memory_limit_source_keeps_config_precedence_over_auto_detection() {
+        assert_eq!(memory_soft_limit_source(1024, 1024), "config");
+        assert_eq!(memory_soft_limit_source(1024, 0), "config");
+        assert_eq!(memory_soft_limit_source(0, 1024), "auto:cgroup");
+        assert_eq!(memory_soft_limit_source(0, 0), "disabled");
     }
 }

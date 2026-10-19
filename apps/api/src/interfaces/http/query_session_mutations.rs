@@ -64,7 +64,7 @@ pub async fn rename_session(
         load_query_session_and_authorize(&auth, &state, session_id, POLICY_QUERY_RUN).await?;
     let allow_manage_all = authorize_session_mutation(&auth, &session)?;
     let renamed = state
-        .canonical_services
+        .application_services
         .query
         .rename_conversation(
             &state,
@@ -87,7 +87,7 @@ pub async fn rename_session(
     // One session representation everywhere: reply with the same camelCase
     // list item shape the session list uses, including the live turn count.
     let turn_count =
-        state.canonical_services.query.count_conversation_turns(&state, renamed.id).await?;
+        state.application_services.query.count_conversation_turns(&state, renamed.id).await?;
     Ok(Json(map_session_list_item_with_turn_count(
         renamed,
         usize::try_from(turn_count).unwrap_or(usize::MAX),
@@ -129,7 +129,7 @@ pub async fn delete_session(
         load_query_session_and_authorize(&auth, &state, session_id, POLICY_QUERY_RUN).await?;
     let allow_manage_all = authorize_session_mutation(&auth, &session)?;
     state
-        .canonical_services
+        .application_services
         .query
         .delete_conversation(
             &state,
@@ -155,7 +155,11 @@ fn authorize_session_mutation(
     auth: &AuthContext,
     session: &QueryConversationRow,
 ) -> Result<bool, ApiError> {
-    auth.require_write_capability()?;
+    // A service principal has no system role; it owns its sessions by
+    // `created_by_principal_id`, so the role gate applies only to humans.
+    if auth.system_role.is_some() {
+        auth.require_write_capability()?;
+    }
     let allow_manage_all = auth.is_system_admin
         || auth.has_library_permission(
             session.workspace_id,
@@ -176,7 +180,7 @@ async fn append_session_mutation_audit(
     redacted_message: &str,
 ) {
     if let Err(error) = state
-        .canonical_services
+        .application_services
         .audit
         .append_event(
             state,
@@ -189,7 +193,7 @@ async fn append_session_mutation_audit(
                 result_kind: "succeeded".to_string(),
                 redacted_message: Some(redacted_message.to_string()),
                 internal_message: None,
-                subjects: vec![state.canonical_services.audit.query_session_subject(
+                subjects: vec![state.application_services.audit.query_session_subject(
                     session.id,
                     session.workspace_id,
                     session.library_id,

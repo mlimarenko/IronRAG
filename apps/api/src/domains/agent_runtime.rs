@@ -108,7 +108,7 @@ impl RuntimeTaskKind {
         match self {
             Self::QueryCompile => Some(AiBindingPurpose::QueryCompile),
             Self::QueryAnswer => Some(AiBindingPurpose::QueryAnswer),
-            Self::QueryRerank => Some(AiBindingPurpose::QueryCompile),
+            Self::QueryRerank => Some(AiBindingPurpose::QueryRerank),
             Self::GraphExtract => Some(AiBindingPurpose::ExtractGraph),
             Self::QueryPlan
             | Self::QueryVerify
@@ -644,9 +644,17 @@ mod tests {
     use crate::domains::ai::AiBindingPurpose;
 
     #[test]
-    fn query_rerank_uses_query_compile_binding_purpose() {
+    fn query_rerank_uses_its_own_binding_purpose() {
         assert_eq!(
             RuntimeTaskKind::QueryRerank.binding_purpose(),
+            Some(AiBindingPurpose::QueryRerank),
+        );
+    }
+
+    #[test]
+    fn query_compile_keeps_the_query_compile_binding_purpose() {
+        assert_eq!(
+            RuntimeTaskKind::QueryCompile.binding_purpose(),
             Some(AiBindingPurpose::QueryCompile),
         );
     }

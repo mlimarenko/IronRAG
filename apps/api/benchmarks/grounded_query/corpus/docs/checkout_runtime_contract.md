@@ -22,4 +22,4 @@ The checkout server does not publish a GraphQL API.
 
 - No `/graphql` endpoint is exposed for this library.
 - No GraphQL schema or GraphQL introspection contract is available.
-- The canonical integration path for system information is the REST endpoint `GET /system/info`.
+- The authoritative integration path for system information is the REST endpoint `GET /system/info`.

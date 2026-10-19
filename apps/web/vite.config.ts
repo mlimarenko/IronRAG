@@ -25,23 +25,6 @@ const vendorChunk = (id: string) => {
   }
 
   if (
-    normalizedId.includes('/node_modules/@tiptap/') ||
-    normalizedId.includes('/node_modules/@prosemirror/') ||
-    normalizedId.includes('/node_modules/prosemirror-') ||
-    normalizedId.includes('/node_modules/orderedmap/')
-  ) {
-    return 'vendor-tiptap'
-  }
-
-  if (
-    normalizedId.includes('/node_modules/@sigma/') ||
-    normalizedId.includes('/node_modules/sigma/') ||
-    normalizedId.includes('/node_modules/graphology')
-  ) {
-    return 'vendor-sigma'
-  }
-
-  if (
     normalizedId.includes('/node_modules/react/') ||
     normalizedId.includes('/node_modules/react-dom/') ||
     normalizedId.includes('/node_modules/react-router') ||
@@ -62,15 +45,12 @@ const vendorChunk = (id: string) => {
     return 'vendor-radix'
   }
 
-  // Form stack (react-hook-form + zod resolver + zod). Lives behind admin and
-  // bootstrap forms only, so isolating it keeps validation weight out of the
-  // index chunk while still sharing one copy between those routes.
-  if (
-    normalizedId.includes('/node_modules/react-hook-form/') ||
-    normalizedId.includes('/node_modules/@hookform/') ||
-    normalizedId.includes('/node_modules/zod/')
-  ) {
-    return 'vendor-forms'
+  // zod is reached eagerly: App.tsx imports LoginPage statically, and the
+  // bootstrap form validates with zod. Splitting it into its own chunk keeps
+  // validation weight out of index-*.js, which carries a 150 KB gzip ceiling
+  // enforced by scripts/check-bundle-budget.mjs and the size-limit config.
+  if (normalizedId.includes('/node_modules/zod/')) {
+    return 'vendor-zod'
   }
 
   if (
@@ -95,18 +75,20 @@ export default defineConfig({
     host: '::',
     port: 3000,
     proxy: {
+      // Dev-only: point the proxy at another IronRAG backend (e.g. a stage
+      // host) with IRONRAG_DEV_API_TARGET when reviewing against real data.
       '/v1': {
-        target: 'http://127.0.0.1:19000',
+        target: process.env.IRONRAG_DEV_API_TARGET ?? 'http://127.0.0.1:19000',
         changeOrigin: true,
+        secure: false,
       },
     },
   },
   build: {
     outDir: 'dist',
     sourcemap: true,
-    // Tiptap is an intentionally isolated, lazy-loaded vendor chunk. Its raw
-    // size is just above Vite's generic 500 kB warning, while the enforced
-    // gzip budget remains 180 kB in package.json and catches real regressions.
+    // Vendor chunks are isolated and lazy-loaded; the enforced gzip budgets
+    // live in package.json and catch real regressions.
     chunkSizeWarningLimit: 600,
     rolldownOptions: {
       output: {
@@ -126,12 +108,6 @@ export default defineConfig({
   resolve: {
     alias: {
       '@': path.resolve(__dirname, './src'),
-      // The ESM graphology build exposes a class method named `import(...)`.
-      // Vite's Rolldown dev prebundle preserves that method name and Chromium
-      // rejects it as a module parse error. The CJS build emits
-      // `_proto["import"]`, so dev visual QA and production builds use the
-      // same Graph API without a browser-only syntax fault.
-      graphology: path.resolve(__dirname, 'node_modules/graphology/dist/graphology.cjs.js'),
     },
     dedupe: [
       'react',

@@ -48,6 +48,7 @@ use crate::{
         router_support::ApiError,
     },
     services::webhook::{custom_headers, ssrf},
+    shared::database::{DatabaseErrorClass, classify_error},
     shared::secret_encryption::SecretPurpose,
 };
 
@@ -211,15 +212,11 @@ fn validate_attempt_state_filter(state: Option<&str>) -> Result<(), ApiError> {
 /// intentional deny-all scope. Filtering happens in SQL before any row (and in
 /// particular any target URL) is materialized.
 fn webhook_admin_workspace_scope(auth: &AuthContext) -> Option<Vec<Uuid>> {
-    if !auth.role_permits_write() {
-        return Some(Vec::new());
-    }
-    let has_system_admin_grant = auth.grants.iter().any(|grant| {
-        grant.resource_kind == "system"
-            && POLICY_WORKSPACE_ADMIN.contains(&grant.permission_kind.as_str())
-    });
-    if auth.is_system_admin || has_system_admin_grant {
+    if auth.is_system_admin {
         return None;
+    }
+    if auth.token_kind.is_session() && !auth.role_permits_write() {
+        return Some(Vec::new());
     }
     Some(
         auth.visible_workspace_ids
@@ -262,7 +259,16 @@ fn map_webhook_subscription_write_error(error: sqlx::Error) -> ApiError {
     } else if webhook_repository::is_draining_webhook_subscription_reactivation_error(&error) {
         ApiError::Conflict("draining webhook subscription cannot be reactivated".to_string())
     } else {
-        ApiError::internal_with_log(error, "internal")
+        match classify_error(&error) {
+            DatabaseErrorClass::UniqueViolation => {
+                ApiError::Conflict("webhook subscription already exists".to_string())
+            }
+            DatabaseErrorClass::ForeignKeyViolation => ApiError::Conflict(
+                "webhook subscription references a resource that no longer exists".to_string(),
+            ),
+            DatabaseErrorClass::Contention => ApiError::database_contention(),
+            DatabaseErrorClass::Other => ApiError::internal_with_log(error, "internal"),
+        }
     }
 }
 
@@ -415,9 +421,6 @@ pub async fn create_subscription(
     Json(mut req): Json<CreateSubscriptionRequest>,
 ) -> Result<axum::response::Response, ApiError> {
     load_workspace_and_authorize(&auth, &state, workspace_id, POLICY_WORKSPACE_ADMIN).await?;
-    if !state.settings.credential_encryption_write_enabled {
-        return Err(ApiError::credential_encryption_writes_disabled());
-    }
     validate_display_name(&mut req.display_name)?;
     validate_target_url_syntax(&req.target_url)?;
     validate_signing_secret(&req.secret)?;
@@ -567,11 +570,6 @@ pub async fn update_subscription(
     Json(mut req): Json<UpdateSubscriptionRequest>,
 ) -> Result<Json<SubscriptionResponse>, ApiError> {
     let existing = load_authorized_subscription_view(&state, &auth, subscription_id).await?;
-    if (req.secret.is_some() || req.custom_headers.is_some())
-        && !state.settings.credential_encryption_write_enabled
-    {
-        return Err(ApiError::credential_encryption_writes_disabled());
-    }
 
     if let Some(display_name) = req.display_name.as_mut() {
         validate_display_name(display_name)?;
@@ -813,10 +811,28 @@ mod secret_lifetime_tests {
 
     use super::{
         CreateSubscriptionRequest, WebhookListCursor, decode_webhook_list_cursor,
-        encode_webhook_list_cursor, scrub_plaintext_secret, validate_attempt_state_filter,
-        validate_display_name, validate_event_types, validate_signing_secret,
-        validate_target_url_syntax,
+        encode_webhook_list_cursor, map_webhook_subscription_write_error, scrub_plaintext_secret,
+        validate_attempt_state_filter, validate_display_name, validate_event_types,
+        validate_signing_secret, validate_target_url_syntax,
     };
+    use crate::{
+        interfaces::http::router_support::ApiError, shared::database::test_database_error,
+    };
+
+    #[test]
+    fn subscription_database_failures_preserve_retry_semantics() {
+        assert!(matches!(
+            map_webhook_subscription_write_error(test_database_error("23505", None)),
+            ApiError::Conflict(_)
+        ));
+        let contention = map_webhook_subscription_write_error(test_database_error("40P01", None));
+        assert!(matches!(contention, ApiError::ServiceUnavailable { .. }));
+        assert_eq!(contention.kind(), "database_contention");
+        assert!(matches!(
+            map_webhook_subscription_write_error(test_database_error("22000", None)),
+            ApiError::Internal
+        ));
+    }
 
     #[test]
     fn keyset_cursor_round_trips_and_rejects_garbage() {
@@ -892,11 +908,11 @@ mod secret_lifetime_tests {
     }
 
     #[test]
-    fn webhook_boundary_normalizes_display_name_and_accepts_canonical_events() {
+    fn webhook_boundary_normalizes_display_name_and_accepts_supported_events() {
         let mut display_name = "  Neutral Receiver  ".to_string();
         validate_display_name(&mut display_name).expect("valid display name");
         validate_event_types(&["revision.ready".into(), "document.deleted".into()])
-            .expect("canonical events");
+            .expect("supported events");
         validate_signing_secret("synthetic-signing-secret-at-least-32-bytes")
             .expect("strong synthetic secret");
 

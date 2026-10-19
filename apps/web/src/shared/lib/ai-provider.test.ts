@@ -56,7 +56,7 @@ describe('normalizeProviderBaseUrl', () => {
 })
 
 describe('provider policy helpers', () => {
-  it('uses canonical credential policy from backend metadata', () => {
+  it('uses backend-supplied credential policy', () => {
     expect(
       resolveProviderCredentialPolicy({
         credentialPolicy,
@@ -95,7 +95,7 @@ describe('provider policy helpers', () => {
     ).toBe(false)
   })
 
-  it('renders base URL input when canonical policy requires a URL without a default', () => {
+  it('renders base URL input when configured policy requires a URL without a default', () => {
     expect(
       shouldRenderBaseUrlInput({
         credentialPolicy: {
@@ -109,7 +109,7 @@ describe('provider policy helpers', () => {
     ).toBe(true)
   })
 
-  it('fails loudly when provider metadata is missing required canonical fields', () => {
+  it('fails loudly when provider metadata is missing required supported fields', () => {
     expect(() =>
       resolveProviderCredentialPolicy({
         credentialPolicy: {

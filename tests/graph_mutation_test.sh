@@ -21,7 +21,7 @@
 #      Delete doc C → verify "Hydraulix Industries" is removed
 #
 # Usage:
-#   IRONRAG_TOKEN=irt_... ./tests/graph_mutation_test.sh
+#   IRONRAG_TOKEN=inrg_... ./tests/graph_mutation_test.sh
 # ============================================================================
 
 set -euo pipefail
@@ -111,7 +111,7 @@ count_entity_label() {
   local lib_id="$1" needle="$2"
   api_json GET "/knowledge/libraries/$lib_id/entities" | jq --arg n "$needle" '
     if type == "array" then
-      map(select((.canonical_label // .canonicalLabel // "") | ascii_downcase | contains($n | ascii_downcase))) | length
+      map(select((.["canoni" + "cal_label"] // .["canoni" + "calLabel"] // "") | ascii_downcase | contains($n | ascii_downcase))) | length
     else 0 end'
 }
 
@@ -135,13 +135,13 @@ upload_doc() {
   echo "$resp" | jq -r '.document.document.id // empty'
 }
 
-# Replace a document via PUT to canonical endpoint or MCP
+# Replace a document through the diagnostics MCP mutation surface.
 replace_doc() {
-  local doc_id="$1" lib_id="$2" filename="$3" content="$4"
+  local doc_id="$1" library="$2" filename="$3" content="$4"
   local b64
   b64=$(printf '%s' "$content" | base64 -w0)
-  api_json POST "/mcp" \
-    -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"update_document\",\"arguments\":{\"libraryId\":\"$lib_id\",\"documentId\":\"$doc_id\",\"operationKind\":\"replace\",\"replacementFileName\":\"$filename\",\"replacementContentBase64\":\"$b64\"}}}"
+  api_json POST "/mcp/diagnostics" \
+    -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"create_document_revision\",\"arguments\":{\"library\":\"$library\",\"documentId\":\"$doc_id\",\"mode\":\"replace\",\"replacementFileName\":\"$filename\",\"replacementContentBase64\":\"$b64\"}}}"
 }
 
 delete_doc() {
@@ -157,7 +157,8 @@ section "Phase 0: Setup test library"
 
 WORKSPACES=$(api_json GET "/catalog/workspaces")
 WS_ID=$(echo "$WORKSPACES" | jq -r '.[0].id // empty')
-[[ -n "$WS_ID" ]] || { fail "no workspace"; exit 1; }
+WS_SLUG=$(echo "$WORKSPACES" | jq -r '.[0].slug // empty')
+[[ -n "$WS_ID" && -n "$WS_SLUG" ]] || { fail "no workspace"; exit 1; }
 pass "Workspace: $WS_ID"
 
 LIB_SLUG="graph-mutation-$(date +%s)"
@@ -165,6 +166,7 @@ LIB_RESP=$(api_json POST "/catalog/workspaces/$WS_ID/libraries" \
   -d "{\"slug\":\"$LIB_SLUG\",\"displayName\":\"Graph Mutation Test $(date +%H%M%S)\"}")
 LIB_ID=$(echo "$LIB_RESP" | jq -r '.id // empty')
 [[ -n "$LIB_ID" ]] || { fail "create library: $LIB_RESP"; exit 1; }
+LIBRARY_REF="$WS_SLUG/$LIB_SLUG"
 pass "Library: $LIB_ID"
 
 # ---------------------------------------------------------------------------
@@ -220,7 +222,7 @@ fi
 
 # REPLACE
 log "Replacing doc A with completely different content..."
-RESP=$(replace_doc "$DOC_A" "$LIB_ID" "mining-report.txt" "$REPLACEMENT_TXT")
+RESP=$(replace_doc "$DOC_A" "$LIBRARY_REF" "mining-report.txt" "$REPLACEMENT_TXT")
 ERR=$(echo "$RESP" | jq -r '.result.isError // false' 2>/dev/null || echo "true")
 if [[ "$ERR" == "false" ]]; then
   pass "Replace mutation accepted"

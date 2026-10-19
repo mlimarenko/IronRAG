@@ -76,7 +76,9 @@ function assertStringEnumField(
   allowedValues: Set<string>,
 ): asserts value is Record<string, unknown> & Record<typeof fieldName, string> {
   if (typeof value[fieldName] !== 'string' || !allowedValues.has(value[fieldName])) {
-    throw new TypeError(`Invalid AI provider metadata: ${policyName}.${fieldName} is not canonical`)
+    throw new TypeError(
+      `Invalid AI provider metadata: ${policyName}.${fieldName} is not normalized`,
+    )
   }
 }
 

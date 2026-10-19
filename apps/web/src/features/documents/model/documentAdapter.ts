@@ -2,9 +2,9 @@ import type { TFunction } from 'i18next'
 
 import { buildDocumentFailureNotice, humanizeDocumentStage } from '@/shared/lib/document-processing'
 import { mapSourceAccess } from '@/shared/lib/source-access'
-import type { StatusTone } from '@/shared/components/StatusBadge'
 import type { DocumentListItem } from '@/shared/api/documents'
-import type { DocumentItem, DocumentStatus } from '@/shared/types'
+import type { DocumentItem } from '@/shared/types'
+import { revisionSourceKindLabel } from '@/shared/lib/enumLabels'
 
 function safeDecode(value: string): string {
   try {
@@ -34,7 +34,7 @@ function extensionFromPathLike(value: string): string | null {
   }
 
   const segments = normalized.split(/[\\/]/)
-  const basename = segments[segments.length - 1] ?? normalized
+  const basename = segments.at(-1) ?? normalized
   const dotIndex = basename.lastIndexOf('.')
   if (dotIndex <= 0 || dotIndex >= basename.length - 1) {
     return null
@@ -43,9 +43,10 @@ function extensionFromPathLike(value: string): string | null {
   return basename.slice(dotIndex + 1).toLowerCase()
 }
 
-function deriveExtension(fileName: string, mimeType?: string | null): string {
-  const normalizedFileName = isHttpUrl(fileName) ? safeDecode(new URL(fileName).pathname) : fileName
-  const fileNameExtension = extensionFromPathLike(normalizedFileName)
+function deriveExtension(fileName: string | null, mimeType?: string | null): string {
+  const normalizedFileName =
+    fileName && isHttpUrl(fileName) ? safeDecode(new URL(fileName).pathname) : fileName
+  const fileNameExtension = normalizedFileName ? extensionFromPathLike(normalizedFileName) : null
   if (fileNameExtension) {
     return fileNameExtension
   }
@@ -72,23 +73,28 @@ function normalizeProgressPercent(value: number | null | undefined): number | un
   return Math.max(0, Math.min(100, Math.round(value)))
 }
 
+function normalizeDocumentCost(value: DocumentListItem['cost']): string | null {
+  // Per-row cost arrives from billing_execution_cost on every list response.
+  // Preserve valid decimals exactly: Number would lose precision and disagree
+  // with the server facet value and selection key.
+  return value != null && /^-?\d+(?:\.\d+)?$/.test(value) ? value : null
+}
+
 /**
- * Canonical list-row mapper. The backend list endpoint already emits
+ * Shared list-row mapper. The backend list endpoint already emits
  * `DocumentListItem` with server-derived `status` / `readiness` / `stage`,
  * so the mapper only does view-model cosmetics: extension extraction,
  * URL-encoded name decoding, and `source_access` normalization.
  */
-export function mapListItem(raw: DocumentListItem, t: TFunction): DocumentItem {
-  const fileName = safeDecode(raw.fileName)
-  const fileType = deriveExtension(fileName, raw.fileType)
+export function mapListItem(
+  raw: DocumentListItem,
+  t: TFunction,
+  costRollupFreshness?: 'current' | 'reconciling',
+): DocumentItem {
+  const fileName = raw.fileName ?? null
+  const fileType = raw.fileType ?? null
 
-  // Per-row cost arrives on every list response (see
-  // list_document_page_rows LATERAL on billing_execution_cost). A valid
-  // numeric value — including `0` — is preserved; only a missing /
-  // non-numeric value collapses to `null`. The render path renders
-  // `$0.000` for `0` and `—` for `null`, matching the prior UI.
-  const costValue = Number.parseFloat(raw.cost)
-  const cost = Number.isFinite(costValue) ? costValue : null
+  const cost = normalizeDocumentCost(raw.cost)
   const progressPercent = normalizeProgressPercent(raw.progressPercent)
   const failureCode = raw.failureCode ?? undefined
   const failureMessage = raw.failureMessage?.trim() || undefined
@@ -117,11 +123,13 @@ export function mapListItem(raw: DocumentListItem, t: TFunction): DocumentItem {
   // `DocumentItem` itself.
   return {
     id: raw.id,
+    documentState: raw.documentState,
     fileName,
     fileType,
-    fileSize: raw.fileSize ?? 0,
+    fileSize: raw.fileSize ?? null,
     uploadedAt: raw.uploadedAt,
     cost,
+    ...(costRollupFreshness ? { costRollupFreshness } : {}),
     status: raw.status,
     readiness: raw.readiness,
     externalKey: raw.externalKey,
@@ -167,86 +175,102 @@ export function getDocumentProcessingDurationMs(
   }
 
   const workerStillHolding = doc.status === 'processing' || doc.status === 'queued'
-  const finishedAtMs = workerStillHolding ? nowMs : parseTimestampMs(doc.processingFinishedAt)
-  if (finishedAtMs == null) {
+  const finishedAtMs = resolveFinishedAtMs(doc, nowMs, workerStillHolding)
+  if (finishedAtMs == null || !Number.isFinite(finishedAtMs)) {
     return null
   }
 
   return Math.max(0, finishedAtMs - startedAtMs)
 }
 
-type DocumentStatusBadge = { label: string; cls: string; tone: StatusTone }
-
 /**
- * Canonical badge styling and label lookup for every `DocumentStatus`.
- * Used by both the documents list and the inspector panel so every
- * surface agrees on how a given status is presented. `tone` drives the
- * shared `<StatusBadge>` component; `cls` is kept in sync for callers that
- * still need the raw `.status-{tone}` class name.
+ * The wall-clock instant a document's processing finished, or `null` when it
+ * never has: the live clock while the worker still holds the job, the recorded
+ * finish time once it exists, and nothing for a document that never started.
  */
-export function buildDocumentStatusBadgeConfig(
-  t: TFunction,
-): Record<DocumentStatus, DocumentStatusBadge> {
-  return {
-    ready: { label: t('dashboard.statusLabels.ready'), cls: 'status-ready', tone: 'ready' },
-    processing: {
-      label: t('dashboard.statusLabels.processing'),
-      cls: 'status-processing',
-      tone: 'processing',
-    },
-    queued: {
-      label: t('dashboard.statusLabels.queued'),
-      cls: 'status-queued',
-      tone: 'queued',
-    },
-    failed: {
-      label: t('dashboard.statusLabels.failed'),
-      cls: 'status-failed',
-      tone: 'failed',
-    },
-    canceled: {
-      label: t('dashboard.statusLabels.canceled'),
-      cls: 'status-stalled',
-      tone: 'stalled',
-    },
-  }
+function resolveFinishedAtMs(
+  doc: Pick<DocumentItem, 'status' | 'processingFinishedAt'>,
+  nowMs: number,
+  workerStillHolding: boolean,
+): number | null {
+  if (doc.status === 'processing') return nowMs
+  const finishedAtMs = parseTimestampMs(doc.processingFinishedAt)
+  if (finishedAtMs != null) return finishedAtMs
+  return workerStillHolding ? nowMs : null
 }
 
-export function isWebPageDocument(
+/**
+ * Whether the documents surface may offer a reprocess for this document.
+ *
+ * `canRetry` (the server's `retryable`) answers "may this *failed* attempt be
+ * retried". A `ready` document has no failed attempt to retry, which is a
+ * different question from "may its index be rebuilt": the server accepts a
+ * reprocess for it, so `canRetry === false` must not disable the control. Work
+ * in flight is never reprocessed blindly. Deleted documents and terminal
+ * attempts marked non-retryable stay off; replacement source provenance does
+ * not mean the current document is inactive.
+ */
+export function canReprocessDocument(
+  document: Pick<DocumentItem, 'documentState' | 'status' | 'canRetry'>,
+): boolean {
+  if (document.documentState !== 'active') return false
+  if (document.status === 'queued' || document.status === 'processing') return false
+  if (document.status === 'ready') return true
+  return document.canRetry === true
+}
+
+/** Editor format and icons are presentation decisions, not the table's MIME sort/filter key. */
+export function getDocumentSourceFormat(
+  document: Pick<DocumentItem, 'fileName' | 'fileType'>,
+): string {
+  return deriveExtension(
+    document.fileName === null ? null : safeDecode(document.fileName),
+    document.fileType,
+  )
+}
+
+function isWebPageDocument(
   sourceKind: DocumentItem['sourceKind'],
   sourceUri?: string,
-  fileName?: string,
+  fileName?: string | null,
 ): boolean {
   return sourceKind === 'web_page' || isHttpUrl(sourceUri) || isHttpUrl(fileName)
 }
 
 export function formatDocumentTypeLabel(
-  fileType: string,
+  fileType: string | null,
   sourceKind: DocumentItem['sourceKind'],
   t: TFunction,
   options?: {
     sourceUri?: string | undefined
-    fileName?: string | undefined
+    fileName?: string | null | undefined
   },
 ): string {
+  if (
+    fileType === null &&
+    options?.fileName == null &&
+    options?.sourceUri == null &&
+    sourceKind == null
+  ) {
+    return t('common.notAvailable')
+  }
   if (isWebPageDocument(sourceKind, options?.sourceUri, options?.fileName)) {
     return t('documents.webPageType')
   }
 
-  return fileType.toUpperCase()
+  return getDocumentSourceFormat({ fileName: options?.fileName ?? null, fileType }).toUpperCase()
 }
 
-export function formatSize(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
-}
-
-export function formatDate(iso: string, locale: string): string {
-  return new Intl.DateTimeFormat(locale, {
-    month: 'short',
-    day: 'numeric',
-    hour: '2-digit',
-    minute: '2-digit',
-  }).format(new Date(iso))
+export function formatDocumentSourceLabel(document: DocumentItem, t: TFunction): string {
+  const externalKey = document.externalKey?.toLowerCase() ?? ''
+  if (externalKey.startsWith('confluence:page:')) {
+    return t('documents.sourceKinds.confluencePage')
+  }
+  if (isWebPageDocument(document.sourceKind, document.sourceUri, document.fileName)) {
+    return t('documents.sourceKinds.webPage')
+  }
+  if (document.sourceKind) {
+    return revisionSourceKindLabel(document.sourceKind, t)
+  }
+  return t('documents.sourceKinds.upload')
 }

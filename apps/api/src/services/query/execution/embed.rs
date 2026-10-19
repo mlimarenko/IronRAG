@@ -25,7 +25,7 @@ use super::types::RuntimeVectorSearchContext;
 const EMBEDDING_CACHE_MAX_ENTRIES: usize = 1000;
 
 /// Full-width content identity for an in-process question-embedding cache
-/// entry. A 32-byte SHA-256 of the canonical identity tuple (trimmed question
+/// entry. A 32-byte SHA-256 of the normalized identity tuple (trimmed question
 /// text + every embedding-scoping binding dimension) keyed with full-width
 /// `Eq`, so two distinct questions / bindings can never alias.
 ///
@@ -57,7 +57,7 @@ pub(super) fn embedding_cache_key(
     hasher.finalize().into()
 }
 
-/// Result of embedding a query question after canonical provider accounting.
+/// Result of embedding a query question after active provider accounting.
 #[derive(Debug, Clone)]
 pub(crate) struct QuestionEmbeddingResult {
     pub(crate) embedding: Vec<f32>,
@@ -87,6 +87,18 @@ fn validate_cached_embedding_dimensions(
     Ok(())
 }
 
+/// Logs a query-embedding provider-call reservation that could not be terminalized.
+fn log_embedding_reservation_failure(
+    provider_call_id: uuid::Uuid,
+    billing_error: &impl std::fmt::Display,
+) {
+    tracing::error!(
+        provider_call_id = %provider_call_id,
+        %billing_error,
+        "failed to terminalize query embedding provider-call reservation"
+    );
+}
+
 pub(super) async fn embed_question(
     state: &AppState,
     execution_context: QueryProviderExecutionContext,
@@ -96,7 +108,7 @@ pub(super) async fn embed_question(
     let library_id = execution_context.library_id;
     let span_started = std::time::Instant::now();
     let embedding_binding = state
-        .canonical_services
+        .application_services
         .ai_catalog
         .resolve_active_runtime_binding(state, library_id, AiBindingPurpose::EmbedChunk)
         .await?
@@ -115,7 +127,7 @@ pub(super) async fn embed_question(
         EMBEDDING_CACHE.lock().ok().and_then(|cache| cache.get(&cache_key).cloned());
     if let Some(cached_embedding) = cached_embedding {
         let _vector_guard =
-            state.canonical_services.search.vector_plane_read_guard(state, library_id).await?;
+            state.application_services.search.vector_plane_read_guard(state, library_id).await?;
         validate_cached_embedding_dimensions(
             cache_key,
             vector_search_context.dimensions,
@@ -141,26 +153,23 @@ pub(super) async fn embed_question(
     )
     .await
     .context("failed to reserve query embedding provider call")?;
-    let response = match state
-        .llm_gateway
-        .embed(EmbeddingRequest {
+    let response = match crate::observability::with_provider_call_id(
+        provider_call.provider_call_id(),
+        state.llm_gateway.embed(EmbeddingRequest {
             provider_kind: embedding_binding.provider_kind.clone(),
             model_name: embedding_binding.model_name.clone(),
             input: trimmed_input,
             api_key_override: embedding_binding.api_key.clone(),
             base_url_override: embedding_binding.provider_base_url.clone(),
             extra_parameters_json: embedding_binding.extra_parameters_json.clone(),
-        })
-        .await
+        }),
+    )
+    .await
     {
         Ok(response) => response,
         Err(error) => {
             if let Err(billing_error) = provider_call.fail().await {
-                tracing::error!(
-                    provider_call_id = %provider_call.provider_call_id(),
-                    %billing_error,
-                    "failed to terminalize query embedding provider-call reservation"
-                );
+                log_embedding_reservation_failure(provider_call.provider_call_id(), &billing_error);
             }
             return Err(error).context("failed to embed runtime query");
         }
@@ -171,7 +180,7 @@ pub(super) async fn embed_question(
         .context("failed to persist query embedding provider usage")?;
     {
         let _vector_guard =
-            state.canonical_services.search.vector_plane_read_guard(state, library_id).await?;
+            state.application_services.search.vector_plane_read_guard(state, library_id).await?;
         validate_embedding_vector_dimensions(
             vector_search_context.dimensions,
             &response.embedding,
@@ -417,7 +426,7 @@ mod tests {
     }
 
     #[test]
-    fn embedding_execution_profile_key_canonicalizes_json_object_order() {
+    fn embedding_execution_profile_key_normalizes_json_object_order() {
         let mut left = binding();
         left.extra_parameters_json = serde_json::from_str(
             r#"{"dimensions":256,"request":{"encoding":"float","truncate":false}}"#,

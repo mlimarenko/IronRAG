@@ -1,6 +1,14 @@
 use std::collections::BTreeSet;
 
-use crate::shared::extraction::text_render::repair_technical_layout_noise;
+use crate::shared::{
+    extraction::text_render::repair_technical_layout_noise,
+    structural_declarations::{
+        declaration_block_end, declaration_has_indented_body, declaration_key_matches_focus,
+        line_indentation_width, structural_declaration_has_indented_body,
+        structural_declaration_line_has_shape, structural_declaration_line_matches_focus,
+        structural_declaration_surface_is_eligible,
+    },
+};
 
 use super::{
     retrieve::excerpt_for,
@@ -11,29 +19,159 @@ use super::{
     },
 };
 
+const EXCERPT_GAP_MARKER: &str = "...";
+const EXCERPT_LINE_BREAK_CHARS: usize = 1;
+
+#[derive(Clone, Copy)]
+enum ExcerptBudget {
+    Compact,
+    Rendered,
+}
+
 pub(super) fn structured_literal_excerpt_for(
     content: &str,
     keywords: &[String],
     max_chars: usize,
 ) -> Option<String> {
     let repaired = repair_technical_layout_noise(content);
-    let lines = excerpt_source_lines(&repaired, max_chars)?;
+    let lines = excerpt_source_lines(&repaired, max_chars, true)?;
     let normalized_keywords = normalized_excerpt_keywords(keywords);
+    let focused_declaration_lines =
+        select_focused_declaration_line_indexes(&lines, &normalized_keywords, max_chars);
+    if focused_declaration_lines.is_empty() {
+        let compact_lines = excerpt_source_lines(&repaired, max_chars, false)?;
+        let scored = score_structured_excerpt_lines(&compact_lines, &normalized_keywords);
+        let selected = select_excerpt_line_indexes(
+            &compact_lines,
+            scored,
+            BTreeSet::new(),
+            ExcerptSelectionLimits {
+                max_chars,
+                candidate_limit: 24,
+                budget: ExcerptBudget::Compact,
+            },
+            |line| {
+                structured_literal_line_score(line) > 0
+                    || line_is_short_context_label(line, &normalized_keywords)
+            },
+        );
+        return render_selected_excerpt(&compact_lines, selected, max_chars);
+    }
     let scored = score_structured_excerpt_lines(&lines, &normalized_keywords);
-    let selected = select_excerpt_line_indexes(&lines, scored, max_chars, 24, |line| {
-        structured_literal_line_score(line) > 0
-            || line_is_short_context_label(line, &normalized_keywords)
-    });
+    let selected = select_excerpt_line_indexes(
+        &lines,
+        scored,
+        focused_declaration_lines,
+        ExcerptSelectionLimits { max_chars, candidate_limit: 24, budget: ExcerptBudget::Rendered },
+        |line| {
+            structured_literal_line_score(line) > 0
+                || line_is_short_context_label(line, &normalized_keywords)
+        },
+    );
     render_selected_excerpt(&lines, selected, max_chars)
 }
 
-fn excerpt_source_lines(content: &str, max_chars: usize) -> Option<Vec<&str>> {
+fn excerpt_source_lines(
+    content: &str,
+    max_chars: usize,
+    preserve_indentation: bool,
+) -> Option<Vec<&str>> {
     if max_chars == 0 {
         return None;
     }
-    let lines: Vec<_> =
-        content.trim().lines().map(str::trim).filter(|line| !line.is_empty()).collect();
+    let lines: Vec<_> = content
+        .trim_matches('\n')
+        .lines()
+        .map(|line| if preserve_indentation { line.trim_end() } else { line.trim() })
+        .filter(|line| !line.trim().is_empty())
+        .collect();
     (!lines.is_empty()).then_some(lines)
+}
+
+pub(super) fn focused_declaration_depth(content: &str, keywords: &[String]) -> Option<usize> {
+    let normalized_keywords = normalized_excerpt_keywords(keywords);
+    let lines = content.lines().collect::<Vec<_>>();
+    lines
+        .iter()
+        .enumerate()
+        .filter_map(|(index, line)| {
+            let depth = matching_declaration_depth(line, &normalized_keywords)?;
+            let end = declaration_block_end(&lines, index, depth);
+            declaration_has_indented_body(&lines, index, end, depth).then_some(depth)
+        })
+        .min()
+}
+
+pub(super) fn focused_declaration_reach_score(
+    content: &str,
+    keywords: &[String],
+    document_start_offset: usize,
+) -> usize {
+    let normalized_keywords = normalized_excerpt_keywords(keywords);
+    let lines = content.lines().collect::<Vec<_>>();
+    let mut line_offset = 0usize;
+    let mut best_score = 0usize;
+    for (index, line) in lines.iter().enumerate() {
+        if structural_declaration_line_matches_focus(line, &normalized_keywords)
+            && structural_declaration_has_indented_body(&lines, index)
+        {
+            best_score =
+                best_score.max(document_start_offset.saturating_add(line_offset).saturating_add(1));
+        }
+        line_offset = line_offset.saturating_add(line.len()).saturating_add(1);
+    }
+    best_score
+}
+
+pub(super) fn top_level_declaration_signatures(content: &str) -> Vec<String> {
+    let repaired = repair_technical_layout_noise(content);
+    let lines = repaired.lines().collect::<Vec<_>>();
+    lines
+        .iter()
+        .enumerate()
+        .filter(|(index, line)| {
+            line_indentation_width(line) == 0
+                && structural_declaration_line_has_shape(line)
+                && structural_declaration_has_indented_body(&lines, *index)
+        })
+        .map(|(_, line)| line.trim_end().to_string())
+        .collect()
+}
+
+fn select_focused_declaration_line_indexes(
+    lines: &[&str],
+    normalized_keywords: &[String],
+    max_chars: usize,
+) -> BTreeSet<usize> {
+    let mut declarations = lines
+        .iter()
+        .enumerate()
+        .filter_map(|(index, line)| {
+            let depth = matching_declaration_depth(line, normalized_keywords)?;
+            let end = declaration_block_end(lines, index, depth);
+            declaration_has_indented_body(lines, index, end, depth).then_some((depth, index, end))
+        })
+        .collect::<Vec<_>>();
+    declarations.sort_by(|(left_depth, left_index, _), (right_depth, right_index, _)| {
+        left_depth.cmp(right_depth).then_with(|| left_index.cmp(right_index))
+    });
+
+    let mut selected = BTreeSet::new();
+    for (_, index, end) in declarations {
+        try_select_excerpt_block(lines, index, end, max_chars, &mut selected);
+    }
+    selected
+}
+
+fn matching_declaration_depth(line: &str, normalized_keywords: &[String]) -> Option<usize> {
+    let key = structural_declaration_key(line)?;
+    declaration_key_matches_focus(key, normalized_keywords).then_some(line_indentation_width(line))
+}
+
+fn structural_declaration_key(line: &str) -> Option<&str> {
+    let trimmed = line.trim();
+    let key = trimmed.strip_suffix(':')?.trim();
+    structural_declaration_surface_is_eligible(key).then(|| key.trim_matches(['\'', '"']))
 }
 
 fn score_structured_excerpt_lines(
@@ -63,26 +201,26 @@ fn score_structured_excerpt_lines(
     scored
 }
 
+/// How much of one excerpt the line selector may keep.
+struct ExcerptSelectionLimits {
+    max_chars: usize,
+    candidate_limit: usize,
+    budget: ExcerptBudget,
+}
+
 fn select_excerpt_line_indexes(
     lines: &[&str],
     scored: Vec<(usize, usize)>,
-    max_chars: usize,
-    candidate_limit: usize,
+    mut selected: BTreeSet<usize>,
+    limits: ExcerptSelectionLimits,
     neighbor_is_relevant: impl Fn(&str) -> bool,
 ) -> BTreeSet<usize> {
-    let mut selected = BTreeSet::new();
-    let mut selected_chars = 0usize;
+    let ExcerptSelectionLimits { max_chars, candidate_limit, budget } = limits;
     for (_, index) in scored.into_iter().take(candidate_limit) {
-        try_select_excerpt_line(lines, index, max_chars, &mut selected_chars, &mut selected);
+        try_select_excerpt_line(lines, index, max_chars, budget, &mut selected);
         for neighbor in adjacent_line_indexes(index, lines.len()) {
             if neighbor_is_relevant(lines[neighbor]) {
-                try_select_excerpt_line(
-                    lines,
-                    neighbor,
-                    max_chars,
-                    &mut selected_chars,
-                    &mut selected,
-                );
+                try_select_excerpt_line(lines, neighbor, max_chars, budget, &mut selected);
             }
         }
     }
@@ -99,18 +237,65 @@ fn try_select_excerpt_line(
     lines: &[&str],
     index: usize,
     max_chars: usize,
-    selected_chars: &mut usize,
+    budget: ExcerptBudget,
     selected: &mut BTreeSet<usize>,
 ) {
-    if selected.contains(&index) {
+    let mut prospective = selected.clone();
+    if !prospective.insert(index) {
         return;
     }
-    let line_chars = lines[index].chars().count().saturating_add(1);
-    if selected_chars.saturating_add(line_chars) > max_chars && !selected.is_empty() {
+    if selected_excerpt_char_count(lines, &prospective, budget) > max_chars && !selected.is_empty()
+    {
         return;
     }
-    selected.insert(index);
-    *selected_chars = selected_chars.saturating_add(line_chars);
+    *selected = prospective;
+}
+
+fn try_select_excerpt_block(
+    lines: &[&str],
+    start: usize,
+    end: usize,
+    max_chars: usize,
+    selected: &mut BTreeSet<usize>,
+) {
+    let mut prospective = selected.clone();
+    prospective.extend(start..end);
+    if selected_excerpt_char_count(lines, &prospective, ExcerptBudget::Rendered) <= max_chars {
+        *selected = prospective;
+        return;
+    }
+    if selected.is_empty() {
+        for index in start..end {
+            try_select_excerpt_line(lines, index, max_chars, ExcerptBudget::Rendered, selected);
+        }
+    }
+}
+
+fn selected_excerpt_char_count(
+    lines: &[&str],
+    selected: &BTreeSet<usize>,
+    budget: ExcerptBudget,
+) -> usize {
+    if matches!(budget, ExcerptBudget::Compact) {
+        return selected.iter().fold(0usize, |chars, index| {
+            chars.saturating_add(lines[*index].chars().count()).saturating_add(1)
+        });
+    }
+    let mut chars = 0usize;
+    let mut previous = None;
+    for index in selected {
+        if let Some(previous_index) = previous {
+            chars = chars.saturating_add(EXCERPT_LINE_BREAK_CHARS);
+            if previous_index + 1 < *index {
+                chars = chars
+                    .saturating_add(EXCERPT_GAP_MARKER.chars().count())
+                    .saturating_add(EXCERPT_LINE_BREAK_CHARS);
+            }
+        }
+        chars = chars.saturating_add(lines[*index].chars().count());
+        previous = Some(*index);
+    }
+    chars
 }
 
 fn render_selected_excerpt(
@@ -125,7 +310,7 @@ fn render_selected_excerpt(
     let mut previous = None;
     for index in selected {
         if previous.is_some_and(|previous| previous + 1 < index) {
-            excerpt_lines.push("...");
+            excerpt_lines.push(EXCERPT_GAP_MARKER);
         }
         excerpt_lines.push(lines[index]);
         previous = Some(index);
@@ -140,12 +325,16 @@ pub(super) fn salient_source_excerpt_for(
     max_chars: usize,
 ) -> Option<String> {
     let repaired = repair_technical_layout_noise(content);
-    let lines = excerpt_source_lines(&repaired, max_chars)?;
+    let lines = excerpt_source_lines(&repaired, max_chars, false)?;
     let normalized_keywords = normalized_excerpt_keywords(keywords);
     let scored = score_salient_excerpt_lines(&lines, &normalized_keywords);
-    let selected = select_excerpt_line_indexes(&lines, scored, max_chars, 32, |line| {
-        source_local_evidence_line_score(line, &normalized_keywords) > 0
-    });
+    let selected = select_excerpt_line_indexes(
+        &lines,
+        scored,
+        BTreeSet::new(),
+        ExcerptSelectionLimits { max_chars, candidate_limit: 32, budget: ExcerptBudget::Compact },
+        |line| source_local_evidence_line_score(line, &normalized_keywords) > 0,
+    );
     render_selected_excerpt(&lines, selected, max_chars)
 }
 
@@ -327,4 +516,108 @@ pub(super) fn line_has_key_value_literal_surface(line: &str) -> bool {
         && key.chars().filter(|ch| ch.is_alphanumeric() || *ch == '_' || *ch == '-').count() >= 2
         && !value.is_empty()
         && !key.contains("==")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        focused_declaration_reach_score, structured_literal_excerpt_for,
+        top_level_declaration_signatures,
+    };
+
+    const TEST_EXCERPT_LIMIT_CHARS: usize = 420;
+    const TEST_REPEATED_SECTION_COUNT: usize = 18;
+
+    fn long_structured_document() -> String {
+        let repeated_sections = (0..TEST_REPEATED_SECTION_COUNT)
+            .map(|index| {
+                format!(
+                    "  worker_{index}:\n    image: example.invalid/worker_{index}\n    bindings:\n      - private\n"
+                )
+            })
+            .collect::<String>();
+        format!(
+            "components:\n{repeated_sections}\nbindings:\n  public:\n    driver: shared\n  private:\n    driver: isolated\n    restricted: true\n"
+        )
+    }
+
+    #[test]
+    fn focused_structural_excerpt_reaches_a_declaration_block_at_the_document_tail() {
+        let content = long_structured_document();
+
+        let excerpt = structured_literal_excerpt_for(
+            &content,
+            &["bindings".to_string(), "restricted".to_string()],
+            TEST_EXCERPT_LIMIT_CHARS,
+        )
+        .expect("matching declaration block");
+
+        assert!(excerpt.contains("\nbindings:\n  public:"));
+        assert!(
+            excerpt.contains("  private:\n    driver: isolated\n    restricted: true"),
+            "{excerpt}"
+        );
+    }
+
+    #[test]
+    fn focused_structural_excerpt_does_not_widen_to_unrelated_declarations() {
+        let content = long_structured_document();
+
+        let excerpt = structured_literal_excerpt_for(
+            &content,
+            &["retention".to_string()],
+            TEST_EXCERPT_LIMIT_CHARS,
+        )
+        .unwrap_or_default();
+
+        assert!(!excerpt.contains("\nbindings:\n  public:"));
+        assert!(!excerpt.contains("restricted: true"));
+    }
+
+    #[test]
+    fn structured_excerpt_without_a_matching_declaration_is_indentation_stable() {
+        let flat = "FlowStage::Queued => &[FlowStage::Running, FlowStage::Aborted],\nFlowStage::Running => &[FlowStage::Finished],";
+        let indented = "    FlowStage::Queued => &[FlowStage::Running, FlowStage::Aborted],\n        FlowStage::Running => &[FlowStage::Finished],";
+        let keywords = ["Queued".to_string(), "FlowStage".to_string()];
+
+        let flat_excerpt =
+            structured_literal_excerpt_for(flat, &keywords, TEST_EXCERPT_LIMIT_CHARS);
+        let indented_excerpt =
+            structured_literal_excerpt_for(indented, &keywords, TEST_EXCERPT_LIMIT_CHARS);
+
+        assert_eq!(indented_excerpt, flat_excerpt);
+    }
+
+    #[test]
+    fn declaration_reach_score_accepts_structural_shapes_across_languages() {
+        let declarations = [
+            ("type LedgerReader interface {\n    Read() error\n}", "ledgerreader"),
+            (
+                "CREATE FUNCTION reconcile_ledger(input_id integer)\n  RETURNS integer\n  AS $$\n    SELECT input_id;\n  $$;",
+                "reconcile_ledger",
+            ),
+            ("ledger_defaults: &ledger_defaults\n  retries: 3", "ledger_defaults"),
+        ];
+
+        for (content, focus) in declarations {
+            assert!(
+                focused_declaration_reach_score(content, &[focus.to_string()], 40) > 0,
+                "{content}"
+            );
+        }
+    }
+
+    #[test]
+    fn declaration_inventory_harvests_language_neutral_top_level_signatures_only() {
+        let content = "type LedgerReader interface {\n    Read() error\n}\n\nCREATE FUNCTION reconcile_ledger(input_id integer)\n  RETURNS integer\n  AS $$\n    SELECT input_id;\n  $$;\n\nledger_defaults: &ledger_defaults\n  retries: 3\n  nested:\n    enabled: true";
+
+        assert_eq!(
+            top_level_declaration_signatures(content),
+            vec![
+                "type LedgerReader interface {",
+                "CREATE FUNCTION reconcile_ledger(input_id integer)",
+                "ledger_defaults: &ledger_defaults",
+            ]
+        );
+    }
 }

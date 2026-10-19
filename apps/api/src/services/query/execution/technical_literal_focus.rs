@@ -251,15 +251,29 @@ fn technical_literal_inventory_score(text: &str) -> isize {
     (score as isize).min(TECHNICAL_LITERAL_INVENTORY_SCORE_CAP)
 }
 
-pub(super) fn select_document_balanced_chunks<'a>(
-    question: &str,
-    ir: Option<&QueryIR>,
-    chunks: &'a [RuntimeMatchedChunk],
-    keywords: &[String],
-    pagination_requested: bool,
-    max_total_chunks: usize,
-    max_chunks_per_document: usize,
-) -> Vec<&'a RuntimeMatchedChunk> {
+/// Inputs for document-balanced chunk selection.
+pub(super) struct DocumentBalancedChunkSelection<'query, 'chunks> {
+    pub(super) question: &'query str,
+    pub(super) ir: Option<&'query QueryIR>,
+    pub(super) chunks: &'chunks [RuntimeMatchedChunk],
+    pub(super) keywords: &'query [String],
+    pub(super) pagination_requested: bool,
+    pub(super) max_total_chunks: usize,
+    pub(super) max_chunks_per_document: usize,
+}
+
+pub(super) fn select_document_balanced_chunks<'chunks>(
+    request: DocumentBalancedChunkSelection<'_, 'chunks>,
+) -> Vec<&'chunks RuntimeMatchedChunk> {
+    let DocumentBalancedChunkSelection {
+        question,
+        ir,
+        chunks,
+        keywords,
+        pagination_requested,
+        max_total_chunks,
+        max_chunks_per_document,
+    } = request;
     let mut ordered_document_ids = Vec::<Uuid>::new();
     let mut per_document_chunks = HashMap::<Uuid, Vec<&RuntimeMatchedChunk>>::new();
 
@@ -420,18 +434,18 @@ mod tests {
         ir.target_types = vec![crate::domains::query_ir::QueryTargetKind::ConfigKey];
 
         let chunks = [overview, config.clone()];
-        let selected = select_document_balanced_chunks(
-            "Alpha Connector configuration parameters",
-            Some(&ir),
-            &chunks,
-            &technical_literal_focus_keywords(
+        let selected = select_document_balanced_chunks(DocumentBalancedChunkSelection {
+            question: "Alpha Connector configuration parameters",
+            ir: Some(&ir),
+            chunks: &chunks,
+            keywords: &technical_literal_focus_keywords(
                 "Alpha Connector configuration parameters",
                 Some(&ir),
             ),
-            false,
-            1,
-            1,
-        );
+            pagination_requested: false,
+            max_total_chunks: 1,
+            max_chunks_per_document: 1,
+        });
 
         assert_eq!(selected.len(), 1);
         assert_eq!(selected[0].chunk_id, config.chunk_id);
@@ -462,18 +476,18 @@ mod tests {
         });
 
         let chunks = [overview, exact.clone()];
-        let selected = select_document_balanced_chunks(
-            "How do Alpha and Beta control thresholds?",
-            Some(&ir),
-            &chunks,
-            &technical_literal_focus_keywords(
+        let selected = select_document_balanced_chunks(DocumentBalancedChunkSelection {
+            question: "How do Alpha and Beta control thresholds?",
+            ir: Some(&ir),
+            chunks: &chunks,
+            keywords: &technical_literal_focus_keywords(
                 "How do Alpha and Beta control thresholds?",
                 Some(&ir),
             ),
-            false,
-            1,
-            1,
-        );
+            pagination_requested: false,
+            max_total_chunks: 1,
+            max_chunks_per_document: 1,
+        });
 
         assert_eq!(selected.len(), 1);
         assert_eq!(selected[0].chunk_id, exact.chunk_id);

@@ -1,19 +1,39 @@
+mod revision_merge;
+mod revision_projection;
+#[cfg(test)]
+mod tests;
+
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::Arc;
 
 use anyhow::Context;
 use chrono::Utc;
-use futures::stream::{self, StreamExt, TryStreamExt};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
+use revision_merge::{
+    PureAppendDelta, RevisionGraphMergeSummary, RevisionMergeRecordsInput,
+    classify_pure_append_chunks, collect_revision_graph_targets_with_connection,
+    merge_revision_graph_records_with_connection, select_latest_revision_extraction_records,
+};
+use revision_projection::{
+    AuthorizedRevisionProjectionInput, RevisionReconcileProjectionPlan,
+    authorized_preserve_or_empty_snapshot, execute_authorized_revision_projection,
+    is_graph_reconcile_chunk_text_eligible, revision_reconcile_projection_plan, union_targeted_ids,
+};
+
 use crate::{
     app::state::AppState,
-    domains::ops::{ASYNC_OP_STATUS_READY, GRAPH_STATUS_READY},
+    domains::ops::{ASYNC_OP_STATUS_READY, GRAPH_STATUS_EMPTY, GRAPH_STATUS_READY},
+    infra::knowledge_plane::IngestRevisionWriteAuthority,
     infra::repositories::{
-        self, ChunkRow, DocumentRow, RuntimeGraphSnapshotRow, content_repository,
+        self, ChunkRow, DocumentRow, RuntimeGraphSnapshotRow, content_chunk_repository,
+        content_document_head_repository, content_document_repository, content_revision_repository,
     },
     services::{
+        graph::backfill::{
+            GraphReextractCandidate, GraphReextractOutcome, REEXTRACT_MAX_BATCH_SIZE,
+            enqueue_graph_reextract_jobs,
+        },
         graph::error::GraphServiceError,
         graph::extract::{
             GRAPH_EXTRACTION_VERSION, GraphExtractionCandidateSet,
@@ -21,57 +41,152 @@ use crate::{
             repair_graph_extraction_candidate_set, repair_graph_extraction_normalized_json,
         },
         graph::merge::{
-            GraphMergeOutcome, GraphMergeScope, merge_chunk_graph_candidates,
-            reconcile_merge_support_counts,
+            GraphMergeOutcome, GraphMergeScope, MergeChunkInput,
+            merge_chunk_graph_candidates_with_connection,
         },
         graph::projection::{
-            GraphProjectionOutcome, GraphProjectionScope, ensure_empty_graph_snapshot,
-            next_projection_version, persist_runtime_graph_snapshot, project_canonical_graph,
+            GraphProjectionOutcome, GraphProjectionScope, next_projection_version,
+            project_rebuild_normalized_graph_with_connection, schedule_topology_prewarm,
         },
         graph::summary::PendingGraphSummaryRefresh,
-        ingest::cancellation::{StageError, ensure_not_cancelled},
+        ingest::cancellation::ensure_not_cancelled,
     },
     shared::extraction::text_quality::is_graph_extraction_text_eligible,
 };
+
+const MIN_REBUILD_PUBLICATION_FLOOR_PERCENT: usize = 90;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ReadyGraphDocument {
+    workspace_id: Uuid,
+    revision_id: Uuid,
+    activated_by_attempt_id: Option<Uuid>,
+    graph_contribution_count: Option<usize>,
+}
+
+#[derive(Debug)]
+enum RebuildTransactionOutcome {
+    Published(GraphProjectionOutcome),
+    CoverageRejected(RebuildCoverageFailure),
+}
 
 pub(crate) async fn rebuild_library_graph(
     state: &AppState,
     library_id: Uuid,
 ) -> Result<GraphProjectionOutcome, GraphServiceError> {
+    let mut guard = match repositories::acquire_runtime_library_graph_rebuild_guard(
+        &state.persistence.postgres,
+        library_id,
+    )
+    .await
+    .context("failed to acquire atomic runtime graph rebuild guard")?
+    {
+        repositories::RuntimeGraphRebuildGuardAcquireOutcome::Acquired(guard) => guard,
+        repositories::RuntimeGraphRebuildGuardAcquireOutcome::LibraryNotFound => {
+            return Err(GraphServiceError::LibraryNotFound { library_id });
+        }
+        repositories::RuntimeGraphRebuildGuardAcquireOutcome::Busy => {
+            return Err(GraphServiceError::WriteContention {
+                message: "another whole-library graph rebuild is already running".to_string(),
+            });
+        }
+    };
+
+    let transaction_result =
+        rebuild_library_graph_in_transaction(state, library_id, guard.connection()).await;
+    match transaction_result {
+        Ok(RebuildTransactionOutcome::Published(outcome)) => {
+            guard.commit().await.context("failed to commit atomic runtime graph rebuild")?;
+            schedule_topology_prewarm(state, library_id);
+            Ok(outcome)
+        }
+        Ok(RebuildTransactionOutcome::CoverageRejected(failure)) => {
+            guard.rollback().await.context("failed to roll back rejected runtime graph rebuild")?;
+            let recovery =
+                enqueue_graph_reextract_jobs(state, library_id, &failure.recovery_candidates).await;
+            Err(failure.into_graph_error(library_id, &recovery))
+        }
+        Err(error) => {
+            let rollback_result =
+                guard.rollback().await.context("failed to roll back atomic runtime graph rebuild");
+            match rollback_result {
+                Ok(()) => Err(error),
+                Err(rollback_error) => Err(rollback_error.context(error.to_string()).into()),
+            }
+        }
+    }
+}
+
+async fn rebuild_library_graph_in_transaction(
+    state: &AppState,
+    library_id: Uuid,
+    connection: &mut sqlx::PgConnection,
+) -> Result<RebuildTransactionOutcome, GraphServiceError> {
     let snapshot =
-        repositories::get_runtime_graph_snapshot(&state.persistence.postgres, library_id)
+        repositories::get_runtime_graph_snapshot_with_executor(&mut *connection, library_id)
             .await
             .context("failed to load graph snapshot while planning rebuild")?;
     let projection_version = next_projection_version(snapshot.as_ref());
-    let extractions = repositories::list_runtime_graph_extraction_records_by_library(
-        &state.persistence.postgres,
+    let ready_documents =
+        load_ready_graph_documents_with_connection(connection, library_id).await?;
+    let baseline_document_ids = load_rebuild_baseline_document_ids_with_connection(
+        connection,
         library_id,
-        GRAPH_EXTRACTION_VERSION,
+        snapshot.as_ref(),
+        &ready_documents,
     )
-    .await
-    .context("failed to reload runtime graph extraction records for rebuild")?;
+    .await?;
+    let extractions = repositories::runtime_graph_repository::
+        list_runtime_graph_extraction_records_by_library_with_executor(
+            &mut *connection,
+            library_id,
+            GRAPH_EXTRACTION_VERSION,
+        )
+        .await
+        .context("failed to reload runtime graph extraction records for rebuild")?;
 
     if extractions.is_empty() {
+        let coverage = match assess_rebuild_coverage(
+            projection_version,
+            &ready_documents,
+            &baseline_document_ids,
+            &BTreeSet::new(),
+        ) {
+            Ok(coverage) => coverage,
+            Err(failure) => return Ok(RebuildTransactionOutcome::CoverageRejected(failure)),
+        };
         if let Some(error) = empty_rebuild_conflict(
             library_id,
             snapshot.as_ref(),
+            &ready_documents,
+            coverage,
             "no graph extraction records matched the current extraction version",
         ) {
             return Err(error);
         }
-        return ensure_empty_graph_snapshot(
+        let projection = project_rebuild_normalized_graph_with_connection(
             state,
+            connection,
             &GraphProjectionScope::new(library_id, projection_version),
         )
-        .await;
+        .await?;
+        return Ok(RebuildTransactionOutcome::Published(projection));
     }
 
     let mut changed_node_ids = BTreeSet::new();
     let mut changed_edge_ids = BTreeSet::new();
 
     for record in extractions {
-        let Some(merge_outcome) =
-            rebuild_graph_extraction_record(state, library_id, projection_version, record).await?
+        let expected_completion = ready_documents.get(&record.document_id);
+        let Some(merge_outcome) = rebuild_graph_extraction_record_with_connection(
+            state,
+            connection,
+            library_id,
+            projection_version,
+            expected_completion,
+            record,
+        )
+        .await?
         else {
             continue;
         };
@@ -79,24 +194,37 @@ pub(crate) async fn rebuild_library_graph(
         changed_edge_ids.extend(merge_outcome.summary_refresh_edge_ids());
     }
 
-    reconcile_merge_support_counts(
-        &state.persistence.postgres,
-        &GraphMergeScope::new(library_id, projection_version),
+    repositories::recalculate_runtime_graph_support_counts_by_ids_with_executor(
+        connection,
+        library_id,
+        projection_version,
         &changed_node_ids.iter().copied().collect::<Vec<_>>(),
         &changed_edge_ids.iter().copied().collect::<Vec<_>>(),
     )
     .await
     .context("failed to reconcile rebuilt graph support counts")?;
 
-    let merged_nodes = repositories::list_admitted_runtime_graph_nodes_by_library(
-        &state.persistence.postgres,
+    let merged_nodes = repositories::list_admitted_runtime_graph_nodes_by_library_with_executor(
+        &mut *connection,
         library_id,
         projection_version,
     )
     .await
     .context("failed to load rebuilt graph nodes")?;
-    let merged_edges = repositories::list_admitted_runtime_graph_edges_by_library(
-        &state.persistence.postgres,
+    let projected_document_ids = runtime_graph_document_ids(&merged_nodes);
+
+    let coverage = match assess_rebuild_coverage(
+        projection_version,
+        &ready_documents,
+        &baseline_document_ids,
+        &projected_document_ids,
+    ) {
+        Ok(coverage) => coverage,
+        Err(failure) => return Ok(RebuildTransactionOutcome::CoverageRejected(failure)),
+    };
+
+    let merged_edges = repositories::list_admitted_runtime_graph_edges_by_library_with_executor(
+        &mut *connection,
         library_id,
         projection_version,
     )
@@ -107,75 +235,109 @@ pub(crate) async fn rebuild_library_graph(
         if let Some(error) = empty_rebuild_conflict(
             library_id,
             snapshot.as_ref(),
+            &ready_documents,
+            coverage,
             "the rebuilt graph produced no admitted nodes or edges",
         ) {
             return Err(error);
         }
-        return ensure_empty_graph_snapshot(
+        let projection = project_rebuild_normalized_graph_with_connection(
             state,
+            connection,
             &GraphProjectionScope::new(library_id, projection_version),
         )
-        .await;
+        .await?;
+        return Ok(RebuildTransactionOutcome::Published(projection));
     }
 
     let projection_scope = GraphProjectionScope::new(library_id, projection_version);
-    run_rebuild_projection(state, &projection_scope, "failed to project rebuilt graph")
-        .await
-        .map_err(Into::into)
+    let projection =
+        project_rebuild_normalized_graph_with_connection(state, connection, &projection_scope)
+            .await
+            .context("failed to project rebuilt graph")?;
+    Ok(RebuildTransactionOutcome::Published(projection))
 }
 
-async fn rebuild_graph_extraction_record(
+async fn rebuild_graph_extraction_record_with_connection(
     state: &AppState,
+    connection: &mut sqlx::PgConnection,
     library_id: Uuid,
     projection_version: i64,
+    expected_completion: Option<&ReadyGraphDocument>,
     record: repositories::RuntimeGraphExtractionRecordRow,
 ) -> Result<Option<GraphMergeOutcome>, GraphServiceError> {
     if record.status != ASYNC_OP_STATUS_READY {
         return Ok(None);
     }
-    let Some(document_row) =
-        content_repository::get_document_by_id(&state.persistence.postgres, record.document_id)
-            .await
-            .with_context(|| format!("failed to load document {}", record.document_id))?
+    let Some(document_row) = content_document_repository::get_document_by_id_with_executor(
+        &mut *connection,
+        record.document_id,
+    )
+    .await
+    .with_context(|| format!("failed to load document {}", record.document_id))?
     else {
         return Ok(None);
     };
-    if document_row.deleted_at.is_some() {
+    if record.library_id != library_id
+        || document_row.library_id != library_id
+        || document_row.deleted_at.is_some()
+    {
         return Ok(None);
     }
-    let Some(document_head) =
-        content_repository::get_document_head(&state.persistence.postgres, record.document_id)
-            .await
-            .with_context(|| format!("failed to load document head {}", record.document_id))?
+    let Some(document_head) = content_document_head_repository::get_document_head_with_executor(
+        &mut *connection,
+        record.document_id,
+    )
+    .await
+    .with_context(|| format!("failed to load document head {}", record.document_id))?
     else {
         return Ok(None);
     };
     let extraction_lifecycle = extraction_lifecycle_from_record(&record);
-    if extraction_lifecycle.revision_id.is_some()
-        && extraction_lifecycle.revision_id != document_head.active_revision_id
+    let Some(revision_id) = extraction_lifecycle.revision_id else {
+        return Ok(None);
+    };
+    let Some(expected_completion) = expected_completion else {
+        return Ok(None);
+    };
+    if !expected_completion.graph_contribution_count.is_some_and(|count| count > 0)
+        || expected_completion.revision_id != revision_id
+        || expected_completion.activated_by_attempt_id
+            != extraction_lifecycle.activated_by_attempt_id
+        || active_readable_revision_id(&document_head) != Some(revision_id)
     {
         return Ok(None);
     }
-    let active_revision_id = extraction_lifecycle.revision_id.or(document_head.active_revision_id);
-    let revision = load_optional_content_revision(state, active_revision_id).await?;
+    let Some(revision) = content_revision_repository::get_revision_by_id_with_executor(
+        &mut *connection,
+        revision_id,
+    )
+    .await
+    .with_context(|| format!("failed to load revision {revision_id}"))?
+    else {
+        return Ok(None);
+    };
+    if revision.document_id != record.document_id
+        || revision.workspace_id != document_row.workspace_id
+        || revision.library_id != library_id
+    {
+        return Ok(None);
+    }
     let Some(chunk_row) =
-        content_repository::get_chunk_by_id(&state.persistence.postgres, record.chunk_id)
+        content_chunk_repository::get_chunk_by_id_with_executor(&mut *connection, record.chunk_id)
             .await
             .with_context(|| format!("failed to load chunk {}", record.chunk_id))?
     else {
         return Ok(None);
     };
-    if !is_graph_reconcile_chunk_text_eligible(&chunk_row.normalized_text) {
+    if chunk_row.revision_id != revision_id
+        || !is_graph_reconcile_chunk_text_eligible(&chunk_row.normalized_text)
+    {
         return Ok(None);
     }
 
-    let document = synthesize_document_row(&document_row, &document_head, revision.as_ref());
-    let chunk = synthesize_chunk_row(
-        &chunk_row,
-        document_row.id,
-        library_id,
-        revision.as_ref().map_or_else(Utc::now, |value| value.created_at),
-    );
+    let document = synthesize_document_row(&document_row, &document_head, Some(&revision));
+    let chunk = synthesize_chunk_row(&chunk_row, document_row.id, library_id, revision.created_at);
     let candidates = repaired_graph_extraction_candidates(record.normalized_output_json.clone())
         .with_context(|| {
             format!(
@@ -188,15 +350,18 @@ async fn rebuild_graph_extraction_record(
     }
 
     let merge_scope = GraphMergeScope::new(library_id, projection_version)
-        .with_lifecycle(active_revision_id, extraction_lifecycle.activated_by_attempt_id);
-    merge_chunk_graph_candidates(
-        &state.persistence.postgres,
+        .with_lifecycle(Some(revision_id), extraction_lifecycle.activated_by_attempt_id);
+    let extraction_recovery = extraction_recovery_summary_from_record(&record);
+    merge_chunk_graph_candidates_with_connection(
+        connection,
         &state.bulk_ingest_hardening_services.graph_quality_guard,
         &merge_scope,
-        &document,
-        &chunk,
-        &candidates,
-        extraction_recovery_summary_from_record(&record).as_ref(),
+        MergeChunkInput {
+            document: &document,
+            chunk: &chunk,
+            candidates: &candidates,
+            extraction_recovery: extraction_recovery.as_ref(),
+        },
     )
     .await
     .with_context(|| {
@@ -204,19 +369,6 @@ async fn rebuild_graph_extraction_record(
     })
     .map(Some)
     .map_err(Into::into)
-}
-
-async fn load_optional_content_revision(
-    state: &AppState,
-    revision_id: Option<Uuid>,
-) -> Result<Option<content_repository::ContentRevisionRow>, GraphServiceError> {
-    let Some(revision_id) = revision_id else {
-        return Ok(None);
-    };
-    content_repository::get_revision_by_id(&state.persistence.postgres, revision_id)
-        .await
-        .with_context(|| format!("failed to load revision {revision_id}"))
-        .map_err(Into::into)
 }
 
 #[derive(Debug, Clone)]
@@ -227,36 +379,54 @@ pub struct RevisionGraphReconcileOutcome {
     pub pending_summary_refresh: Option<PendingGraphSummaryRefresh>,
 }
 
-pub(crate) async fn reconcile_revision_graph(
+pub(crate) async fn reconcile_revision_graph_authorized(
     state: &AppState,
-    library_id: Uuid,
+    authority: IngestRevisionWriteAuthority,
     document_id: Uuid,
-    revision_id: Uuid,
-    activated_by_attempt_id: Option<Uuid>,
+    connection: &mut sqlx::PgConnection,
     cancellation_token: &CancellationToken,
 ) -> Result<RevisionGraphReconcileOutcome, GraphServiceError> {
     ensure_not_cancelled(cancellation_token)?;
-    let document_row =
-        content_repository::get_document_by_id(&state.persistence.postgres, document_id)
-            .await
-            .with_context(|| format!("failed to load content document {document_id}"))?
-            .with_context(|| format!("content document {document_id} not found"))?;
-    ensure_not_cancelled(cancellation_token)?;
+    let document_row = content_document_repository::get_document_by_id_with_executor(
+        &mut *connection,
+        document_id,
+    )
+    .await
+    .with_context(|| format!("failed to load content document {document_id}"))?
+    .with_context(|| format!("content document {document_id} not found"))?;
     let document_head =
-        content_repository::get_document_head(&state.persistence.postgres, document_id)
-            .await
-            .with_context(|| format!("failed to load content document head {document_id}"))?
-            .with_context(|| format!("content document head {document_id} not found"))?;
-    ensure_not_cancelled(cancellation_token)?;
-    let revision = content_repository::get_revision_by_id(&state.persistence.postgres, revision_id)
+        content_document_head_repository::get_document_head_for_update_with_executor(
+            &mut *connection,
+            document_id,
+        )
         .await
-        .with_context(|| format!("failed to load content revision {revision_id}"))?
-        .with_context(|| format!("content revision {revision_id} not found"))?;
-    ensure_not_cancelled(cancellation_token)?;
-    let revision_chunks =
-        content_repository::list_chunks_by_revision(&state.persistence.postgres, revision_id)
-            .await
-            .with_context(|| format!("failed to list chunks for content revision {revision_id}"))?;
+        .with_context(|| format!("failed to load content document head {document_id}"))?
+        .with_context(|| format!("content document head {document_id} not found"))?;
+    let revision = content_revision_repository::get_revision_by_id_with_executor(
+        &mut *connection,
+        authority.revision_id,
+    )
+    .await
+    .with_context(|| format!("failed to load content revision {}", authority.revision_id))?
+    .with_context(|| format!("content revision {} not found", authority.revision_id))?;
+    let revision_chunks = content_chunk_repository::list_chunks_by_revision_with_executor(
+        &mut *connection,
+        authority.revision_id,
+    )
+    .await
+    .with_context(|| {
+        format!("failed to list chunks for content revision {}", authority.revision_id)
+    })?;
+    if document_row.workspace_id != authority.workspace_id
+        || document_row.library_id != authority.library_id
+        || revision.workspace_id != authority.workspace_id
+        || revision.library_id != authority.library_id
+        || revision.document_id != document_id
+    {
+        return Err(GraphServiceError::StateConflict {
+            message: "authorized graph reconcile scope mismatch".to_string(),
+        });
+    }
     ensure_not_cancelled(cancellation_token)?;
 
     let document = synthesize_document_row(&document_row, &document_head, Some(&revision));
@@ -264,121 +434,156 @@ pub(crate) async fn reconcile_revision_graph(
     let chunk_rows_by_id = revision_chunks
         .iter()
         .map(|chunk| {
-            (chunk.id, synthesize_chunk_row(chunk, document_id, library_id, revision.created_at))
+            (
+                chunk.id,
+                synthesize_chunk_row(chunk, document_id, authority.library_id, revision.created_at),
+            )
         })
         .collect::<BTreeMap<_, _>>();
-
     let previous_active_revision_id = document_head
         .active_revision_id
-        .filter(|active_revision_id| *active_revision_id != revision_id);
-    let (superseded_node_ids, superseded_edge_ids) = collect_superseded_graph_targets(
-        state,
-        library_id,
-        document_id,
-        previous_active_revision_id,
-        cancellation_token,
-    )
-    .await?;
+        .filter(|revision_id| *revision_id != authority.revision_id);
 
-    let snapshot =
-        repositories::get_runtime_graph_snapshot(&state.persistence.postgres, library_id)
-            .await
-            .context("failed to load graph snapshot while reconciling revision graph")?;
-    ensure_not_cancelled(cancellation_token)?;
-    let projection_scope =
-        crate::services::graph::projection::resolve_projection_scope(state, library_id)
-            .await
-            .context("failed to resolve active projection scope for revision graph reconcile")?
-            .defer_source_truth_to_lifecycle();
-    ensure_not_cancelled(cancellation_token)?;
-    let existing_graph_is_empty =
-        snapshot.as_ref().is_none_or(|value| value.node_count <= 0 && value.edge_count <= 0);
-    if document_row.document_state == "deleted" || document_row.deleted_at.is_some() {
-        tracing::info!(
-            %library_id,
-            %document_id,
-            %revision_id,
-            "revision graph reconcile skipped because document is deleted"
-        );
-        let projection = preserve_runtime_graph_snapshot(
-            state,
-            &projection_scope,
-            snapshot,
-            "deleted revision graph reconcile",
-        )
-        .await?;
-        return Ok(RevisionGraphReconcileOutcome {
-            graph_ready: false,
-            graph_contribution_count: 0,
-            pending_summary_refresh: None,
-            projection,
-        });
-    }
-
-    let extraction_records = repositories::list_runtime_graph_extraction_records_by_document(
-        &state.persistence.postgres,
-        document_id,
-        GRAPH_EXTRACTION_VERSION,
+    let snapshot = repositories::get_runtime_graph_snapshot_with_executor(
+        &mut *connection,
+        authority.library_id,
     )
     .await
-    .with_context(|| {
-        format!("failed to list graph extraction records for document {document_id}")
-    })?;
-    let latest_records_by_chunk = select_latest_revision_extraction_records(
+    .context("failed to load graph snapshot while reconciling authorized revision graph")?;
+    let projection_scope = GraphProjectionScope::new(
+        authority.library_id,
+        crate::services::graph::projection::active_projection_version(snapshot.as_ref()),
+    )
+    .defer_source_truth_to_lifecycle();
+    let existing_graph_is_empty =
+        snapshot.as_ref().is_none_or(|row| row.node_count <= 0 && row.edge_count <= 0);
+
+    // Deletion convergence owns removal of a deleted document's evidence.
+    // Bail out before retry replacement mutates any evidence: preserving an
+    // old snapshot after deleting its support rows would publish internally
+    // inconsistent counts. The document/head locks held above serialize this
+    // decision with deletion lifecycle publication.
+    if document_row.document_state == "deleted" || document_row.deleted_at.is_some() {
+        return preserve_deleted_document_graph_snapshot(
+            connection,
+            &projection_scope,
+            snapshot.as_ref(),
+        )
+        .await;
+    }
+
+    // Same-revision retry replacement is mandatory: remove all evidence from
+    // A before merging B. Previous-revision evidence is removed as a separate
+    // footprint when the head is moving to a new revision.
+    let (mut replaced_node_ids, mut replaced_edge_ids) =
+        collect_revision_graph_targets_with_connection(
+            connection,
+            authority.library_id,
+            document_id,
+            authority.revision_id,
+            false,
+            cancellation_token,
+        )
+        .await?;
+    // A pure append carries every previous chunk forward at the same index with
+    // the same text checksum. Its evidence is moved to the new revision and the
+    // new chunk ids in place; only the appended chunks are extracted and merged
+    // again. Any other change (edit, delete, reorder) keeps the full teardown
+    // path below unchanged.
+    let pure_append = match previous_active_revision_id {
+        Some(previous_revision_id) => {
+            let previous_chunks = content_chunk_repository::list_chunks_by_revision_with_executor(
+                &mut *connection,
+                previous_revision_id,
+            )
+            .await
+            .with_context(|| {
+                format!(
+                    "failed to list previous revision chunks {previous_revision_id} while classifying append"
+                )
+            })?;
+            classify_pure_append_chunks(&previous_chunks, &revision_chunks)
+        }
+        None => None,
+    };
+    let carried_evidence_target_count = carry_previous_revision_graph_evidence(
+        connection,
+        PreviousRevisionCarry {
+            authority: &authority,
+            document_id,
+            previous_active_revision_id,
+            pure_append: pure_append.as_ref(),
+            cancellation_token,
+        },
+        &mut replaced_node_ids,
+        &mut replaced_edge_ids,
+    )
+    .await?;
+
+    let extraction_records =
+        repositories::list_runtime_graph_extraction_records_by_document_with_executor(
+            &mut *connection,
+            document_id,
+            GRAPH_EXTRACTION_VERSION,
+        )
+        .await
+        .with_context(|| {
+            format!("failed to list graph extraction records for document {document_id}")
+        })?;
+    let mut latest_records_by_chunk = select_latest_revision_extraction_records(
         extraction_records,
         &revision_chunk_ids,
-        revision_id,
+        authority.revision_id,
+        authority.attempt_id,
         cancellation_token,
     )?;
-
-    let merge_scope = GraphMergeScope::new(library_id, projection_scope.projection_version)
-        .with_lifecycle(Some(revision_id), activated_by_attempt_id);
-
-    let merge_summary = merge_revision_graph_records(
+    if let Some(delta) = pure_append.as_ref() {
+        latest_records_by_chunk.retain(|chunk_id, _| delta.added_chunk_ids.contains(chunk_id));
+    }
+    let merge_scope =
+        GraphMergeScope::new(authority.library_id, projection_scope.projection_version)
+            .with_lifecycle(Some(authority.revision_id), Some(authority.attempt_id));
+    let merge_summary = merge_revision_graph_records_with_connection(
+        connection,
         state,
-        document,
-        chunk_rows_by_id,
-        merge_scope,
-        latest_records_by_chunk,
+        RevisionMergeRecordsInput {
+            document,
+            chunk_rows_by_id,
+            merge_scope,
+            records: latest_records_by_chunk,
+        },
         cancellation_token,
     )
     .await?;
-    let graph_contribution_count = merge_summary.graph_contribution_count;
-    let changed_node_ids = merge_summary.changed_node_ids;
-    let changed_edge_ids = merge_summary.changed_edge_ids;
-    // Union the new revision's merge contributions with the superseded
-    // revision's now-orphaned targets. This is the exact set of nodes/edges
-    // whose support must be re-derived and whose zero-support members must be
-    // pruned, and it bounds the projection to this document's graph footprint.
-    let targeted_node_ids = union_targeted_ids(&changed_node_ids, &superseded_node_ids);
-    let targeted_edge_ids = union_targeted_ids(&changed_edge_ids, &superseded_edge_ids);
-
+    let graph_contribution_count =
+        merge_summary.graph_contribution_count.saturating_add(carried_evidence_target_count);
+    let targeted_node_ids = union_targeted_ids(&merge_summary.changed_node_ids, &replaced_node_ids);
+    let targeted_edge_ids = union_targeted_ids(&merge_summary.changed_edge_ids, &replaced_edge_ids);
     let plan = revision_reconcile_projection_plan(
-        previous_active_revision_id.is_some(),
+        previous_active_revision_id.is_some()
+            || !replaced_node_ids.is_empty()
+            || !replaced_edge_ids.is_empty(),
         graph_contribution_count,
         existing_graph_is_empty,
         snapshot.is_some(),
         &targeted_node_ids,
         &targeted_edge_ids,
     );
-
-    let pending_summary_refresh = if plan.broad_summary_refresh() {
-        PendingGraphSummaryRefresh::broad()
-    } else {
-        PendingGraphSummaryRefresh::targeted(changed_node_ids.clone(), changed_edge_ids.clone())
-    };
-
-    let projection = execute_revision_reconcile_projection(
-        state,
-        projection_scope,
-        snapshot,
-        plan,
-        &targeted_node_ids,
-        &targeted_edge_ids,
+    let pending_summary_refresh = pending_summary_refresh_for_plan(plan, &merge_summary);
+    let projection = execute_authorized_revision_projection(
+        connection,
+        &projection_scope,
+        AuthorizedRevisionProjectionInput {
+            authority,
+            document_id,
+            snapshot: snapshot.as_ref(),
+            plan,
+            targeted_node_ids: &targeted_node_ids,
+            targeted_edge_ids: &targeted_edge_ids,
+        },
         cancellation_token,
     )
     .await?;
-
     Ok(RevisionGraphReconcileOutcome {
         graph_ready: graph_contribution_count > 0 && projection.graph_status == GRAPH_STATUS_READY,
         graph_contribution_count,
@@ -387,567 +592,397 @@ pub(crate) async fn reconcile_revision_graph(
     })
 }
 
-#[derive(Debug, Default)]
-struct ChunkMergeOutcome {
-    contribution: usize,
-    node_ids: Vec<Uuid>,
-    edge_ids: Vec<Uuid>,
+/// Inputs for carrying or replacing a previous revision's graph evidence.
+struct PreviousRevisionCarry<'a> {
+    authority: &'a IngestRevisionWriteAuthority,
+    document_id: Uuid,
+    previous_active_revision_id: Option<Uuid>,
+    pure_append: Option<&'a PureAppendDelta>,
+    cancellation_token: &'a CancellationToken,
 }
 
-struct RevisionGraphMergeSummary {
-    graph_contribution_count: usize,
-    changed_node_ids: Vec<Uuid>,
-    changed_edge_ids: Vec<Uuid>,
-}
-
-async fn merge_revision_graph_records(
-    state: &AppState,
-    document: DocumentRow,
-    chunk_rows_by_id: BTreeMap<Uuid, ChunkRow>,
-    merge_scope: GraphMergeScope,
-    records: BTreeMap<Uuid, repositories::RuntimeGraphExtractionRecordRow>,
-    cancellation_token: &CancellationToken,
-) -> Result<RevisionGraphMergeSummary, GraphServiceError> {
-    const MERGE_PARALLELISM: usize = 1;
-    let pool = state.persistence.postgres.clone();
-    let quality_guard = state.bulk_ingest_hardening_services.graph_quality_guard.clone();
-    let document = Arc::new(document);
-    let chunk_rows_by_id = Arc::new(chunk_rows_by_id);
-    let merge_scope = Arc::new(merge_scope);
-    let merge_results = stream::iter(records.into_values().map(|record| {
-        let pool = pool.clone();
-        let quality_guard = quality_guard.clone();
-        let document = Arc::clone(&document);
-        let chunk_rows_by_id = Arc::clone(&chunk_rows_by_id);
-        let merge_scope = Arc::clone(&merge_scope);
-        let cancellation_token = cancellation_token.clone();
-        async move {
-            merge_revision_graph_record(
-                &pool,
-                &quality_guard,
-                document,
-                chunk_rows_by_id,
-                merge_scope,
-                record,
-                &cancellation_token,
+/// Carries a pure append's evidence forward or replaces the previous revision's
+/// footprint, extending the replaced id sets. Returns the carried target count.
+async fn carry_previous_revision_graph_evidence(
+    connection: &mut sqlx::PgConnection,
+    carry: PreviousRevisionCarry<'_>,
+    replaced_node_ids: &mut BTreeSet<Uuid>,
+    replaced_edge_ids: &mut BTreeSet<Uuid>,
+) -> Result<usize, GraphServiceError> {
+    let PreviousRevisionCarry {
+        authority,
+        document_id,
+        previous_active_revision_id,
+        pure_append,
+        cancellation_token,
+    } = carry;
+    let mut carried_evidence_target_count = 0usize;
+    if let Some(previous_revision_id) = previous_active_revision_id {
+        if let Some(delta) = pure_append {
+            repositories::query_repository::delete_query_execution_references_by_content_revision_with_executor(
+                &mut *connection,
+                authority.library_id,
+                document_id,
+                previous_revision_id,
             )
             .await
-        }
-    }))
-    .buffer_unordered(MERGE_PARALLELISM)
-    .try_collect::<Vec<_>>()
-    .await?;
-    let summary = summarize_revision_graph_merges(merge_results, cancellation_token)?;
-    reconcile_merge_support_counts(
-        &state.persistence.postgres,
-        merge_scope.as_ref(),
-        &summary.changed_node_ids,
-        &summary.changed_edge_ids,
-    )
-    .await
-    .context("failed to reconcile graph support counts during revision graph reconcile")?;
-    ensure_not_cancelled(cancellation_token)?;
-    Ok(summary)
-}
-
-async fn merge_revision_graph_record(
-    pool: &sqlx::PgPool,
-    quality_guard: &crate::services::graph::quality_guard::GraphQualityGuardService,
-    document: Arc<DocumentRow>,
-    chunk_rows_by_id: Arc<BTreeMap<Uuid, ChunkRow>>,
-    merge_scope: Arc<GraphMergeScope>,
-    mut record: repositories::RuntimeGraphExtractionRecordRow,
-    cancellation_token: &CancellationToken,
-) -> anyhow::Result<ChunkMergeOutcome> {
-    ensure_not_cancelled(cancellation_token)?;
-    let chunk_id = record.chunk_id;
-    let doc_id = document.id;
-    let merge_started = std::time::Instant::now();
-    tracing::info!(%doc_id, %chunk_id, "graph merge chunk start");
-    let Some(chunk_row) = chunk_rows_by_id.get(&chunk_id).cloned() else {
-        tracing::info!(%doc_id, %chunk_id, "graph merge chunk skipped — no chunk row");
-        return Ok(ChunkMergeOutcome::default());
-    };
-    if !is_graph_reconcile_chunk_text_eligible(&chunk_row.content) {
-        tracing::info!(
-            %doc_id,
-            %chunk_id,
-            elapsed_ms = merge_started.elapsed().as_millis() as u64,
-            "graph merge chunk skipped — current chunk text is not graph-eligible"
-        );
-        return Ok(ChunkMergeOutcome::default());
-    }
-    let normalized = std::mem::take(&mut record.normalized_output_json);
-    let recovery = extraction_recovery_summary_from_record(&record);
-    let candidates = tokio::task::spawn_blocking(move || {
-        repaired_graph_extraction_candidates(normalized)
-    })
-    .await
-    .context("normalized graph extraction decode task panicked")?
-    .with_context(|| {
-        format!(
-            "failed to decode normalized graph extraction for document {doc_id} chunk {chunk_id}"
-        )
-    })?;
-    ensure_not_cancelled(cancellation_token)?;
-    if candidates.entities.is_empty() && candidates.relations.is_empty() {
-        tracing::info!(
-            %doc_id,
-            %chunk_id,
-            elapsed_ms = merge_started.elapsed().as_millis() as u64,
-            "graph merge chunk done — no candidates"
-        );
-        return Ok(ChunkMergeOutcome::default());
-    }
-    merge_nonempty_revision_graph_candidates(
-        pool,
-        quality_guard,
-        &document,
-        &chunk_row,
-        &merge_scope,
-        &candidates,
-        recovery.as_ref(),
-        cancellation_token,
-        merge_started,
-    )
-    .await
-}
-
-async fn merge_nonempty_revision_graph_candidates(
-    pool: &sqlx::PgPool,
-    quality_guard: &crate::services::graph::quality_guard::GraphQualityGuardService,
-    document: &DocumentRow,
-    chunk: &ChunkRow,
-    merge_scope: &GraphMergeScope,
-    candidates: &GraphExtractionCandidateSet,
-    recovery: Option<&crate::domains::graph_quality::ExtractionRecoverySummary>,
-    cancellation_token: &CancellationToken,
-    merge_started: std::time::Instant,
-) -> anyhow::Result<ChunkMergeOutcome> {
-    const PER_CHUNK_MERGE_TIMEOUT: std::time::Duration = std::time::Duration::from_mins(3);
-    let entity_count = candidates.entities.len();
-    let relation_count = candidates.relations.len();
-    let chunk_id = chunk.id;
-    let doc_id = document.id;
-    let merge_future = merge_chunk_graph_candidates(
-        pool,
-        quality_guard,
-        merge_scope,
-        document,
-        chunk,
-        candidates,
-        recovery,
-    );
-    let timed_result = tokio::select! {
-        () = cancellation_token.cancelled() => {
-            return Err(anyhow::Error::new(StageError::Cancelled));
-        }
-        result = tokio::time::timeout(PER_CHUNK_MERGE_TIMEOUT, merge_future) => result,
-    };
-    let merge_outcome = timed_result.map_err(|_| {
-        tracing::error!(
-            %doc_id,
-            %chunk_id,
-            entity_count,
-            relation_count,
-            timeout_secs = PER_CHUNK_MERGE_TIMEOUT.as_secs(),
-            "graph merge chunk exceeded per-chunk timeout — aborting chunk"
-        );
-        anyhow::anyhow!(
-            "graph merge chunk {chunk_id} exceeded {}s per-chunk timeout on document {doc_id}",
-            PER_CHUNK_MERGE_TIMEOUT.as_secs()
-        )
-    })??;
-    tracing::info!(
-        %doc_id,
-        %chunk_id,
-        entity_count,
-        relation_count,
-        elapsed_ms = merge_started.elapsed().as_millis() as u64,
-        contribution = merge_outcome.nodes.len() + merge_outcome.edges.len(),
-        "graph merge chunk done"
-    );
-    Ok(ChunkMergeOutcome {
-        contribution: merge_outcome.nodes.len() + merge_outcome.edges.len(),
-        node_ids: merge_outcome.summary_refresh_node_ids(),
-        edge_ids: merge_outcome.summary_refresh_edge_ids(),
-    })
-}
-
-fn summarize_revision_graph_merges(
-    merge_results: Vec<ChunkMergeOutcome>,
-    cancellation_token: &CancellationToken,
-) -> Result<RevisionGraphMergeSummary, GraphServiceError> {
-    let mut graph_contribution_count = 0usize;
-    let mut changed_node_ids = BTreeSet::new();
-    let mut changed_edge_ids = BTreeSet::new();
-    for outcome in merge_results {
-        ensure_not_cancelled(cancellation_token)?;
-        graph_contribution_count = graph_contribution_count.saturating_add(outcome.contribution);
-        changed_node_ids.extend(outcome.node_ids);
-        changed_edge_ids.extend(outcome.edge_ids);
-    }
-    Ok(RevisionGraphMergeSummary {
-        graph_contribution_count,
-        changed_node_ids: changed_node_ids.into_iter().collect(),
-        changed_edge_ids: changed_edge_ids.into_iter().collect(),
-    })
-}
-
-async fn collect_superseded_graph_targets(
-    state: &AppState,
-    library_id: Uuid,
-    document_id: Uuid,
-    previous_revision_id: Option<Uuid>,
-    cancellation_token: &CancellationToken,
-) -> Result<(BTreeSet<Uuid>, BTreeSet<Uuid>), GraphServiceError> {
-    let Some(previous_revision_id) = previous_revision_id else {
-        return Ok((BTreeSet::new(), BTreeSet::new()));
-    };
-    ensure_not_cancelled(cancellation_token)?;
-    repositories::delete_query_execution_references_by_content_revision(
-        &state.persistence.postgres,
-        library_id,
-        document_id,
-        previous_revision_id,
-    )
-    .await
-    .with_context(|| {
-        format!(
-            "failed to delete stale query references for document {document_id} revision {previous_revision_id}"
-        )
-    })?;
-    let targets = repositories::deactivate_runtime_graph_evidence_by_content_revision(
-        &state.persistence.postgres,
-        library_id,
-        document_id,
-        previous_revision_id,
-    )
-    .await
-    .with_context(|| {
-        format!(
-            "failed to deactivate stale graph evidence for document {document_id} revision {previous_revision_id}"
-        )
-    })?;
-    ensure_not_cancelled(cancellation_token)?;
-    Ok(partition_graph_target_ids(targets))
-}
-
-fn partition_graph_target_ids(
-    targets: Vec<repositories::RuntimeGraphEvidenceTargetRow>,
-) -> (BTreeSet<Uuid>, BTreeSet<Uuid>) {
-    let mut node_ids = BTreeSet::new();
-    let mut edge_ids = BTreeSet::new();
-    for target in targets {
-        match target.target_kind.as_str() {
-            "node" => {
-                node_ids.insert(target.target_id);
-            }
-            "edge" => {
-                edge_ids.insert(target.target_id);
-            }
-            _ => {}
-        }
-    }
-    (node_ids, edge_ids)
-}
-
-fn select_latest_revision_extraction_records(
-    records: Vec<repositories::RuntimeGraphExtractionRecordRow>,
-    revision_chunk_ids: &BTreeSet<Uuid>,
-    revision_id: Uuid,
-    cancellation_token: &CancellationToken,
-) -> Result<BTreeMap<Uuid, repositories::RuntimeGraphExtractionRecordRow>, GraphServiceError> {
-    let mut latest_records = BTreeMap::new();
-    for record in records {
-        ensure_not_cancelled(cancellation_token)?;
-        if extraction_record_matches_revision(&record, revision_chunk_ids, revision_id) {
-            latest_records.insert(record.chunk_id, record);
-        }
-    }
-    Ok(latest_records)
-}
-
-fn extraction_record_matches_revision(
-    record: &repositories::RuntimeGraphExtractionRecordRow,
-    revision_chunk_ids: &BTreeSet<Uuid>,
-    revision_id: Uuid,
-) -> bool {
-    if record.status != ASYNC_OP_STATUS_READY || !revision_chunk_ids.contains(&record.chunk_id) {
-        return false;
-    }
-    let lifecycle = extraction_lifecycle_from_record(record);
-    lifecycle.revision_id.is_none() || lifecycle.revision_id == Some(revision_id)
-}
-
-async fn execute_revision_reconcile_projection(
-    state: &AppState,
-    projection_scope: GraphProjectionScope,
-    snapshot: Option<RuntimeGraphSnapshotRow>,
-    plan: RevisionReconcileProjectionPlan,
-    targeted_node_ids: &[Uuid],
-    targeted_edge_ids: &[Uuid],
-    cancellation_token: &CancellationToken,
-) -> Result<GraphProjectionOutcome, GraphServiceError> {
-    match plan {
-        RevisionReconcileProjectionPlan::TargetedSupersede => {
-            project_targeted_supersede(
-                state,
-                projection_scope,
-                targeted_node_ids,
-                targeted_edge_ids,
+            .with_context(|| {
+                format!(
+                    "failed to delete superseded query references for document {document_id} revision {previous_revision_id}"
+                )
+            })?;
+            let carried = repositories::runtime_graph_repository::retag_runtime_graph_evidence_to_revision(
+                &mut *connection,
+                repositories::runtime_graph_repository::RetagRuntimeGraphEvidenceInput {
+                    library_id: authority.library_id,
+                    document_id,
+                    previous_revision_id,
+                    revision_id: authority.revision_id,
+                    activated_by_attempt_id: authority.attempt_id,
+                    kept_previous_chunk_ids: &delta.kept_previous_chunk_ids(),
+                    kept_revision_chunk_ids: &delta.kept_revision_chunk_ids(),
+                },
+            )
+            .await
+            .with_context(|| {
+                format!(
+                    "failed to retag carried graph evidence for document {document_id} revision {previous_revision_id}"
+                )
+            })?;
+            carried_evidence_target_count = carried.len();
+        } else {
+            let (nodes, edges) = collect_revision_graph_targets_with_connection(
+                connection,
+                authority.library_id,
+                document_id,
+                previous_revision_id,
+                true,
                 cancellation_token,
             )
-            .await
-        }
-        RevisionReconcileProjectionPlan::TargetedFresh => {
-            project_targeted_refresh(state, projection_scope, targeted_node_ids, targeted_edge_ids)
-                .await
-        }
-        RevisionReconcileProjectionPlan::Full => project_canonical_graph(state, &projection_scope)
-            .await
-            .context("failed to project reconciled revision graph")
-            .map_err(Into::into),
-        RevisionReconcileProjectionPlan::Preserve => {
-            preserve_or_empty_projection(
-                state,
-                &projection_scope,
-                snapshot,
-                "no-op revision graph reconcile",
-            )
-            .await
-        }
-        RevisionReconcileProjectionPlan::Empty => {
-            ensure_empty_graph_snapshot(state, &projection_scope)
-                .await
-                .context("failed to persist empty graph snapshot during no-op revision reconcile")
-                .map_err(Into::into)
+            .await?;
+            replaced_node_ids.extend(nodes);
+            replaced_edge_ids.extend(edges);
         }
     }
+    Ok(carried_evidence_target_count)
 }
 
-async fn project_targeted_supersede(
-    state: &AppState,
-    projection_scope: GraphProjectionScope,
-    targeted_node_ids: &[Uuid],
-    targeted_edge_ids: &[Uuid],
-    cancellation_token: &CancellationToken,
-) -> Result<GraphProjectionOutcome, GraphServiceError> {
-    prune_superseded_revision_graph(
-        state,
-        projection_scope.library_id,
-        projection_scope.projection_version,
-        targeted_node_ids,
-        targeted_edge_ids,
-    )
-    .await
-    .context("failed to prune superseded revision graph before targeted projection")?;
-    ensure_not_cancelled(cancellation_token)?;
-    project_targeted_refresh(state, projection_scope, targeted_node_ids, targeted_edge_ids).await
+/// Preserves or empties a deleted document's snapshot without mutating evidence.
+async fn preserve_deleted_document_graph_snapshot(
+    connection: &mut sqlx::PgConnection,
+    scope: &GraphProjectionScope,
+    snapshot: Option<&RuntimeGraphSnapshotRow>,
+) -> Result<RevisionGraphReconcileOutcome, GraphServiceError> {
+    let projection = authorized_preserve_or_empty_snapshot(connection, scope, snapshot).await?;
+    Ok(RevisionGraphReconcileOutcome {
+        graph_ready: false,
+        graph_contribution_count: 0,
+        pending_summary_refresh: None,
+        projection,
+    })
 }
 
-async fn project_targeted_refresh(
-    state: &AppState,
-    projection_scope: GraphProjectionScope,
-    targeted_node_ids: &[Uuid],
-    targeted_edge_ids: &[Uuid],
-) -> Result<GraphProjectionOutcome, GraphServiceError> {
-    let projection_scope = projection_scope
-        .with_targeted_refresh(targeted_node_ids.to_vec(), targeted_edge_ids.to_vec());
-    project_canonical_graph(state, &projection_scope)
-        .await
-        .context("failed to project reconciled revision graph")
-        .map_err(Into::into)
-}
-
-async fn preserve_or_empty_projection(
-    state: &AppState,
-    projection_scope: &GraphProjectionScope,
-    snapshot: Option<RuntimeGraphSnapshotRow>,
-    context: &str,
-) -> Result<GraphProjectionOutcome, GraphServiceError> {
-    if snapshot.is_some() {
-        return preserve_runtime_graph_snapshot(state, projection_scope, snapshot, context)
-            .await
-            .map_err(Into::into);
-    }
-    ensure_empty_graph_snapshot(state, projection_scope)
-        .await
-        .with_context(|| format!("failed to persist empty graph snapshot during {context}"))
-        .map_err(Into::into)
-}
-
-/// Projection strategy for one revision-graph reconcile.
-///
-/// `TargetedSupersede` and `TargetedFresh` both republish only the affected
-/// subgraph (bounded by the document's own node/edge footprint); the difference
-/// is that a supersede first prunes the old revision's now-orphaned rows.
-/// `Full` and `Preserve`/`Empty` keep the prior behavior for the first-ever
-/// graph build and genuine no-ops.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum RevisionReconcileProjectionPlan {
-    TargetedSupersede,
-    TargetedFresh,
-    Full,
-    Preserve,
-    Empty,
-}
-
-impl RevisionReconcileProjectionPlan {
-    /// A library-wide source-truth change needs a broad canonical-summary
-    /// supersede (the inline regeneration self-skips for large graphs). Targeted
-    /// refreshes can scope the summary supersede to their own contributions.
-    const fn broad_summary_refresh(self) -> bool {
-        matches!(self, Self::TargetedSupersede | Self::Full | Self::Preserve | Self::Empty)
-    }
-}
-
-/// Decides how to project a revision-graph reconcile.
-///
-/// The driving goal is that a per-document re-revision must NOT rebuild the
-/// whole library projection (the > 2 GiB resident load that OOM-killed the
-/// worker). When a previous revision existed we take the targeted supersede
-/// path whenever there is anything to change, falling back to preserve/empty
-/// only for a genuine no-op so an empty union can never silently route into the
-/// full (OOM) rebuild.
-const fn revision_reconcile_projection_plan(
-    has_previous_revision: bool,
-    graph_contribution_count: usize,
-    existing_graph_is_empty: bool,
-    has_snapshot: bool,
-    targeted_node_ids: &[Uuid],
-    targeted_edge_ids: &[Uuid],
-) -> RevisionReconcileProjectionPlan {
-    let has_targets = !targeted_node_ids.is_empty() || !targeted_edge_ids.is_empty();
-
-    if has_previous_revision {
-        // Re-revision supersede. The existing graph is already populated for
-        // this library, so a targeted refresh over the union of new
-        // contributions and superseded orphans is correct and bounded. Only a
-        // truly empty union (nothing merged, nothing superseded) is a no-op.
-        if has_targets {
-            return RevisionReconcileProjectionPlan::TargetedSupersede;
-        }
-        return if has_snapshot {
-            RevisionReconcileProjectionPlan::Preserve
-        } else {
-            RevisionReconcileProjectionPlan::Empty
-        };
-    }
-
-    // First activation of this document's revision (no predecessor).
-    if existing_graph_is_empty {
-        // The library graph is empty/new; a full projection is cheap here and
-        // also covers the first-ever build for the library.
-        return RevisionReconcileProjectionPlan::Full;
-    }
-    if graph_contribution_count > 0 && has_targets {
-        return RevisionReconcileProjectionPlan::TargetedFresh;
-    }
-    if has_snapshot {
-        RevisionReconcileProjectionPlan::Preserve
+/// Selects the queued summary refresh for a reconcile projection plan.
+fn pending_summary_refresh_for_plan(
+    plan: RevisionReconcileProjectionPlan,
+    merge_summary: &RevisionGraphMergeSummary,
+) -> PendingGraphSummaryRefresh {
+    if plan.broad_summary_refresh() {
+        PendingGraphSummaryRefresh::broad()
     } else {
-        RevisionReconcileProjectionPlan::Empty
+        PendingGraphSummaryRefresh::targeted(
+            merge_summary.changed_node_ids.clone(),
+            merge_summary.changed_edge_ids.clone(),
+        )
     }
-}
-
-fn union_targeted_ids(changed_ids: &[Uuid], superseded_ids: &BTreeSet<Uuid>) -> Vec<Uuid> {
-    let mut union = superseded_ids.clone();
-    union.extend(changed_ids.iter().copied());
-    union.into_iter().collect()
-}
-
-/// Re-derives support counts for `node_ids`/`edge_ids` from surviving active
-/// evidence, prunes any that dropped to zero support, drops their orphaned
-/// canonical summaries, and mirrors the node/edge deletions into `PostgreSQL`.
-///
-/// Mirrors `refresh_deleted_library_graph_projection_for_cleanup` step-for-step
-/// so the superseded revision's contributions leave no graph trace while shared
-/// nodes/edges (still supported by other documents) survive.
-async fn prune_superseded_revision_graph(
-    state: &AppState,
-    library_id: Uuid,
-    projection_version: i64,
-    node_ids: &[Uuid],
-    edge_ids: &[Uuid],
-) -> Result<(), GraphServiceError> {
-    repositories::recalculate_runtime_graph_node_support_counts_by_ids(
-        &state.persistence.postgres,
-        library_id,
-        projection_version,
-        node_ids,
-    )
-    .await
-    .context("failed to recalculate node support counts for superseded revision prune")?;
-    repositories::recalculate_runtime_graph_edge_support_counts_by_ids(
-        &state.persistence.postgres,
-        library_id,
-        projection_version,
-        edge_ids,
-    )
-    .await
-    .context("failed to recalculate edge support counts for superseded revision prune")?;
-    let deleted_edge_keys = repositories::delete_runtime_graph_edges_without_support_by_ids(
-        &state.persistence.postgres,
-        library_id,
-        projection_version,
-        edge_ids,
-    )
-    .await
-    .context("failed to prune zero-support edges for superseded revision")?;
-    let deleted_node_keys = repositories::delete_runtime_graph_nodes_without_support_by_ids(
-        &state.persistence.postgres,
-        library_id,
-        projection_version,
-        node_ids,
-    )
-    .await
-    .context("failed to prune zero-support nodes for superseded revision")?;
-    // Canonical summaries have no FK back to the node/edge tables, so the prune
-    // above does not cascade. Drop any summary whose target was just removed.
-    repositories::delete_runtime_graph_canonical_summaries_for_orphan_targets(
-        &state.persistence.postgres,
-        library_id,
-        node_ids,
-        edge_ids,
-    )
-    .await
-    .context("failed to prune orphan canonical summaries for superseded revision")?;
-    if !deleted_edge_keys.is_empty() {
-        state
-            .graph_store
-            .delete_relations_by_canonical_keys(library_id, &deleted_edge_keys)
-            .await
-            .context("failed to sync superseded relation deletions to PostgreSQL")?;
-    }
-    if !deleted_node_keys.is_empty() {
-        state
-            .graph_store
-            .delete_entities_by_canonical_keys(library_id, &deleted_node_keys)
-            .await
-            .context("failed to sync superseded entity deletions to PostgreSQL")?;
-    }
-    Ok(())
-}
-
-fn is_graph_reconcile_chunk_text_eligible(text: &str) -> bool {
-    is_graph_extraction_text_eligible(text)
 }
 
 fn empty_rebuild_conflict(
     library_id: Uuid,
     snapshot: Option<&RuntimeGraphSnapshotRow>,
+    ready_documents: &BTreeMap<Uuid, ReadyGraphDocument>,
+    coverage: RebuildCoverageCounts,
     reason: &str,
 ) -> Option<GraphServiceError> {
     let snapshot = snapshot
         .filter(|snapshot| snapshot.graph_status == GRAPH_STATUS_READY)
         .filter(|snapshot| snapshot.node_count > 0 || snapshot.edge_count > 0)?;
+    if authoritative_zero_rebuild_is_proven(ready_documents, coverage) {
+        return None;
+    }
     Some(GraphServiceError::StateConflict {
         message: format!(
             "runtime graph rebuild for library {library_id} would publish an empty projection because {reason}, but active projection {} is ready with {} nodes and {} edges; rebuild source material is inconsistent and the active projection was left unchanged",
             snapshot.projection_version, snapshot.node_count, snapshot.edge_count
         ),
     })
+}
+
+fn authoritative_zero_rebuild_is_proven(
+    ready_documents: &BTreeMap<Uuid, ReadyGraphDocument>,
+    coverage: RebuildCoverageCounts,
+) -> bool {
+    // The completion query left-joins every readable current head, so an
+    // all-zero, exact-attempt result proves the absence of graph input. Keep
+    // the set non-empty so a vacuous no-readable-document result cannot retire
+    // a live projection without affirmative lifecycle evidence.
+    coverage.is_publishable()
+        && !ready_documents.is_empty()
+        && ready_documents.values().all(|document| {
+            document.activated_by_attempt_id.is_some()
+                && document.graph_contribution_count == Some(0)
+        })
+}
+
+async fn load_ready_graph_documents_with_connection(
+    connection: &mut sqlx::PgConnection,
+    library_id: Uuid,
+) -> Result<BTreeMap<Uuid, ReadyGraphDocument>, GraphServiceError> {
+    let completion_rows = repositories::runtime_graph_repository::
+        list_graph_rebuild_document_completions_with_executor(
+            &mut *connection,
+            library_id,
+            GRAPH_EXTRACTION_VERSION,
+        )
+        .await
+        .context("failed to load graph extraction completions for rebuild coverage")?;
+    Ok(completion_rows
+        .into_iter()
+        .map(|completion| {
+            (
+                completion.document_id,
+                ReadyGraphDocument {
+                    workspace_id: completion.workspace_id,
+                    revision_id: completion.revision_id,
+                    activated_by_attempt_id: completion.activated_by_attempt_id,
+                    graph_contribution_count: completion.graph_contribution_count,
+                },
+            )
+        })
+        .collect())
+}
+
+fn active_readable_revision_id(
+    head: &content_document_head_repository::ContentDocumentHeadRow,
+) -> Option<Uuid> {
+    let active_revision_id = head.active_revision_id?;
+    (head.readable_revision_id == Some(active_revision_id)).then_some(active_revision_id)
+}
+
+async fn load_rebuild_baseline_document_ids_with_connection(
+    connection: &mut sqlx::PgConnection,
+    library_id: Uuid,
+    snapshot: Option<&RuntimeGraphSnapshotRow>,
+    ready_documents: &BTreeMap<Uuid, ReadyGraphDocument>,
+) -> Result<BTreeSet<Uuid>, GraphServiceError> {
+    let Some(snapshot) = snapshot.filter(|snapshot| snapshot.graph_status == GRAPH_STATUS_READY)
+    else {
+        return Ok(BTreeSet::new());
+    };
+    let active_document_ids = load_projection_document_ids_with_connection(
+        connection,
+        library_id,
+        snapshot.projection_version,
+    )
+    .await?;
+    let previous_document_ids = if snapshot.projection_version > 1 {
+        load_projection_document_ids_with_connection(
+            connection,
+            library_id,
+            snapshot.projection_version - 1,
+        )
+        .await?
+    } else {
+        BTreeSet::new()
+    };
+    Ok(select_rebuild_baseline_document_ids(
+        active_document_ids,
+        previous_document_ids,
+        ready_documents,
+    ))
+}
+
+async fn load_projection_document_ids_with_connection(
+    connection: &mut sqlx::PgConnection,
+    library_id: Uuid,
+    projection_version: i64,
+) -> Result<BTreeSet<Uuid>, GraphServiceError> {
+    let nodes = repositories::list_admitted_runtime_graph_nodes_by_library_with_executor(
+        &mut *connection,
+        library_id,
+        projection_version,
+    )
+    .await
+    .with_context(|| {
+        format!(
+            "failed to load projection {projection_version} document baseline for graph rebuild"
+        )
+    })?;
+    Ok(runtime_graph_document_ids(&nodes))
+}
+
+fn runtime_graph_document_ids(nodes: &[repositories::RuntimeGraphNodeRow]) -> BTreeSet<Uuid> {
+    nodes
+        .iter()
+        .filter(|node| node.node_type == "document")
+        .filter_map(|node| node.identity_key.strip_prefix("document:"))
+        .filter_map(|document_id| Uuid::parse_str(document_id).ok())
+        .collect()
+}
+
+fn select_rebuild_baseline_document_ids(
+    mut active_document_ids: BTreeSet<Uuid>,
+    mut previous_document_ids: BTreeSet<Uuid>,
+    ready_documents: &BTreeMap<Uuid, ReadyGraphDocument>,
+) -> BTreeSet<Uuid> {
+    let requires_retention = |document_id: &Uuid| {
+        ready_documents
+            .get(document_id)
+            .is_some_and(|document| document.graph_contribution_count != Some(0))
+    };
+    active_document_ids.retain(|document_id| requires_retention(document_id));
+    previous_document_ids.retain(requires_retention);
+    if previous_document_ids.len() > active_document_ids.len() {
+        previous_document_ids
+    } else {
+        active_document_ids
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct RebuildCoverageCounts {
+    retained_baseline: usize,
+    baseline: usize,
+    completed: usize,
+    ready: usize,
+    projected_positive: usize,
+    positive: usize,
+}
+
+#[derive(Debug)]
+struct RebuildCoverageFailure {
+    projection_version: i64,
+    coverage: RebuildCoverageCounts,
+    recovery_candidates: Vec<GraphReextractCandidate>,
+}
+
+impl RebuildCoverageFailure {
+    fn into_graph_error(
+        self,
+        library_id: Uuid,
+        recovery: &GraphReextractOutcome,
+    ) -> GraphServiceError {
+        let coverage = self.coverage;
+        let retention_percent = coverage_percent(coverage.retained_baseline, coverage.baseline);
+        let completion_coverage_percent = coverage_percent(coverage.completed, coverage.ready);
+        let positive_projection_percent =
+            coverage_percent(coverage.projected_positive, coverage.positive);
+        GraphServiceError::StateConflict {
+            message: format!(
+                "runtime graph rebuild for library {library_id} refused projection {}: it retains {} of {} baseline documents ({retention_percent:.2}%), has current completion markers for {} of {} ready documents ({completion_coverage_percent:.2}%), and projects {} of {} positive-contribution completions ({positive_projection_percent:.2}%); all three must meet the {MIN_REBUILD_PUBLICATION_FLOOR_PERCENT}% publication floor; active projection was left unchanged, all staging writes were rolled back, and graph_refresh recovery jobs were enqueued={}, deduplicated={}, failed={}",
+                self.projection_version,
+                coverage.retained_baseline,
+                coverage.baseline,
+                coverage.completed,
+                coverage.ready,
+                coverage.projected_positive,
+                coverage.positive,
+                recovery.enqueued,
+                recovery.skipped_dedupe,
+                recovery.failures,
+            ),
+        }
+    }
+}
+
+impl RebuildCoverageCounts {
+    fn is_publishable(self) -> bool {
+        rebuild_coverage_meets_publication_floor(self.retained_baseline, self.baseline)
+            && rebuild_coverage_meets_publication_floor(self.completed, self.ready)
+            && rebuild_coverage_meets_publication_floor(self.projected_positive, self.positive)
+    }
+}
+
+fn rebuild_coverage_counts(
+    projected_document_ids: &BTreeSet<Uuid>,
+    baseline_document_ids: &BTreeSet<Uuid>,
+    ready_documents: &BTreeMap<Uuid, ReadyGraphDocument>,
+) -> RebuildCoverageCounts {
+    let retained_baseline = projected_document_ids.intersection(baseline_document_ids).count();
+    let completed = ready_documents
+        .values()
+        .filter(|document| document.graph_contribution_count.is_some())
+        .count();
+    let positive = ready_documents
+        .values()
+        .filter(|document| document.graph_contribution_count.is_some_and(|count| count > 0))
+        .count();
+    let projected_positive = ready_documents
+        .iter()
+        .filter(|(document_id, document)| {
+            document.graph_contribution_count.is_some_and(|count| count > 0)
+                && projected_document_ids.contains(document_id)
+        })
+        .count();
+    RebuildCoverageCounts {
+        retained_baseline,
+        baseline: baseline_document_ids.len(),
+        completed,
+        ready: ready_documents.len(),
+        projected_positive,
+        positive,
+    }
+}
+
+fn rebuild_coverage_meets_publication_floor(
+    covered_document_count: usize,
+    required_document_count: usize,
+) -> bool {
+    if required_document_count == 0 {
+        return true;
+    }
+    (covered_document_count as u128) * 100
+        >= (required_document_count as u128) * (MIN_REBUILD_PUBLICATION_FLOOR_PERCENT as u128)
+}
+
+fn missing_reextract_candidates(
+    ready_documents: &BTreeMap<Uuid, ReadyGraphDocument>,
+    projected_document_ids: &BTreeSet<Uuid>,
+) -> Vec<GraphReextractCandidate> {
+    ready_documents
+        .iter()
+        .filter(|(document_id, document)| match document.graph_contribution_count {
+            None => true,
+            Some(0) => false,
+            Some(_) => !projected_document_ids.contains(document_id),
+        })
+        .map(|(document_id, document)| GraphReextractCandidate {
+            workspace_id: document.workspace_id,
+            document_id: *document_id,
+            revision_id: document.revision_id,
+        })
+        .take(usize::try_from(REEXTRACT_MAX_BATCH_SIZE).unwrap_or(usize::MAX))
+        .collect()
+}
+
+fn assess_rebuild_coverage(
+    projection_version: i64,
+    ready_documents: &BTreeMap<Uuid, ReadyGraphDocument>,
+    baseline_document_ids: &BTreeSet<Uuid>,
+    projected_document_ids: &BTreeSet<Uuid>,
+) -> Result<RebuildCoverageCounts, RebuildCoverageFailure> {
+    let coverage =
+        rebuild_coverage_counts(projected_document_ids, baseline_document_ids, ready_documents);
+    if coverage.is_publishable() {
+        return Ok(coverage);
+    }
+
+    let recovery_candidates = missing_reextract_candidates(ready_documents, projected_document_ids);
+    Err(RebuildCoverageFailure { projection_version, coverage, recovery_candidates })
+}
+
+fn coverage_percent(covered: usize, total: usize) -> f64 {
+    if total == 0 { 100.0 } else { covered as f64 * 100.0 / total as f64 }
 }
 
 fn repaired_graph_extraction_candidates(
@@ -960,65 +995,10 @@ fn repaired_graph_extraction_candidates(
     .context("normalized graph extraction does not match the candidate contract")
 }
 
-#[cfg(test)]
-fn count_surviving_documents(records: &[repositories::RuntimeGraphExtractionRecordRow]) -> usize {
-    records.iter().map(|record| record.document_id).collect::<BTreeSet<_>>().len()
-}
-
-async fn run_rebuild_projection(
-    state: &AppState,
-    scope: &GraphProjectionScope,
-    failure_context: &str,
-) -> anyhow::Result<GraphProjectionOutcome> {
-    project_canonical_graph(state, scope).await.with_context(|| failure_context.to_string())
-}
-
-async fn preserve_runtime_graph_snapshot(
-    state: &AppState,
-    scope: &GraphProjectionScope,
-    snapshot: Option<repositories::RuntimeGraphSnapshotRow>,
-    context: &str,
-) -> anyhow::Result<GraphProjectionOutcome> {
-    if let Some(snapshot) = snapshot {
-        persist_runtime_graph_snapshot(
-            state,
-            scope,
-            "building",
-            snapshot.node_count,
-            snapshot.edge_count,
-            Some(snapshot.provenance_coverage_percent.unwrap_or(100.0)),
-            None,
-        )
-        .await
-        .with_context(|| format!("failed to claim graph snapshot during {context}"))?;
-        persist_runtime_graph_snapshot(
-            state,
-            scope,
-            "ready",
-            snapshot.node_count,
-            snapshot.edge_count,
-            Some(snapshot.provenance_coverage_percent.unwrap_or(100.0)),
-            None,
-        )
-        .await
-        .with_context(|| format!("failed to preserve ready graph snapshot during {context}"))?;
-        return Ok(GraphProjectionOutcome {
-            projection_version: scope.projection_version,
-            node_count: usize::try_from(snapshot.node_count).unwrap_or_default(),
-            edge_count: usize::try_from(snapshot.edge_count).unwrap_or_default(),
-            graph_status: "ready".to_string(),
-        });
-    }
-
-    ensure_empty_graph_snapshot(state, scope)
-        .await
-        .with_context(|| format!("failed to persist empty graph snapshot during {context}"))
-}
-
 fn synthesize_document_row(
-    document_row: &content_repository::ContentDocumentRow,
-    document_head: &content_repository::ContentDocumentHeadRow,
-    revision: Option<&content_repository::ContentRevisionRow>,
+    document_row: &content_document_repository::ContentDocumentRow,
+    document_head: &content_document_head_repository::ContentDocumentHeadRow,
+    revision: Option<&content_revision_repository::ContentRevisionRow>,
 ) -> DocumentRow {
     DocumentRow {
         id: document_row.id,
@@ -1039,7 +1019,7 @@ fn synthesize_document_row(
 }
 
 fn synthesize_chunk_row(
-    chunk_row: &content_repository::ContentChunkRow,
+    chunk_row: &content_chunk_repository::ContentChunkRow,
     document_id: Uuid,
     library_id: Uuid,
     created_at: chrono::DateTime<Utc>,
@@ -1058,240 +1038,5 @@ fn synthesize_chunk_row(
             "text_checksum": chunk_row.text_checksum,
         }),
         created_at,
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::infra::repositories::RuntimeGraphExtractionRecordRow;
-
-    #[test]
-    fn malformed_persisted_candidate_contract_fails_closed() {
-        let error = repaired_graph_extraction_candidates(serde_json::json!({
-            "entities": { "unexpected": true },
-            "relations": []
-        }))
-        .expect_err("malformed persisted candidates must not become an empty successful graph");
-
-        assert!(error.to_string().contains("candidate contract"));
-    }
-
-    #[test]
-    fn counts_unique_documents_in_rebuild_plan() {
-        let document_id = Uuid::now_v7();
-        let other_document_id = Uuid::now_v7();
-
-        let records = vec![
-            RuntimeGraphExtractionRecordRow {
-                id: Uuid::now_v7(),
-                runtime_execution_id: Uuid::now_v7(),
-                library_id: Uuid::now_v7(),
-                document_id,
-                chunk_id: Uuid::now_v7(),
-                provider_kind: "openai".to_string(),
-                model_name: "gpt-5.4-mini".to_string(),
-                extraction_version: "graph_extract".to_string(),
-                prompt_hash: "a".to_string(),
-                status: "completed".to_string(),
-                raw_output_json: serde_json::json!({}),
-                normalized_output_json: serde_json::json!({}),
-                glean_pass_count: 1,
-                error_message: None,
-                created_at: chrono::Utc::now(),
-            },
-            RuntimeGraphExtractionRecordRow {
-                id: Uuid::now_v7(),
-                runtime_execution_id: Uuid::now_v7(),
-                library_id: Uuid::now_v7(),
-                document_id,
-                chunk_id: Uuid::now_v7(),
-                provider_kind: "openai".to_string(),
-                model_name: "gpt-5.4-mini".to_string(),
-                extraction_version: "graph_extract".to_string(),
-                prompt_hash: "b".to_string(),
-                status: "completed".to_string(),
-                raw_output_json: serde_json::json!({}),
-                normalized_output_json: serde_json::json!({}),
-                glean_pass_count: 1,
-                error_message: None,
-                created_at: chrono::Utc::now(),
-            },
-            RuntimeGraphExtractionRecordRow {
-                id: Uuid::now_v7(),
-                runtime_execution_id: Uuid::now_v7(),
-                library_id: Uuid::now_v7(),
-                document_id: other_document_id,
-                chunk_id: Uuid::now_v7(),
-                provider_kind: "openai".to_string(),
-                model_name: "gpt-5.4-mini".to_string(),
-                extraction_version: "graph_extract".to_string(),
-                prompt_hash: "c".to_string(),
-                status: "completed".to_string(),
-                raw_output_json: serde_json::json!({}),
-                normalized_output_json: serde_json::json!({}),
-                glean_pass_count: 1,
-                error_message: None,
-                created_at: chrono::Utc::now(),
-            },
-        ];
-
-        assert_eq!(count_surviving_documents(&records), 2);
-    }
-
-    #[test]
-    fn re_revision_with_changes_takes_targeted_supersede_path() {
-        // A re-revision on a populated library (the OOM scenario): there is a
-        // previous revision and the existing graph is non-empty. Even though the
-        // old full-rebuild trigger fired here, we now route to the bounded
-        // targeted supersede path instead of a library-wide rebuild.
-        let plan = revision_reconcile_projection_plan(
-            true,
-            3,
-            false,
-            true,
-            &[Uuid::now_v7()],
-            &[Uuid::now_v7()],
-        );
-        assert_eq!(plan, RevisionReconcileProjectionPlan::TargetedSupersede);
-        assert!(plan.broad_summary_refresh());
-    }
-
-    #[test]
-    fn re_revision_pruning_only_still_targeted_supersede() {
-        // Content-shrinking re-revision: the new revision contributes nothing
-        // (graph_contribution_count == 0) but the superseded revision left
-        // orphan targets that must be pruned. Must NOT fall through to preserve.
-        let plan = revision_reconcile_projection_plan(true, 0, false, true, &[Uuid::now_v7()], &[]);
-        assert_eq!(plan, RevisionReconcileProjectionPlan::TargetedSupersede);
-    }
-
-    #[test]
-    fn re_revision_empty_union_preserves_instead_of_full_rebuild() {
-        // Genuine no-op re-revision: nothing merged, nothing superseded. The
-        // empty union must route to preserve, never silently into the full
-        // (OOM) rebuild.
-        let plan = revision_reconcile_projection_plan(true, 0, false, true, &[], &[]);
-        assert_eq!(plan, RevisionReconcileProjectionPlan::Preserve);
-    }
-
-    #[test]
-    fn re_revision_empty_union_without_snapshot_is_empty() {
-        let plan = revision_reconcile_projection_plan(true, 0, false, false, &[], &[]);
-        assert_eq!(plan, RevisionReconcileProjectionPlan::Empty);
-    }
-
-    #[test]
-    fn first_revision_on_empty_library_is_full() {
-        // First-ever graph for the library: full projection is cheap on an
-        // empty/new graph.
-        let plan = revision_reconcile_projection_plan(
-            false,
-            5,
-            true,
-            false,
-            &[Uuid::now_v7()],
-            &[Uuid::now_v7()],
-        );
-        assert_eq!(plan, RevisionReconcileProjectionPlan::Full);
-    }
-
-    #[test]
-    fn first_revision_on_populated_library_is_targeted_fresh() {
-        let plan = revision_reconcile_projection_plan(
-            false,
-            5,
-            false,
-            true,
-            &[Uuid::now_v7()],
-            &[Uuid::now_v7()],
-        );
-        assert_eq!(plan, RevisionReconcileProjectionPlan::TargetedFresh);
-        assert!(!plan.broad_summary_refresh());
-    }
-
-    #[test]
-    fn first_revision_no_contribution_preserves() {
-        let plan = revision_reconcile_projection_plan(false, 0, false, true, &[], &[]);
-        assert_eq!(plan, RevisionReconcileProjectionPlan::Preserve);
-    }
-
-    #[test]
-    fn union_targeted_ids_dedups_and_merges() {
-        let shared = Uuid::now_v7();
-        let only_changed = Uuid::now_v7();
-        let only_superseded = Uuid::now_v7();
-        let superseded: BTreeSet<Uuid> = [shared, only_superseded].into_iter().collect();
-        let union = union_targeted_ids(&[shared, only_changed], &superseded);
-        assert_eq!(union.len(), 3);
-        assert!(union.contains(&shared));
-        assert!(union.contains(&only_changed));
-        assert!(union.contains(&only_superseded));
-    }
-
-    #[test]
-    fn empty_rebuild_conflicts_with_live_snapshot() {
-        let library_id = Uuid::now_v7();
-        let snapshot = snapshot_row(library_id, GRAPH_STATUS_READY, 7, 12, 34);
-
-        let error = empty_rebuild_conflict(library_id, Some(&snapshot), "no source")
-            .expect("live graph must reject empty rebuild");
-
-        assert!(matches!(error, GraphServiceError::StateConflict { .. }));
-        assert!(error.to_string().contains("projection 7"));
-        assert!(error.to_string().contains("left unchanged"));
-    }
-
-    #[test]
-    fn empty_rebuild_allows_empty_or_absent_snapshot() {
-        let library_id = Uuid::now_v7();
-        let empty_snapshot = snapshot_row(library_id, "empty", 3, 0, 0);
-
-        assert!(empty_rebuild_conflict(library_id, None, "no source").is_none());
-        assert!(empty_rebuild_conflict(library_id, Some(&empty_snapshot), "no source").is_none());
-    }
-
-    #[test]
-    fn graph_reconcile_rejects_low_confidence_current_chunk_text() {
-        let text = concat!(
-            "overview status alpha beta gamma. ",
-            "<!-- formula-not-decoded --> ",
-            "abCD4efGH hiJKlmNO pQrST uvWXyZab. ",
-            "cdEFGh3Ij klMNOprs tuVWxyZq mnOPqRst."
-        );
-
-        assert!(!is_graph_reconcile_chunk_text_eligible(text));
-    }
-
-    #[test]
-    fn graph_reconcile_accepts_code_like_current_chunk_text() {
-        let text = concat!(
-            "POST /api/v1/projects getProjectById renderHTMLNode ",
-            "AUTH_TOKEN_TIMEOUT_MS status_code retry_count"
-        );
-
-        assert!(is_graph_reconcile_chunk_text_eligible(text));
-    }
-
-    fn snapshot_row(
-        library_id: Uuid,
-        graph_status: &str,
-        projection_version: i64,
-        node_count: i32,
-        edge_count: i32,
-    ) -> RuntimeGraphSnapshotRow {
-        RuntimeGraphSnapshotRow {
-            library_id,
-            graph_status: graph_status.to_string(),
-            projection_version,
-            topology_generation: 1,
-            node_count,
-            edge_count,
-            provenance_coverage_percent: Some(100.0),
-            last_built_at: None,
-            last_error_message: None,
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
-        }
     }
 }

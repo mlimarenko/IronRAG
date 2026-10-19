@@ -1,8 +1,8 @@
 <div align="center">
 
-# Webhooks IronRAG
+# Вебхуки IronRAG
 
-### Исходящие webhooks: рассылка событий revision.ready и document.deleted подписчикам
+### Исходящие вебхуки: рассылка событий `revision.ready` и `document.deleted`
 
 [Обзор](./README.md) | [Webhooks (EN)](../en/WEBHOOK.md) | [Шифрование credential](./CREDENTIAL-ENCRYPTION.md) | [MCP](./MCP.md) | [IAM](./IAM.md) | [CLI](./CLI.md)
 
@@ -10,25 +10,32 @@
 
 ## Обзор
 
-IronRAG отправляет исходящие webhooks, уведомляя внешние системы об изменениях состояния. Приём входящих событий от vendor-систем (Confluence, MediaWiki, Notion и др.) — ответственность внешней middleware-прослойки, которая напрямую вызывает HTTP API IronRAG (upload / replace / delete).
+IronRAG отправляет исходящие вебхуки внешним системам при изменении состояния.
+Входящие события поставщиков (Confluence, MediaWiki, Notion и других) принимает
+внешний промежуточный сервис, который вызывает HTTP API IronRAG для загрузки,
+замены и удаления документов.
 
-**Outbound** — `webhook_subscription` регистрирует HTTPS-эндпоинты, получающие HMAC-подписанные события об изменениях состояния IronRAG (`revision.ready`, `document.deleted`). Доставка durable: каждая отправка — `ingest_job` с `job_kind=webhook_delivery`, существующий пул воркеров обрабатывает lease/heartbeat/retry. На неудачу — экспоненциальный backoff до 8 попыток (максимальная задержка 128 минут), затем `abandoned`.
+**Исходящая подписка** — строка `webhook_subscription` с HTTP(S)-адресом,
+получающим HMAC-подписанные события IronRAG (`revision.ready`,
+`document.deleted`). Каждая отправка создаёт `ingest_job` с
+`job_kind=webhook_delivery`; существующий пул воркеров обрабатывает аренду,
+продление и повторы. Неудачная доставка повторяется с экспоненциальной задержкой
+до восьми попыток (максимум 128 минут), затем получает состояние `abandoned`.
 
 ## Модель подписки
 
 Строки `webhook_subscription` описывают HTTP-приёмники событий IronRAG.
 
 ```
-POST /v1/webhooks/subscriptions
+POST /v1/webhooks/workspaces/<workspace_uuid>/subscriptions
 Authorization: Bearer <api-token с workspace_admin>
 Content-Type: application/json
 
 {
-  "workspaceId": "<uuid>",
   "libraryId": "<uuid или null для workspace-wide>",
   "displayName": "Downstream индекс",
   "targetUrl": "https://hooks.example.com/ironrag-events",
-  "secret": "<random 32+ байта hex>",
+  "secret": "<не менее 32 байтов случайных данных>",
   "eventTypes": ["revision.ready", "document.deleted"],
   "customHeaders": {
     "Authorization": "Bearer <receiver-token>"
@@ -38,64 +45,66 @@ Content-Type: application/json
 
 | Поле | Заметки |
 |------|---------|
-| `workspaceId` | Scope. Доставляются только события из этого workspace |
-| `libraryId` | Опционально. Если указан — только события из этой library; null = все libraries в workspace |
-| `eventTypes` | Непустой массив event names |
+| `workspace_uuid` в пути | Область: доставляются только события этого рабочего пространства |
+| `libraryId` | Необязательно. Если указан — только события этой библиотеки; `null` — всех библиотек рабочего пространства |
+| `eventTypes` | Непустой массив из 1–8 различных поддерживаемых имён событий |
 | `secret` | HMAC-SHA256 ключ для исходящих подписей |
-| `customHeaders` | До 32 валидированных строковых headers, зашифрованных at rest. Служебные framing/signature/trace headers зарезервированы |
+| `customHeaders` | До 32 проверенных строковых заголовков, зашифрованных при хранении. Служебные заголовки фрейминга, подписи и трассировки зарезервированы |
 | `active` | По умолчанию `true`; `false` → подписка приостановлена |
 
-В одном workspace может быть не более 100 активных подписок. Workspace-scoped
-DB trigger сериализует create/reactivation на границе транзакции, поэтому
-конкурентные запросы и старые API pod-ы в rolling deploy используют один
-fanout-лимит; неактивные подписки его не занимают. Legacy-превышения видны в
-redacted audit view. Общее число активных и неактивных строк ограничено 1 000
-на workspace. IronRAG не удаляет неактивные подписки автоматически по возрасту:
-связанные delivery-строки являются операционным audit evidence. Перед созданием
-новых подписок удаляйте ненужные неактивные явно.
+В рабочем пространстве может быть не более 100 активных подписок. Триггер базы
+данных сериализует создание и повторную активацию в транзакции, поэтому
+конкурентные запросы используют один предел рассылки; неактивные подписки его
+не занимают. Всего может быть до 1 000 активных и неактивных строк на рабочее
+пространство. IronRAG не удаляет неактивные подписки по возрасту: связанные
+строки доставки нужны для операционного аудита. Перед созданием новых подписок
+явно удалите ненужные неактивные.
 
 CRUD-эндпоинты:
 
-- `GET    /v1/webhooks/subscriptions?workspaceId=`
-- `GET    /v1/webhooks/subscriptions/{id}`
-- `POST   /v1/webhooks/subscriptions`
-- `PATCH  /v1/webhooks/subscriptions/{id}`
-- `DELETE /v1/webhooks/subscriptions/{id}`
-- `GET    /v1/webhooks/subscriptions/{id}/attempts`
+- `GET    /v1/webhooks/workspaces/{workspaceId}/subscriptions`
+- `GET    /v1/webhooks/subscriptions/{subscriptionId}`
+- `POST   /v1/webhooks/workspaces/{workspaceId}/subscriptions`
+- `PATCH  /v1/webhooks/subscriptions/{subscriptionId}`
+- `DELETE /v1/webhooks/subscriptions/{subscriptionId}`
+- `GET    /v1/webhooks/subscriptions/{subscriptionId}/attempts`
 
-Оба list endpoint используют bounded keyset pagination по `(createdAt, id)`,
-сохраняя прежний JSON array в response. Для подписок default page = 100, для
-delivery attempts = 200; `limit` в обоих случаях ограничен сверху 200. Для
-следующей страницы передайте `createdAt` и `id` последнего элемента как пару
-`afterCreatedAt` + `afterId`; один компонент без второго возвращает `400`.
-Подписки остаются в порядке от старых к новым, attempts — от новых к старым.
-Management projection не загружает signing secrets, custom-header ciphertext,
-signed payload, response body, queue job ID и delivery lease token.
+Оба списка используют ограниченную постраничную выборку по `(createdAt, id)` и
+возвращают объект с `items` и, если есть следующая страница, непрозрачным
+`nextCursor`. Для подписок размер страницы по умолчанию — 100, для попыток
+доставки — 200; `limit` в обоих случаях ограничен 200. Для следующей страницы
+передайте `cursor=<nextCursor>` без изменений. Подписки идут от старых к новым,
+попытки — от новых к старым. Управляющая проекция не загружает секреты подписи,
+шифротекст пользовательских заголовков, подписанные полезные нагрузки, тела
+ответов, идентификаторы заданий очереди и токены аренды доставки.
 
-Global UUID подписки фильтруется в SQL по разрешённому workspace scope
-вызывающего. Отсутствующая и чужая подписка одинаково возвращают `404` для GET,
-PATCH, DELETE и списка attempts, поэтому UUID нельзя использовать для tenant
-enumeration.
+Глобальный UUID подписки SQL фильтрует по разрешённой вызывающему области
+рабочего пространства. Отсутствующая и чужая подписка одинаково возвращают
+`404` для GET, PATCH, DELETE и списка попыток, поэтому UUID нельзя использовать
+для перечисления арендаторов.
 
-`DELETE` возвращает `204` только когда не осталось владельцев claimed delivery.
-Если POST уже захвачен worker-ом, первый вызов атомарно ставит tombstone и
-возвращает `202 Accepted`; повторяйте тот же DELETE до `204`. Tombstoned
-подписку нельзя реактивировать через PATCH. Один только возраст lease не
-доказывает, что внешний HTTP side effect остановлен.
+`DELETE` возвращает `204`, только когда не осталось владельца выполняющейся
+доставки. Если worker уже владеет POST, первый вызов атомарно помечает подписку
+для удаления и возвращает `202 Accepted`; повторяйте DELETE до `204`. Такую
+подписку нельзя повторно активировать через PATCH. Возраст аренды сам по себе не
+доказывает остановку внешнего HTTP-действия.
 
-Доставка имеет семантику at-least-once: remote endpoint мог принять POST до
-того, как worker потерял DB lease или успел сохранить результат. Получатель
-должен идемпотентно дедуплицировать запросы по `X-IronRAG-Event-Id` (то же
-значение находится в `event_id` body). Lease-token защищает запись результата
-в БД, но не превращает внешний HTTP side effect в exactly-once. Для crashed
-draining owner нужен явный operator command
-`ironrag-maintenance repair webhook-delivery-abandon --subscription <uuid> --acknowledge-duplicate-delivery-risk`; обычный DELETE не считает возраст lease подтверждением остановки.
+Доставка выполняется как минимум один раз: удалённый адрес мог принять POST до
+того, как worker потерял аренду базы или сохранил результат. Получатель должен
+идемпотентно дедуплицировать запросы по `X-IronRAG-Event-Id` (это же значение
+находится в `event_id` тела). Токен аренды защищает запись результата в БД, но
+не делает внешнее HTTP-действие ровно однократным. Для аварийно завершившегося
+владельца ожидающей удаления доставки нужна явная команда:
+`ironrag-maintenance repair webhook-delivery-abandon --subscription <uuid> --acknowledge-duplicate-delivery-risk`.
+Обычный DELETE не считает возраст аренды подтверждением остановки.
 
 ## События
 
 ### `revision.ready`
 
-Срабатывает после того, как ingest-пайплайн закончил ревизию и продвинул её в readable. Шлётся на каждый успешный upload, replace, append или edit.
+Событие возникает, когда ingest-пайплайн завершил ревизию и сделал её доступной
+для чтения. Оно отправляется после успешной загрузки, замены, добавления или
+редактирования.
 
 ```json
 {
@@ -111,9 +120,10 @@ draining owner нужен явный operator command
 
 ### `document.deleted`
 
-Записывается атомарно вместе с сохранённым переходом документа в soft-delete и
-становится доступным для доставки только после коммита этой транзакции. Cleanup
-проекций выполняется независимо и не может удалить durable lifecycle event.
+Событие записывается атомарно с сохранённым переходом документа в мягкое
+удаление и становится доступным для доставки только после фиксации транзакции.
+Очистка проекций выполняется независимо и не удаляет долговечное событие
+жизненного цикла.
 
 ```json
 {
@@ -137,14 +147,15 @@ X-Ironrag-Event-Type: revision.ready
 X-Ironrag-Event-Id: revision.ready:<uuid>
 ```
 
-Плюс любые `customHeaders` подписки.
+Также отправляются `customHeaders` подписки.
 
-Raw signed body — плоский JSON-объект из каталога событий выше. Перед постановкой
+Подписываемое тело — плоский JSON-объект из каталога событий. Перед постановкой
 в очередь IronRAG перезаписывает `event_type`, `event_id`, `occurred_at`,
-`workspace_id` и `library_id` каноническими сохранёнными метаданными, поэтому
-producer payload не может подменить поля маршрутизации или дедупликации.
+`workspace_id` и `library_id` сохранёнными метаданными, поэтому payload
+поставщика не может подменить поля маршрутизации или дедупликации.
 
-Вход HMAC: `<ts_unix_seconds>.<raw байты тела>` — точка `.` буквальная. HMAC-ключ — `subscription.secret`.
+Вход HMAC: `<ts_unix_seconds>.<raw байты тела>`; точка `.` буквальная. Ключ HMAC
+— `subscription.secret`.
 
 ### Верификация входящих событий (на стороне получателя)
 
@@ -164,106 +175,100 @@ def verify(secret: bytes, header: str, body: bytes, window_seconds: int = 300) -
     return hmac.compare_digest(expected, received_mac)
 ```
 
-**Не пересериализовывать тело** между получением и проверкой; байты должны совпадать byte-for-byte.
+**Не пересериализуйте тело** между получением и проверкой: байты должны
+совпадать полностью.
 
-## Политика retry
+## Повторные попытки
 
 | Результат | Поведение |
 |-----------|-----------|
 | HTTP 2xx | `delivered`, проставляется `delivered_at` |
-| HTTP 5xx, 429, network/timeout | `attempt_number++`; попытки 1–7 планируются через 2, 4, 8, 16, 32, 64 и 128 минут. Попытка 8 → `abandoned` |
-| HTTP 4xx (прочие) | `failed`, без retry |
+| HTTP 5xx, 429, ошибка сети или тайм-аут | `attempt_number++`; попытки 1–7 назначаются через 2, 4, 8, 16, 32, 64 и 128 минут. Попытка 8 → `abandoned` |
+| Другой HTTP 4xx | `failed`, без повтора |
 
-Replay-защита: получатели ДОЛЖНЫ отклонять delivery с `t=` за пределами ±5 минут от своих часов.
+Защита от повтора: получатель ДОЛЖЕН отклонять доставку с `t=` за пределами
+±5 минут от собственных часов.
 
-### Обновление с delivery fencing
+## Безопасное удаление каталога
 
-Expansion-миграция добавляет token-fenced completion, но не переписывает и не
-reclaim-ит legacy tokenless in-flight owner: старый процесс во время rolling
-overlap всё ещё может продолжить работу и сохранить результат. Обновлённые
-workers reclaim-ят только lease, созданные уже с current-protocol token.
-Постоянный DB trigger удаляет response body и динамические legacy error strings,
-а deferred commit trigger создаёт корректно scoped queue job, если старый
-двухтранзакционный publisher закоммитил unlinked pending attempt.
+Удаление библиотеки и рабочего пространства работает по умолчанию с отказом,
+пока есть долговечная работа вебхуков. Транзакция удаления библиотеки блокирует
+её строку `catalog_library`; транзакция удаления рабочего пространства блокирует
+строку `catalog_workspace` и строки всех дочерних библиотек. Затем удаление
+отклоняется, пока в затронутой области выполняется хотя бы одно условие:
 
-Crashed tokenless owner остаётся fail-closed и требует явного abandon command с
-подтверждением duplicate-delivery риска, описанного выше. После drain старых
-writers оператор проверяет redacted lease/tenant/contract audit views; только
-следующая contract migration может валидировать restrictive lease-shape и
-subscription field checks.
+- есть строка `webhook_lifecycle_outbox` в состоянии `pending`, `dispatching` или
+  `dead_letter`; конечные состояния `dispatched` и `resolved` удаление не
+  блокируют; или
+- есть ingest job типа `webhook_delivery` в состоянии `queued`, `leased`,
+  `paused` или `failed`; или
+- попытка доставки остаётся `pending`/`delivering` либо повторяемой `failed`,
+  но без соответствующего активного задания очереди.
 
-## Гарантия безопасного удаления catalog
+Объект каталога удаляется той же транзакцией только после завершения этой
+работы. Блокировки родительских строк также не допускают конкурентные
+FK-поддерживаемые вставки библиотеки, outbox или job между проверкой и каскадным
+удалением, чтобы событие не потерялось бесшумно. Блокировка преобразуется в
+типизированный конфликт каталога (`409` на синхронных поверхностях). REST-маршрут
+удаления каталога асинхронный и сначала возвращает `202`; если блокер появится
+до запуска worker, асинхронная операция завершится с `failed`, а удаление нужно
+повторить после завершения outbox/job. Событие `dead_letter` требует явного
+решения оператора и не отбрасывается простым удалением библиотеки или рабочего
+пространства. Строка `resolved` не блокирует удаление, а её обезличенное
+глобальное событие аудита переживает каскадное удаление каталога.
 
-Удаление library и workspace работает fail-closed относительно durable webhook-работы. Транзакция
-удаления library блокирует её строку `catalog_library`; транзакция удаления workspace блокирует
-строку `catalog_workspace` и все строки дочерних libraries. Затем удаление отклоняется, пока во
-всём затронутом scope выполняется хотя бы одно условие:
+В текущем enum `ingest_queue_state` не блокируют удаление только задания
+webhook-delivery в состояниях `completed` и `canceled`. `abandoned` — состояние
+попытки доставки, а не очереди ingest job. Любое будущее или неизвестное
+состояние очереди по умолчанию считается незавершённым и блокирует удаление.
 
-- в scope есть строка `webhook_lifecycle_outbox` в состоянии `pending`, `dispatching` или
-  `dead_letter`; явные terminal states `dispatched` и `resolved` удаление не блокируют; или
-- в scope есть ingest job типа `webhook_delivery` в состоянии `queued`, `leased`, `paused` или
-  `failed`; или
-- delivery attempt остаётся `pending`/`delivering` либо retryable `failed`, но для
-  него нет соответствующего активного queue job (включая crash-window старого
-  publisher между create и link).
+## Операции с dead-letter lifecycle outbox
 
-Catalog-объект удаляется той же транзакцией только после полного drain этих строк. Блокировки
-родительских строк также отсекают конкурентные FK-backed вставки library/outbox/job: новая строка
-не может попасть между проверкой и cascade-delete и тем самым бесшумно потерять событие.
-Заблокированное исполнение маппится в типизированный catalog conflict (`409` на синхронных
-поверхностях). REST-маршрут удаления catalog асинхронный и сначала отвечает `202`; если blocker
-появляется до запуска воркера,
-async operation завершается как failed, а удаление нужно повторить после drain outbox/job. В
-частности, событие `dead_letter` требует явного решения оператора и никогда не отбрасывается просто
-через удаление library или workspace. Строка `resolved` не блокирует удаление, а её redacted global
-audit event переживает последующий catalog cascade.
-
-В текущем enum `ingest_queue_state` не блокируют удаление только webhook-delivery jobs в состояниях
-`completed` и `canceled`. `abandoned` — состояние delivery attempt, а не очереди ingest job. Любое
-будущее или неизвестное состояние очереди по умолчанию считается незавершённым и блокирует
-удаление.
-
-## Операции с lifecycle outbox dead-letter
-
-Вместо прямых запросов к webhook-таблицам с секретными данными используйте bounded audit:
+Вместо прямых запросов к таблицам вебхуков с секретными данными используйте
+ограниченную проверку:
 
 ```bash
 ironrag-maintenance audit webhook-outbox --state dead-letter --limit 100
 ironrag-maintenance audit webhook-outbox --state dead-letter --library <library-uuid> --json
 ```
 
-Допустимые state-фильтры: `pending`, `dispatching`, `dispatched`, `dead-letter` и `resolved`; по умолчанию
-используется `dead-letter`, а команда отклоняет limit вне `1..=500`. В вывод попадают только UUID
-outbox, тип события, workspace/library scope, state/счётчик попыток, типизированные failure/resolution
-reason codes и timestamps. Payload, event ID,
-URL получателя, signing secret, custom headers, lease identity/token и raw-текст ошибки не выводятся.
+Допустимые фильтры состояния: `pending`, `dispatching`, `dispatched`,
+`dead-letter` и `resolved`; по умолчанию используется `dead-letter`, а команда
+отклоняет limit вне `1..=500`. В вывод попадают только UUID outbox, тип события,
+область рабочего пространства и библиотеки, состояние и число попыток,
+типизированные коды ошибки и причины разрешения, а также временные метки. Не
+выводятся payload, event ID, URL получателя, секрет подписи, пользовательские
+заголовки, идентификатор или токен аренды и исходный текст ошибки.
 
-Если есть следующая страница, JSON содержит `has_more=true` и объект `next_cursor`, а human output
-печатает точные continuation flags. Продолжайте с обоими компонентами keyset и теми же фильтрами:
+Если есть следующая страница, JSON содержит `has_more=true` и объект
+`next_cursor`, а обычный вывод печатает точные флаги продолжения. Продолжайте с
+обоими компонентами keyset и теми же фильтрами:
 
 ```bash
 ironrag-maintenance audit webhook-outbox --state dead-letter \
   --before-created-at <next_cursor.created_at> --before-id <next_cursor.id>
 ```
 
-Так stable keyset pagination позволяет просмотреть все строки без unbounded read; только один
-компонент cursor команда не принимает.
+Такая стабильная постраничная выборка позволяет просмотреть все строки без
+неограниченного чтения; один компонент cursor команда не принимает.
 
-После диагностики и исправления receiver/configuration верните в очередь один точный UUID:
+После диагностики и исправления получателя или конфигурации верните в очередь
+один точный UUID:
 
 ```bash
 ironrag-maintenance repair webhook-outbox-dead-letter --outbox <outbox-uuid> --json
 ```
 
-Это атомарный compare-and-set только из `dead_letter` в `pending`: он сбрасывает attempts, lease
-поля и raw error, затем выставляет немедленную доступность строки. Команда не выполняет HTTP-запрос;
-доставку позже делает штатный worker loop. Отсутствующая строка или строка, state которой уже
-изменился, остаётся нетронутой, а команда завершается с ненулевым кодом. В аудите виден только
-стабильный типизированный `last_error_code`; payload и сырые ошибки транспорта maintenance-процесс
-вообще не загружает.
+Это атомарный compare-and-set только из `dead_letter` в `pending`: он сбрасывает
+попытки, поля аренды и исходную ошибку и сразу делает строку доступной. Команда
+не выполняет HTTP-запрос; доставку позже запускает штатный worker. Отсутствующая
+строка или строка с изменившимся состоянием остаётся нетронутой, а команда
+завершается с ненулевым кодом. В аудите виден только стабильный типизированный
+`last_error_code`; процесс обслуживания не загружает payload и исходные ошибки
+транспорта.
 
-Если доставка навсегда не нужна, явно resolve'ните точный dead-letter, не выдавая это за успешную
-доставку получателю:
+Если доставка больше не нужна, явно разрешите точный dead-letter, не выдавая это
+за успешную доставку получателю:
 
 ```bash
 ironrag-maintenance repair webhook-outbox-dead-letter-resolve \
@@ -271,34 +276,62 @@ ironrag-maintenance repair webhook-outbox-dead-letter-resolve \
   --acknowledge-not-delivered --json
 ```
 
-Это отдельный атомарный compare-and-set из `dead_letter` в `resolved`. Reason обязан быть bounded
-machine code в lowercase `snake_case` (1–64 ASCII bytes); free-form текст отклоняется, чтобы оператор
-случайно не сохранил URL, credential или response body. Строка получает
-`resolution_reason_code` и рассчитанный по часам PostgreSQL `resolved_at`, а тот же SQL statement
-добавляет redacted audit event `webhook.lifecycle_outbox.dead_letter_resolved`. Команда никогда не
-меняет `dispatched` и не утверждает, что доставка состоялась. Если доставку всё ещё надо выполнить,
-используйте requeue-команду выше. Явный флаг `--acknowledge-not-delivered` обязателен.
+Это отдельный атомарный compare-and-set из `dead_letter` в `resolved`. Причина
+должна быть ограниченным машинным кодом в нижнем `snake_case` (1–64 ASCII-байта);
+свободный текст отклоняется, чтобы оператор не сохранил URL, учётные данные или
+тело ответа. Строка получает `resolution_reason_code` и рассчитанный по часам
+PostgreSQL `resolved_at`, а то же SQL-выражение добавляет обезличенное событие
+аудита `webhook.lifecycle_outbox.dead_letter_resolved`. Команда не меняет
+`dispatched` и не утверждает, что доставка состоялась. Если доставка всё ещё
+нужна, используйте команду возврата в очередь выше. Явный флаг
+`--acknowledge-not-delivered` обязателен.
 
-## Детект изменений только-картинок
+## Обнаружение изменений только изображения
 
-Когда PDF, DOCX или PPTX заменяет встроенную картинку без изменения OCR-текста, существующий `text_checksum` не изменился бы и стандартный chunk-reuse plan пропустил бы re-embedding. Чтобы это исправить, IronRAG считает revision-level `image_checksum` (sort всех байтов извлечённых картинок, затем SHA-256). Когда `parent.image_checksum != new.image_checksum`, chunk-reuse plan байпасится и embeddings + graph extraction пересчитываются полностью для этой ревизии. Семантика `text_checksum` сохранена (только текст).
+Если PDF, DOCX или PPTX заменяет встроенное изображение без изменения текста,
+доступного OCR, `text_checksum` не меняется и обычный план повторного
+использования chunk пропускает повторное embedding. Поэтому IronRAG вычисляет
+`image_checksum` для ревизии: сортирует байты извлечённых изображений и считает
+SHA-256. При `parent.image_checksum != new.image_checksum` план повторного
+использования chunk отключается, а embedding и извлечение графа для ревизии
+выполняются заново. Семантика `text_checksum` остаётся текстовой.
 
 ## Операционные заметки
 
-- **Секреты** и сериализованные значения **custom headers** хранятся отдельными аутентифицированными row-bound AEAD-конвертами `ironrag:enc:v3` в `webhook_subscription.secret` и `webhook_subscription.custom_headers_json`. Расшифрование происходит только внутри delivery; purpose, UUID подписки и key ID аутентифицируются. Для существующей установки сначала нужно развернуть dual-reader с выключенной encrypted-записью, а затем включить запись отдельным rollout. Ротация master key требует трёх фаз с перекрывающимся keyring. Используйте полный [runbook шифрования credential](./CREDENTIAL-ENCRYPTION.md); неизвестный key ID или ошибка аутентификации всегда обрабатывается fail-closed.
-- **Job queue** общая с ingest-пайплайном. `job_kind=webhook_delivery` конкурирует с `content_mutation`, `web_discovery`, `web_materialize_page` за worker-leases. Тяжёлая outbound нагрузка может тормозить ingest; тюнить `IRONRAG_INGESTION_WORKER_POOL_SIZE`.
-- **Lease lifecycle relay**: relay берёт по одной outbox-строке и каждые 60 секунд продлевает пятиминутный lease через token-fenced CAS по часам PostgreSQL. Потеря lease или ошибка renewal отменяет оставшийся recipient fanout; детерминированный per-recipient dedupe безопасно сводит повтор нового owner.
-- **Наблюдаемость**: каждая outbound-попытка записана в `webhook_delivery_attempt` и запрашивается SQL для forensics. Воркеры эмитят `tracing` spans на стадии `webhook_delivery`. OTLP-метрики: `ironrag.webhook.lifecycle_outbox.event_age_seconds`, `drain_duration_seconds`, `lease_conflicts`, `lease_renewals` и `outcomes`.
+- **Секреты** и сериализованные значения **custom headers** хранятся отдельными
+  аутентифицированными AEAD-конвертами `ironrag:enc:v3`, привязанными к строке,
+  в `webhook_subscription.secret` и `webhook_subscription.custom_headers_json`.
+  Расшифрование происходит только во время доставки; конверт аутентифицирует
+  назначение, UUID подписки и key ID. Шифрование учётных данных обязательно, а
+  master key требуется при старте. Ротация master key
+  требует трёх фаз с перекрывающимся keyring. Используйте полный [runbook
+  шифрования credential](./CREDENTIAL-ENCRYPTION.md); неизвестный key ID или
+  ошибка аутентификации всегда приводят к отказу.
+- **Очередь заданий** общая с ingest-пайплайном. `job_kind=webhook_delivery`
+  конкурирует с `content_mutation`, `web_discovery` и `web_materialize_page` за
+  аренду worker. Большая исходящая нагрузка может замедлить ingest; настройте
+  `IRONRAG_INGESTION_WORKER_POOL_SIZE`.
+- **Аренда lifecycle relay**: relay берёт по одной строке outbox и каждые 60
+  секунд продлевает пятиминутную аренду token-fenced CAS по часам PostgreSQL.
+  Потеря аренды или ошибка продления отменяет оставшуюся рассылку получателям;
+  детерминированная дедупликация для каждого получателя безопасно сводит повтор
+  нового владельца.
+- **Наблюдаемость**: каждая исходящая попытка записывается в
+  `webhook_delivery_attempt` и доступна через SQL для расследования. Workers
+  создают spans `tracing` на этапе `webhook_delivery`. Метрики OTLP:
+  `ironrag.webhook.lifecycle_outbox.event_age_seconds`, `drain_duration_seconds`,
+  `lease_conflicts`, `lease_renewals` и `outcomes`.
 
-## Reference: пример outbound
+## Пример исходящей доставки
 
-IronRAG эмитит `revision.ready` после завершения ingest документа. Подписчик передаёт событие в downstream поисковый индекс:
+IronRAG отправляет `revision.ready` после завершения ingest документа. Подписчик
+передаёт событие в поисковый индекс:
 
 ```python
 import hmac, hashlib, time, json, requests
 
 def verify_and_forward(secret: bytes, header: str, body: bytes):
-    # Верифицировать подпись IronRAG
+    # Проверить подпись IronRAG
     parts = dict(p.split("=", 1) for p in header.split(","))
     ts = int(parts["t"])
     expected = hmac.new(secret, f"{ts}.".encode() + body, hashlib.sha256).hexdigest()
@@ -314,4 +347,6 @@ def verify_and_forward(secret: bytes, header: str, body: bytes):
         )
 ```
 
-Для приёма vendor-событий (обновление страницы Confluence → замена документа в IronRAG) — см. внешний middleware-проект; вход — API IronRAG upload/replace/delete.
+Для приёма событий поставщика (обновление страницы Confluence → замена документа
+в IronRAG) используйте внешний промежуточный сервис; его точка входа — API
+IronRAG для загрузки, замены и удаления документов.

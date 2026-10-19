@@ -1,4 +1,4 @@
-//! Explicit, idempotent rewrapping of legacy or non-current database
+//! Explicit, idempotent rewrapping of non-current database
 //! credentials into active-key row-bound v3 envelopes.
 //!
 //! This module is intentionally not wired into the recurring scheduler or
@@ -40,20 +40,25 @@ impl Default for CredentialSecretMigrationOptions {
 pub struct CredentialSecretMigrationReport {
     pub apply: bool,
     pub ai_rows_scanned: usize,
-    pub ai_legacy_found: usize,
+    pub ai_rewrap_candidates: usize,
     pub ai_migrated: usize,
     pub ai_concurrent_changes: usize,
     pub webhook_rows_scanned: usize,
-    pub webhook_legacy_found: usize,
+    pub webhook_rewrap_candidates: usize,
     pub webhook_migrated: usize,
     pub webhook_concurrent_changes: usize,
     pub webhook_header_rows_scanned: usize,
     pub webhook_header_rewrap_candidates: usize,
     pub webhook_headers_migrated: usize,
     pub webhook_header_concurrent_changes: usize,
+    pub service_identity_rows_scanned: usize,
+    pub service_identity_rewrap_candidates: usize,
+    pub service_identity_migrated: usize,
+    pub service_identity_concurrent_changes: usize,
     pub ai_invalid: usize,
     pub webhook_invalid: usize,
     pub webhook_header_invalid: usize,
+    pub service_identity_invalid: usize,
     /// Bounded, non-secret operator diagnostics. Values and envelope details
     /// are intentionally never included.
     pub invalid_samples: Vec<CredentialSecretInvalidSample>,
@@ -62,7 +67,10 @@ pub struct CredentialSecretMigrationReport {
 impl CredentialSecretMigrationReport {
     #[must_use]
     pub const fn invalid_values(&self) -> usize {
-        self.ai_invalid + self.webhook_invalid + self.webhook_header_invalid
+        self.ai_invalid
+            + self.webhook_invalid
+            + self.webhook_header_invalid
+            + self.service_identity_invalid
     }
 
     fn record_invalid(
@@ -75,6 +83,9 @@ impl CredentialSecretMigrationReport {
             CredentialSecretStorage::AiAccountApiKey => self.ai_invalid += 1,
             CredentialSecretStorage::WebhookSigningSecret => self.webhook_invalid += 1,
             CredentialSecretStorage::WebhookCustomHeaders => self.webhook_header_invalid += 1,
+            CredentialSecretStorage::ServiceIdentityCredential => {
+                self.service_identity_invalid += 1;
+            }
         }
         if self.invalid_samples.len() < MAX_INVALID_SAMPLES {
             self.invalid_samples.push(CredentialSecretInvalidSample {
@@ -92,6 +103,7 @@ pub enum CredentialSecretStorage {
     AiAccountApiKey,
     WebhookSigningSecret,
     WebhookCustomHeaders,
+    ServiceIdentityCredential,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -200,7 +212,7 @@ impl Drop for StoredWebhookHeadersRow {
     }
 }
 
-/// Inventories or re-encrypts every legacy or non-current AI/webhook secret.
+/// Inventories or re-encrypts every legacy or non-current protected credential.
 ///
 /// The key preflight happens before the first query. Each batch holds at most
 /// `batch_size` credential rows in memory, and every update compares the old
@@ -217,7 +229,6 @@ pub async fn migrate_credential_secrets(
     cipher: &CredentialCipher,
     options: CredentialSecretMigrationOptions,
 ) -> Result<CredentialSecretMigrationReport, CredentialSecretMigrationError> {
-    cipher.require_configured()?;
     if !(1..=MAX_BATCH_SIZE).contains(&options.batch_size) {
         return Err(CredentialSecretMigrationError::InvalidBatchSize);
     }
@@ -226,10 +237,113 @@ pub async fn migrate_credential_secrets(
 
     let mut report = CredentialSecretMigrationReport { apply: options.apply, ..Default::default() };
     migrate_ai_account_secrets(postgres, cipher, options, database_batch_size, &mut report).await?;
+    migrate_service_identity_credentials(
+        postgres,
+        cipher,
+        options,
+        database_batch_size,
+        &mut report,
+    )
+    .await?;
     migrate_webhook_secrets(postgres, cipher, options, database_batch_size, &mut report).await?;
     migrate_webhook_custom_headers(postgres, cipher, options, database_batch_size, &mut report)
         .await?;
     Ok(report)
+}
+
+async fn migrate_service_identity_credentials(
+    postgres: &PgPool,
+    cipher: &CredentialCipher,
+    options: CredentialSecretMigrationOptions,
+    database_batch_size: i64,
+    report: &mut CredentialSecretMigrationReport,
+) -> Result<(), CredentialSecretMigrationError> {
+    let mut cursor = None;
+    loop {
+        let rows = sqlx::query_as::<_, StoredCredentialRow>(
+            "select id, encrypted_credential as stored_value
+             from iam_service_identity_operation
+             where encrypted_credential is not null
+               and ($1::uuid is null or id > $1)
+             order by id
+             limit $2",
+        )
+        .bind(cursor)
+        .bind(database_batch_size)
+        .fetch_all(postgres)
+        .await?;
+        if rows.is_empty() {
+            break;
+        }
+        let row_count = rows.len();
+        report.service_identity_rows_scanned += row_count;
+        let next_cursor = rows.last().map(|row| row.id);
+        for row in rows {
+            migrate_service_identity_credential_row(postgres, cipher, options.apply, row, report)
+                .await?;
+        }
+        cursor = next_cursor;
+        if row_count < options.batch_size {
+            break;
+        }
+    }
+    Ok(())
+}
+
+async fn migrate_service_identity_credential_row(
+    postgres: &PgPool,
+    cipher: &CredentialCipher,
+    apply: bool,
+    row: StoredCredentialRow,
+    report: &mut CredentialSecretMigrationReport,
+) -> Result<(), CredentialSecretMigrationError> {
+    let (needs_rewrap, plaintext) = match inspect_secret(
+        cipher,
+        SecretPurpose::ServiceIdentityCredential,
+        row.id,
+        &row.stored_value,
+    ) {
+        Ok(inspection) => inspection,
+        Err(error) => {
+            report.record_invalid(
+                CredentialSecretStorage::ServiceIdentityCredential,
+                row.id,
+                secret_encryption_error_code(&error),
+            );
+            return Ok(());
+        }
+    };
+    if !needs_rewrap {
+        drop(plaintext);
+        return Ok(());
+    }
+    report.service_identity_rewrap_candidates += 1;
+    if !apply {
+        drop(plaintext);
+        return Ok(());
+    }
+    let encrypted = cipher.encrypt(
+        SecretPurpose::ServiceIdentityCredential,
+        row.id,
+        plaintext.expose_secret(),
+    )?;
+    drop(plaintext);
+    let result = sqlx::query(
+        "update iam_service_identity_operation
+         set encrypted_credential = $2
+         where id = $1 and encrypted_credential = $3",
+    )
+    .bind(row.id)
+    .bind(encrypted.as_str())
+    .bind(&row.stored_value)
+    .execute(postgres)
+    .await?;
+    if result.rows_affected() == 1 {
+        report.service_identity_migrated += 1;
+    } else {
+        report.service_identity_concurrent_changes += 1;
+    }
+    Ok(())
 }
 
 async fn migrate_ai_account_secrets(
@@ -294,7 +408,7 @@ async fn migrate_ai_account_row(
         drop(plaintext);
         return Ok(());
     }
-    report.ai_legacy_found += 1;
+    report.ai_rewrap_candidates += 1;
     if !apply {
         drop(plaintext);
         return Ok(());
@@ -385,7 +499,7 @@ async fn migrate_webhook_secret_row(
         drop(plaintext);
         return Ok(());
     }
-    report.webhook_legacy_found += 1;
+    report.webhook_rewrap_candidates += 1;
     if !apply {
         drop(plaintext);
         return Ok(());
@@ -555,29 +669,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn migration_requires_key_before_first_database_query() {
-        let pool = PgPoolOptions::new()
-            .connect_lazy("postgres://127.0.0.1:1/unreachable")
-            .expect("syntactically valid lazy database URL");
-        let cipher = CredentialCipher::from_optional_base64(None)
-            .expect("missing key is a supported runtime state");
-
-        let error =
-            migrate_credential_secrets(&pool, &cipher, CredentialSecretMigrationOptions::default())
-                .await
-                .expect_err("maintenance must fail before trying the unreachable database");
-
-        assert!(matches!(error, CredentialSecretMigrationError::CredentialProtection(_)));
-    }
-
-    #[tokio::test]
     async fn invalid_batch_is_rejected_before_database_access() {
         let pool = PgPoolOptions::new()
             .connect_lazy("postgres://127.0.0.1:1/unreachable")
             .expect("syntactically valid lazy database URL");
         let encoded_key = STANDARD.encode([23_u8; 32]);
-        let cipher =
-            CredentialCipher::from_optional_base64(Some(&encoded_key)).expect("valid master key");
+        let cipher = CredentialCipher::from_base64(&encoded_key).expect("valid master key");
 
         let error = migrate_credential_secrets(
             &pool,

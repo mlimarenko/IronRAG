@@ -8,7 +8,7 @@ pub mod ssrf;
 
 /// Webhook service marker.
 ///
-/// Outbound delivery clients are built per target from the canonical
+/// Outbound delivery clients are built per target from the authoritative
 /// public-URL resolver so each attempt pins DNS to already validated
 /// public addresses.
 #[derive(Clone, Debug)]

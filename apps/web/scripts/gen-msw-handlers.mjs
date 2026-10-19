@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Sprint 5: emit a default MSW handler per (method, path) from the canonical
+// Sprint 5: emit a default MSW handler per (method, path) from the authoritative
 // OpenAPI doc. Run via `make frontend-mocks-regen` whenever the contract
 // changes (i.e. after `make openapi-emit`).
 //

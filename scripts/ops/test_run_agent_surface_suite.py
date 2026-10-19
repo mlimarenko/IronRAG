@@ -11,7 +11,8 @@ from unittest import mock
 
 SCRIPT_PATH = pathlib.Path(__file__).resolve().parent / "run-agent-surface-suite.py"
 SPEC = importlib.util.spec_from_file_location("run_agent_surface_suite", SCRIPT_PATH)
-assert SPEC is not None and SPEC.loader is not None
+assert SPEC is not None
+assert SPEC.loader is not None
 MODULE = importlib.util.module_from_spec(SPEC)
 sys.modules[SPEC.name] = MODULE
 SPEC.loader.exec_module(MODULE)
@@ -82,6 +83,7 @@ class AgentSurfaceSuiteSecurityTests(unittest.TestCase):
 
     def test_case_runner_rejects_unsafe_case_id_before_spawning(self) -> None:
         with tempfile.TemporaryDirectory() as reports_dir:
+            reports_path = pathlib.Path(reports_dir)
             with mock.patch.object(MODULE.subprocess, "run") as run:
                 with self.assertRaisesRegex(ValueError, "case id"):
                     MODULE.run_case(
@@ -91,7 +93,7 @@ class AgentSurfaceSuiteSecurityTests(unittest.TestCase):
                         workspace_id=None,
                         mcp_token="private-suite-token",
                         probe_password="private-suite-password",
-                        reports_dir=pathlib.Path(reports_dir),
+                        reports_dir=reports_path,
                         case={"id": "../../outside", "question": "private question"},
                     )
 

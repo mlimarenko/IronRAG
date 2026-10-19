@@ -4,6 +4,7 @@ import { toast } from 'sonner'
 
 import { documentsApi } from '@/shared/api'
 import type { DocumentItem } from '@/shared/types'
+import { getDocumentSourceFormat } from '../../model/documentAdapter'
 
 import { serializeSourceTextForEditor } from './documentEditorBlocks'
 import { isCodeLikeSourceFormat, isPlainTextSourceFormat } from './editorSurfaceMode'
@@ -145,12 +146,13 @@ async function loadSourceEditorMarkdown(doc: DocumentItem): Promise<string> {
   }
 
   const sourceText = await documentsApi.getSourceText(sourceHref)
-  return serializeSourceTextForEditor(sourceText, doc.fileType)
+  return serializeSourceTextForEditor(sourceText, getDocumentSourceFormat(doc))
 }
 
 function shouldLoadStoredSourceTextForEditor(doc: DocumentItem): boolean {
+  const sourceFormat = getDocumentSourceFormat(doc)
   return (
     doc.sourceAccess?.kind === 'stored_document' &&
-    (isCodeLikeSourceFormat(doc.fileType) || isPlainTextSourceFormat(doc.fileType))
+    (isCodeLikeSourceFormat(sourceFormat) || isPlainTextSourceFormat(sourceFormat))
   )
 }

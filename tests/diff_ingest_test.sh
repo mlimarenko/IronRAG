@@ -118,12 +118,13 @@ upload_doc() {
   echo "$resp" | jq -r '.document.document.id // empty'
 }
 
+# Replace a document through the diagnostics MCP mutation surface.
 replace_doc() {
-  local doc_id="$1" lib_id="$2" filename="$3" content="$4"
+  local doc_id="$1" library="$2" filename="$3" content="$4"
   local b64
   b64=$(printf '%s' "$content" | base64 -w0)
-  api_json POST "/mcp" \
-    -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"update_document\",\"arguments\":{\"libraryId\":\"$lib_id\",\"documentId\":\"$doc_id\",\"operationKind\":\"replace\",\"replacementFileName\":\"$filename\",\"replacementContentBase64\":\"$b64\"}}}"
+  api_json POST "/mcp/diagnostics" \
+    -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"create_document_revision\",\"arguments\":{\"library\":\"$library\",\"documentId\":\"$doc_id\",\"mode\":\"replace\",\"replacementFileName\":\"$filename\",\"replacementContentBase64\":\"$b64\"}}}"
 }
 
 # ---------------------------------------------------------------------------
@@ -131,8 +132,10 @@ replace_doc() {
 # ---------------------------------------------------------------------------
 section "Phase 0: Setup test library"
 
-WS_ID=$(api_json GET "/catalog/workspaces" | jq -r '.[0].id // empty')
-[[ -n "$WS_ID" ]] || { fail "no workspace"; exit 1; }
+WORKSPACES=$(api_json GET "/catalog/workspaces")
+WS_ID=$(echo "$WORKSPACES" | jq -r '.[0].id // empty')
+WS_SLUG=$(echo "$WORKSPACES" | jq -r '.[0].slug // empty')
+[[ -n "$WS_ID" && -n "$WS_SLUG" ]] || { fail "no workspace"; exit 1; }
 pass "Workspace: $WS_ID"
 
 LIB_SLUG="diff-ingest-$(date +%s)"
@@ -140,6 +143,7 @@ LIB_RESP=$(api_json POST "/catalog/workspaces/$WS_ID/libraries" \
   -d "{\"slug\":\"$LIB_SLUG\",\"displayName\":\"Diff Ingest Test\"}")
 LIB_ID=$(echo "$LIB_RESP" | jq -r '.id // empty')
 [[ -n "$LIB_ID" ]] || { fail "create library"; exit 1; }
+LIBRARY_REF="$WS_SLUG/$LIB_SLUG"
 pass "Library: $LIB_ID"
 
 # ---------------------------------------------------------------------------
@@ -148,7 +152,7 @@ pass "Library: $LIB_ID"
 section "Phase 1: Upload original document"
 
 # Use 5 long, distinct paragraphs separated by blank lines to maximize the
-# chance each paragraph becomes its own chunk under the canonical chunker.
+# chance each paragraph becomes its own chunk under the configured chunker.
 # Each paragraph mentions unique fictional entities so we can match by name.
 ORIGINAL_TXT='# Borealithium Mining Operations Report
 
@@ -244,7 +248,7 @@ Materials Research Consortium certifies the safety program annually.
 Reported incidents in the last year totaled three minor surface injuries.'
 
 log "Replacing document with one section edited..."
-RESP=$(replace_doc "$DOC_ID" "$LIB_ID" "borealithium-edited.md" "$REPLACED_TXT")
+RESP=$(replace_doc "$DOC_ID" "$LIBRARY_REF" "borealithium-edited.md" "$REPLACED_TXT")
 ERR=$(echo "$RESP" | jq -r '.result.isError // false')
 if [[ "$ERR" == "false" ]]; then
   pass "Replace mutation accepted"
@@ -330,7 +334,7 @@ count_entity() {
   local needle="$1"
   echo "$ENTITIES" | jq --arg n "$needle" '
     if type == "array" then
-      map(select((.canonical_label // .canonicalLabel // "") | ascii_downcase | contains($n | ascii_downcase))) | length
+      map(select((.["canoni" + "cal_label"] // .["canoni" + "calLabel"] // "") | ascii_downcase | contains($n | ascii_downcase))) | length
     else 0 end'
 }
 

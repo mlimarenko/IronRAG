@@ -1,189 +1,199 @@
 // Off-main-thread graph layout computation.
 //
-// At 25 k nodes + 80 k edges the Graphology build + layout pass runs
-// 700-1700 ms on a typical laptop. Running it on the main thread
-// triggers Chrome's "page is slowing down" warning and freezes the UI
-// shell while the user is waiting for the graph to appear. This worker
-// offloads everything that does not touch the DOM:
+// The main thread uploads the topology once per stream (flat typed arrays +
+// label/type string arrays), then requests layouts by id. Geometric layouts
+// run over a typed-array `LayoutGraph` shim (no graphology build cost); the
+// force layout runs the typed-array Barnes-Hut simulation in bounded slices,
+// posting a transferable position snapshot after each slice so the renderer
+// can stream physics into the scene while the simulation is still running.
 //
-//   1. Build a scratch Graphology instance from the slim node/edge
-//      payload the main thread sends.
-//   2. Compute the requested layout via `applyGraphLayout`.
-//   3. Extract the resulting (x, y) pairs into a `Float32Array` and
-//      post them back as a transferable buffer (zero-copy).
-//
-// The main thread then constructs its own Graphology instance using
-// those precomputed positions and hands it to Sigma. The worker's
-// Graphology instance is thrown away — the double-build is the price
-// we pay for moving the expensive layout step off the critical frame
-// path, and on dense graphs the wall-clock wins dwarf that cost.
+// Every computed layout result is cached per (topology, layout), which makes
+// switching back to an already-computed layout instant.
 
-import Graph from 'graphology'
 import { applyGraphLayout } from '@/features/graph/model/layouts'
-import { runForceSimulation } from './forceSimulation'
+import { LayoutGraph, type LayoutTopology } from '@/features/graph/model/layoutGraph'
 import { isIterativeLayout, type GraphLayoutType } from '@/features/graph/model/config'
+import { createForceSim, forceIterationBudget } from './forceSim'
 
-export interface GraphLayoutRequestNode {
-  id: string
-  nodeType: string
-  size: number
-  label: string
+export interface GraphLayoutTopologyMessage {
+  type: 'topology'
+  topologyId: number
+  count: number
+  labels: string[]
+  types: string[]
+  sizes: Float32Array
+  neighborOffsets: Uint32Array
+  neighborIndices: Uint32Array
+  edgeEndpoints: Uint32Array
+  edgeWeights: Float32Array
+  seedPositions: Float32Array
 }
 
-export interface GraphLayoutRequestEdge {
-  sourceId: string
-  targetId: string
-  /** Relation / document support count; drives weighted ForceAtlas2 (stronger
-   *  links pull nodes closer). Geometric layouts ignore it. */
-  weight?: number | undefined
-}
-
-export interface GraphLayoutRequest {
+interface GraphLayoutComputeMessage {
   type: 'compute'
   requestId: number
-  topologyId?: number | undefined
+  topologyId: number
   layout: GraphLayoutType
-  nodes?: GraphLayoutRequestNode[] | undefined
-  edges?: GraphLayoutRequestEdge[] | undefined
 }
 
-export interface GraphLayoutResponse {
-  type: 'result'
+interface GraphLayoutCancelMessage {
+  type: 'cancel'
   requestId: number
-  /** Interleaved `[x0, y0, x1, y1, ...]` matching request node order. */
+}
+
+export type GraphLayoutRequest =
+  GraphLayoutTopologyMessage | GraphLayoutComputeMessage | GraphLayoutCancelMessage
+
+interface GraphLayoutPositionsResponse {
+  type: 'positions'
+  requestId: number
+  /** Interleaved `[x0, y0, ...]` in topology node order. */
   positions: Float32Array
+  /** False for intermediate force-simulation snapshots. */
+  final: boolean
   elapsedMs: number
 }
 
-export interface GraphLayoutErrorResponse {
+interface GraphLayoutErrorResponse {
   type: 'error'
   requestId: number
   message: string
 }
 
-// The `WebWorker` lib (which declares `DedicatedWorkerGlobalScope`) is not
-// part of this project's `lib` compiler option (only `ES2020`/`DOM` are, so
-// the same tsconfig also type-checks DOM-side code). Declare the minimal
-// surface this worker actually uses instead of pulling in the global type.
+export type GraphLayoutResponse = GraphLayoutPositionsResponse | GraphLayoutErrorResponse
+
+// The `WebWorker` lib is not part of this project's `lib` compiler option;
+// declare the minimal surface this worker uses.
 interface WorkerGlobalMessagePort {
   addEventListener(
     type: 'message',
     listener: (event: MessageEvent<GraphLayoutRequest>) => void,
   ): void
-  postMessage(
-    message: GraphLayoutResponse | GraphLayoutErrorResponse,
-    transfer?: Transferable[],
-  ): void
+  postMessage(message: GraphLayoutResponse, transfer?: Transferable[]): void
 }
 
 const ctx = self as unknown as WorkerGlobalMessagePort
-let cachedTopologyId: number | null = null
-let cachedNodes: GraphLayoutRequestNode[] | null = null
-let cachedEdges: GraphLayoutRequestEdge[] | null = null
 
-function updateTopologyCache(payload: GraphLayoutRequest): void {
-  if (!payload.nodes || !payload.edges) {
-    return
-  }
-  cachedTopologyId = payload.topologyId ?? null
-  cachedNodes = payload.nodes
-  cachedEdges = payload.edges
+interface TopologyEntry {
+  message: GraphLayoutTopologyMessage
+  layoutTopology: LayoutTopology
+  resultByLayout: Map<GraphLayoutType, Float32Array>
 }
 
-function loadCachedTopology(payload: GraphLayoutRequest): {
-  nodes: GraphLayoutRequestNode[]
-  edges: GraphLayoutRequestEdge[]
-} {
-  updateTopologyCache(payload)
-  if (
-    !cachedNodes ||
-    !cachedEdges ||
-    (payload.topologyId != null && cachedTopologyId !== payload.topologyId)
-  ) {
-    throw new Error('graph layout topology is not loaded')
-  }
-  return { nodes: cachedNodes, edges: cachedEdges }
+let topology: TopologyEntry | null = null
+let topologyId = -1
+let activeRequestId = 0
+
+/** Target wall-clock per force slice: long enough to amortize the tree
+ *  build, short enough that a layout switch lands within the time budget. */
+const FORCE_SLICE_MS = 400
+
+function postPositions(
+  requestId: number,
+  positions: Float32Array,
+  final: boolean,
+  elapsedMs: number,
+): void {
+  const copy = positions.slice()
+  ctx.postMessage({ type: 'positions', requestId, positions: copy, final, elapsedMs }, [
+    copy.buffer,
+  ])
 }
 
-function buildLayoutGraph(nodes: GraphLayoutRequestNode[], edges: GraphLayoutRequestEdge[]): Graph {
-  const graph = new Graph()
-  for (const node of nodes) {
-    graph.addNode(node.id, {
-      x: 0,
-      y: 0,
-      size: node.size,
-      nodeType: node.nodeType,
-      label: node.label,
+function computeGeometric(requestId: number, layout: GraphLayoutType, entry: TopologyEntry): void {
+  const startedAt = performance.now()
+  const graph = new LayoutGraph(entry.layoutTopology)
+  applyGraphLayout(graph, layout)
+  entry.resultByLayout.set(layout, graph.positions.slice())
+  postPositions(requestId, graph.positions, true, performance.now() - startedAt)
+}
+
+async function computeForce(requestId: number, entry: TopologyEntry): Promise<void> {
+  const startedAt = performance.now()
+  const { message } = entry
+  const sim = createForceSim({
+    count: message.count,
+    seedPositions: message.seedPositions,
+    edgeEndpoints: message.edgeEndpoints,
+    edgeWeights: message.edgeWeights,
+  })
+  const budget = forceIterationBudget(message.count)
+  let sliceIterations = 1
+  while (sim.iterationsDone < budget) {
+    const iterations = Math.min(sliceIterations, budget - sim.iterationsDone)
+    const sliceMs = sim.step(iterations)
+    const perIteration = Math.max(0.1, sliceMs / iterations)
+    sliceIterations = Math.max(1, Math.min(25, Math.round(FORCE_SLICE_MS / perIteration)))
+    const final = sim.iterationsDone >= budget
+    postPositions(requestId, sim.positions, final, performance.now() - startedAt)
+    if (final) break
+    // Yield so a superseding compute/topology message can cancel this run.
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    if (activeRequestId !== requestId || topology !== entry) return
+  }
+  entry.resultByLayout.set('force', sim.positions.slice())
+}
+
+function handleTopology(message: GraphLayoutTopologyMessage): void {
+  topologyId = message.topologyId
+  topology = {
+    message,
+    layoutTopology: {
+      count: message.count,
+      labels: message.labels,
+      types: message.types,
+      sizes: message.sizes,
+      neighborOffsets: message.neighborOffsets,
+      neighborIndices: message.neighborIndices,
+    },
+    resultByLayout: new Map(),
+  }
+}
+
+function handleCompute(message: GraphLayoutComputeMessage): void {
+  activeRequestId = message.requestId
+  if (!topology || topologyId !== message.topologyId) {
+    ctx.postMessage({
+      type: 'error',
+      requestId: message.requestId,
+      message: 'graph layout topology is not loaded',
     })
-  }
-  for (const edge of edges) {
-    addLayoutEdge(graph, edge)
-  }
-  return graph
-}
-
-function addLayoutEdge(graph: Graph, edge: GraphLayoutRequestEdge): void {
-  if (
-    edge.sourceId === edge.targetId ||
-    !graph.hasNode(edge.sourceId) ||
-    !graph.hasNode(edge.targetId)
-  ) {
     return
   }
-  const weight = edge.weight ?? 1
-  if (graph.hasEdge(edge.sourceId, edge.targetId)) {
-    graph.updateEdgeAttribute(
-      edge.sourceId,
-      edge.targetId,
-      'weight',
-      (current) => (typeof current === 'number' ? current : 0) + weight,
-    )
+  const cached = topology.resultByLayout.get(message.layout)
+  if (cached) {
+    postPositions(message.requestId, cached, true, 0)
     return
   }
   try {
-    graph.addEdge(edge.sourceId, edge.targetId, { weight })
-  } catch {
-    // Graphology can reject a parallel edge inserted by another route.
+    if (isIterativeLayout(message.layout)) {
+      // Async: rejections would escape the surrounding try/catch.
+      computeForce(message.requestId, topology).catch((error: unknown) => {
+        ctx.postMessage({
+          type: 'error',
+          requestId: message.requestId,
+          message: error instanceof Error ? error.message : String(error),
+        })
+      })
+    } else {
+      computeGeometric(message.requestId, message.layout, topology)
+    }
+  } catch (error) {
+    ctx.postMessage({
+      type: 'error',
+      requestId: message.requestId,
+      message: error instanceof Error ? error.message : String(error),
+    })
   }
-}
-
-function serializePositions(graph: Graph, nodes: GraphLayoutRequestNode[]): Float32Array {
-  const positions = new Float32Array(nodes.length * 2)
-  nodes.forEach((node, index) => {
-    const attrs = graph.getNodeAttributes(node.id)
-    positions[index * 2] = (attrs.x as number | undefined) ?? 0
-    positions[index * 2 + 1] = (attrs.y as number | undefined) ?? 0
-  })
-  return positions
 }
 
 ctx.addEventListener('message', (event: MessageEvent<GraphLayoutRequest>) => {
   const payload = event.data
-  if (payload?.type !== 'compute') return
-  try {
-    const topology = loadCachedTopology(payload)
-    const started = performance.now()
-    const graph = buildLayoutGraph(topology.nodes, topology.edges)
-
-    applyGraphLayout(graph, payload.layout)
-    if (isIterativeLayout(payload.layout)) {
-      runForceSimulation(graph)
-    }
-
-    const positions = serializePositions(graph, topology.nodes)
-    const response: GraphLayoutResponse = {
-      type: 'result',
-      requestId: payload.requestId,
-      positions,
-      elapsedMs: performance.now() - started,
-    }
-    ctx.postMessage(response, [positions.buffer])
-  } catch (error) {
-    const response: GraphLayoutErrorResponse = {
-      type: 'error',
-      requestId: payload.requestId,
-      message: error instanceof Error ? error.message : String(error),
-    }
-    ctx.postMessage(response)
+  if (payload?.type === 'topology') handleTopology(payload)
+  else if (payload?.type === 'compute') handleCompute(payload)
+  else if (payload?.type === 'cancel' && payload.requestId === activeRequestId) {
+    // Cancelling the active request stops the sliced force loop at its next
+    // yield point (it checks activeRequestId between slices).
+    activeRequestId = 0
   }
 })

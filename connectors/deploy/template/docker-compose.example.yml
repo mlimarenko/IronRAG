@@ -1,0 +1,33 @@
+# Canonical deployment compose for a connector built on this template.
+#
+# This template is a library, not a runnable image — copy this file into
+# your connector repo (next to its Dockerfile), rename to docker-compose.yml,
+# and adjust the names. See ../bookstack, ../confluence, ../gitrepos and
+# ../youtrack for working instances.
+#
+#   cp .env.example .env             # IRONRAG_* + ADMIN_BEARER_TOKEN + vendor creds
+#   cp routing.yaml.example routing.yaml   # map items → workspace/library slugs
+#   docker compose up -d
+services:
+  connector:
+    # Published connectors pull their release image; build locally during dev.
+    # image: pipingspace/ironrag.<your-connector>:latest
+    build: .
+    container_name: ironrag-your-connector
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      # Routing rules (read-only).
+      - ./routing.yaml:/app/routing.yaml:ro
+      # Connector-specific config mounts go here, e.g.:
+      # - ./repos.yaml:/app/repos.yaml:ro
+      # Persistent SQLite cursor (STATE_DB_PATH) so restarts ship only the diff.
+      - connector-state:/var/lib/ironrag-connector
+    # Only needed for RUN_MODE=webhook/both. Bound to localhost; front it
+    # with a TLS reverse proxy for public webhook intake.
+    ports:
+      - "127.0.0.1:8088:8088"
+
+volumes:
+  connector-state:

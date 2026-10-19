@@ -1,4 +1,5 @@
 mod identifiers;
+mod literals;
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -24,6 +25,14 @@ use self::identifiers::{
     extract_code_identifier_candidates, extract_config_key_candidates,
     extract_environment_variable_candidates, extract_error_code_candidates,
     extract_version_candidates,
+};
+
+use self::literals::{
+    extract_auth_rule_candidates, extract_endpoint_candidates,
+    extract_http_response_status_literals, extract_parameter_candidates, extract_path_like_token,
+    extract_port_candidates, extract_port_from_url, extract_protocol_candidates,
+    extract_status_code_candidates, extract_url_candidates, extract_url_like_token,
+    is_prefixed_semver_literal, normalize_http_method, technical_tokens, trim_technical_token,
 };
 
 const TECHNICAL_FACT_NAMESPACE: Uuid = Uuid::from_u128(0x8c79_60e4_40fd_4ad8_b5d3_4d93_d93d_4021);
@@ -75,7 +84,7 @@ pub struct TechnicalFactExtractionFailure {
 #[derive(Debug, Clone)]
 struct FactCandidate {
     fact_kind: TechnicalFactKind,
-    canonical_value: TechnicalFactValue,
+    normalized_value: TechnicalFactValue,
     display_value: String,
     qualifiers: Vec<TechnicalFactQualifier>,
     support_block_ids: BTreeSet<Uuid>,
@@ -88,7 +97,7 @@ struct FactCandidate {
 #[derive(Debug, Clone)]
 struct FactAggregate {
     fact_kind: TechnicalFactKind,
-    canonical_value: TechnicalFactValue,
+    normalized_value: TechnicalFactValue,
     display_value: String,
     qualifiers: Vec<TechnicalFactQualifier>,
     support_block_ids: BTreeSet<Uuid>,
@@ -339,216 +348,6 @@ fn logical_lines(block_text: &str) -> Vec<String> {
         .collect()
 }
 
-fn extract_url_candidates(block: &StructuredBlockData, line: &str) -> Vec<FactCandidate> {
-    technical_tokens(line)
-        .into_iter()
-        .filter_map(|token| {
-            extract_url_like_token(&token).and_then(|url| {
-                build_candidate(
-                    block,
-                    TechnicalFactKind::Url,
-                    &url,
-                    Vec::new(),
-                    line,
-                    "literal_url",
-                )
-            })
-        })
-        .collect()
-}
-
-fn extract_endpoint_candidates(block: &StructuredBlockData, line: &str) -> Vec<FactCandidate> {
-    let descriptors = line_descriptors(line);
-    let methods = descriptors
-        .iter()
-        .filter_map(|descriptor| normalize_http_method(&descriptor.value))
-        .collect::<Vec<_>>();
-    let mut facts = methods
-        .iter()
-        .filter_map(|method| {
-            build_candidate(
-                block,
-                TechnicalFactKind::HttpMethod,
-                method,
-                Vec::new(),
-                line,
-                "endpoint_method",
-            )
-        })
-        .collect::<Vec<_>>();
-
-    let method_qualifiers = if methods.len() == 1 {
-        vec![TechnicalFactQualifier { key: "method".to_string(), value: methods[0].to_string() }]
-    } else {
-        Vec::new()
-    };
-
-    let path_descriptors = descriptors
-        .iter()
-        .filter_map(|descriptor| {
-            extract_path_like_token(&descriptor.value)
-                .or_else(|| {
-                    extract_url_like_token(&descriptor.value).and_then(|url| extract_url_path(&url))
-                })
-                .map(|path| (descriptor.value.as_str(), path))
-        })
-        .collect::<Vec<_>>();
-
-    for (_, path) in path_descriptors {
-        if let Some(candidate) = build_candidate(
-            block,
-            TechnicalFactKind::EndpointPath,
-            &path,
-            method_qualifiers.clone(),
-            line,
-            "endpoint_path",
-        ) {
-            facts.push(candidate);
-        }
-    }
-
-    facts
-}
-
-fn extract_port_candidates(block: &StructuredBlockData, line: &str) -> Vec<FactCandidate> {
-    let mut ports = BTreeSet::<String>::new();
-
-    for token in technical_tokens(line) {
-        if let Some(url) = extract_url_like_token(&token)
-            && let Some(port_literal) = extract_port_from_url(&url)
-        {
-            ports.insert(port_literal);
-        }
-    }
-
-    ports
-        .into_iter()
-        .filter_map(|port| {
-            build_candidate(block, TechnicalFactKind::Port, &port, Vec::new(), line, "network_port")
-        })
-        .collect()
-}
-
-fn extract_status_code_candidates(block: &StructuredBlockData, line: &str) -> Vec<FactCandidate> {
-    extract_http_response_status_literals(line)
-        .into_iter()
-        .filter_map(|status| {
-            build_candidate(
-                block,
-                TechnicalFactKind::StatusCode,
-                &status,
-                Vec::new(),
-                line,
-                "http_status",
-            )
-        })
-        .collect()
-}
-
-fn extract_protocol_candidates(block: &StructuredBlockData, line: &str) -> Vec<FactCandidate> {
-    let mut protocols = BTreeSet::<String>::new();
-    for token in technical_tokens(line) {
-        if let Some(url) = extract_url_like_token(&token)
-            && let Some((scheme, _)) = url.split_once("://")
-            && PROTOCOLS.iter().any(|protocol| protocol == &scheme)
-        {
-            protocols.insert(scheme.to_string());
-        }
-        let normalized = trim_technical_token(&token).to_ascii_lowercase();
-        if PROTOCOLS.iter().any(|protocol| protocol == &normalized) {
-            protocols.insert(normalized);
-        }
-    }
-
-    protocols
-        .into_iter()
-        .filter_map(|protocol| {
-            build_candidate(
-                block,
-                TechnicalFactKind::Protocol,
-                &protocol,
-                Vec::new(),
-                line,
-                "protocol",
-            )
-        })
-        .collect()
-}
-
-fn extract_parameter_candidates(block: &StructuredBlockData, line: &str) -> Vec<FactCandidate> {
-    let mut parameters = BTreeSet::<String>::new();
-
-    for token in technical_tokens(line) {
-        if let Some(url) = extract_url_like_token(&token) {
-            for key in extract_query_parameter_keys(&url) {
-                parameters.insert(key);
-            }
-        }
-    }
-
-    let cells = table_cells(line);
-    if cells.len() >= 2
-        && let Some(parameter_name) = leading_identifier(&cells[0])
-        && is_parameter_name_like(&parameter_name)
-    {
-        parameters.insert(parameter_name);
-    }
-
-    let cleaned = strip_leading_marker(&collapse_literal_whitespace(line));
-    for separator in [":", "="] {
-        if let Some((left, _right)) = cleaned.split_once(separator)
-            && let Some(parameter_name) = leading_identifier(left)
-            && is_parameter_name_like(&parameter_name)
-        {
-            parameters.insert(parameter_name);
-        }
-    }
-
-    parameters
-        .into_iter()
-        .filter_map(|parameter_name| {
-            build_candidate(
-                block,
-                TechnicalFactKind::ParameterName,
-                &parameter_name,
-                Vec::new(),
-                line,
-                "parameter_name",
-            )
-        })
-        .collect()
-}
-
-fn extract_auth_rule_candidates(block: &StructuredBlockData, line: &str) -> Vec<FactCandidate> {
-    let literal = line
-        .split_once(':')
-        .filter(|(name, _)| name.trim().eq_ignore_ascii_case("authorization"))
-        .and_then(|(_, value)| value.split_ascii_whitespace().next())
-        .and_then(|scheme| {
-            if scheme.eq_ignore_ascii_case("bearer") {
-                Some("bearer_token")
-            } else if scheme.eq_ignore_ascii_case("basic") {
-                Some("basic_auth")
-            } else {
-                None
-            }
-        });
-
-    literal
-        .and_then(|value| {
-            build_candidate(
-                block,
-                TechnicalFactKind::AuthRule,
-                value,
-                Vec::new(),
-                line,
-                "auth_rule",
-            )
-        })
-        .into_iter()
-        .collect()
-}
-
 fn finalize_candidates(
     command: &ExtractTechnicalFactsCommand,
     candidates: Vec<FactCandidate>,
@@ -557,13 +356,13 @@ fn finalize_candidates(
         BTreeMap::<(TechnicalFactKind, String, String, String), FactAggregate>::new();
 
     for candidate in candidates {
-        let canonical_string = candidate.canonical_value.canonical_string();
+        let normalized_string = candidate.normalized_value.normalized_string();
         let qualifier_key = qualifier_signature(&candidate.qualifiers);
         let scope_signature = candidate.scope_signature.clone();
-        let key = (candidate.fact_kind, canonical_string, qualifier_key, scope_signature.clone());
+        let key = (candidate.fact_kind, normalized_string, qualifier_key, scope_signature.clone());
         let aggregate = aggregates.entry(key).or_insert_with(|| FactAggregate {
             fact_kind: candidate.fact_kind,
-            canonical_value: candidate.canonical_value.clone(),
+            normalized_value: candidate.normalized_value.clone(),
             display_value: candidate.display_value.clone(),
             qualifiers: candidate.qualifiers.clone(),
             support_block_ids: BTreeSet::new(),
@@ -586,14 +385,14 @@ fn finalize_candidates(
     aggregates
         .into_values()
         .map(|aggregate| {
-            let canonical_string = aggregate.canonical_value.canonical_string();
+            let normalized_string = aggregate.normalized_value.normalized_string();
             let fact_id = Uuid::new_v5(
                 &TECHNICAL_FACT_NAMESPACE,
                 format!(
                     "{}:{}:{}:{}",
                     command.revision_id,
                     aggregate.fact_kind.as_str(),
-                    canonical_string,
+                    normalized_string,
                     aggregate.scope_signature,
                 )
                 .as_bytes(),
@@ -606,7 +405,7 @@ fn finalize_candidates(
                     workspace_id: command.workspace_id,
                     library_id: command.library_id,
                     fact_kind: aggregate.fact_kind,
-                    canonical_value: aggregate.canonical_value,
+                    normalized_value: aggregate.normalized_value,
                     display_value: aggregate.display_value,
                     qualifiers: aggregate.qualifiers,
                     support_block_ids: aggregate.support_block_ids.into_iter().collect(),
@@ -634,7 +433,7 @@ fn assign_conflicts(
     for ((fact_kind, scope_signature), indices) in scope_groups {
         let distinct_values = indices
             .iter()
-            .map(|index| facts_with_scope[*index].0.canonical_value.canonical_string())
+            .map(|index| facts_with_scope[*index].0.normalized_value.normalized_string())
             .collect::<BTreeSet<_>>();
         if distinct_values.len() <= 1 {
             continue;
@@ -653,7 +452,7 @@ fn assign_conflicts(
         conflicts.push(TechnicalFactConflict {
             conflict_group_id,
             fact_kind,
-            canonical_values: distinct_values.into_iter().collect(),
+            normalized_values: distinct_values.into_iter().collect(),
             fact_ids,
         });
     }
@@ -669,11 +468,11 @@ fn build_candidate(
     anchor_line: &str,
     extraction_suffix: &str,
 ) -> Option<FactCandidate> {
-    let canonical_value = normalize_technical_fact_value(fact_kind, raw_value)?;
-    let qualifiers = canonicalize_qualifiers(qualifiers);
+    let normalized_value = normalize_technical_fact_value(fact_kind, raw_value)?;
+    let qualifiers = normalize_qualifiers(qualifiers);
     Some(FactCandidate {
         fact_kind,
-        canonical_value,
+        normalized_value,
         display_value: raw_value.trim().to_string(),
         qualifiers: qualifiers.clone(),
         support_block_ids: BTreeSet::from([block.block_id]),
@@ -695,14 +494,14 @@ fn candidate_scope_signature(
     fact_kind: TechnicalFactKind,
     qualifiers: &[TechnicalFactQualifier],
     anchor_line: &str,
-    canonical_value: &str,
+    normalized_value: &str,
 ) -> String {
     let ancestry = if block.section_path.is_empty() {
         block.heading_trail.join(" > ")
     } else {
         block.section_path.join(" > ")
     };
-    let anchor = normalize_scope_anchor(anchor_line, fact_kind, canonical_value);
+    let anchor = normalize_scope_anchor(anchor_line, fact_kind, normalized_value);
     format!(
         "{}|{}|{}|{}|{}",
         block.block_kind.as_str(),
@@ -716,7 +515,7 @@ fn candidate_scope_signature(
 fn normalize_scope_anchor(
     anchor_line: &str,
     fact_kind: TechnicalFactKind,
-    canonical_value: &str,
+    normalized_value: &str,
 ) -> String {
     let mut anchor = collapse_literal_whitespace(anchor_line).to_ascii_lowercase();
     let placeholder = match fact_kind {
@@ -738,14 +537,14 @@ fn normalize_scope_anchor(
         TechnicalFactKind::DependencyDeclaration => "<dependency>",
         TechnicalFactKind::CodeIdentifier => "<codeident>",
     };
-    let raw_lower = canonical_value.to_ascii_lowercase();
+    let raw_lower = normalized_value.to_ascii_lowercase();
     if !raw_lower.is_empty() {
         anchor = anchor.replace(&raw_lower, placeholder);
     }
     anchor
 }
 
-fn canonicalize_qualifiers(
+fn normalize_qualifiers(
     mut qualifiers: Vec<TechnicalFactQualifier>,
 ) -> Vec<TechnicalFactQualifier> {
     qualifiers
@@ -815,735 +614,5 @@ fn confidence_for_extraction(block: &StructuredBlockData, extraction_suffix: &st
     }
 }
 
-fn technical_tokens(line: &str) -> Vec<String> {
-    line.split_whitespace()
-        .map(trim_technical_token)
-        .map(str::to_string)
-        .filter(|token| !token.is_empty())
-        .collect()
-}
-
-#[derive(Debug, Clone)]
-struct LineDescriptor {
-    value: String,
-}
-
-fn line_descriptors(line: &str) -> Vec<LineDescriptor> {
-    let mut descriptors = technical_tokens(line)
-        .into_iter()
-        .map(|value| LineDescriptor { value })
-        .collect::<Vec<_>>();
-
-    for cell in table_cells(line) {
-        if !descriptors.iter().any(|descriptor| descriptor.value == cell) {
-            descriptors.push(LineDescriptor { value: cell });
-        }
-    }
-
-    descriptors
-}
-
-fn table_cells(line: &str) -> Vec<String> {
-    if !line.contains('|') {
-        return Vec::new();
-    }
-    line.split('|')
-        .map(collapse_literal_whitespace)
-        .map(|cell| strip_leading_marker(&cell))
-        .filter(|cell| !cell.is_empty())
-        .collect()
-}
-
-/// Validates a token as a well-formed URL using the `url` crate
-/// (RFC 3986). Replaces the old `starts_with("http://")` heuristic
-/// that couldn't distinguish a real URL from a comment that happens
-/// to contain "http://" and missed edge cases like trailing parens,
-/// angle brackets, and percent-encoded paths.
-fn extract_url_like_token(token: &str) -> Option<String> {
-    let trimmed = trim_technical_token(token);
-    let parsed = url::Url::parse(trimmed).ok()?;
-    matches!(parsed.scheme(), "http" | "https").then(|| trimmed.to_string())
-}
-
-/// Extracts the path component from a URL via RFC-compliant parsing.
-fn extract_url_path(raw: &str) -> Option<String> {
-    let parsed = url::Url::parse(raw).ok()?;
-    let path = parsed.path();
-    if path == "/" || path.is_empty() {
-        return None;
-    }
-    extract_path_like_token(path)
-}
-
-/// Extracts query parameter keys from a URL via the `url` crate's
-/// `query_pairs()` iterator. Replaces manual `split('&')` +
-/// `split('=')` which silently broke on percent-encoded keys.
-fn extract_query_parameter_keys(raw: &str) -> Vec<String> {
-    let Ok(parsed) = url::Url::parse(raw) else {
-        return Vec::new();
-    };
-    parsed
-        .query_pairs()
-        .map(|(key, _)| key.to_string())
-        .filter(|key| is_parameter_name_like(key))
-        .collect()
-}
-
-fn extract_path_like_token(token: &str) -> Option<String> {
-    let trimmed = trim_technical_token(token);
-    if !trimmed.starts_with('/') || trimmed.len() < 2 {
-        return None;
-    }
-    let path = trimmed.split(['?', '#']).next().unwrap_or_default();
-    path.chars()
-        .all(|character| {
-            character.is_ascii_alphanumeric()
-                || matches!(character, '/' | '_' | '-' | '.' | '{' | '}')
-        })
-        .then(|| collapse_literal_whitespace(path).replace(' ', ""))
-}
-
-fn extract_port_from_url(url: &str) -> Option<String> {
-    url::Url::parse(url).ok()?;
-    let (_, remainder) = url.split_once("://")?;
-    let authority = remainder.split(['/', '?', '#']).next().unwrap_or_default();
-    let host_and_port = authority.rsplit('@').next().unwrap_or_default();
-    let port = if host_and_port.starts_with('[') {
-        host_and_port.split_once("]:")?.1
-    } else {
-        host_and_port.rsplit_once(':')?.1
-    };
-    extract_port_literal(port)
-}
-
-fn extract_port_literal(value: &str) -> Option<String> {
-    if value.is_empty() || !value.chars().all(|character| character.is_ascii_digit()) {
-        return None;
-    }
-    let parsed = value.parse::<u16>().ok()?;
-    ((1..=65535).contains(&parsed)).then_some(parsed.to_string())
-}
-
-fn extract_http_response_status_literals(line: &str) -> BTreeSet<String> {
-    technical_tokens(line)
-        .windows(2)
-        .filter_map(|window| {
-            is_http_version_literal(&window[0])
-                .then(|| trim_technical_token(&window[1]))
-                .filter(|candidate| {
-                    candidate.len() == 3
-                        && candidate.chars().all(|character| character.is_ascii_digit())
-                })
-                .and_then(|candidate| {
-                    candidate
-                        .parse::<u16>()
-                        .ok()
-                        .filter(|status| (100..=599).contains(status))
-                        .map(|_| candidate.to_string())
-                })
-        })
-        .collect()
-}
-
-fn is_http_version_literal(value: &str) -> bool {
-    let Some(version) = trim_technical_token(value).strip_prefix("HTTP/") else {
-        return false;
-    };
-    let mut segments = version.split('.');
-    let Some(major) = segments.next() else {
-        return false;
-    };
-    if major.is_empty() || !major.chars().all(|character| character.is_ascii_digit()) {
-        return false;
-    }
-    match (segments.next(), segments.next()) {
-        (None, None) => true,
-        (Some(minor), None) => {
-            !minor.is_empty() && minor.chars().all(|character| character.is_ascii_digit())
-        }
-        _ => false,
-    }
-}
-
-fn is_prefixed_semver_literal(value: &str) -> bool {
-    value
-        .strip_prefix('v')
-        .or_else(|| value.strip_prefix('V'))
-        .is_some_and(|version| semver::Version::parse(version).is_ok())
-}
-
-fn normalize_http_method(value: &str) -> Option<&'static str> {
-    let upper = trim_technical_token(value).to_ascii_uppercase();
-    HTTP_METHODS.into_iter().find(|method| method == &upper)
-}
-
-fn leading_identifier(value: &str) -> Option<String> {
-    let trimmed = strip_leading_marker(value);
-    let candidate = trim_technical_token(trimmed.split_whitespace().next().unwrap_or_default());
-    is_parameter_name_like(candidate).then(|| candidate.to_string())
-}
-
-fn is_parameter_name_like(candidate: &str) -> bool {
-    let compact = trim_technical_token(candidate);
-    !compact.is_empty()
-        && compact.len() <= 64
-        && compact.chars().any(|character| character.is_ascii_alphabetic())
-        && compact.chars().all(|character| {
-            character.is_ascii_alphanumeric() || matches!(character, '_' | '-' | '.')
-        })
-        && (compact.contains('_')
-            || compact.contains('-')
-            || compact
-                .chars()
-                .zip(compact.chars().skip(1))
-                .any(|(a, b)| a.is_ascii_lowercase() && b.is_ascii_uppercase())
-            || (compact.chars().next().is_some_and(|c| c.is_ascii_uppercase())
-                && compact.chars().skip(1).all(|c| c.is_ascii_lowercase())))
-}
-
-fn strip_leading_marker(value: &str) -> String {
-    value
-        .trim_start_matches(|character: char| {
-            matches!(character, '-' | '*' | '+' | '#' | '>' | '"' | '\'')
-        })
-        .trim()
-        .to_string()
-}
-
-fn trim_technical_token(token: &str) -> &str {
-    token.trim_matches(|character: char| {
-        matches!(character, ',' | ';' | ':' | ')' | '(' | ']' | '[' | '"' | '\'' | '`' | '{' | '}')
-    })
-}
-
 #[cfg(test)]
-mod tests {
-    use super::{ExtractTechnicalFactsCommand, TechnicalFactService};
-    use crate::shared::extraction::{
-        structured_document::{StructuredBlockData, StructuredBlockKind},
-        table_markdown::parse_markdown_table_row,
-    };
-    use tokio_util::sync::CancellationToken;
-    use uuid::Uuid;
-
-    // extracts_branded_identifiers_from_catalog_link_list_items — REMOVED.
-    // Branded identifier heuristic was the noisiest extractor and is now
-    // delegated to the LLM's entity extraction pipeline.
-
-    #[test]
-    fn branded_identifier_extraction_no_longer_produces_facts() {
-        // Verify the branded heuristic is truly gone — no `Identifier`
-        // facts from heading phrases or list item links.
-        let service = TechnicalFactService::new();
-        let result = service
-            .extract_from_blocks(
-                ExtractTechnicalFactsCommand {
-                    revision_id: Uuid::now_v7(),
-                    document_id: Uuid::now_v7(),
-                    workspace_id: Uuid::now_v7(),
-                    library_id: Uuid::now_v7(),
-                    blocks: vec![
-                        StructuredBlockData {
-                            block_id: Uuid::now_v7(),
-                            ordinal: 0,
-                            block_kind: StructuredBlockKind::Heading,
-                            text: "Acme Software Products - Acme Software Products - Example"
-                                .to_string(),
-                            normalized_text:
-                                "Acme Software Products - Acme Software Products - Example"
-                                    .to_string(),
-                            heading_trail: vec![
-                                "Acme Software Products - Acme Software Products - Example"
-                                    .to_string(),
-                            ],
-                            section_path: vec!["acme-software-products".to_string()],
-                            page_number: None,
-                            source_span: None,
-                            parent_block_id: None,
-                            table_coordinates: None,
-                            code_language: None,
-                            is_boilerplate: false,
-                        },
-                        StructuredBlockData {
-                            block_id: Uuid::now_v7(),
-                            ordinal: 1,
-                            block_kind: StructuredBlockKind::ListItem,
-                            text: "- [Operations Console](https://docs.example.test/operations-console)"
-                                .to_string(),
-                            normalized_text:
-                                "- [Operations Console](https://docs.example.test/operations-console)"
-                                    .to_string(),
-                            heading_trail: vec![
-                                "Acme Software Products - Acme Software Products - Example"
-                                    .to_string(),
-                            ],
-                            section_path: vec!["acme-software-products".to_string()],
-                            page_number: None,
-                            source_span: None,
-                            parent_block_id: None,
-                            table_coordinates: None,
-                            code_language: None,
-                            is_boilerplate: false,
-                        },
-                        StructuredBlockData {
-                            block_id: Uuid::now_v7(),
-                            ordinal: 2,
-                            block_kind: StructuredBlockKind::ListItem,
-                            text: "- [POS](https://docs.example.test/pos)".to_string(),
-                            normalized_text: "- [POS](https://docs.example.test/pos)".to_string(),
-                            heading_trail: vec![
-                                "Acme Software Products - Acme Software Products - Example"
-                                    .to_string(),
-                            ],
-                            section_path: vec!["acme-software-products".to_string()],
-                            page_number: None,
-                            source_span: None,
-                            parent_block_id: None,
-                            table_coordinates: None,
-                            code_language: None,
-                            is_boilerplate: false,
-                        },
-                    ],
-                },
-                &CancellationToken::new(),
-            )
-            .expect("technical facts extracted");
-
-        let identifiers = result
-            .facts
-            .iter()
-            .filter(|fact| fact.fact_kind.as_str() == "identifier")
-            .map(|fact| fact.display_value.as_str())
-            .collect::<Vec<_>>();
-
-        assert!(
-            identifiers.is_empty(),
-            "branded identifier heuristic should no longer produce facts, got: {:?}",
-            identifiers
-        );
-    }
-
-    #[test]
-    fn extracts_endpoint_methods_and_query_parameter_names() {
-        let service = TechnicalFactService::new();
-        let result = service
-            .extract_from_blocks(
-                ExtractTechnicalFactsCommand {
-                    revision_id: Uuid::now_v7(),
-                    document_id: Uuid::now_v7(),
-                    workspace_id: Uuid::now_v7(),
-                    library_id: Uuid::now_v7(),
-                    blocks: vec![StructuredBlockData {
-                        block_id: Uuid::now_v7(),
-                        ordinal: 0,
-                        block_kind: StructuredBlockKind::EndpointBlock,
-                        text: "GET https://api.example.test/orders?pageNumber=1&pageSize=25"
-                            .to_string(),
-                        normalized_text:
-                            "GET https://api.example.test/orders?pageNumber=1&pageSize=25"
-                                .to_string(),
-                        heading_trail: vec!["Orders".to_string()],
-                        section_path: vec!["orders".to_string()],
-                        page_number: None,
-                        source_span: None,
-                        parent_block_id: None,
-                        table_coordinates: None,
-                        code_language: None,
-                        is_boilerplate: false,
-                    }],
-                },
-                &CancellationToken::new(),
-            )
-            .expect("technical facts extracted");
-
-        let fact_kinds = result
-            .facts
-            .iter()
-            .map(|fact| (fact.fact_kind.as_str().to_string(), fact.display_value.clone()))
-            .collect::<Vec<_>>();
-
-        assert!(fact_kinds.contains(&("http_method".to_string(), "GET".to_string())));
-        assert!(fact_kinds.contains(&(
-            "url".to_string(),
-            "https://api.example.test/orders?pageNumber=1&pageSize=25".to_string()
-        )));
-        assert!(fact_kinds.contains(&("endpoint_path".to_string(), "/orders".to_string())));
-        assert!(fact_kinds.contains(&("parameter_name".to_string(), "pageNumber".to_string())));
-        assert!(fact_kinds.contains(&("parameter_name".to_string(), "pageSize".to_string())));
-    }
-
-    #[test]
-    fn table_rows_skip_business_table_url_noise_for_fact_extraction() {
-        let service = TechnicalFactService::new();
-        let raw_row = "| 1 | FAB0d41d5b5d22c | Ferrell LLC | https://price.net/ | Papua New Guinea | Plastics |";
-        assert_eq!(parse_markdown_table_row(raw_row).len(), 6);
-        let result = service.extract_from_blocks(ExtractTechnicalFactsCommand {
-            revision_id: Uuid::now_v7(),
-            document_id: Uuid::now_v7(),
-            workspace_id: Uuid::now_v7(),
-            library_id: Uuid::now_v7(),
-            blocks: vec![
-                StructuredBlockData {
-                    block_id: Uuid::now_v7(),
-                    ordinal: 0,
-                    block_kind: StructuredBlockKind::Table,
-                    text: "| Index | Organization Id | Name | Website | Country | Industry |\n| --- | --- | --- | --- | --- | --- |\n| 1 | FAB0d41d5b5d22c | Ferrell LLC | https://price.net/ | Papua New Guinea | Plastics |".to_string(),
-                    normalized_text: "| Index | Organization Id | Name | Website | Country | Industry |\n| --- | --- | --- | --- | --- | --- |\n| 1 | FAB0d41d5b5d22c | Ferrell LLC | https://price.net/ | Papua New Guinea | Plastics |".to_string(),
-                    heading_trail: vec!["organizations-100".to_string()],
-                    section_path: vec!["organizations_100".to_string()],
-                    page_number: None,
-                    source_span: None,
-                    parent_block_id: None,
-                    table_coordinates: None,
-                    code_language: None,
-                    is_boilerplate: false,
-                },
-                StructuredBlockData {
-                    block_id: Uuid::now_v7(),
-                    ordinal: 1,
-                    block_kind: StructuredBlockKind::TableRow,
-                    text: raw_row.to_string(),
-                    normalized_text: "Sheet: organizations-100 | Row 1 | Index: 1 | Organization Id: FAB0d41d5b5d22c | Name: Ferrell LLC | Website: https://price.net/ | Country: Papua New Guinea | Industry: Plastics".to_string(),
-                    heading_trail: vec!["organizations-100".to_string()],
-                    section_path: vec!["organizations_100".to_string()],
-                    page_number: None,
-                    source_span: None,
-                    parent_block_id: None,
-                    table_coordinates: None,
-                    code_language: None,
-                    is_boilerplate: false,
-                },
-            ],
-        }, &CancellationToken::new())
-        .expect("technical facts extracted");
-
-        assert!(!result.facts.iter().any(|fact| {
-            fact.fact_kind.as_str() == "parameter_name" && fact.display_value == "Sheet"
-        }));
-        assert!(!result.facts.iter().any(|fact| {
-            fact.fact_kind.as_str() == "parameter_name" && fact.display_value == "Index"
-        }));
-        assert!(result.facts.is_empty());
-    }
-
-    #[test]
-    fn table_rows_keep_formal_endpoint_facts_without_semantic_header_names() {
-        let service = TechnicalFactService::new();
-        let result = service.extract_from_blocks(ExtractTechnicalFactsCommand {
-            revision_id: Uuid::now_v7(),
-            document_id: Uuid::now_v7(),
-            workspace_id: Uuid::now_v7(),
-            library_id: Uuid::now_v7(),
-            blocks: vec![StructuredBlockData {
-                block_id: Uuid::now_v7(),
-                ordinal: 0,
-                block_kind: StructuredBlockKind::TableRow,
-                text: "| GET | /orders | https://api.example.test/orders | 200 |".to_string(),
-                normalized_text: "Sheet: API | Row 1 | A: GET | B: /orders | C: https://api.example.test/orders | D: 200".to_string(),
-                heading_trail: vec!["api".to_string()],
-                section_path: vec!["api".to_string()],
-                page_number: None,
-                source_span: None,
-                parent_block_id: None,
-                table_coordinates: None,
-                code_language: None,
-                is_boilerplate: false,
-            }],
-        }, &CancellationToken::new())
-        .expect("technical facts extracted");
-
-        let fact_kinds = result
-            .facts
-            .iter()
-            .map(|fact| (fact.fact_kind.as_str().to_string(), fact.display_value.clone()))
-            .collect::<Vec<_>>();
-        assert!(fact_kinds.contains(&("http_method".to_string(), "GET".to_string())));
-        assert!(fact_kinds.contains(&("endpoint_path".to_string(), "/orders".to_string())));
-        assert!(
-            fact_kinds
-                .contains(&("url".to_string(), "https://api.example.test/orders".to_string()))
-        );
-    }
-
-    #[test]
-    fn table_rows_abstain_when_only_semantic_headers_imply_technical_meaning() {
-        let facts = extract_facts(vec![StructuredBlockData {
-            block_id: Uuid::now_v7(),
-            ordinal: 0,
-            block_kind: StructuredBlockKind::TableRow,
-            text: "| 404 | 8080 |".to_string(),
-            normalized_text: "Sheet: Sample | Row 1 | Status: 404 | Port: 8080".to_string(),
-            heading_trail: Vec::new(),
-            section_path: Vec::new(),
-            page_number: None,
-            source_span: None,
-            parent_block_id: None,
-            table_coordinates: None,
-            code_language: None,
-            is_boilerplate: false,
-        }]);
-
-        assert!(facts.is_empty(), "ambiguous table values must not become technical facts");
-    }
-
-    fn make_test_block(
-        kind: StructuredBlockKind,
-        text: &str,
-        code_language: Option<&str>,
-    ) -> StructuredBlockData {
-        StructuredBlockData {
-            block_id: Uuid::now_v7(),
-            ordinal: 0,
-            block_kind: kind,
-            text: text.to_string(),
-            normalized_text: text.to_string(),
-            heading_trail: Vec::new(),
-            section_path: Vec::new(),
-            page_number: None,
-            source_span: None,
-            parent_block_id: None,
-            table_coordinates: None,
-            code_language: code_language.map(str::to_string),
-            is_boilerplate: false,
-        }
-    }
-
-    fn extract_facts(
-        blocks: Vec<StructuredBlockData>,
-    ) -> Vec<crate::domains::knowledge::TypedTechnicalFact> {
-        TechnicalFactService::new()
-            .extract_from_blocks(
-                ExtractTechnicalFactsCommand {
-                    revision_id: Uuid::now_v7(),
-                    document_id: Uuid::now_v7(),
-                    workspace_id: Uuid::now_v7(),
-                    library_id: Uuid::now_v7(),
-                    blocks,
-                },
-                &CancellationToken::new(),
-            )
-            .expect("technical facts extracted")
-            .facts
-    }
-
-    #[test]
-    fn extracts_environment_variables() {
-        let facts = extract_facts(vec![make_test_block(
-            StructuredBlockKind::Paragraph,
-            "Set $DATABASE_URL and process.env.API_KEY before starting",
-            None,
-        )]);
-
-        let env_vars: Vec<_> =
-            facts.iter().filter(|f| f.fact_kind.as_str() == "environment_variable").collect();
-
-        assert!(
-            env_vars.len() >= 2,
-            "expected at least 2 environment variables, found {}: {:?}",
-            env_vars.len(),
-            env_vars.iter().map(|f| &f.display_value).collect::<Vec<_>>()
-        );
-    }
-
-    #[test]
-    fn environment_context_does_not_promote_bare_uppercase_tokens() {
-        let facts = extract_facts(vec![make_test_block(
-            StructuredBlockKind::Paragraph,
-            "environment DATABASE_URL",
-            None,
-        )]);
-
-        assert!(!facts.iter().any(|fact| fact.fact_kind.as_str() == "environment_variable"));
-    }
-
-    #[test]
-    fn extracts_version_numbers() {
-        let facts = extract_facts(vec![make_test_block(
-            StructuredBlockKind::Paragraph,
-            "Requires version v2.3.1 or later",
-            None,
-        )]);
-
-        let versions: Vec<_> =
-            facts.iter().filter(|f| f.fact_kind.as_str() == "version_number").collect();
-
-        assert!(!versions.is_empty(), "expected at least one VersionNumber fact");
-        assert!(
-            versions.iter().any(|f| f.display_value.contains("2.3.1")),
-            "expected a version containing '2.3.1', got: {:?}",
-            versions.iter().map(|f| &f.display_value).collect::<Vec<_>>()
-        );
-    }
-
-    #[test]
-    fn version_context_does_not_promote_bare_numeric_literals() {
-        let facts = extract_facts(vec![make_test_block(
-            StructuredBlockKind::Paragraph,
-            "version 2.3.1; release 2026.07",
-            None,
-        )]);
-
-        assert!(!facts.iter().any(|fact| fact.fact_kind.as_str() == "version_number"));
-    }
-
-    #[test]
-    fn error_context_does_not_promote_an_ambiguous_identifier() {
-        let facts = extract_facts(vec![make_test_block(
-            StructuredBlockKind::Paragraph,
-            "error E1234",
-            None,
-        )]);
-
-        assert!(!facts.iter().any(|fact| fact.fact_kind.as_str() == "error_code"));
-    }
-
-    #[test]
-    fn semantic_port_context_does_not_promote_a_bare_number() {
-        let facts =
-            extract_facts(vec![make_test_block(StructuredBlockKind::Paragraph, "port 8080", None)]);
-
-        assert!(!facts.iter().any(|fact| fact.fact_kind.as_str() == "port"));
-    }
-
-    #[test]
-    fn explicit_url_authority_keeps_its_port() {
-        let facts = extract_facts(vec![make_test_block(
-            StructuredBlockKind::Paragraph,
-            "https://api.example.test:8443/orders",
-            None,
-        )]);
-
-        assert!(
-            facts
-                .iter()
-                .any(|fact| { fact.fact_kind.as_str() == "port" && fact.display_value == "8443" })
-        );
-    }
-
-    #[test]
-    fn semantic_status_context_does_not_promote_a_bare_number() {
-        let facts = extract_facts(vec![make_test_block(
-            StructuredBlockKind::EndpointBlock,
-            "status 404",
-            None,
-        )]);
-
-        assert!(!facts.iter().any(|fact| fact.fact_kind.as_str() == "status_code"));
-    }
-
-    #[test]
-    fn http_response_grammar_keeps_its_status_code() {
-        let facts = extract_facts(vec![make_test_block(
-            StructuredBlockKind::EndpointBlock,
-            "HTTP/1.1 404",
-            None,
-        )]);
-
-        assert!(facts.iter().any(|fact| {
-            fact.fact_kind.as_str() == "status_code" && fact.display_value == "404"
-        }));
-    }
-
-    #[test]
-    fn auth_prose_does_not_create_protocol_facts() {
-        let facts = extract_facts(vec![make_test_block(
-            StructuredBlockKind::EndpointBlock,
-            "Bearer token, Basic auth, and OAuth are mentioned in prose",
-            None,
-        )]);
-
-        assert!(facts.iter().all(|fact| fact.fact_kind.as_str() != "auth_rule"));
-    }
-
-    #[test]
-    fn explicit_authorization_header_keeps_formal_auth_scheme() {
-        let facts = extract_facts(vec![make_test_block(
-            StructuredBlockKind::EndpointBlock,
-            "Authorization: Bearer opaque-credential",
-            None,
-        )]);
-
-        assert!(facts.iter().any(|fact| {
-            fact.fact_kind.as_str() == "auth_rule" && fact.display_value == "bearer_token"
-        }));
-    }
-
-    #[test]
-    fn extracts_code_identifiers_from_python_code_blocks() {
-        let facts = extract_facts(vec![make_test_block(
-            StructuredBlockKind::CodeBlock,
-            "def build_router(state):\n    pass\n\nclass AppRouter:\n    pass",
-            Some("python"),
-        )]);
-
-        let code_idents: Vec<_> =
-            facts.iter().filter(|f| f.fact_kind.as_str() == "code_identifier").collect();
-
-        assert!(
-            code_idents.iter().any(|f| f.display_value == "build_router"),
-            "expected CodeIdentifier for 'build_router', got: {:?}",
-            code_idents.iter().map(|f| &f.display_value).collect::<Vec<_>>()
-        );
-    }
-
-    #[test]
-    fn no_code_identifiers_from_unsupported_language() {
-        // Rust is not yet supported by tree-sitter in our pipeline.
-        // The heuristic fallback was removed — no guessing.
-        let facts = extract_facts(vec![make_test_block(
-            StructuredBlockKind::CodeBlock,
-            "fn build_router(state: AppState) -> Router {",
-            Some("rust"),
-        )]);
-
-        let code_idents: Vec<_> =
-            facts.iter().filter(|f| f.fact_kind.as_str() == "code_identifier").collect();
-
-        assert!(
-            code_idents.is_empty(),
-            "expected no CodeIdentifier for unsupported language, got: {:?}",
-            code_idents.iter().map(|f| &f.display_value).collect::<Vec<_>>()
-        );
-    }
-
-    #[test]
-    fn extracts_config_keys_from_json() {
-        let facts = extract_facts(vec![make_test_block(
-            StructuredBlockKind::CodeBlock,
-            "{\"max_connections\": 200, \"shared_buffers\": \"256MB\"}",
-            Some("json"),
-        )]);
-
-        let config_keys: Vec<_> =
-            facts.iter().filter(|f| f.fact_kind.as_str() == "configuration_key").collect();
-
-        assert!(!config_keys.is_empty(), "expected at least one ConfigurationKey fact, got none");
-        let key_names: Vec<_> = config_keys.iter().map(|f| f.display_value.as_str()).collect();
-        assert!(
-            key_names.contains(&"max_connections"),
-            "expected 'max_connections', got: {:?}",
-            key_names
-        );
-    }
-
-    #[test]
-    fn extracts_config_keys_from_yaml() {
-        // YAML is now parsed structurally via serde_yaml.
-        let facts = extract_facts(vec![make_test_block(
-            StructuredBlockKind::CodeBlock,
-            "max_connections: 200\nshared_buffers: 256MB",
-            Some("yaml"),
-        )]);
-
-        let config_keys: Vec<_> =
-            facts.iter().filter(|f| f.fact_kind.as_str() == "configuration_key").collect();
-
-        assert!(!config_keys.is_empty(), "expected YAML config keys to be extracted, got none");
-        let key_names: Vec<_> = config_keys.iter().map(|f| f.display_value.as_str()).collect();
-        assert!(
-            key_names.contains(&"max_connections"),
-            "expected 'max_connections' from YAML, got: {:?}",
-            key_names
-        );
-    }
-}
+mod tests;

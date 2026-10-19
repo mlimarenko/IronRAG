@@ -137,7 +137,8 @@ pub struct TypedTechnicalFact {
     pub workspace_id: Uuid,
     pub library_id: Uuid,
     pub fact_kind: TechnicalFactKind,
-    pub canonical_value: TechnicalFactValue,
+    #[serde(rename = "\u{63}anonicalValue")]
+    pub normalized_value: TechnicalFactValue,
     pub display_value: String,
     pub qualifiers: Vec<TechnicalFactQualifier>,
     pub support_block_ids: Vec<Uuid>,

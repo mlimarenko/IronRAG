@@ -23,6 +23,13 @@ pub(super) fn map_ai_write_error(error: sqlx::Error) -> ApiError {
         sqlx::Error::Database(database_error) if database_error.is_unique_violation() => {
             ApiError::Conflict("AI catalog resource already exists".to_string())
         }
+        sqlx::Error::Database(database_error)
+            if database_error.constraint() == Some("ai_binding_model_purpose_fkey") =>
+        {
+            ApiError::Conflict(
+                "model binding purpose is referenced by an existing AI binding".to_string(),
+            )
+        }
         sqlx::Error::Database(database_error) if database_error.is_foreign_key_violation() => {
             ApiError::NotFound("referenced AI catalog resource was not found".to_string())
         }
@@ -166,6 +173,7 @@ pub(super) fn map_binding_row(row: ai_repository::AiBindingRow) -> Result<AiBind
         library_id: row.library_id,
         binding_purpose: parse_binding_purpose(&row.binding_purpose)?,
         account_id: row.account_id,
+        provider_catalog_id: row.provider_catalog_id,
         model_catalog_id: row.model_catalog_id,
         system_prompt: row.system_prompt,
         temperature: row.temperature,

@@ -18,7 +18,7 @@ pub(super) struct PendingChunkInsert {
     pub(super) quality_score: Option<f32>,
     pub(super) window_text: Option<String>,
     /// Earliest record timestamp aggregated into this chunk (JSONL ingest
-    /// only; None for non-temporal sources). Computed via the canonical
+    /// only; None for non-temporal sources). Computed through the shared
     /// `record_jsonl::extract_chunk_temporal_bounds` helper at construction
     /// time so a single source feeds downstream persistence writers.
     pub(super) occurred_at: Option<DateTime<Utc>>,

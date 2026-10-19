@@ -5,8 +5,8 @@ use chrono::Utc;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
-mod canonicalization;
 mod evidence;
+mod identity_normalization;
 mod materialization;
 #[cfg(test)]
 mod tests;
@@ -16,6 +16,9 @@ use crate::{
     app::state::AppState,
     domains::content::revision_text_state_is_readable,
     infra::{
+        knowledge_plane::{
+            IngestAttemptMutationOutcome, IngestRevisionWriteAuthority, RevisionReadinessUpdate,
+        },
         knowledge_rows::{
             GraphViewData, GraphViewEdgeWrite, GraphViewNodeWrite, sanitize_graph_view_writes,
         },
@@ -24,28 +27,32 @@ use crate::{
     services::{
         graph::error::GraphServiceError,
         graph::extract::GraphExtractionCandidateSet,
-        graph::merge::{GraphMergeOutcome, GraphMergeScope},
         graph::projection::{GraphProjectionOutcome, GraphProjectionScope},
         graph::rebuild::RevisionGraphReconcileOutcome,
         graph::summary::{PendingGraphSummaryRefresh, PublishedGraphSummaryRefreshOutcome},
     },
 };
 
-use canonicalization::{
+#[cfg(test)]
+use evidence::resolve_entity_evidence_support;
+use evidence::{
+    EntityEvidenceContext, RelationEvidenceContext, normalize_evidence_literal,
+    relation_fields_are_semantically_empty,
+};
+use identity_normalization::RelationCandidateIdentity;
+use identity_normalization::{
     MaterializedExtractCandidates, ReconciledEntityCandidate, ReconciledRelationCandidate,
     apply_entity_key_aliases_to_relation_candidate, build_entity_candidate_key_index,
     build_materialized_extract_candidates, build_prefixed_entity_key_aliases,
-    build_relation_entity_key_index, canonical_entity_candidate_id, canonical_entity_id,
-    canonical_evidence_id, canonical_relation_assertion_from_keys, canonical_relation_candidate_id,
-    canonical_relation_id, placeholder_entity_parts_from_key, reconcile_entity_candidate_row,
-    reconcile_relation_candidate_row, relation_candidate_keys_are_materializable,
-    select_canonical_entity_label,
+    build_relation_entity_key_index, deterministic_entity_candidate_id, deterministic_entity_id,
+    deterministic_evidence_id, deterministic_relation_candidate_id, deterministic_relation_id,
+    normalized_relation_assertion_from_keys, placeholder_entity_parts_from_key,
+    reconcile_entity_candidate_row, reconcile_relation_candidate_row,
+    relation_candidate_keys_are_materializable, select_primary_entity_label,
 };
 #[cfg(test)]
-use canonicalization::{canonical_entity_normalization_key, canonical_relation_assertion};
-#[cfg(test)]
-use evidence::resolve_entity_evidence_support;
-use evidence::{normalize_evidence_literal, relation_fields_are_semantically_empty};
+use identity_normalization::{entity_identity_normalization_key, normalized_relation_assertion};
+use upserts::{UpsertGraphEntityInput, UpsertGraphRelationInput};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GraphRebuildTarget {
@@ -85,11 +92,20 @@ impl GraphRebuildOutcome {
     }
 }
 
-/// Canonical graph application service. Library merge serialization is owned
+/// Graph application service. Library merge serialization is owned
 /// by a `PostgreSQL` transaction-scoped advisory lock so it works across worker
 /// replicas and cannot grow a process-local lock registry without bound.
 #[derive(Clone, Default)]
 pub struct GraphService;
+
+/// Graph reconcile result coupled to the still-held ingest authority guard.
+/// Callers must consume `publication_guard` in the matching lifecycle
+/// publication, including when `outcome` is a degraded graph error.
+pub struct AuthorizedRevisionGraphReconcile {
+    pub outcome: Result<RevisionGraphReconcileOutcome, GraphServiceError>,
+    pub publication_guard:
+        repositories::runtime_graph_repository::IngestRevisionGraphPublicationGuard,
+}
 
 impl GraphService {
     #[must_use]
@@ -104,12 +120,12 @@ impl GraphService {
     ) -> GraphViewData {
         let mut nodes = BTreeMap::<String, GraphViewNodeWrite>::new();
         for node in current.nodes.iter().chain(incoming.nodes.iter()) {
-            nodes.insert(node.canonical_key.clone(), node.clone());
+            nodes.insert(node.identity_key.clone(), node.clone());
         }
 
         let mut edges = BTreeMap::<String, GraphViewEdgeWrite>::new();
         for edge in current.edges.iter().chain(incoming.edges.iter()) {
-            edges.insert(edge.canonical_key.clone(), edge.clone());
+            edges.insert(edge.identity_key.clone(), edge.clone());
         }
 
         let merged = GraphViewData {
@@ -118,28 +134,6 @@ impl GraphService {
         };
         let (nodes, edges, _) = sanitize_graph_view_writes(&merged.nodes, &merged.edges);
         GraphViewData { nodes, edges }
-    }
-
-    pub async fn merge_chunk_graph_candidates(
-        &self,
-        pool: &sqlx::PgPool,
-        graph_quality_guard: &crate::services::graph::quality_guard::GraphQualityGuardService,
-        scope: &GraphMergeScope,
-        document: &repositories::DocumentRow,
-        chunk: &repositories::ChunkRow,
-        candidates: &crate::services::graph::extract::GraphExtractionCandidateSet,
-        extraction_recovery: Option<&crate::domains::graph_quality::ExtractionRecoverySummary>,
-    ) -> Result<GraphMergeOutcome, GraphServiceError> {
-        crate::services::graph::merge::merge_chunk_graph_candidates(
-            pool,
-            graph_quality_guard,
-            scope,
-            document,
-            chunk,
-            candidates,
-            extraction_recovery,
-        )
-        .await
     }
 
     pub async fn merge_graph_candidates(
@@ -220,16 +214,16 @@ impl GraphService {
 
         let _ = state
             .document_store
-            .update_revision_readiness(
+            .update_revision_readiness(RevisionReadinessUpdate {
                 revision_id,
-                &revision.text_state,
-                &revision.vector_state,
-                &revision.graph_state,
-                revision.text_readable_at,
-                revision.vector_ready_at,
-                revision.graph_ready_at,
+                text_state: &revision.text_state,
+                vector_state: &revision.vector_state,
+                graph_state: &revision.graph_state,
+                text_readable_at: revision.text_readable_at,
+                vector_ready_at: revision.vector_ready_at,
+                graph_ready_at: revision.graph_ready_at,
                 superseded_by_revision_id,
-            )
+            })
             .await
             .context("failed to mark knowledge revision as superseded")?;
 
@@ -257,7 +251,7 @@ impl GraphService {
         library_id: Uuid,
     ) -> Result<GraphRebuildOutcome, GraphServiceError> {
         let library = state
-            .canonical_services
+            .application_services
             .catalog
             .get_library(state, library_id)
             .await
@@ -287,15 +281,17 @@ impl GraphService {
                     continue;
                 }
                 let _ = state
-                    .canonical_services
+                    .application_services
                     .knowledge
                     .set_revision_text_state(
                         state,
                         revision.revision_id,
-                        "text_readable",
-                        None,
-                        None,
-                        Some(Utc::now()),
+                        crate::services::knowledge::service::RevisionTextContent {
+                            text_state: "text_readable",
+                            normalized_text: None,
+                            text_checksum: None,
+                            text_readable_at: Some(Utc::now()),
+                        },
                     )
                     .await
                     .context("failed to reconcile knowledge text readiness")?;
@@ -316,7 +312,7 @@ impl GraphService {
         library_id: Uuid,
     ) -> Result<GraphRebuildOutcome, GraphServiceError> {
         let vector_rebuild = state
-            .canonical_services
+            .application_services
             .search
             .rebuild_vector_plane_for_library(state, library_id)
             .await?;
@@ -411,12 +407,12 @@ impl GraphService {
             library_id,
         )
         .await
-        .context("failed to acquire canonical graph advisory lock")?;
+        .context("failed to acquire runtime graph advisory lock")?;
         let result = operation.await;
         let release_result =
             repositories::release_runtime_library_graph_lock(graph_lock, library_id)
                 .await
-                .context("failed to release canonical graph advisory lock");
+                .context("failed to release runtime graph advisory lock");
         match (result, release_result) {
             (Ok(outcome), Ok(())) => Ok(outcome),
             (Err(error), Ok(())) => Err(error),
@@ -439,12 +435,12 @@ impl GraphService {
             .await
     }
 
-    pub async fn project_canonical_graph(
+    pub async fn project_normalized_graph(
         &self,
         state: &AppState,
         scope: &GraphProjectionScope,
     ) -> Result<GraphProjectionOutcome, GraphServiceError> {
-        crate::services::graph::projection::project_canonical_graph(state, scope).await
+        crate::services::graph::projection::project_normalized_graph(state, scope).await
     }
 
     pub async fn rebuild_library_graph(
@@ -458,84 +454,107 @@ impl GraphService {
     pub async fn reconcile_revision_graph(
         &self,
         state: &AppState,
-        library_id: Uuid,
+        authority: IngestRevisionWriteAuthority,
         document_id: Uuid,
-        revision_id: Uuid,
-        activated_by_attempt_id: Option<Uuid>,
         cancellation_token: &CancellationToken,
-    ) -> Result<RevisionGraphReconcileOutcome, GraphServiceError> {
+    ) -> Result<IngestAttemptMutationOutcome<AuthorizedRevisionGraphReconcile>, GraphServiceError>
+    {
         crate::services::ingest::cancellation::ensure_not_cancelled(cancellation_token)?;
-        let document_lock = repositories::content_repository::acquire_content_document_lock(
-            &state.persistence.postgres,
-            document_id,
-        )
-        .await
-        .context("failed to acquire content document advisory lock for graph reconcile")?;
-        let merge_lock_result = tokio::select! {
-            () = cancellation_token.cancelled() => {
-                Err(anyhow::Error::new(
-                    crate::services::ingest::cancellation::StageError::Cancelled,
-                ))
-            }
-            result = repositories::acquire_runtime_library_graph_merge_lock(
-                &state.persistence.postgres,
-                library_id,
-            ) => result
-                .context("failed to acquire cross-process graph merge advisory lock"),
-        };
-        let merge_lock = match merge_lock_result {
-            Ok(lock) => lock,
-            Err(error) => {
-                let release_result = repositories::content_repository::release_content_document_lock(
-                    document_lock,
-                    document_id,
-                )
-                .await
-                .context("failed to release content document advisory lock after canceled graph reconcile");
-                return match release_result {
-                    Ok(()) => Err(error.into()),
-                    Err(release_error) => {
-                        Err(GraphServiceError::from(release_error.context(error.to_string())))
-                    }
-                };
-            }
-        };
-        let result = crate::services::graph::rebuild::reconcile_revision_graph(
-            state,
-            library_id,
-            document_id,
-            revision_id,
-            activated_by_attempt_id,
-            cancellation_token,
-        )
-        .await;
-        let merge_release_result =
-            repositories::release_runtime_library_graph_merge_lock(merge_lock, library_id)
-                .await
-                .context("failed to release cross-process graph merge advisory lock");
-        let document_release_result =
-            repositories::content_repository::release_content_document_lock(
-                document_lock,
+        let timeout = std::time::Duration::from_secs(
+            state.settings.runtime_graph_extract_stage_timeout_seconds.max(1),
+        );
+        let deadline = tokio::time::Instant::now() + timeout;
+        let publication_guard = loop {
+            crate::services::ingest::cancellation::ensure_not_cancelled(cancellation_token)?;
+            match repositories::runtime_graph_repository::acquire_ingest_revision_graph_reconcile_guard(
+                &state.persistence.heartbeat_postgres,
+                authority,
                 document_id,
             )
             .await
-            .context("failed to release content document advisory lock after graph reconcile");
-        let result = match (result, merge_release_result) {
-            (Ok(outcome), Ok(())) => Ok(outcome),
-            (Err(error), Ok(())) => Err(error),
-            (Ok(_), Err(release_error)) => Err(GraphServiceError::from(release_error)),
-            (Err(error), Err(release_error)) => {
-                Err(GraphServiceError::from(release_error.context(error.to_string())))
+            .context("failed to acquire ingest-authorized graph reconcile guard")?
+            {
+                repositories::runtime_graph_repository::IngestRevisionGraphGuardAcquireOutcome::Acquired(guard) => {
+                    break guard;
+                }
+                repositories::runtime_graph_repository::IngestRevisionGraphGuardAcquireOutcome::AuthorityLost => {
+                    return Ok(IngestAttemptMutationOutcome::AuthorityLost);
+                }
+                repositories::runtime_graph_repository::IngestRevisionGraphGuardAcquireOutcome::Superseded => {
+                    return Err(GraphServiceError::RevisionSuperseded {
+                        revision_id: authority.revision_id,
+                    });
+                }
+                repositories::runtime_graph_repository::IngestRevisionGraphGuardAcquireOutcome::Busy => {
+                    if tokio::time::Instant::now() >= deadline {
+                        return Err(GraphServiceError::WriteContention {
+                            message: format!(
+                                "timed out waiting for graph reconcile ownership for library {} revision {}",
+                                authority.library_id, authority.revision_id
+                            ),
+                        });
+                    }
+                    tokio::select! {
+                        () = cancellation_token.cancelled() => {
+                            return Err(GraphServiceError::Cancelled);
+                        }
+                        () = tokio::time::sleep(std::time::Duration::from_millis(25)) => {}
+                    }
+                }
             }
         };
-        match (result, document_release_result) {
-            (Ok(outcome), Ok(())) => Ok(outcome),
-            (Err(error), Ok(())) => Err(error),
-            (Ok(_), Err(release_error)) => Err(GraphServiceError::from(release_error)),
-            (Err(error), Err(release_error)) => {
-                Err(GraphServiceError::from(release_error.context(error.to_string())))
+
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        let mut publication_guard = publication_guard;
+        // Own everything captured by the higher-ranked savepoint future. The
+        // only borrow tied to a particular invocation is `connection`; keeping
+        // caller references in the boxed future would incorrectly require
+        // them to be `'static` for every possible connection lifetime.
+        let reconcile_state = state.clone();
+        let reconcile_cancellation_token = cancellation_token.clone();
+        let outcome = publication_guard
+            .run_graph_savepoint(move |connection| {
+                Box::pin(async move {
+                    match tokio::time::timeout(
+                        remaining,
+                        crate::services::graph::rebuild::reconcile_revision_graph_authorized(
+                            &reconcile_state,
+                            authority,
+                            document_id,
+                            connection,
+                            &reconcile_cancellation_token,
+                        ),
+                    )
+                    .await
+                    {
+                        Ok(outcome) => outcome,
+                        Err(_) => Err(GraphServiceError::StateConflict {
+                            message: format!(
+                                "graph reconcile exceeded configured timeout of {}s for revision {}",
+                                timeout.as_secs(),
+                                authority.revision_id
+                            ),
+                        }),
+                    }
+                })
+            })
+            .await;
+        let outcome = match outcome {
+            Ok(outcome) => Ok(outcome),
+            Err(repositories::runtime_graph_repository::GraphSavepointError::Operation(
+                GraphServiceError::Cancelled,
+            )) => return Err(GraphServiceError::Cancelled),
+            Err(repositories::runtime_graph_repository::GraphSavepointError::Operation(error)) => {
+                Err(error)
             }
-        }
+            Err(repositories::runtime_graph_repository::GraphSavepointError::Sqlx(error)) => {
+                return Err(GraphServiceError::Internal(error.into()));
+            }
+        };
+        Ok(IngestAttemptMutationOutcome::Applied(AuthorizedRevisionGraphReconcile {
+            outcome,
+            publication_guard,
+        }))
     }
 }
 

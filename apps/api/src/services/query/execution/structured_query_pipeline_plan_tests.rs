@@ -2,15 +2,107 @@ use std::collections::HashMap;
 
 use uuid::Uuid;
 
-use crate::domains::query_ir::{
-    EntityMention, EntityRole, QueryAct, QueryIR, QueryLanguage, QueryScope,
+use crate::{
+    domains::{
+        query::RuntimeQueryMode,
+        query_ir::{EntityMention, EntityRole, QueryAct, QueryIR, QueryLanguage, QueryScope},
+    },
+    services::query::{
+        execution::{
+            embed::QuestionEmbeddingResult,
+            technical_literals::TechnicalLiteralIntent,
+            types::{QueryGraphIndex, RuntimeVectorSearchContext, StructuredQueryPlanningStage},
+        },
+        planner::{QueryPlanTaskInput, build_task_query_plan},
+        support::{IntentResolutionRequest, derive_query_planning_metadata},
+    },
 };
-use crate::services::query::execution::types::RuntimeVectorSearchContext;
 
-use super::*;
+use super::planning::{
+    CompiledIrPlanRefresh, build_compiled_ir_query_plan,
+    refresh_query_plan_for_compiled_ir_with_hyde, validate_prepared_query_embedding,
+};
 
 fn sample_embedding_result(profile_key: &str, embedding: Vec<f32>) -> QuestionEmbeddingResult {
     QuestionEmbeddingResult { embedding, embedding_profile_key: profile_key.to_string() }
+}
+
+/// The hybrid refresh shape every compiled-IR HyDE test shares.
+fn compiled_ir_refresh<'a>(
+    planning: &'a mut StructuredQueryPlanningStage,
+    retrieval_question: &'a str,
+    query_ir: &'a QueryIR,
+) -> CompiledIrPlanRefresh<'a> {
+    CompiledIrPlanRefresh {
+        planning,
+        retrieval_question,
+        mode: RuntimeQueryMode::Hybrid,
+        top_k: 8,
+        query_ir,
+        rerank_enabled: false,
+        rerank_candidate_limit: 32,
+    }
+}
+
+/// Multi-document comparison IR whose refreshed plan recommends HyDE.
+fn multi_document_hyde_query_ir(retrieval_question: &str) -> QueryIR {
+    QueryIR {
+        act: QueryAct::Describe,
+        scope: QueryScope::MultiDocument,
+        language: QueryLanguage::Auto,
+        target_types: Vec::new(),
+        target_entities: vec![
+            EntityMention { label: "Alpha Node".to_string(), role: EntityRole::Subject },
+            EntityMention { label: "Gamma Node".to_string(), role: EntityRole::Subject },
+        ],
+        literal_constraints: Vec::new(),
+        temporal_constraints: Vec::new(),
+        comparison: None,
+        document_focus: None,
+        conversation_refs: Vec::new(),
+        needs_clarification: None,
+        source_slice: None,
+        retrieval_query: Some(retrieval_question.to_string()),
+        confidence: 0.9,
+    }
+}
+
+/// Provider-free planning stage for `retrieval_question`, ready for a
+/// compiled-IR refresh.
+fn provider_free_planning_stage(
+    retrieval_question: &str,
+    question_embedding: Vec<f32>,
+    hyde_embedding: Option<Vec<f32>>,
+    embedding_profile_key: &str,
+) -> StructuredQueryPlanningStage {
+    let metadata = derive_query_planning_metadata(&IntentResolutionRequest {
+        question: retrieval_question.to_string(),
+        explicit_mode: RuntimeQueryMode::Hybrid,
+    });
+    let plan = build_task_query_plan(&QueryPlanTaskInput {
+        question: retrieval_question.to_string(),
+        top_k: Some(8),
+        explicit_mode: Some(RuntimeQueryMode::Hybrid),
+        metadata: Some(metadata.clone()),
+        query_ir: None,
+    })
+    .expect("provider-free planning should build");
+    StructuredQueryPlanningStage {
+        planning: metadata,
+        plan,
+        technical_literal_intent: TechnicalLiteralIntent::default(),
+        question_embedding,
+        hyde_embedding,
+        vector_search_context: Some(RuntimeVectorSearchContext {
+            embedding_profile_key: embedding_profile_key.to_string(),
+            dimensions: 3,
+            active_vector_generation: 1,
+            source_truth_version: 1,
+        }),
+        graph_index: QueryGraphIndex::empty(),
+        document_index: HashMap::new(),
+        candidate_limit: 1,
+    }
 }
 
 #[test]
@@ -80,45 +172,17 @@ async fn compiled_ir_query_plan_refresh_without_hyde_is_provider_free() {
     assert_eq!(plan.high_level_keywords, vec!["gamma".to_string()]);
     assert!(plan.low_level_keywords.contains(&"common".to_string()));
 
-    let initial_planning = derive_query_planning_metadata(&IntentResolutionRequest {
-        question: retrieval_question.to_string(),
-        explicit_mode: RuntimeQueryMode::Hybrid,
-    });
-    let initial_plan = build_task_query_plan(&QueryPlanTaskInput {
-        question: retrieval_question.to_string(),
-        top_k: Some(8),
-        explicit_mode: Some(RuntimeQueryMode::Hybrid),
-        metadata: Some(initial_planning.clone()),
-        query_ir: None,
-    })
-    .expect("initial planning should build");
     let question_embedding = vec![0.1, 0.2, 0.3];
-    let mut planning = StructuredQueryPlanningStage {
-        planning: initial_planning,
-        plan: initial_plan,
-        technical_literal_intent: TechnicalLiteralIntent::default(),
-        question_embedding: question_embedding.clone(),
-        hyde_embedding: Some(vec![0.4, 0.5, 0.6]),
-        vector_search_context: Some(RuntimeVectorSearchContext {
-            embedding_profile_key: "embedding-profile:v1:existing".to_string(),
-            dimensions: 3,
-            active_vector_generation: 1,
-            source_truth_version: 1,
-        }),
-        graph_index: QueryGraphIndex::empty(),
-        document_index: HashMap::new(),
-        candidate_limit: 1,
-    };
+    let mut planning = provider_free_planning_stage(
+        retrieval_question,
+        question_embedding.clone(),
+        Some(vec![0.4, 0.5, 0.6]),
+        "embedding-profile:v1:existing",
+    );
     let hyde_calls = std::cell::Cell::new(0usize);
 
     refresh_query_plan_for_compiled_ir_with_hyde(
-        &mut planning,
-        retrieval_question,
-        RuntimeQueryMode::Hybrid,
-        8,
-        &query_ir,
-        false,
-        32,
+        compiled_ir_refresh(&mut planning, retrieval_question, &query_ir),
         || {
             hyde_calls.set(hyde_calls.get() + 1);
             std::future::ready(Ok(vec![9.0, 9.0, 9.0]))
@@ -138,71 +202,24 @@ async fn compiled_ir_query_plan_refresh_without_hyde_is_provider_free() {
 #[tokio::test]
 async fn common_path_compiled_multidocument_ir_materializes_missing_hyde_only() {
     let retrieval_question = "Describe evidence shared by Alpha Node and Gamma Node";
-    let query_ir = QueryIR {
-        act: QueryAct::Describe,
-        scope: QueryScope::MultiDocument,
-        language: QueryLanguage::Auto,
-        target_types: Vec::new(),
-        target_entities: vec![
-            EntityMention { label: "Alpha Node".to_string(), role: EntityRole::Subject },
-            EntityMention { label: "Gamma Node".to_string(), role: EntityRole::Subject },
-        ],
-        literal_constraints: Vec::new(),
-        temporal_constraints: Vec::new(),
-        comparison: None,
-        document_focus: None,
-        conversation_refs: Vec::new(),
-        needs_clarification: None,
-        source_slice: None,
-        retrieval_query: Some(retrieval_question.to_string()),
-        confidence: 0.9,
-    };
+    let query_ir = multi_document_hyde_query_ir(retrieval_question);
     assert!(!query_ir.is_exact_literal_technical());
     assert!(query_ir.is_multi_document());
     assert!(!query_ir.is_follow_up());
 
-    let initial_metadata = derive_query_planning_metadata(&IntentResolutionRequest {
-        question: retrieval_question.to_string(),
-        explicit_mode: RuntimeQueryMode::Hybrid,
-    });
-    let initial_plan = build_task_query_plan(&QueryPlanTaskInput {
-        question: retrieval_question.to_string(),
-        top_k: Some(8),
-        explicit_mode: Some(RuntimeQueryMode::Hybrid),
-        metadata: Some(initial_metadata.clone()),
-        query_ir: None,
-    })
-    .expect("provider-free planning should build");
-    assert!(!initial_plan.hyde_recommended);
-
     let question_embedding = vec![0.1, 0.2, 0.3];
     let expected_hyde_embedding = vec![0.4, 0.5, 0.6];
-    let mut planning = StructuredQueryPlanningStage {
-        planning: initial_metadata,
-        plan: initial_plan,
-        technical_literal_intent: TechnicalLiteralIntent::default(),
-        question_embedding: question_embedding.clone(),
-        hyde_embedding: None,
-        vector_search_context: Some(RuntimeVectorSearchContext {
-            embedding_profile_key: "embedding-profile:v1:question".to_string(),
-            dimensions: 3,
-            active_vector_generation: 1,
-            source_truth_version: 1,
-        }),
-        graph_index: QueryGraphIndex::empty(),
-        document_index: HashMap::new(),
-        candidate_limit: 1,
-    };
+    let mut planning = provider_free_planning_stage(
+        retrieval_question,
+        question_embedding.clone(),
+        None,
+        "embedding-profile:v1:question",
+    );
+    assert!(!planning.plan.hyde_recommended);
     let hyde_calls = std::cell::Cell::new(0usize);
 
     refresh_query_plan_for_compiled_ir_with_hyde(
-        &mut planning,
-        retrieval_question,
-        RuntimeQueryMode::Hybrid,
-        8,
-        &query_ir,
-        false,
-        32,
+        compiled_ir_refresh(&mut planning, retrieval_question, &query_ir),
         || {
             hyde_calls.set(hyde_calls.get() + 1);
             std::future::ready(Ok(expected_hyde_embedding.clone()))
@@ -226,13 +243,7 @@ async fn common_path_compiled_multidocument_ir_materializes_missing_hyde_only() 
     assert_eq!(hyde_calls.get(), 1);
 
     refresh_query_plan_for_compiled_ir_with_hyde(
-        &mut planning,
-        retrieval_question,
-        RuntimeQueryMode::Hybrid,
-        8,
-        &query_ir,
-        false,
-        32,
+        compiled_ir_refresh(&mut planning, retrieval_question, &query_ir),
         || {
             hyde_calls.set(hyde_calls.get() + 1);
             std::future::ready(Ok(vec![9.0, 9.0, 9.0]))
@@ -243,5 +254,35 @@ async fn common_path_compiled_multidocument_ir_materializes_missing_hyde_only() 
 
     assert_eq!(planning.question_embedding, question_embedding);
     assert_eq!(planning.hyde_embedding.as_deref(), Some(expected_hyde_embedding.as_slice()));
+    assert_eq!(hyde_calls.get(), 1);
+}
+
+#[tokio::test]
+async fn failed_hyde_creation_degrades_to_question_only_retrieval() {
+    let retrieval_question = "Describe evidence shared by Alpha Node and Gamma Node";
+    let query_ir = multi_document_hyde_query_ir(retrieval_question);
+
+    let question_embedding = vec![0.1, 0.2, 0.3];
+    let mut planning = provider_free_planning_stage(
+        retrieval_question,
+        question_embedding.clone(),
+        None,
+        "embedding-profile:v1:question",
+    );
+    let hyde_calls = std::cell::Cell::new(0usize);
+
+    refresh_query_plan_for_compiled_ir_with_hyde(
+        compiled_ir_refresh(&mut planning, retrieval_question, &query_ir),
+        || {
+            hyde_calls.set(hyde_calls.get() + 1);
+            std::future::ready(Err(anyhow::anyhow!("HyDE LLM call returned empty output")))
+        },
+    )
+    .await
+    .expect("a failed HyDE artifact must degrade the plan, not fail the turn");
+
+    assert!(planning.plan.hyde_recommended);
+    assert_eq!(planning.question_embedding, question_embedding);
+    assert_eq!(planning.hyde_embedding, None, "failed HyDE must leave question-only retrieval");
     assert_eq!(hyde_calls.get(), 1);
 }

@@ -1,10 +1,10 @@
-//! Canonical HTTP middleware stack.
+//! Primary HTTP middleware stack.
 //!
 //! The request path is ordered outer-most first:
 //! tracing -> MCP Origin guard -> CORS -> compression -> auth -> handler.
 //!
 //! Prometheus metrics, request body limits, and request-id propagation are part of this
-//! same canonical stack; they are kept here so router construction has one middleware path.
+//! same shared stack; they are kept here so router construction has one middleware path.
 //! The concrete stack places body-limit and Prometheus inside compression, before auth.
 
 pub mod auth;
@@ -35,7 +35,7 @@ where
     mcp_origin::apply(router, mcp_origin_policy)
 }
 
-pub fn apply_canonical_middleware(router: Router<AppState>, state: AppState) -> Router {
+pub fn apply_http_middleware(router: Router<AppState>, state: AppState) -> Router {
     let public_origin_settings = state.settings.public_origin_settings();
     let max_request_body_bytes = state.mcp_memory.max_request_body_bytes();
 
@@ -93,7 +93,7 @@ mod tests {
 
     fn origin_policy() -> McpHttpOriginPolicy {
         McpHttpOriginPolicy::try_from_origins([CONFIGURED_BROWSER_ORIGIN], None)
-            .expect("synthetic browser origin must be canonical")
+            .expect("synthetic browser origin must be normalized")
     }
 
     async fn initialize_response() -> Response {
@@ -150,7 +150,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn configured_browser_preflight_accepts_canonical_and_mcp_session_headers() {
+    async fn configured_browser_preflight_accepts_standard_and_mcp_session_headers() {
         for path in [MCP_PUBLIC_JSONRPC_ROUTE, MCP_PUBLIC_DIAGNOSTICS_JSONRPC_ROUTE] {
             let response = browser_transport_router()
                 .oneshot(preflight_request(path, CONFIGURED_BROWSER_ORIGIN))

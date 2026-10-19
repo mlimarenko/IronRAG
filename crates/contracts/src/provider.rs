@@ -10,6 +10,10 @@ pub enum ProviderAuthScheme {
     Bearer,
     /// Send the configured credential as the complete authorization value.
     RawAuthorization,
+    /// Send the credential in Anthropic's `x-api-key` header.
+    AnthropicApiKey,
+    /// Send the credential in Google's `x-goog-api-key` header.
+    GoogleApiKey,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
@@ -111,6 +115,18 @@ pub struct ProviderBaseUrlPolicy {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
+/// Capability family a provider model-discovery endpoint returns.
+pub enum ProviderModelCapabilityKind {
+    /// The endpoint lists text-generation models.
+    Chat,
+    /// The endpoint lists embedding models.
+    Embedding,
+    /// The endpoint lists typed decision models (`TypeSafe` System One).
+    Decision,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "snake_case")]
 /// Credential context required to discover provider models.
 pub enum ProviderModelDiscoveryMode {
     /// Discovery uses a provider-wide catalog without stored credentials.
@@ -126,7 +142,7 @@ pub enum ProviderModelDiscoveryMode {
 /// Model-discovery endpoint for one provider capability family.
 pub struct ProviderModelDiscoveryPath {
     /// Capability family returned by this endpoint.
-    pub capability_kind: String,
+    pub capability_kind: ProviderModelCapabilityKind,
     /// Provider-relative path used for discovery.
     pub path: String,
 }
@@ -139,6 +155,11 @@ pub struct ProviderModelDiscovery {
     pub mode: ProviderModelDiscoveryMode,
     /// Discovery endpoints grouped by capability family.
     pub paths: Vec<ProviderModelDiscoveryPath>,
+    /// Currency the provider's listing quotes its rates in, when it is known.
+    /// The listing itself carries a bare number, so a rouble-priced router and
+    /// a dollar-priced one are indistinguishable without this.
+    #[serde(default)]
+    pub listed_pricing_currency: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
@@ -151,6 +172,17 @@ pub enum ProviderCapabilityState {
     Unsupported,
     /// The catalog cannot make a reliable determination.
     Unknown,
+}
+
+impl ProviderCapabilityState {
+    /// The honest default for a capability a persisted row predates: absent
+    /// means the catalog never declared it, which is `Unsupported`, not
+    /// `Unknown` — a provider that shipped before the `decision` capability
+    /// existed is not thereby a provider the catalog is merely unsure about.
+    #[must_use]
+    pub const fn unsupported() -> Self {
+        Self::Unsupported
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
@@ -169,4 +201,14 @@ pub struct ProviderCapabilities {
     pub tools: ProviderCapabilityState,
     /// Remote model-discovery availability.
     pub model_discovery: ProviderCapabilityState,
+    /// Typed decision-model availability (`TypeSafe` System One). Defaults to
+    /// `Unsupported` so a persisted row written before this capability
+    /// existed deserializes as "this provider is not a decision provider"
+    /// rather than failing to parse.
+    #[serde(default = "ProviderCapabilityState::unsupported")]
+    pub decision: ProviderCapabilityState,
+    /// Whether the endpoint accepts `service_tier: "flex"`, the half-price
+    /// tier for latency-tolerant work. Defaults to `Unsupported`.
+    #[serde(default = "ProviderCapabilityState::unsupported")]
+    pub flex_tier: ProviderCapabilityState,
 }

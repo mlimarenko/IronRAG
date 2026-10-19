@@ -25,7 +25,9 @@ const GENERATED_SSE_SOURCE = `export function createSseClient() {
 }
 `
 
-const GENERATED_REACT_QUERY_SOURCE = `const createQueryKey = <TOptions extends Options>(id: string, options?: TOptions): [
+const GENERATED_REACT_QUERY_SOURCE = `import { client } from '../client.gen';
+
+const createQueryKey = <TOptions extends Options>(id: string, options?: TOptions): [
     QueryKey<TOptions>[0]
 ] => {
     const params: QueryKey<TOptions>[0] = { _id: id, baseUrl: options?.baseUrl || (options?.client ?? client).getConfig().baseUrl } as QueryKey<TOptions>[0];
@@ -41,7 +43,9 @@ const stringOptions = infiniteQueryOptions<Response, DefaultError, InfiniteData<
 const page: Pick<QueryKey<Options<ListAuditEventsData>>[0], 'body' | 'headers' | 'path' | 'query'> = {};
 `
 
-async function normalizeFixture(files) {
+async function normalizeFixture(
+  files: Readonly<Record<string, string>>,
+): Promise<Array<[string, string]>> {
   const temporaryRoot = await mkdtemp(path.join(tmpdir(), 'ironrag-sdk-'))
 
   try {
@@ -53,12 +57,21 @@ async function normalizeFixture(files) {
       }),
     )
     await execFileAsync(process.execPath, [normalizer, temporaryRoot])
-    return await Promise.all(
-      Object.keys(files).map(async (relativePath) => [
+    const firstPass = await Promise.all(
+      Object.keys(files).map(async (relativePath): Promise<[string, string]> => [
         relativePath,
         await readFile(path.join(temporaryRoot, relativePath), 'utf8'),
       ]),
     )
+    await execFileAsync(process.execPath, [normalizer, temporaryRoot])
+    const secondPass = await Promise.all(
+      Object.keys(files).map(async (relativePath): Promise<[string, string]> => [
+        relativePath,
+        await readFile(path.join(temporaryRoot, relativePath), 'utf8'),
+      ]),
+    )
+    expect(secondPass).toEqual(firstPass)
+    return secondPass
   } finally {
     await rm(temporaryRoot, { recursive: true, force: true })
   }
@@ -72,7 +85,7 @@ describe('generated SDK normalization', () => {
 
     expect(normalized).toHaveProperty('core/serverSentEvents.gen.ts')
     expect(normalized['core/serverSentEvents.gen.ts']).toMatch(
-      /chunk\.split\('\\n'\)\.reduce\(\s*\(state, line\) => parseSseField\(state, line\),\s*initial,?\s*\)/,
+      /chunk\.split\('\\n'\)\.reduce(?:<SseFrameState>)?\(\s*\(state, line\) => parseSseField\(state, line\),\s*initial,?\s*\)/,
     )
     expect(normalized['core/serverSentEvents.gen.ts']).not.toMatch(
       /chunk\.split\('\\n'\)\.reduce\(parseSseField, initial\)/,

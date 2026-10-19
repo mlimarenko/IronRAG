@@ -1,0 +1,493 @@
+.dashboard-metrics {
+  margin-bottom: 16px;
+}
+.dashboard-refresh-warning {
+  color: var(--warning);
+  font-size: 0.75rem;
+}
+.dashboard-metrics .metric-card {
+  color: inherit;
+  border-top: 3px solid var(--metric-color, var(--border));
+}
+.dashboard-metrics .metric-card--link {
+  cursor: pointer;
+  transition: border-color 0.16s ease;
+}
+.dashboard-metrics .metric-card--link::before {
+  content: '↗';
+  position: absolute;
+  top: 15px;
+  right: 17px;
+  z-index: 1;
+  color: var(--muted);
+  font-size: 0.8125rem;
+}
+.dashboard-metrics .metric-card--link:hover {
+  border-color: var(--accent);
+}
+.dashboard-metrics .metric-card--link:hover::before {
+  color: var(--accent);
+}
+.dashboard-metrics .metric-card--link:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+.dashboard-metrics .metric-card > svg {
+  position: absolute;
+  right: 18px;
+  bottom: 18px;
+  color: var(--metric-color, var(--muted));
+}
+.metric-card--materials {
+  --metric-color: var(--accent);
+}
+.metric-card--ready {
+  --metric-color: var(--ready);
+}
+.metric-card--processing {
+  --metric-color: var(--processing);
+}
+.metric-card--warning {
+  --metric-color: var(--warning);
+}
+.metric-card--failed {
+  --metric-color: var(--failed);
+}
+.dashboard-skeleton {
+  /* <output> is inline by default; the skeleton's children are grids. */
+  display: block;
+}
+.dashboard-skeleton__metric {
+  gap: 17px;
+}
+.dashboard-skeleton__metric .skeleton-line {
+  width: min(100%, 220px);
+}
+.dashboard-skeleton__metric .skeleton-line:last-child {
+  margin-top: auto;
+}
+.dashboard-skeleton__panel {
+  min-height: 240px;
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+.dashboard-skeleton__panel .skeleton-line {
+  width: min(100%, 420px);
+}
+.dashboard-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.55fr) minmax(310px, 0.75fr);
+  /* Stretching both panels to the taller one left a blank half-screen under
+     the collapsed technical details, which reads as content that failed to
+     load. Each panel is as tall as what it holds. */
+  align-items: start;
+  gap: 16px;
+  margin-bottom: 16px;
+}
+.coverage-body {
+  display: grid;
+  grid-template-columns: 128px minmax(0, 1fr);
+  gap: 16px;
+  align-items: center;
+}
+.coverage-panel .panel-heading {
+  flex-wrap: wrap;
+}
+.coverage-panel .panel-heading .badge,
+.coverage-panel .panel-heading .badge__label {
+  max-width: 100%;
+  white-space: normal;
+  overflow: visible;
+  text-overflow: clip;
+}
+.coverage-list__hint {
+  margin: 12px 0 4px;
+  color: var(--muted);
+  font-size: 0.75rem;
+}
+.coverage-orbit {
+  --coverage-percent: 0%;
+  width: 128px;
+  height: 128px;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  background: conic-gradient(
+    var(--ready) 0 var(--coverage-percent),
+    var(--surface-3) var(--coverage-percent) 100%
+  );
+  position: relative;
+}
+.coverage-orbit::after {
+  content: '';
+  position: absolute;
+  inset: 8px;
+  border-radius: 50%;
+  background: var(--surface);
+}
+.coverage-orbit > div {
+  width: calc(100% - 24px);
+  text-align: center;
+  position: relative;
+  z-index: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
+.coverage-orbit strong {
+  font-size: 1.5rem;
+  letter-spacing: -0.04em;
+}
+.coverage-orbit span {
+  color: var(--muted);
+  font-size: 0.75rem;
+}
+.coverage-list {
+  display: flex;
+  flex-direction: column;
+}
+.coverage-list .coverage-row {
+  min-height: 36px;
+  display: grid;
+  grid-template-columns: 8px minmax(0, 1.5fr) minmax(40px, 1fr) 45px;
+  align-items: center;
+  gap: 9px;
+  border-bottom: 1px solid var(--border);
+  font-size: 0.8125rem;
+}
+.coverage-list .coverage-row:last-child {
+  border: 0;
+}
+.coverage-list strong {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+.coverage-list a.coverage-list__inflight {
+  display: block;
+  min-height: 0;
+  padding-top: 8px;
+  border: 0;
+  color: var(--muted);
+  font-size: 0.75rem;
+}
+.status-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--neutral-status);
+}
+.status-dot--ready {
+  background: var(--ready);
+}
+.status-dot--enhanced {
+  background: var(--accent);
+}
+.status-dot--processing {
+  background: var(--processing);
+}
+.status-dot--sparse {
+  background: var(--sparse);
+}
+.coverage-stats {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  border-top: 1px solid var(--border);
+  padding-top: 16px;
+}
+.coverage-stats > * {
+  padding: 0 14px;
+  display: grid;
+  grid-template-columns: auto 1fr;
+  align-items: center;
+  gap: 7px;
+  border-right: 1px solid var(--border);
+}
+.coverage-stats > :last-child {
+  border: 0;
+}
+.coverage-stats span {
+  color: var(--muted);
+  font-size: 0.75rem;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.coverage-stats strong {
+  grid-column: 2;
+  font-size: 1.25rem;
+  letter-spacing: -0.03em;
+}
+.technical-details {
+  grid-column: 1 / -1;
+  margin-top: 2px;
+  border-top: 1px solid var(--border);
+}
+.technical-details summary {
+  min-height: 40px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  cursor: pointer;
+  color: var(--muted);
+  font-size: 0.8125rem;
+  list-style: none;
+}
+.technical-details summary::-webkit-details-marker {
+  display: none;
+}
+.technical-details summary::after {
+  content: '+';
+  color: var(--accent);
+  font-size: 1.125rem;
+}
+.technical-details[open] summary::after {
+  content: '−';
+}
+.technical-details summary span {
+  color: var(--text);
+  font-weight: 600;
+}
+.technical-details summary small {
+  margin-left: auto;
+  color: var(--faint);
+  font-size: 0.75rem;
+}
+.technical-details__status {
+  padding: 12px 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  color: var(--muted);
+  font-size: 0.75rem;
+}
+.technical-details__status strong {
+  color: var(--text);
+  font-size: 0.8125rem;
+}
+.attention-list {
+  padding: 8px;
+}
+/* The attention tile points here with an in-page link. The panel is usually
+   already on screen, so the scroll is a no-op and the click looked dead;
+   focusing the list is what actually shows the reader where they landed. */
+.attention-list:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: var(--radius-lg);
+}
+.attention-section + .attention-section {
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid var(--border);
+}
+.attention-section h3 {
+  margin: 6px 12px 4px;
+  color: var(--text);
+  font-size: 0.8125rem;
+}
+.attention-item {
+  min-height: 64px;
+  padding: 12px;
+  display: grid;
+  grid-template-columns: 30px 1fr 16px;
+  gap: 9px;
+  align-items: flex-start;
+  border-radius: var(--radius);
+}
+.attention-item:hover {
+  background: var(--surface-2);
+}
+.attention-item > span {
+  width: 28px;
+  height: 28px;
+  display: grid;
+  place-items: center;
+  border-radius: 8px;
+  background: var(--neutral-status-bg);
+  color: var(--neutral-status);
+}
+.attention-item--error > span {
+  background: var(--failed-bg);
+  color: var(--failed);
+}
+.attention-item--warning > span {
+  background: var(--warning-bg);
+  color: var(--warning);
+}
+.attention-item strong {
+  font-size: 0.8125rem;
+}
+.attention-item p {
+  margin: 3px 0 0;
+  color: var(--muted);
+  font-size: 0.75rem;
+  line-height: 1.45;
+}
+.attention-item > svg {
+  color: var(--faint);
+}
+.memory-status-ok {
+  margin: 8px;
+  padding: 14px;
+  display: grid;
+  grid-template-columns: 12px 1fr;
+  gap: 10px;
+  align-items: flex-start;
+  border-radius: 9px;
+  background: var(--surface-2);
+}
+.memory-status-ok .status-dot {
+  margin-top: 4px;
+}
+.memory-status-ok strong {
+  font-size: 0.8125rem;
+}
+.memory-status-ok p {
+  margin: 3px 0 0;
+  color: var(--muted);
+  font-size: 0.75rem;
+  line-height: 1.45;
+}
+.web-run {
+  padding: 14px 20px 17px;
+  border-top: 1px solid var(--border);
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 3px 10px;
+}
+.web-run > div {
+  font-size: 0.75rem;
+  text-transform: none;
+  letter-spacing: normal;
+  color: var(--muted);
+}
+.web-run strong {
+  font-size: 0.8125rem;
+}
+.web-run p,
+.web-run small {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.75rem;
+}
+.web-run__counts {
+  grid-column: 1 / -1;
+  margin-top: 5px;
+}
+.web-run__counts + small {
+  grid-column: 1 / -1;
+}
+.live-dot {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--processing);
+  margin-right: 6px;
+}
+.recent-docs {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+}
+.recent-docs > a {
+  min-height: 72px;
+  display: grid;
+  grid-template-columns: 34px 1fr auto;
+  grid-template-rows: 1fr auto;
+  gap: 5px 10px;
+  align-items: center;
+  padding: 12px 16px;
+  border-right: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+}
+.recent-docs > a:nth-child(3n) {
+  border-right: 0;
+}
+.recent-docs > a:nth-last-child(-n + 3) {
+  border-bottom: 0;
+}
+.recent-docs > a:hover {
+  background: var(--surface-2);
+}
+.file-glyph {
+  width: 32px;
+  height: 32px;
+  grid-row: 1 / span 2;
+  display: grid;
+  place-items: center;
+  border-radius: 8px;
+  color: var(--muted);
+  background: var(--surface-2);
+}
+.recent-docs div {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.recent-docs strong {
+  font-size: 0.8125rem;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.recent-docs small {
+  color: var(--muted);
+  font-size: 0.75rem;
+}
+.recent-docs .progress,
+.recent-docs .failure-text {
+  grid-column: 2 / -1;
+}
+.failure-text {
+  color: var(--failed) !important;
+}
+
+@media (max-width: 1050px) {
+  .dashboard-grid {
+    grid-template-columns: 1fr;
+  }
+  .recent-docs {
+    grid-template-columns: repeat(2, 1fr);
+  }
+  .recent-docs > a:nth-child(3n) {
+    border-right: 1px solid var(--border);
+  }
+  .recent-docs > a:nth-child(2n) {
+    border-right: 0;
+  }
+  .recent-docs > a:nth-last-child(-n + 3) {
+    border-bottom: 1px solid var(--border);
+  }
+  .recent-docs > a:nth-last-child(-n + 2) {
+    border-bottom: 0;
+  }
+}
+@media (max-width: 600px) {
+  .coverage-body {
+    grid-template-columns: 1fr;
+  }
+  .coverage-orbit {
+    margin: 0 auto;
+  }
+  .coverage-stats {
+    grid-template-columns: 1fr;
+    gap: 12px;
+  }
+  .coverage-stats > * {
+    border-right: 0;
+  }
+  .recent-docs {
+    grid-template-columns: 1fr;
+  }
+  .recent-docs > a {
+    border-right: 0 !important;
+    border-bottom: 1px solid var(--border) !important;
+  }
+  .recent-docs > a:last-child {
+    border-bottom: 0 !important;
+  }
+}

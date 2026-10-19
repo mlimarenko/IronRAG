@@ -5,6 +5,7 @@ use uuid::Uuid;
 use crate::{
     app::state::AppState,
     domains::knowledge::{GraphEvidenceLiteralSpan, GraphEvidenceRecord, TypedTechnicalFact},
+    infra::knowledge_plane::EvidenceEdgeTargets,
     infra::knowledge_rows::{
         KnowledgeEntityCandidateRow, KnowledgeEntityRow, KnowledgeEvidenceRow,
         KnowledgeRelationCandidateRow, KnowledgeRelationRow, NewKnowledgeEntityCandidate,
@@ -13,7 +14,7 @@ use crate::{
 };
 
 use super::{
-    GraphRevisionContext, GraphService, ReconciledRelationCandidate, canonical_evidence_id,
+    GraphRevisionContext, GraphService, ReconciledRelationCandidate, deterministic_evidence_id,
 };
 
 #[derive(Debug, Clone, Default)]
@@ -167,6 +168,22 @@ impl RelationEvidenceCandidate for ReconciledRelationCandidate {
     }
 }
 
+/// Evidence-resolution inputs for one entity candidate's upsert.
+///
+/// Groups the identity key and the supporting chunk/technical-fact slices so
+/// the same-typed optional and slice arguments are not passed positionally.
+pub(super) struct EntityEvidenceContext<'a> {
+    pub(super) identity_key: &'a str,
+    pub(super) supporting_chunk: Option<&'a crate::infra::knowledge_rows::KnowledgeChunkRow>,
+    pub(super) revision_facts: &'a [TypedTechnicalFact],
+}
+
+/// Evidence-resolution inputs for one relation candidate's upsert.
+pub(super) struct RelationEvidenceContext<'a> {
+    pub(super) supporting_chunk: Option<&'a crate::infra::knowledge_rows::KnowledgeChunkRow>,
+    pub(super) revision_facts: &'a [TypedTechnicalFact],
+}
+
 impl GraphService {
     pub(super) async fn upsert_current_entity_evidence<C>(
         &self,
@@ -174,19 +191,18 @@ impl GraphService {
         revision: &GraphRevisionContext,
         candidate: &C,
         entity: &KnowledgeEntityRow,
-        canonical_key: &str,
-        supporting_chunk: Option<&crate::infra::knowledge_rows::KnowledgeChunkRow>,
-        revision_facts: &[TypedTechnicalFact],
+        context: EntityEvidenceContext<'_>,
     ) -> Result<KnowledgeEvidenceRow>
     where
         C: EntityEvidenceCandidate,
     {
-        let evidence_id = canonical_evidence_id(
+        let EntityEvidenceContext { identity_key, supporting_chunk, revision_facts } = context;
+        let evidence_id = deterministic_evidence_id(
             revision.library_id,
             revision.revision_id,
             candidate.chunk_id(),
             "entity",
-            canonical_key,
+            identity_key,
         );
         let excerpt = candidate.candidate_label().to_string();
         let support = resolve_entity_evidence_support(
@@ -195,37 +211,23 @@ impl GraphService {
             supporting_chunk,
             revision_facts,
         );
-        let evidence = GraphEvidenceRecord {
+        let evidence = graph_evidence_record(
             evidence_id,
-            library_id: revision.library_id,
-            revision_id: revision.revision_id,
-            chunk_id: candidate.chunk_id(),
-            block_id: support.block_id,
-            fact_id: support.fact_id,
-            quote_text: excerpt,
-            literal_spans: support.literal_spans,
-            confidence: candidate.confidence(),
-            evidence_kind: support.evidence_kind,
-            created_at: Utc::now(),
-        };
-        let row = state
-            .graph_store
-            .upsert_evidence_with_edges(
-                &graph_evidence_record_to_new_evidence(
-                    revision.workspace_id,
-                    revision.document_id,
-                    revision.revision_number,
-                    candidate.extraction_method(),
-                    &evidence,
-                ),
-                Some(revision.revision_id),
-                Some(entity.entity_id),
-                None,
-                evidence.fact_id,
-                revision.library_id,
-            )
-            .await
-            .context("failed to upsert knowledge entity evidence")?;
+            revision,
+            candidate.chunk_id(),
+            excerpt,
+            candidate.confidence(),
+            support,
+        );
+        let row = persist_graph_evidence(
+            state,
+            revision,
+            candidate.extraction_method(),
+            &evidence,
+            EvidenceSupportTarget::Entity(entity.entity_id),
+            "failed to upsert knowledge entity evidence",
+        )
+        .await?;
         if let Some(chunk_id) = candidate.chunk_id() {
             self.upsert_chunk_mentions_entity_edge(
                 state,
@@ -245,13 +247,13 @@ impl GraphService {
         revision: &GraphRevisionContext,
         candidate: &C,
         relation: &KnowledgeRelationRow,
-        supporting_chunk: Option<&crate::infra::knowledge_rows::KnowledgeChunkRow>,
-        revision_facts: &[TypedTechnicalFact],
+        context: RelationEvidenceContext<'_>,
     ) -> Result<KnowledgeEvidenceRow>
     where
         C: RelationEvidenceCandidate,
     {
-        let evidence_id = canonical_evidence_id(
+        let RelationEvidenceContext { supporting_chunk, revision_facts } = context;
+        let evidence_id = deterministic_evidence_id(
             revision.library_id,
             revision.revision_id,
             candidate.chunk_id(),
@@ -272,37 +274,23 @@ impl GraphService {
             supporting_chunk,
             revision_facts,
         );
-        let evidence = GraphEvidenceRecord {
+        let evidence = graph_evidence_record(
             evidence_id,
-            library_id: revision.library_id,
-            revision_id: revision.revision_id,
-            chunk_id: candidate.chunk_id(),
-            block_id: support.block_id,
-            fact_id: support.fact_id,
-            quote_text: excerpt,
-            literal_spans: support.literal_spans,
-            confidence: candidate.confidence(),
-            evidence_kind: support.evidence_kind,
-            created_at: Utc::now(),
-        };
-        let row = state
-            .graph_store
-            .upsert_evidence_with_edges(
-                &graph_evidence_record_to_new_evidence(
-                    revision.workspace_id,
-                    revision.document_id,
-                    revision.revision_number,
-                    candidate.extraction_method(),
-                    &evidence,
-                ),
-                Some(revision.revision_id),
-                None,
-                Some(relation.relation_id),
-                evidence.fact_id,
-                revision.library_id,
-            )
-            .await
-            .context("failed to upsert knowledge relation evidence")?;
+            revision,
+            candidate.chunk_id(),
+            excerpt,
+            candidate.confidence(),
+            support,
+        );
+        let row = persist_graph_evidence(
+            state,
+            revision,
+            candidate.extraction_method(),
+            &evidence,
+            EvidenceSupportTarget::Relation(relation.relation_id),
+            "failed to upsert knowledge relation evidence",
+        )
+        .await?;
         let subject = self
             .upsert_placeholder_entity_for_key(
                 state,
@@ -322,6 +310,74 @@ impl GraphService {
         self.upsert_relation_edges(state, relation, &subject, &object).await?;
         Ok(row)
     }
+}
+
+/// Assemble an evidence record from already-resolved support. Both the entity
+/// and relation upserts share this exact field layout; the only per-kind
+/// difference is how `support` was resolved, which stays at the call site.
+fn graph_evidence_record(
+    evidence_id: Uuid,
+    revision: &GraphRevisionContext,
+    chunk_id: Option<Uuid>,
+    quote_text: String,
+    confidence: Option<f64>,
+    support: ResolvedGraphEvidenceSupport,
+) -> GraphEvidenceRecord {
+    GraphEvidenceRecord {
+        evidence_id,
+        library_id: revision.library_id,
+        revision_id: revision.revision_id,
+        chunk_id,
+        block_id: support.block_id,
+        fact_id: support.fact_id,
+        quote_text,
+        literal_spans: support.literal_spans,
+        confidence,
+        evidence_kind: support.evidence_kind,
+        created_at: Utc::now(),
+    }
+}
+
+/// Persist an evidence record with its revision, library and supporting
+/// entity/relation edges. `supporting_fact_id` is taken from the record so the
+/// edge always points at the fact the record captured.
+enum EvidenceSupportTarget {
+    Entity(Uuid),
+    Relation(Uuid),
+}
+
+async fn persist_graph_evidence(
+    state: &AppState,
+    revision: &GraphRevisionContext,
+    extraction_method: &str,
+    evidence: &GraphEvidenceRecord,
+    target: EvidenceSupportTarget,
+    failure_context: &'static str,
+) -> Result<KnowledgeEvidenceRow> {
+    let (supporting_entity_id, supporting_relation_id) = match target {
+        EvidenceSupportTarget::Entity(entity_id) => (Some(entity_id), None),
+        EvidenceSupportTarget::Relation(relation_id) => (None, Some(relation_id)),
+    };
+    state
+        .graph_store
+        .upsert_evidence_with_edges(
+            &graph_evidence_record_to_new_evidence(
+                revision.workspace_id,
+                revision.document_id,
+                revision.revision_number,
+                extraction_method,
+                evidence,
+            ),
+            EvidenceEdgeTargets {
+                source_revision_id: Some(revision.revision_id),
+                supporting_entity_id,
+                supporting_relation_id,
+                supporting_fact_id: evidence.fact_id,
+                library_id: revision.library_id,
+            },
+        )
+        .await
+        .context(failure_context)
 }
 
 fn graph_evidence_record_to_new_evidence(
@@ -455,7 +511,7 @@ fn technical_fact_matches_relation(
 fn technical_fact_match_haystack(fact: &TypedTechnicalFact) -> String {
     let mut parts = Vec::<String>::new();
     parts.push(normalize_evidence_literal(&fact.display_value));
-    parts.push(normalize_evidence_literal(&fact.canonical_value.canonical_string()));
+    parts.push(normalize_evidence_literal(&fact.normalized_value.normalized_string()));
     for qualifier in &fact.qualifiers {
         parts.push(normalize_evidence_literal(&qualifier.key));
         parts.push(normalize_evidence_literal(&qualifier.value));

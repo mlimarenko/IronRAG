@@ -1,0 +1,751 @@
+.page-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 20px;
+}
+.page-header h1 {
+  margin: 0 0 4px;
+  font-size: 1.5rem;
+  letter-spacing: -0.025em;
+  line-height: 1.3;
+  font-weight: 600;
+}
+.page-header p {
+  margin: 0;
+  max-width: 680px;
+  color: var(--muted);
+  font-size: 0.875rem;
+}
+.page-header__actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.eyebrow {
+  color: var(--muted);
+  letter-spacing: 0;
+  font-size: 0.75rem;
+  font-weight: 500;
+}
+.panel {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+}
+.panel-heading {
+  padding: 16px;
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  border-bottom: 1px solid var(--border);
+}
+.panel-heading h2,
+.panel-heading h3 {
+  margin: 0;
+  font-size: 0.9375rem;
+  letter-spacing: -0.01em;
+}
+.panel-heading p {
+  margin: 3px 0 0;
+  color: var(--muted);
+  font-size: 0.75rem;
+}
+.panel-body {
+  padding: 16px;
+}
+.settings-list {
+  container-type: inline-size;
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}
+.settings-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px 24px;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--border);
+  font-size: 0.8125rem;
+}
+.settings-row:last-child {
+  border-bottom: 0;
+}
+.settings-row__identity,
+.settings-row__summary,
+.settings-row__details {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.settings-row__toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-height: 24px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  font-weight: 600;
+  text-align: left;
+  cursor: pointer;
+}
+.settings-row__toggle svg {
+  flex-shrink: 0;
+  color: var(--muted);
+}
+.settings-row__toggle[aria-expanded='true'] svg {
+  transform: rotate(90deg);
+}
+.settings-row__toggle:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 3px;
+  border-radius: var(--radius-sm);
+}
+.settings-row__description,
+.settings-row__summary {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 8px;
+  color: var(--muted);
+  font-size: 0.75rem;
+}
+.settings-row__description {
+  margin-top: 4px;
+}
+.settings-row__summary strong {
+  color: var(--text);
+}
+.settings-row__actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 4px;
+}
+.settings-row__actions .button--ghost {
+  color: var(--accent);
+}
+.settings-row__details {
+  grid-column: 1 / -1;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+}
+.settings-row__details > p {
+  margin: 0 0 12px;
+  color: var(--muted);
+}
+.settings-list-section > .panel-heading {
+  flex-wrap: wrap;
+}
+@container (max-width: 600px) {
+  .settings-row {
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 8px 12px;
+    padding: 12px;
+  }
+  .settings-row__summary {
+    grid-column: 1;
+    grid-row: 2;
+  }
+  .settings-row__actions {
+    grid-column: 2;
+    grid-row: 1 / span 2;
+  }
+}
+.button {
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  font-weight: 500;
+  cursor: pointer;
+  transition:
+    background 0.15s,
+    border-color 0.15s;
+  white-space: nowrap;
+}
+.button--md {
+  min-height: 36px;
+  padding: 0 12px;
+  font-size: 0.875rem;
+}
+.button--sm {
+  min-height: 32px;
+  padding: 0 8px;
+  font-size: 0.8125rem;
+}
+.button--icon {
+  width: 34px;
+  height: 34px;
+  padding: 0;
+}
+.button--primary {
+  color: var(--accent-foreground);
+  background: var(--accent);
+  border-color: var(--accent);
+}
+.button--primary:hover {
+  background: var(--accent-hover);
+}
+.button--secondary {
+  color: var(--text);
+  background: var(--surface);
+  border-color: var(--border);
+}
+.button--secondary:hover,
+.button--ghost:hover {
+  background: var(--surface-2);
+}
+.button--ghost {
+  color: var(--muted);
+  background: transparent;
+  border-color: transparent;
+}
+.button--danger {
+  color: var(--failed);
+  background: var(--failed-bg);
+  border-color: color-mix(in srgb, var(--failed) 22%, transparent);
+}
+.button:disabled {
+  color: var(--text);
+  background: var(--surface-2);
+  border-color: var(--border);
+  box-shadow: none;
+  opacity: 0.72;
+  cursor: not-allowed;
+  transform: none;
+}
+.badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  /* A flex/grid item defaults to `min-width: auto`, so the badge held its
+     content width and overflowed the column instead of letting the label
+     shrink into an ellipsis. */
+  min-width: 0;
+  min-height: 23px;
+  padding: 2px 8px;
+  border-radius: var(--radius-sm);
+  background: var(--neutral-status-bg);
+  color: var(--neutral-status);
+  font-size: 0.75rem;
+  font-weight: 500;
+  letter-spacing: 0;
+  white-space: nowrap;
+}
+/* `text-overflow` on the inline-flex badge itself does nothing: the text is an
+   anonymous flex item, which keeps its own `text-overflow: clip`, so a badge
+   squeezed by a narrow column was cut mid-glyph. The label is a real child, so
+   the ellipsis lands on the box that actually holds the text. */
+.badge__label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.badge--ready,
+.badge--verified,
+.badge--succeeded,
+.badge--active {
+  background: var(--ready-bg);
+  color: var(--ready);
+}
+.badge--processing,
+.badge--queued,
+.badge--running,
+.badge--leased {
+  background: var(--processing-bg);
+  color: var(--processing);
+}
+.badge--warning,
+.badge--partial,
+.badge--paused,
+.badge--partially_supported {
+  background: var(--warning-bg);
+  color: var(--warning);
+}
+.badge--failed,
+.badge--error,
+.badge--conflicting {
+  background: var(--failed-bg);
+  color: var(--failed);
+}
+.badge--sparse {
+  background: var(--sparse-bg);
+  color: var(--sparse);
+}
+.badge--canceled,
+.badge--neutral,
+.badge--revoked {
+  background: var(--neutral-status-bg);
+  color: var(--neutral-status);
+}
+.input,
+input.input,
+select.input,
+textarea.input {
+  width: 100%;
+  min-height: 36px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text);
+  border-radius: var(--radius-sm);
+  padding: 8px 12px;
+}
+textarea.input {
+  resize: vertical;
+  min-height: 90px;
+}
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.field label,
+.field > span {
+  color: var(--muted);
+  font-size: 0.875rem;
+  font-weight: 500;
+}
+.field-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+}
+.field-hint {
+  color: var(--muted);
+  font-size: 0.75rem;
+}
+.toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 16px;
+}
+.toolbar .search-box {
+  flex: 1 1 260px;
+}
+.search-box {
+  position: relative;
+}
+.search-box svg {
+  position: absolute;
+  left: 11px;
+  top: 50%;
+  transform: translateY(-50%);
+  color: var(--muted);
+  pointer-events: none;
+}
+.search-box input {
+  padding-left: 35px;
+}
+.segmented {
+  display: inline-flex;
+  align-items: center;
+  padding: 3px;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  background: var(--surface-2);
+  overflow: auto;
+  max-width: 100%;
+}
+.tabs {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 0 0 8px;
+  margin-bottom: 16px;
+  border-bottom: 1px solid var(--border);
+  overflow-x: auto;
+}
+.tabs > button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  flex: 0 0 auto;
+  min-height: 36px;
+  padding: 0 12px;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--muted);
+  font-size: 0.875rem;
+  font-weight: 500;
+  cursor: pointer;
+}
+.tabs > button:hover {
+  background: var(--surface-2);
+  color: var(--text);
+}
+.tabs > button[aria-selected='true'] {
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-weight: 600;
+}
+.tab-panel {
+  min-width: 0;
+}
+.segmented button {
+  min-height: 29px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 0.75rem;
+  white-space: nowrap;
+}
+.segmented button.is-active {
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-weight: 600;
+}
+.segmented button:disabled {
+  border: 1px solid var(--border);
+  background: var(--surface-3);
+  color: var(--text);
+  box-shadow: none;
+  opacity: 0.72;
+  cursor: not-allowed;
+}
+.metric-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+}
+.metric-card {
+  min-height: 108px;
+  padding: 16px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--surface);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.metric-card > span {
+  color: var(--muted);
+  font-size: 0.75rem;
+}
+.metric-card strong {
+  font-size: 1.875rem;
+  letter-spacing: -0.04em;
+  line-height: 1.1;
+  margin-top: 8px;
+}
+.metric-card small {
+  margin-top: auto;
+  color: var(--muted);
+  font-size: 0.75rem;
+}
+.data-table-wrap {
+  width: 100%;
+  overflow-x: auto;
+}
+.data-table {
+  width: 100%;
+  border-collapse: collapse;
+}
+.data-table th {
+  height: 40px;
+  padding: 0 13px;
+  border-bottom: 1px solid var(--border);
+  color: var(--muted);
+  text-align: left;
+  letter-spacing: 0;
+  font-size: 0.75rem;
+  font-weight: 500;
+  white-space: nowrap;
+}
+.data-table td {
+  padding: 12px;
+  border-bottom: 1px solid var(--border);
+  vertical-align: middle;
+  font-size: 0.875rem;
+}
+.data-table tbody tr {
+  transition: background 0.14s;
+}
+.data-table tbody tr:hover {
+  background: color-mix(in srgb, var(--surface-2) 70%, transparent);
+}
+.data-table tbody tr:last-child td {
+  border-bottom: 0;
+}
+.data-table .cell-title,
+.data-grid__table .cell-title {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 180px;
+  max-width: 32rem;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+.data-table .cell-title strong,
+.data-grid__table .cell-title strong {
+  font-size: 0.875rem;
+  font-weight: 500;
+}
+.data-table .cell-title small,
+.data-grid__table .cell-title small {
+  color: var(--muted);
+  font-size: 0.75rem;
+}
+.row-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  justify-content: flex-end;
+}
+.progress {
+  display: block;
+  width: 100%;
+  height: 5px;
+  border: 0;
+  border-radius: 99px;
+  background: var(--surface-3);
+  color: var(--progress-color, var(--accent));
+  appearance: none;
+  overflow: hidden;
+}
+.progress::-webkit-progress-bar {
+  border-radius: inherit;
+  background: var(--surface-3);
+}
+.progress::-webkit-progress-value {
+  border-radius: inherit;
+  background: var(--progress-color, var(--accent));
+  transition: width 0.3s ease;
+}
+.progress::-moz-progress-bar {
+  border-radius: inherit;
+  background: var(--progress-color, var(--accent));
+}
+.progress--ready {
+  --progress-color: var(--ready);
+}
+.progress--processing {
+  --progress-color: var(--processing);
+}
+.progress--sparse {
+  --progress-color: var(--sparse);
+}
+.state-card {
+  min-height: 180px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 16px;
+  padding: 24px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  color: var(--muted);
+  background: var(--surface);
+}
+.state-card > div {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 7px;
+  min-width: 0;
+}
+/* Empty and error states stack: the icon belongs to the message, and beside a
+   multi-line paragraph it centred against the whole block and read as a stray
+   glyph floating to the left. Loading keeps the row — a spinner next to
+   skeleton lines is exactly what it should look like. */
+.state-card--stacked {
+  flex-direction: column;
+  text-align: center;
+}
+.state-card--stacked > div {
+  align-items: center;
+  min-width: 0;
+  max-width: 46ch;
+}
+.state-card strong {
+  color: var(--text);
+}
+.state-card p {
+  margin: 0;
+  font-size: 0.75rem;
+}
+.state-card--error svg {
+  color: var(--failed);
+}
+.skeleton-line {
+  width: 220px;
+  height: 8px;
+  border-radius: 6px;
+  background: linear-gradient(90deg, var(--surface-2), var(--surface-3), var(--surface-2));
+  background-size: 200% 100%;
+  animation: skeleton 1.3s infinite;
+}
+.skeleton-line.short {
+  width: 145px;
+}
+@keyframes skeleton {
+  to {
+    background-position: -200% 0;
+  }
+}
+.spin {
+  animation: spin 0.8s linear infinite;
+}
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+.dialog-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.5);
+  z-index: 60;
+  animation: fade 0.15s ease;
+}
+.dialog-content {
+  position: fixed;
+  left: 50%;
+  top: 50%;
+  width: min(520px, calc(100vw - 28px));
+  max-height: min(84vh, 760px);
+  transform: translate(-50%, -50%);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-md);
+  z-index: 61;
+  overflow: hidden;
+  /* One height budget for the whole shell. The heading and footer keep their
+     own height and the body is the single scroll region, so a footer action
+     is always on screen no matter how tall the body's content is. */
+  display: flex;
+  flex-direction: column;
+}
+.dialog-content--wide {
+  width: min(820px, calc(100vw - 28px));
+}
+.dialog-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 16px;
+  border-bottom: 1px solid var(--border);
+  flex: 0 0 auto;
+}
+.dialog-heading h2 {
+  margin: 0;
+  font-size: 1.0625rem;
+}
+.dialog-heading p {
+  margin: 4px 0 0;
+  color: var(--muted);
+  font-size: 0.75rem;
+}
+.dialog-body {
+  padding: 16px;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+}
+.dialog-footer {
+  padding: 12px 16px;
+  border-top: 1px solid var(--border);
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  background: var(--surface);
+  flex: 0 0 auto;
+}
+.drawer-content {
+  position: fixed;
+  z-index: 61;
+  top: var(--topbar-height);
+  right: 0;
+  bottom: 0;
+  width: min(520px, 100vw);
+  background: var(--surface);
+  border-left: 1px solid var(--border);
+  box-shadow: var(--shadow-md);
+  display: flex;
+  flex-direction: column;
+  animation: slide-in 0.2s ease;
+}
+.drawer-body {
+  flex: 1;
+  overflow-y: auto;
+  padding: 20px;
+}
+@keyframes slide-in {
+  from {
+    transform: translateX(30px);
+    opacity: 0;
+  }
+}
+@keyframes fade {
+  from {
+    opacity: 0;
+  }
+}
+.command-search {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  border: 1px solid var(--border-strong);
+  border-radius: 9px;
+  padding: 0 11px;
+}
+.command-search input {
+  flex: 1;
+  height: 43px;
+  border: 0;
+  outline: none;
+  background: transparent;
+  color: var(--text);
+}
+.command-list {
+  max-height: 340px;
+  overflow-y: auto;
+  padding-top: 10px;
+}
+.command-list button {
+  width: 100%;
+  min-height: 42px;
+  display: grid;
+  grid-template-columns: 22px 1fr auto;
+  align-items: center;
+  gap: 8px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+}
+.command-list button.is-active {
+  background: var(--surface-2);
+}
+.command-list button:disabled {
+  border: 1px solid var(--border);
+  background: var(--surface-2);
+  color: var(--text);
+  opacity: 0.72;
+  cursor: not-allowed;
+}
+.command-list small {
+  color: var(--muted);
+}
+.mobile-card-list {
+  display: none;
+}

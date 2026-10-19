@@ -1,49 +1,18 @@
-import { AlertTriangle, Brain, CheckCircle2, XCircle } from 'lucide-react'
-import type { LucideIcon } from 'lucide-react'
 import type { TFunction } from 'i18next'
 import type { VerificationState } from '@/shared/types'
 
-type VerificationBadgeConfig = {
-  icon: LucideIcon
-  cls: string
-}
-
-/**
- * Static lookup table for verification badge styling. Lives outside the
- * page component so that React does not rebuild it every render and so
- * both the inline-in-thread badge and the evidence panel pull from the
- * same source of truth.
- */
-export const VERIFICATION_CONFIG: Record<VerificationState, VerificationBadgeConfig> = {
-  passed: {
-    icon: CheckCircle2,
-    cls: 'text-status-ready',
-  },
-  partially_supported: {
-    icon: AlertTriangle,
-    cls: 'text-status-warning',
-  },
-  conflicting: {
-    icon: XCircle,
-    cls: 'text-status-failed',
-  },
-  insufficient_evidence: {
-    icon: AlertTriangle,
-    cls: 'text-status-sparse',
-  },
-  failed: {
-    icon: XCircle,
-    cls: 'text-status-failed',
-  },
-  not_run: {
-    icon: Brain,
-    cls: 'text-muted-foreground',
-  },
+export const VERIFICATION_TONE: Record<VerificationState, string> = {
+  verified: 'verified',
+  partially_supported: 'partially_supported',
+  conflicting: 'conflicting',
+  insufficient_evidence: 'sparse',
+  failed: 'failed',
+  not_run: 'neutral',
 }
 
 export function verificationLabel(state: VerificationState, t: TFunction): string {
   switch (state) {
-    case 'passed':
+    case 'verified':
       return t('assistant.verified')
     case 'partially_supported':
       return t('assistant.partiallySupported')

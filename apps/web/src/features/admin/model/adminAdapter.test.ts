@@ -1,11 +1,6 @@
-import { describe, expect, it, vi } from 'vitest'
+import { describe, expect, it } from 'vitest'
 
-import {
-  adminApi,
-  adminModelCatalogOptions,
-  parseModelCatalogResponse,
-  parseProviderCatalogResponse,
-} from '@/shared/api/admin'
+import { parseModelCatalogResponse, parseProviderCatalogResponse } from '@/shared/api/admin'
 import type {
   AiAccountResponse,
   AiBindingResponse,
@@ -67,7 +62,11 @@ describe('mapToken', () => {
         label: 'Bad token',
         tokenPrefix: 'irr_bad',
         status: 'enabled',
-        scope: { kind: 'system', libraries: [] },
+        scope: {
+          kind: 'workspace',
+          libraries: [],
+          workspace: { id: 'workspace-1', displayName: 'Workspace 1' },
+        },
         grants: [],
       }),
     ).toThrow('invalid status')
@@ -154,7 +153,7 @@ describe('mapAudit', () => {
     expect(audit.actor).toBe('Operator One (operator.one)')
   })
 
-  it('maps generated audit pages canonically', () => {
+  it('maps generated audit pages consistently', () => {
     const page = mapAuditPage({
       items: [
         {
@@ -170,14 +169,12 @@ describe('mapAudit', () => {
         },
       ],
       total: 1,
-      limit: 50,
-      offset: 0,
+      nextCursor: 'cursor-next',
     } satisfies AuditEventPageResponse)
 
     expect(page).toMatchObject({
       total: 1,
-      limit: 50,
-      offset: 0,
+      nextCursor: 'cursor-next',
       items: [{ id: 'evt-1', action: 'token.mint', resultKind: 'succeeded' }],
     })
   })
@@ -190,6 +187,7 @@ describe('mapProviderList', () => {
         {
           id: 'provider-alpha',
           providerKind: 'provider_alpha',
+          purposeGaps: [],
           displayName: 'Provider Alpha',
           apiStyle: 'openai_compatible',
           lifecycleState: 'active',
@@ -260,6 +258,7 @@ describe('mapProviderList', () => {
       {
         id: 'provider-alpha',
         providerKind: 'provider_alpha',
+        purposeGaps: [],
         displayName: 'Provider Alpha',
         apiStyle: 'openai_compatible',
         lifecycleState: 'active',
@@ -306,7 +305,7 @@ describe('mapProviderList', () => {
 })
 
 describe('parseProviderCatalogResponse', () => {
-  it('rejects non-canonical provider policy vocabulary from untyped payloads', () => {
+  it('rejects non-active provider policy vocabulary from untyped payloads', () => {
     expect(() =>
       parseProviderCatalogResponse([
         {
@@ -355,8 +354,6 @@ describe('parseModelCatalogResponse', () => {
           id: 'model-alpha',
           providerCatalogId: 'provider-alpha',
           modelName: 'alpha-chat',
-          capabilityKind: 'chat',
-          modalityKind: 'text',
           allowedBindingPurposes: ['extract_text', 'query_compile', 'query_answer'],
         },
       ]),
@@ -368,43 +365,11 @@ describe('parseModelCatalogResponse', () => {
           id: 'model-alpha',
           providerCatalogId: 'provider-alpha',
           modelName: 'alpha-chat',
-          capabilityKind: 'chat',
-          modalityKind: 'text',
           allowedBindingPurposes: ['extract_text', 'query_compile', 'query_answer'],
           availabilityState: 'available',
         },
       ]),
     ).toThrow('availableAccountIds')
-  })
-})
-
-describe('adminModelCatalogOptions', () => {
-  it('routes model catalog queries through the validated adminApi boundary', async () => {
-    const catalog: ModelCatalogEntryResponse[] = [
-      {
-        id: 'model-alpha',
-        providerCatalogId: 'provider-alpha',
-        modelName: 'alpha-chat',
-        capabilityKind: 'chat',
-        modalityKind: 'text',
-        allowedBindingPurposes: ['extract_text', 'query_compile', 'query_answer'],
-        availabilityState: 'available',
-        availableAccountIds: ['account-alpha'],
-        lifecycleState: 'active',
-      },
-    ]
-    const listModels = vi.spyOn(adminApi, 'listModels').mockResolvedValueOnce(catalog)
-
-    const options = adminModelCatalogOptions({
-      providerCatalogId: 'provider-alpha',
-      accountId: 'account-alpha',
-    })
-
-    await expect(options.queryFn()).resolves.toBe(catalog)
-    expect(listModels).toHaveBeenCalledWith({
-      providerCatalogId: 'provider-alpha',
-      accountId: 'account-alpha',
-    })
   })
 })
 
@@ -415,12 +380,18 @@ describe('mapModelList', () => {
         id: 'model-alpha',
         providerCatalogId: 'provider-alpha',
         modelName: 'alpha-chat',
-        capabilityKind: 'chat',
-        modalityKind: 'text',
         allowedBindingPurposes: ['extract_text', 'query_compile', 'query_answer'],
         availabilityState: 'unknown',
         availableAccountIds: ['account-alpha'],
         lifecycleState: 'active',
+        metadataJson: { seedSource: 'clean_v1' },
+        pricing: {
+          currencyCode: 'USD',
+          inputPricePer1m: '0.20',
+          cachedInputPricePer1m: '0.10',
+          cacheWriteInputPricePer1m: '0.20',
+          outputPricePer1m: '1.20',
+        },
       } satisfies ModelCatalogEntryResponse,
     ])
 
@@ -442,6 +413,7 @@ describe('mapBindingList', () => {
         bindingPurpose: 'embed_chunk',
         bindingState: 'active',
         accountId: 'account-alpha',
+        providerCatalogId: 'provider-alpha',
         modelCatalogId: 'model-alpha',
         extraParametersJson: { response_format: { type: 'json_object' } },
       } satisfies AiBindingResponse,
@@ -461,6 +433,7 @@ describe('mapBindingList', () => {
         bindingPurpose: 'embed_chunk',
         bindingState: 'active',
         accountId: 'account-alpha',
+        providerCatalogId: 'provider-alpha',
         modelCatalogId: 'model-alpha',
         extraParametersJson: '{"response_format":{"type":"json_object"}}',
       } satisfies AiBindingResponse,
@@ -470,7 +443,7 @@ describe('mapBindingList', () => {
   })
 
   it.each(['active', 'invalid', 'disabled'] as const)(
-    'preserves the canonical %s binding state in the view model',
+    'preserves the expected %s binding state in the view model',
     (bindingState) => {
       const bindings = mapBindingList([
         {
@@ -479,6 +452,7 @@ describe('mapBindingList', () => {
           bindingPurpose: 'extract_text',
           bindingState,
           accountId: 'account-alpha',
+          providerCatalogId: 'provider-alpha',
           modelCatalogId: 'model-alpha',
           extraParametersJson: {},
         } satisfies AiBindingResponse,
@@ -488,7 +462,7 @@ describe('mapBindingList', () => {
     },
   )
 
-  it('rejects a non-canonical inactive binding state', () => {
+  it('rejects a unsupported inactive binding state', () => {
     expect(() =>
       mapBindingList([
         {
@@ -497,6 +471,7 @@ describe('mapBindingList', () => {
           bindingPurpose: 'extract_text',
           bindingState: 'inactive',
           accountId: 'account-alpha',
+          providerCatalogId: 'provider-alpha',
           modelCatalogId: 'model-alpha',
           extraParametersJson: {},
         } satisfies AiBindingResponse,

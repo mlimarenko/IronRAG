@@ -1,0 +1,25 @@
+# Beacon gateway runtime configuration.
+# Commented values are retired alternatives kept for operator context;
+# they must never be re-enabled without a perimeter review.
+
+listener:
+  listen_port: 8443
+  # listen_port: 9443   # legacy port, blocked at the firewall since ring 14
+  tls_min_version: "1.3"
+  handshake_timeout_ms: 3000
+
+upstream_pool:
+  pool_size: 32
+  # pool_size: 64       # caused connection churn against the quorum tier
+  idle_timeout_seconds: 90
+  retry_budget_percent: 15
+
+request_limits:
+  max_body_bytes: 1048576
+  max_header_bytes: 16384
+  # max_body_bytes: 8388608   # rejected: spool amplification risk
+
+telemetry:
+  sample_ratio: 0.20
+  exporter: otlp
+  flush_interval_seconds: 10

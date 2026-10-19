@@ -5,6 +5,13 @@ use super::types::{
 };
 
 pub(crate) const GRAPH_EXTRACTION_VERSION: &str = "graph_extract";
+/// Version of the static extraction instruction template and its output
+/// contract. The semantic cache key binds this version (IRG-197); raise it in
+/// the same change that edits [`graph_extraction_static_sections`] or the
+/// response schema, so cached outputs produced under an older contract are
+/// never reused.
+pub(crate) const GRAPH_EXTRACTION_CONTRACT_VERSION: &str =
+    "graph_extract_contract_3_stable_request_context";
 pub(crate) const GRAPH_EXTRACTION_MAX_PROVIDER_ATTEMPTS: usize = 2;
 pub(crate) const GRAPH_EXTRACTION_REQUEST_OVERHEAD_BYTES: usize = 8 * 1024;
 pub(crate) const GRAPH_EXTRACTION_MAX_SEGMENTS: usize = 3;
@@ -50,6 +57,20 @@ pub(crate) fn build_graph_extraction_prompt(request: &GraphExtractionRequest) ->
     .prompt
 }
 
+/// The label the extraction prompt shows for the document: its title when set
+/// and non-blank, otherwise its external key. Shared with the cache contract so
+/// a rename moves the cache identity exactly when it moves the prompt (IRG-197).
+#[must_use]
+pub(crate) fn graph_extraction_document_label(
+    document: &crate::infra::repositories::DocumentRow,
+) -> &str {
+    document
+        .title
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or(&document.external_key)
+}
+
 #[cfg(test)]
 #[must_use]
 pub(crate) fn build_graph_extraction_prompt_preview(
@@ -67,29 +88,16 @@ pub(crate) fn build_graph_extraction_prompt_preview(
     (plan.prompt, plan.request_shape_key, plan.request_size_bytes)
 }
 
-pub(crate) fn build_graph_extraction_prompt_plan(
-    request: &GraphExtractionRequest,
-    variant: GraphExtractionPromptVariant,
-    trigger_reason: Option<&str>,
-    issue_summary: Option<&str>,
-    previous_output: Option<&str>,
-    request_size_soft_limit_bytes: usize,
-) -> GraphExtractionPromptPlan {
-    let downgrade_level = normalized_downgrade_level(request);
-    let document_label = request
-        .document
-        .title
-        .as_deref()
-        .filter(|value| !value.trim().is_empty())
-        .unwrap_or(&request.document.external_key);
-    let safe_limit = downgraded_request_size_soft_limit_bytes(
-        request_size_soft_limit_bytes.max(GRAPH_EXTRACTION_REQUEST_OVERHEAD_BYTES + 1024),
-        downgrade_level,
-    );
-    let mut sections: Vec<(String, String)> = Vec::new();
-    sections.push((
-        "task".to_string(),
-        "You are a knowledge graph extraction expert. Your job is to extract structured entities and relationships from a document chunk to build a rich, queryable knowledge graph.\n\n\
+/// The request-independent instruction template of the extraction prompt.
+///
+/// Factored out so the semantic cache identity can hash the exact same bytes
+/// the provider sees (IRG-197): a change here is a contract change and must
+/// raise [`GRAPH_EXTRACTION_CONTRACT_VERSION`].
+pub(crate) fn graph_extraction_static_sections() -> Vec<(String, String)> {
+    vec![
+        (
+            "task".to_string(),
+            "You are a knowledge graph extraction expert. Your job is to extract structured entities and relationships from a document chunk to build a rich, queryable knowledge graph.\n\n\
 Extract ALL meaningful entities: named things (people, organizations, artifacts, natural phenomena), typed concepts (algorithms, patterns, paradigms), processes (methods, workflows), and measurable attributes (metrics, parameters, configuration values) that appear in the text.\n\n\
 For each entity, determine the single best type from the entity type reference below.\n\n\
 Extract ALL relationships explicitly supported by the source. Choose a concise `relation_type` that captures the relationship meaning selected from the source evidence. Encode it as lowercase ASCII snake_case; the application validates its formal shape but does not supply or infer its meaning. Omit a relation when the evidence does not support a precise relationship.\n\n\
@@ -100,42 +108,54 @@ SOURCE WRITING PRESERVATION (critical):\n\
 - NEVER substitute visually similar glyphs across writing systems or replace digits with look-alike letters or letters with look-alike digits.\n\
 - NEVER emit UTF-8 mojibake, Latin-1 byte artifacts, replacement characters, or C0/C1 control characters in any JSON string value.\n\
 - Each `label`, `source_label`, and `target_label` value MUST appear as a verbatim, byte-for-byte substring of the prepared chunk text segments. If you cannot copy a name directly from the source, do not emit it.".to_string(),
-    ));
-    sections.push((
-        "entity_types".to_string(),
-        "Entity type reference (choose the single best type for each entity):\n\
-- person: A named individual human being (Linus Torvalds, Marie Curie, Warren Buffett, Hippocrates)\n\
-- organization: A company, institution, government body, team, or standards body (Google, WHO, SEC, IETF, Supreme Court, Red Cross)\n\
-- location: A named geographic place, region, facility, or site (Silicon Valley, Wall Street, Chernobyl, Amazon rainforest)\n\
-- event: A named occurrence, incident, milestone, or time-bounded happening (COVID-19 pandemic, Log4Shell, 2008 financial crisis, Roe v. Wade, Apollo 11)\n\
-- artifact: Anything created, built, or designed by humans — software, tools, products, drugs, devices, standards, protocols, laws, licenses, code functions, APIs, documents (PostgreSQL, Aspirin, TCP/IP, GDPR, MIT License, build_router(), GET /api/users, Basel III, React, insulin pump)\n\
-- natural: Anything existing in nature without human creation — species, organisms, diseases, genes, proteins, elements, minerals, natural phenomena (SARS-CoV-2, BRCA1 gene, malaria, silicon, photosynthesis, earthquake, DNA)\n\
-- process: A named procedure, method, algorithm, workflow, or repeatable sequence of steps (Agile methodology, PCR testing, IPO process, judicial review, gradient descent, fermentation)\n\
-- concept: An abstract idea, theory, principle, pattern, paradigm, theme, or field of study (dependency injection, herd immunity, supply and demand, due process, machine learning, oncology, relativity)\n\
-- attribute: A named measurable property, metric, indicator, parameter, status, threshold, or configuration value (p99 latency, blood pressure, GDP, APP_PORT, credit score, HTTP 200, melting point, pH level)\n\
-- entity: Catch-all for named things that do not fit any other type. Always prefer a more specific type above.".to_string(),
-    ));
-    sections.push((
-        "schema".to_string(),
-        format!(
-            "Return strict JSON with keys `entities` and `relations`. Each entity must include `label`, `node_type` (one of: `person`, `organization`, `location`, `event`, `artifact`, `natural`, `process`, `concept`, `attribute`, `entity`), `aliases`, `sub_type`, and `summary`. `sub_type` is a freeform specialization within the type (for example framework, database, algorithm, enzyme, microservice, protocol); use null when no concise specialization is available. Each relation must include `source_label`, `target_label`, `relation_type`, and `summary`. Choose a concise `relation_type` from the relationship meaning grounded in the source. It must be lowercase ASCII snake_case with at most {} characters. If no concise summary is available, emit an empty string. If the relationship meaning is not explicit, omit the relation.",
-            crate::services::graph::identity::RELATION_TYPE_MAX_LENGTH
         ),
-    ));
-    sections.push((
-        "rules".to_string(),
-        "Do not include markdown fences or prose. If no grounded graph evidence exists, return {\"entities\":[],\"relations\":[]}.\n\
+        (
+            "entity_types".to_string(),
+            format!(
+                "Entity type reference (choose the single best type for each entity):\n{}",
+                super::type_reference::entity_type_reference_lines()
+            ),
+        ),
+        (
+            "schema".to_string(),
+            format!(
+                "Return strict JSON with keys `entities` and `relations`. Each entity must include `label`, `node_type` (one of: `person`, `organization`, `location`, `event`, `artifact`, `natural`, `process`, `concept`, `attribute`, `entity`), `aliases`, `sub_type`, and `summary`. `sub_type` is a freeform specialization within the type (for example framework, database, algorithm, enzyme, microservice, protocol); use null when no concise specialization is available. Each relation must include `source_label`, `target_label`, `relation_type`, and `summary`. Choose a concise `relation_type` from the relationship meaning grounded in the source. It must be lowercase ASCII snake_case with at most {} characters. If no concise summary is available, emit an empty string. If the relationship meaning is not explicit, omit the relation.",
+                crate::services::graph::identity::RELATION_TYPE_MAX_LENGTH
+            ),
+        ),
+        (
+            "rules".to_string(),
+            "Do not include markdown fences or prose. If no grounded graph evidence exists, return {\"entities\":[],\"relations\":[]}.\n\
 Critical rules:\n\
 1. ALWAYS provide a non-empty summary for every entity and relation.\n\
 2. Choose each relation type from the explicit relationship expressed by the source evidence.\n\
 3. Keep relation-specific qualifiers in the summary and use a consistent relation type for the same meaning within this response.\n\
 4. Extract the entity's PRIMARY role or purpose in the summary, not just its name.\n\
 5. When the text explicitly relates two extracted entities, model that evidence as a relation rather than only as independent entity summaries.".to_string(),
-    ));
-    sections.push((
-        "document".to_string(),
-        format!("Document: {document_label}\nChunk ordinal: {}", request.chunk.ordinal),
-    ));
+        ),
+    ]
+}
+
+pub(crate) fn build_graph_extraction_prompt_plan(
+    request: &GraphExtractionRequest,
+    variant: GraphExtractionPromptVariant,
+    trigger_reason: Option<&str>,
+    issue_summary: Option<&str>,
+    previous_output: Option<&str>,
+    request_size_soft_limit_bytes: usize,
+) -> GraphExtractionPromptPlan {
+    let downgrade_level = normalized_downgrade_level(request);
+    let document_label = graph_extraction_document_label(&request.document);
+    let safe_limit = downgraded_request_size_soft_limit_bytes(
+        request_size_soft_limit_bytes.max(GRAPH_EXTRACTION_REQUEST_OVERHEAD_BYTES + 1024),
+        downgrade_level,
+    );
+    let mut sections = graph_extraction_static_sections();
+    // IRG-197: the extraction prompt carries no positional identity. A chunk's
+    // ordinal changes with every append or edit while its text does not, so it
+    // must not enter the prompt. Position is already expressed by content-derived
+    // context (`Section` / `Heading trail` below).
+    sections.push(("document".to_string(), format!("Document: {document_label}")));
     {
         let section_path_text = if request.structured_chunk.section_path.is_empty() {
             String::new()
@@ -279,27 +299,43 @@ fn segment_chunk_text_for_prompt(
     ]
 }
 
+/// Hard cap on hint terms rendered per node type. The loader already trims to
+/// its own bound; this is the prompt's own ceiling so no upstream change can
+/// make the rendered hint list unbounded.
+const GRAPH_EXTRACTION_MAX_HINTS_PER_NODE_TYPE: usize = 15;
+
+/// Renders the library sub_type vocabulary as a deterministic set.
+///
+/// The list carries no occurrence counts and is sorted by
+/// `(node_type, sub_type)`, so a graph merge that only changes how often a term
+/// occurs cannot change these bytes. That is what lets the semantic cache
+/// identity ignore the hint list entirely while the prompt stays stable for a
+/// stable vocabulary (IRG-197).
 fn render_sub_type_hints(hints: &GraphExtractionSubTypeHints) -> Option<String> {
     if hints.is_empty() {
         return None;
     }
-    let mut lines = Vec::with_capacity(hints.by_node_type.len() + 2);
+    let mut groups = hints
+        .by_node_type
+        .iter()
+        .filter_map(|group| {
+            let mut entries =
+                group.entries.iter().map(|entry| entry.sub_type.as_str()).collect::<Vec<_>>();
+            entries.sort_unstable();
+            entries.dedup();
+            entries.truncate(GRAPH_EXTRACTION_MAX_HINTS_PER_NODE_TYPE);
+            (!entries.is_empty()).then_some((group.node_type.as_str(), entries))
+        })
+        .collect::<Vec<_>>();
+    groups.sort_by(|left, right| left.0.cmp(right.0));
+    let mut lines = Vec::with_capacity(groups.len() + 1);
     lines.push(
         "Observed sub_types in this library (prefer one of these if it fits an extracted entity; \
          create a new sub_type only if none of these match):"
             .to_string(),
     );
-    for group in &hints.by_node_type {
-        if group.entries.is_empty() {
-            continue;
-        }
-        let entries = group
-            .entries
-            .iter()
-            .map(|entry| format!("{} ({})", entry.sub_type, entry.occurrences))
-            .collect::<Vec<_>>()
-            .join(", ");
-        lines.push(format!("- {}: {}", group.node_type, entries));
+    for (node_type, entries) in groups {
+        lines.push(format!("- {}: {}", node_type, entries.join(", ")));
     }
     if lines.len() <= 1 {
         return None;
@@ -349,7 +385,7 @@ fn render_graph_extraction_technical_facts(
         };
         let line = format!(
             "- {}: {} | display: {}{}",
-            fact.fact_kind, fact.canonical_value, fact.display_value, qualifiers
+            fact.fact_kind, fact.normalized_value, fact.display_value, qualifiers
         );
         let next_len = rendered.len().saturating_add(line.len()).saturating_add(1);
         if !rendered.is_empty() && next_len > max_bytes.max(256) {

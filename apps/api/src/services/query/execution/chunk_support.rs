@@ -19,18 +19,17 @@ use super::types::{RuntimeChunkScoreKind, RuntimeMatchedChunk};
 const CONFIG_PATH_EXTENSIONS: [&str; 8] =
     [".conf", ".ini", ".cfg", ".properties", ".yaml", ".yml", ".toml", ".json"];
 
-/// Maps a canonical knowledge chunk into answer evidence.
+/// Maps a stored knowledge chunk into answer evidence.
 pub(crate) fn map_chunk_hit(
     chunk: KnowledgeChunkRow,
     score: f32,
     document_index: &HashMap<Uuid, KnowledgeDocumentRow>,
     keywords: &[String],
 ) -> Option<RuntimeMatchedChunk> {
-    if chunk.raptor_level.is_some() {
+    let document = document_index.get(&chunk.document_id)?;
+    if !document_has_exact_readable_revision(document, chunk.revision_id) {
         return None;
     }
-    let document = document_index.get(&chunk.document_id)?;
-    canonical_document_revision_id(document)?;
     let source_text = chunk_answer_source_text(&chunk);
     let excerpt = if chunk.chunk_kind.as_deref() == Some("source_unit") {
         focused_record_unit_excerpt(&source_text, keywords, 280)
@@ -56,8 +55,16 @@ pub(crate) fn map_chunk_hit(
     })
 }
 
-pub(crate) fn canonical_document_revision_id(document: &KnowledgeDocumentRow) -> Option<Uuid> {
+pub(crate) fn current_document_revision_id(document: &KnowledgeDocumentRow) -> Option<Uuid> {
     document.readable_revision_id.or(document.active_revision_id)
+}
+
+/// Returns whether a revision is the document's currently query-readable head.
+pub(super) fn document_has_exact_readable_revision(
+    document: &KnowledgeDocumentRow,
+    revision_id: Uuid,
+) -> bool {
+    document.is_query_readable() && document.readable_revision_id == Some(revision_id)
 }
 
 pub(super) fn chunk_answer_source_text(chunk: &KnowledgeChunkRow) -> String {

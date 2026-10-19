@@ -1,3 +1,5 @@
+use crate::infra::knowledge_plane::VectorSimilaritySearchInput;
+
 use uuid::Uuid;
 
 use crate::{
@@ -31,7 +33,7 @@ pub(super) async fn retrieve_entity_vector_hits(
         })?;
 
     let _vector_guard =
-        state.canonical_services.search.vector_plane_read_guard(state, library_id).await?;
+        state.application_services.search.vector_plane_read_guard(state, library_id).await?;
     validate_runtime_vector_search_context(state, library_id, context).await?;
     validate_embedding_vector_dimensions(
         context.dimensions,
@@ -41,12 +43,14 @@ pub(super) async fn retrieve_entity_vector_hits(
     let raw_hits = match state
         .search_store
         .search_entity_vectors_by_similarity(
-            context.dimensions,
-            library_id,
-            &context.embedding_profile_key,
-            question_embedding,
+            VectorSimilaritySearchInput {
+                dim: context.dimensions,
+                library_id,
+                embedding_model_key: &context.embedding_profile_key,
+                query_vector: question_embedding,
+                n_probe: None,
+            },
             limit.max(1),
-            None,
         )
         .await
     {
@@ -60,7 +64,7 @@ pub(super) async fn retrieve_entity_vector_hits(
         }
         Err(error) => {
             return Err(
-                error.context("failed to search canonical entity vectors for runtime query")
+                error.context("failed to search normalized entity vectors for runtime query")
             );
         }
     };

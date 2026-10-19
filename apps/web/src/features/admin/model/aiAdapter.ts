@@ -3,8 +3,10 @@ import type {
   AiBindingResponse,
   AiScopeKind,
   ModelCatalogEntryResponse,
+  ModelPricing,
   ProviderCatalogEntryResponse,
 } from '@/shared/api/generated'
+import { parseModelCatalogResponse } from '@/shared/api/admin'
 import type {
   AIAccount,
   AIBinding,
@@ -18,6 +20,7 @@ import {
   resolveProviderCredentialPolicy,
   resolveProviderModelDiscovery,
 } from '@/shared/lib/ai-provider'
+import { parseReasoningCapability, type ReasoningCapability } from './reasoningCapability'
 
 function normalizeArray<T>(value: T[] | null | undefined): T[] {
   return Array.isArray(value) ? value : []
@@ -32,6 +35,16 @@ function scopeKind(value: AiScopeKind) {
 
 function optionalNumber(value: number | null | undefined) {
   return value ?? undefined
+}
+
+export type AdminModelOption = AIModelOption & {
+  pricing: ModelPricing
+  /**
+   * The exact pair reasoning capability this catalog row confirms, projected
+   * from its `metadataJson` for the binding selector. Display/selection only;
+   * the server owns validation.
+   */
+  reasoningCapability: ReasoningCapability
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -91,6 +104,16 @@ function mapProvider(raw: ProviderCatalogEntryResponse): AIProvider {
       raw.uiHints && typeof raw.uiHints === 'object' && !Array.isArray(raw.uiHints)
         ? (raw.uiHints as Record<string, unknown>)
         : {},
+    // `code` is absent on providers an operator created by hand, so the card
+    // falls back to the server's prose rather than rendering a missing key.
+    // A hand-made provider declares no kind either, and the safe reading is
+    // the capability gap: it never promises a listing that does not exist.
+    purposeGaps: (raw.purposeGaps ?? []).map((gap) => ({
+      purpose: gap.purpose,
+      kind: gap.kind ?? 'provider_cannot',
+      code: gap.code ?? '',
+      reason: gap.reason,
+    })),
     modelCount: 0,
     credentialCount: 0,
   }
@@ -124,13 +147,11 @@ function mapAccount(raw: AiAccountResponse, providers: AIProvider[]): AIAccount 
   }
 }
 
-function mapModelOption(raw: ModelCatalogEntryResponse): AIModelOption {
+function mapModelOption(raw: ModelCatalogEntryResponse): AdminModelOption {
   return {
     id: raw.id,
     providerCatalogId: raw.providerCatalogId,
     modelName: raw.modelName,
-    capabilityKind: raw.capabilityKind ?? '',
-    modalityKind: raw.modalityKind ?? '',
     allowedBindingPurposes: raw.allowedBindingPurposes,
     ...(optionalNumber(raw.contextWindow) !== undefined
       ? { contextWindow: raw.contextWindow as number }
@@ -147,6 +168,13 @@ function mapModelOption(raw: ModelCatalogEntryResponse): AIModelOption {
         : 'active',
     availabilityState: raw.availabilityState,
     availableAccountIds: raw.availableAccountIds,
+    reasoningCapability: parseReasoningCapability(raw.metadataJson),
+    seeded: Boolean(
+      raw.metadataJson &&
+      typeof raw.metadataJson === 'object' &&
+      'seedSource' in (raw.metadataJson as Record<string, unknown>),
+    ),
+    pricing: raw.pricing,
   }
 }
 
@@ -179,8 +207,10 @@ export function mapProviderList(
   return normalizeArray(raw).map(mapProvider)
 }
 
-export function mapModelList(raw: ModelCatalogEntryResponse[] | null | undefined): AIModelOption[] {
-  return normalizeArray(raw).map(mapModelOption)
+export function mapModelList(
+  raw: ModelCatalogEntryResponse[] | null | undefined,
+): AdminModelOption[] {
+  return parseModelCatalogResponse(raw ?? []).map(mapModelOption)
 }
 
 export function mapAccountList(

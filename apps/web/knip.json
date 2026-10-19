@@ -1,6 +1,6 @@
 {
   "$schema": "https://unpkg.com/knip@6/schema.json",
-  "entry": ["scripts/*.mjs", "src/shared/i18n/auditKeyRegistry.ts"],
+  "entry": ["scripts/*.mjs"],
   "project": ["src/**/*.{ts,tsx}", "scripts/*.mjs"],
   "ignoreDependencies": ["tailwindcss", "tw-animate-css"],
   "ignoreIssues": {

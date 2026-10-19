@@ -5,16 +5,13 @@ use sha2::{Digest as _, Sha256};
 
 use crate::{
     app::state::{AppState, McpMemorySettings},
-    domains::{
-        content::ContentMutation,
-        ingest::{WebDiscoveredPage, WebIngestRun, WebIngestRunReceipt},
-    },
+    domains::ingest::{WebDiscoveredPage, WebIngestRun, WebIngestRunReceipt},
     infra::repositories::catalog_repository::CatalogLibraryRow,
     interfaces::http::{
         auth::AuthContext,
         authorization::{
-            POLICY_DOCUMENTS_WRITE, POLICY_LIBRARY_READ, POLICY_LIBRARY_WRITE, POLICY_USAGE_READ,
-            authorize_document_permission, authorize_library_discovery,
+            POLICY_DOCUMENTS_WRITE, POLICY_LIBRARY_READ, POLICY_LIBRARY_WRITE,
+            POLICY_OPERATION_READ, authorize_document_permission, authorize_library_discovery,
             authorize_library_permission, load_async_operation_and_authorize,
         },
         router_support::ApiError,
@@ -32,6 +29,13 @@ use crate::{
     services::ingest::web::CreateWebIngestRunCommand,
     shared::extraction::file_extract::UploadAdmissionError,
     shared::outbound_http::{get_public_http_following_redirects, read_response_bytes_with_limit},
+};
+
+mod execution;
+
+pub(crate) use execution::{
+    DocumentMutationIdentity, process_append_mutation, process_replace_mutation,
+    process_upload_mutation,
 };
 
 pub(crate) async fn upload_documents(
@@ -69,12 +73,22 @@ pub(crate) async fn upload_documents(
             total_upload_bytes.saturating_add(u64::try_from(file_bytes.len()).unwrap_or(u64::MAX));
         validate_mcp_upload_batch_size(settings, total_upload_bytes)?;
 
-        let payload_identity = hash_upload_payload(
-            &file_name,
-            mime_type.as_deref(),
-            document.title.as_deref(),
-            &file_bytes,
-        );
+        let mut command = UploadInlineDocumentCommand {
+            workspace_id: library.workspace_id,
+            library_id: library.id,
+            external_key: None,
+            idempotency_key: None,
+            requested_by_principal_id: Some(auth.principal_id),
+            request_surface: "mcp".to_owned(),
+            source_identity: None,
+            file_name,
+            title: document.title,
+            document_hint: None,
+            mime_type,
+            file_bytes,
+            parent_external_key: None,
+        };
+        let payload_identity = hash_upload_payload(&command)?;
         let normalized_idempotency_key = normalize_upload_idempotency_key(
             request.idempotency_key.as_deref(),
             library.id,
@@ -82,32 +96,8 @@ pub(crate) async fn upload_documents(
             &payload_identity,
         );
 
-        if let Some(existing) = find_existing_mutation_by_idempotency(
-            auth,
-            state,
-            &normalized_idempotency_key,
-            &payload_identity,
-        )
-        .await?
-        {
-            let admission =
-                state.canonical_services.content.get_mutation_admission(state, existing.id).await?;
-            receipts.push(resolve_mutation_receipt(state, auth, &admission).await?);
-            continue;
-        }
-
-        let receipt = process_upload_mutation(
-            auth,
-            state,
-            &library,
-            normalized_idempotency_key,
-            payload_identity,
-            document.title,
-            file_name,
-            mime_type,
-            file_bytes,
-        )
-        .await?;
+        command.idempotency_key = Some(normalized_idempotency_key);
+        let receipt = process_upload_mutation(auth, state, command).await?;
         receipts.push(receipt);
     }
 
@@ -147,11 +137,24 @@ pub(crate) async fn update_document(
         ));
     }
 
-    let current_state =
-        crate::services::mcp::access::resolve_document_state(auth, state, document.document_id)
-            .await?;
-    let (operation_kind, payload_identity) = match request.operation_kind {
+    match request.operation_kind {
         McpDocumentMutationKind::Append => {
+            let base_revision_id = request
+                .base_revision_id
+                .ok_or_else(|| ApiError::invalid_mcp_tool_call("append requires baseRevisionId"))?;
+            if request.replacement_file_name.is_some()
+                || request.replacement_content_base64.is_some()
+                || request.replacement_mime_type.is_some()
+                || request.title.is_some()
+                || request.language_code.is_some()
+                || request.source_uri.is_some()
+                || request.document_hint.is_some()
+                || request.visibility_intent_id.is_some()
+            {
+                return Err(ApiError::invalid_mcp_tool_call(
+                    "append does not accept replacement metadata",
+                ));
+            }
             let appended_text = request
                 .appended_text
                 .as_deref()
@@ -160,14 +163,25 @@ pub(crate) async fn update_document(
                 .ok_or_else(|| {
                     ApiError::invalid_mcp_tool_call("append requires non-empty appendedText")
                 })?;
-            if current_state.readability_state != crate::mcp_types::McpReadabilityState::Readable {
-                return Err(ApiError::unreadable_document(
-                    current_state.status_reason.unwrap_or_else(|| {
-                        "document is not readable enough for append".to_string()
-                    }),
-                ));
-            }
-            (McpMutationOperationKind::Append, hash_append_payload(appended_text))
+            let payload_identity = hash_append_payload(base_revision_id, appended_text);
+            let idempotency_key = normalize_document_idempotency_key(
+                request.idempotency_key.as_deref(),
+                document.document_id,
+                &McpMutationOperationKind::Append,
+                &payload_identity,
+            );
+            process_append_mutation(
+                auth,
+                state,
+                &library,
+                document.document_id,
+                DocumentMutationIdentity { idempotency_key, payload_identity },
+                execution::AppendMutationPayload {
+                    base_revision_id,
+                    appended_text: request.appended_text.unwrap_or_default(),
+                },
+            )
+            .await
         }
         McpDocumentMutationKind::Replace => {
             let file_name = request
@@ -196,91 +210,43 @@ pub(crate) async fn update_document(
                 request.replacement_mime_type.as_deref(),
                 &file_bytes,
             )?;
-            (
-                McpMutationOperationKind::Replace,
-                hash_replace_payload(
-                    file_name,
-                    request.replacement_mime_type.as_deref(),
-                    &file_bytes,
-                ),
-            )
-        }
-    };
-    let mutation_kind = match request.operation_kind {
-        McpDocumentMutationKind::Append => "append",
-        McpDocumentMutationKind::Replace => "replace",
-    };
-    state
-        .canonical_services
-        .content
-        .ensure_document_accepts_new_mutation(state, document.document_id, mutation_kind)
-        .await?;
-    let normalized_idempotency_key = normalize_document_idempotency_key(
-        request.idempotency_key.as_deref(),
-        document.document_id,
-        &operation_kind,
-        &payload_identity,
-    );
-
-    if let Some(existing) = find_existing_mutation_by_idempotency(
-        auth,
-        state,
-        &normalized_idempotency_key,
-        &payload_identity,
-    )
-    .await?
-    {
-        let admission =
-            state.canonical_services.content.get_mutation_admission(state, existing.id).await?;
-        return resolve_mutation_receipt(state, auth, &admission).await;
-    }
-
-    match request.operation_kind {
-        McpDocumentMutationKind::Append => {
-            process_append_mutation(
-                auth,
-                state,
-                &library,
-                document.document_id,
-                normalized_idempotency_key,
-                payload_identity,
-                request.appended_text.unwrap_or_default(),
-            )
-            .await
-        }
-        McpDocumentMutationKind::Replace => {
-            let replacement_content_base64 = request.replacement_content_base64.unwrap_or_default();
-            let file_name =
-                request.replacement_file_name.unwrap_or_else(|| "replace.bin".to_string());
-            let file_bytes =
-                BASE64_STANDARD.decode(replacement_content_base64.trim()).map_err(|_| {
-                    ApiError::invalid_mcp_tool_call("replacementContentBase64 must be valid base64")
-                })?;
-            validate_mcp_upload_file_size(
-                settings,
-                &file_name,
-                request.replacement_mime_type.as_deref(),
-                &file_bytes,
-            )?;
-            process_replace_mutation(
-                auth,
-                state,
-                &library,
-                document.document_id,
-                normalized_idempotency_key,
-                payload_identity,
-                file_name,
-                request.replacement_mime_type,
+            if request.base_revision_id.is_some() || request.appended_text.is_some() {
+                return Err(ApiError::invalid_mcp_tool_call(
+                    "replace does not accept append input",
+                ));
+            }
+            let mut command = ReplaceInlineMutationCommand {
+                workspace_id: library.workspace_id,
+                library_id: library.id,
+                document_id: document.document_id,
+                idempotency_key: None,
+                requested_by_principal_id: Some(auth.principal_id),
+                request_surface: "mcp".to_owned(),
+                source_identity: None,
+                file_name: file_name.to_owned(),
+                title: request.title,
+                language_code: request.language_code,
+                source_uri: request.source_uri,
+                document_hint: request.document_hint,
+                mime_type: request.replacement_mime_type,
                 file_bytes,
-            )
-            .await
+                visibility_intent_id: request.visibility_intent_id,
+            };
+            let payload_identity = hash_replace_payload(&command)?;
+            command.idempotency_key = Some(normalize_document_idempotency_key(
+                request.idempotency_key.as_deref(),
+                document.document_id,
+                &McpMutationOperationKind::Replace,
+                &payload_identity,
+            ));
+            process_replace_mutation(auth, state, command).await
         }
     }
 }
 
-/// Backs the `get_operation` MCP tool. Reads the same canonical
+/// Backs the `get_operation` MCP tool. Reads the same shared
 /// `ops_async_operation` store as `GET /v1/ops/operations/{operationId}`
-/// (authorized the same way, via `POLICY_USAGE_READ`) rather than the
+/// (authorized the same way, via `POLICY_OPERATION_READ`) rather than the
 /// content-mutation-specific receipt store the old `get_mutation_status`
 /// tool used — see plan §6.3/§6.4 convergence.
 pub(crate) async fn get_operation(
@@ -288,11 +254,11 @@ pub(crate) async fn get_operation(
     state: &AppState,
     operation_id: Uuid,
 ) -> Result<McpOperationStatus, ApiError> {
-    let _ =
-        load_async_operation_and_authorize(auth, state, operation_id, POLICY_USAGE_READ).await?;
-    let operation = state.canonical_services.ops.get_async_operation(state, operation_id).await?;
+    let _ = load_async_operation_and_authorize(auth, state, operation_id, POLICY_OPERATION_READ)
+        .await?;
+    let operation = state.application_services.ops.get_async_operation(state, operation_id).await?;
     let progress =
-        state.canonical_services.ops.get_async_operation_progress(state, operation_id).await?;
+        state.application_services.ops.get_async_operation_progress(state, operation_id).await?;
     Ok(McpOperationStatus { operation, progress })
 }
 
@@ -310,7 +276,7 @@ pub(crate) async fn submit_web_ingest_run(
     )
     .await?;
     let run = state
-        .canonical_services
+        .application_services
         .web_ingest
         .create_run(
             state,
@@ -348,7 +314,7 @@ pub(crate) async fn get_web_ingest_run(
     request: McpGetWebIngestRunRequest,
 ) -> Result<WebIngestRun, ApiError> {
     auth.require_any_scope(POLICY_LIBRARY_READ)?;
-    let run = state.canonical_services.web_ingest.get_run(state, request.run_id).await?;
+    let run = state.application_services.web_ingest.get_run(state, request.run_id).await?;
     authorize_library_permission(auth, run.workspace_id, run.library_id, POLICY_LIBRARY_READ)?;
     Ok(run)
 }
@@ -359,9 +325,9 @@ pub(crate) async fn list_web_ingest_run_pages(
     request: McpListWebIngestRunPagesRequest,
 ) -> Result<Vec<WebDiscoveredPage>, ApiError> {
     auth.require_any_scope(POLICY_LIBRARY_READ)?;
-    let run = state.canonical_services.web_ingest.get_run(state, request.run_id).await?;
+    let run = state.application_services.web_ingest.get_run(state, request.run_id).await?;
     authorize_library_permission(auth, run.workspace_id, run.library_id, POLICY_LIBRARY_READ)?;
-    state.canonical_services.web_ingest.list_pages(state, request.run_id).await
+    state.application_services.web_ingest.list_pages(state, request.run_id).await
 }
 
 pub(crate) async fn cancel_web_ingest_run(
@@ -370,108 +336,9 @@ pub(crate) async fn cancel_web_ingest_run(
     request: McpCancelWebIngestRunRequest,
 ) -> Result<WebIngestRunReceipt, ApiError> {
     auth.require_any_scope(POLICY_LIBRARY_WRITE)?;
-    let run = state.canonical_services.web_ingest.get_run(state, request.run_id).await?;
+    let run = state.application_services.web_ingest.get_run(state, request.run_id).await?;
     authorize_library_permission(auth, run.workspace_id, run.library_id, POLICY_LIBRARY_WRITE)?;
-    state.canonical_services.web_ingest.cancel_run(state, request.run_id).await
-}
-
-pub(crate) async fn find_existing_mutation_by_idempotency(
-    auth: &AuthContext,
-    state: &AppState,
-    idempotency_key: &str,
-    payload_identity: &str,
-) -> Result<Option<ContentMutation>, ApiError> {
-    let existing = state
-        .canonical_services
-        .content
-        .find_mutation_by_idempotency(state, auth.principal_id, "mcp", idempotency_key)
-        .await?;
-    let Some(existing) = existing else {
-        return Ok(None);
-    };
-    ensure_matching_mutation_payload_identity(
-        state,
-        existing.id,
-        existing.source_identity.as_deref(),
-        payload_identity,
-    )
-    .await?;
-    Ok(Some(existing))
-}
-
-pub(crate) async fn ensure_matching_mutation_payload_identity(
-    state: &AppState,
-    mutation_id: Uuid,
-    existing_source_identity: Option<&str>,
-    payload_identity: &str,
-) -> Result<(), ApiError> {
-    let existing_payload_identity = if let Some(existing_source_identity) = existing_source_identity
-    {
-        Some(existing_source_identity.to_string())
-    } else {
-        let items =
-            state.canonical_services.content.list_mutation_items(state, mutation_id).await?;
-        if let Some(revision_id) = items.iter().find_map(|item| item.result_revision_id) {
-            state
-                .document_store
-                .get_revision(revision_id)
-                .await
-                .map_err(|e| ApiError::internal_with_log(e, "internal"))?
-                .and_then(|revision| {
-                    payload_identity_from_source_uri(revision.source_uri.as_deref())
-                })
-        } else {
-            return Err(ApiError::idempotency_conflict(
-                "the same idempotency key was already used before payload identity tracking was available; retry with a new idempotency key",
-            ));
-        }
-    };
-
-    if let Some(existing_payload_identity) = existing_payload_identity
-        && existing_payload_identity != payload_identity
-    {
-        return Err(ApiError::idempotency_conflict(
-            "the same idempotency key was already used with a different payload",
-        ));
-    }
-
-    Ok(())
-}
-
-pub(crate) async fn process_upload_mutation(
-    auth: &AuthContext,
-    state: &AppState,
-    library: &CatalogLibraryRow,
-    idempotency_key: String,
-    payload_identity: String,
-    title: Option<String>,
-    file_name: String,
-    mime_type: Option<String>,
-    file_bytes: Vec<u8>,
-) -> Result<McpMutationReceipt, ApiError> {
-    let admission = state
-        .canonical_services
-        .content
-        .upload_inline_document(
-            state,
-            UploadInlineDocumentCommand {
-                workspace_id: library.workspace_id,
-                library_id: library.id,
-                external_key: None,
-                idempotency_key: Some(idempotency_key),
-                requested_by_principal_id: Some(auth.principal_id),
-                request_surface: "mcp".to_string(),
-                source_identity: Some(payload_identity),
-                file_name,
-                title,
-                document_hint: None,
-                mime_type,
-                file_bytes,
-                parent_external_key: None,
-            },
-        )
-        .await?;
-    resolve_mutation_receipt(state, auth, &admission.mutation).await
+    state.application_services.web_ingest.cancel_run(state, request.run_id).await
 }
 
 fn resolve_upload_file_name(
@@ -683,162 +550,6 @@ fn normalize_inline_file_stem(title: &str) -> String {
     normalized.trim_matches('-').to_string()
 }
 
-pub(crate) async fn process_append_mutation(
-    auth: &AuthContext,
-    state: &AppState,
-    library: &CatalogLibraryRow,
-    document_id: Uuid,
-    idempotency_key: String,
-    payload_identity: String,
-    appended_text: String,
-) -> Result<McpMutationReceipt, ApiError> {
-    let admission = state
-        .canonical_services
-        .content
-        .append_inline_mutation(
-            state,
-            AppendInlineMutationCommand {
-                workspace_id: library.workspace_id,
-                library_id: library.id,
-                document_id,
-                idempotency_key: Some(idempotency_key),
-                requested_by_principal_id: Some(auth.principal_id),
-                request_surface: "mcp".to_string(),
-                source_identity: Some(payload_identity),
-                appended_text,
-            },
-        )
-        .await?;
-    resolve_mutation_receipt(state, auth, &admission).await
-}
-
-pub(crate) async fn process_replace_mutation(
-    auth: &AuthContext,
-    state: &AppState,
-    library: &CatalogLibraryRow,
-    document_id: Uuid,
-    idempotency_key: String,
-    payload_identity: String,
-    file_name: String,
-    mime_type: Option<String>,
-    file_bytes: Vec<u8>,
-) -> Result<McpMutationReceipt, ApiError> {
-    let admission = state
-        .canonical_services
-        .content
-        .replace_inline_mutation(
-            state,
-            ReplaceInlineMutationCommand {
-                workspace_id: library.workspace_id,
-                library_id: library.id,
-                document_id,
-                idempotency_key: Some(idempotency_key),
-                requested_by_principal_id: Some(auth.principal_id),
-                request_surface: "mcp".to_string(),
-                source_identity: Some(payload_identity),
-                file_name,
-                document_hint: None,
-                mime_type,
-                file_bytes,
-            },
-        )
-        .await?;
-    resolve_mutation_receipt(state, auth, &admission).await
-}
-
-/// Builds the MCP-facing receipt from a [`ContentMutationAdmission`].
-/// `operation_id` on the resulting [`McpMutationReceipt`] is the
-/// canonical async-operation id (pollable via the `get_operation` tool
-/// and `GET /v1/ops/operations/{operationId}`), falling back to the
-/// content-mutation id only for the rare case a mutation settled
-/// synchronously without ever getting an async operation row.
-pub(crate) async fn resolve_mutation_receipt(
-    state: &AppState,
-    auth: &AuthContext,
-    admission: &ContentMutationAdmission,
-) -> Result<McpMutationReceipt, ApiError> {
-    let row = &admission.mutation;
-    let items = &admission.items;
-    let mut document_id = items.iter().find_map(|item| item.document_id);
-    if document_id.is_none()
-        && let Some(revision_id) = items.iter().find_map(|item| item.result_revision_id)
-    {
-        document_id = state
-            .document_store
-            .get_revision(revision_id)
-            .await
-            .map_err(|e| ApiError::internal_with_log(e, "internal"))?
-            .map(|revision| revision.document_id);
-    }
-
-    if let Some(document_id) = document_id {
-        let document = state
-            .document_store
-            .get_document(document_id)
-            .await
-            .map_err(|e| ApiError::internal_with_log(e, "internal"))?
-            .ok_or_else(|| ApiError::resource_not_found("document", document_id))?;
-        authorize_library_discovery(auth, document.workspace_id, document.library_id)?;
-        authorize_document_permission(
-            auth,
-            document.workspace_id,
-            document.library_id,
-            document.document_id,
-            POLICY_DOCUMENTS_WRITE,
-        )?;
-    } else {
-        authorize_library_permission(auth, row.workspace_id, row.library_id, POLICY_LIBRARY_WRITE)?;
-    }
-
-    let mut status = map_content_mutation_status_to_receipt_status(&row.mutation_state);
-    let mut failure_kind = row.failure_code.clone().or_else(|| row.conflict_code.clone());
-    let last_status_at = row.completed_at.unwrap_or(row.requested_at);
-
-    if matches!(status, McpMutationReceiptStatus::Ready)
-        && let Some(document_id) = document_id
-        && let Some(result_revision_id) = items.iter().find_map(|item| item.result_revision_id)
-    {
-        let current_revision_id = state
-            .document_store
-            .get_document(document_id)
-            .await
-            .map_err(|e| ApiError::internal_with_log(e, "internal"))?
-            .and_then(|row| row.readable_revision_id);
-        if current_revision_id != Some(result_revision_id) {
-            status = McpMutationReceiptStatus::Superseded;
-        }
-    }
-
-    if matches!(status, McpMutationReceiptStatus::Failed) && failure_kind.is_none() {
-        let jobs = state
-            .canonical_services
-            .ingest
-            .list_jobs(state, Some(row.workspace_id), Some(row.library_id))
-            .await?;
-        if let Some(job) = jobs.into_iter().find(|job| job.mutation_id == Some(row.id)) {
-            let attempts = state.canonical_services.ingest.list_attempts(state, job.id).await?;
-            if let Some(attempt) = attempts.into_iter().max_by_key(|attempt| attempt.attempt_number)
-            {
-                failure_kind = attempt.failure_code.or(attempt.failure_class);
-            }
-        }
-    }
-
-    Ok(McpMutationReceipt {
-        operation_id: admission.async_operation_id.unwrap_or(row.id),
-        token_id: auth.token_id,
-        workspace_id: row.workspace_id,
-        library_id: row.library_id,
-        document_id,
-        operation_kind: parse_mutation_operation_kind(&row.operation_kind)?,
-        idempotency_key: row.idempotency_key.clone().unwrap_or_default(),
-        status,
-        accepted_at: row.requested_at,
-        last_status_at,
-        failure_kind,
-    })
-}
-
 // --- Idempotency-key / payload-hash / admission helpers ---------------
 //
 // Split out of the former `services/mcp/support.rs` god-file (plan
@@ -866,37 +577,42 @@ fn normalize_document_idempotency_key(
 ) -> String {
     let operation = operation_kind_key(operation_kind);
     match idempotency_key.map(str::trim).filter(|value| !value.is_empty()) {
-        Some(base) => format!("mcp:{operation}:{document_id}:{base}"),
+        Some(base) => format!("mcp:{operation}:{base}"),
         None => format!("mcp:{operation}:{document_id}:{payload_identity}"),
     }
 }
 
-fn hash_upload_payload(
-    file_name: &str,
-    mime_type: Option<&str>,
-    title: Option<&str>,
-    file_bytes: &[u8],
-) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(file_name.as_bytes());
-    hasher.update(mime_type.unwrap_or_default().as_bytes());
-    hasher.update(title.unwrap_or_default().as_bytes());
-    hasher.update(file_bytes);
-    hex::encode(hasher.finalize())
+fn hash_upload_payload(command: &UploadInlineDocumentCommand) -> Result<String, ApiError> {
+    hash_semantic_identity(&serde_json::json!({
+        "workspaceId": command.workspace_id,
+        "libraryId": command.library_id,
+        "replacement": command.replacement_identity()?,
+        "externalKey": command.external_key,
+        "parentExternalKey": command.parent_external_key,
+    }))
 }
 
-fn hash_append_payload(appended_text: &str) -> String {
+fn hash_append_payload(base_revision_id: Uuid, appended_text: &str) -> String {
     let mut hasher = Sha256::new();
+    hasher.update(base_revision_id.as_bytes());
     hasher.update(appended_text.as_bytes());
     hex::encode(hasher.finalize())
 }
 
-fn hash_replace_payload(file_name: &str, mime_type: Option<&str>, file_bytes: &[u8]) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(file_name.as_bytes());
-    hasher.update(mime_type.unwrap_or_default().as_bytes());
-    hasher.update(file_bytes);
-    hex::encode(hasher.finalize())
+fn hash_replace_payload(command: &ReplaceInlineMutationCommand) -> Result<String, ApiError> {
+    hash_semantic_identity(&serde_json::json!({
+        "workspaceId": command.workspace_id,
+        "libraryId": command.library_id,
+        "documentId": command.document_id,
+        "replacement": command.replacement_identity()?,
+        "visibilityIntentId": command.visibility_intent_id,
+    }))
+}
+
+fn hash_semantic_identity(value: &serde_json::Value) -> Result<String, ApiError> {
+    let bytes = serde_json::to_vec(value)
+        .map_err(|error| ApiError::internal_with_log(error, "mutation identity"))?;
+    Ok(hex::encode(Sha256::digest(bytes)))
 }
 
 fn validate_mcp_upload_file_size(
@@ -952,15 +668,10 @@ fn map_content_mutation_status_to_receipt_status(mutation_state: &str) -> McpMut
         "accepted" => McpMutationReceiptStatus::Accepted,
         "running" => McpMutationReceiptStatus::Processing,
         "applied" => McpMutationReceiptStatus::Ready,
-        "failed" | "conflicted" | "canceled" => McpMutationReceiptStatus::Failed,
+        "failed" | "canceled" => McpMutationReceiptStatus::Failed,
         _ => McpMutationReceiptStatus::Accepted,
     }
 }
 
-fn payload_identity_from_source_uri(source_uri: Option<&str>) -> Option<String> {
-    source_uri
-        .and_then(|value| {
-            value.strip_prefix("mcp://payload/").or_else(|| value.strip_prefix("inline://payload/"))
-        })
-        .map(ToString::to_string)
-}
+#[cfg(test)]
+mod tests;

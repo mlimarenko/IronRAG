@@ -14,7 +14,7 @@
 //! ticks see the slot already claimed and skip the block entirely. The
 //! maintenance work remains correct because graph projection is committed
 //! before document finalization and maintenance only has to eventually catch
-//! up with that canonical graph state.
+//! up with that published graph state.
 //!
 //! The bounded throttle lives in process-local state (a `Mutex<HashMap>`)
 //! because it guards a process-local CPU hot path — cross-worker

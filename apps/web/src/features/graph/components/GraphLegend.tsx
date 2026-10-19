@@ -1,251 +1,140 @@
-import { memo, useCallback, useMemo } from 'react'
-import type { TFunction } from 'i18next'
-import { Eye, EyeOff, Layers, RotateCcw } from 'lucide-react'
-import { GRAPH_NODE_COLORS } from '@/features/graph/model/config'
-import { NO_SUBTYPE_KEY, type TypeLegendMap } from '../model/typeLegend'
-
-const SUBTYPE_PREVIEW_LIMIT = 12
-
-function subtypeLegendLabel(t: TFunction, subType: string): string {
-  return subType === NO_SUBTYPE_KEY ? t('graph.noSubType') : subType
-}
+import { Eye, EyeOff } from 'lucide-react'
+import { memo, useMemo, useState, type Dispatch, type MouseEvent, type SetStateAction } from 'react'
+import { useTranslation } from 'react-i18next'
+import { humanizeToken } from '@/shared/lib/enumLabels'
+import { GRAPH_NODE_COLORS } from '../model/config'
+import {
+  NO_SUBTYPE_KEY,
+  isolateLegendSubType,
+  isolateLegendType,
+  legendSubtypes,
+  subtypeFilterKey,
+  toggleLegendSubType,
+  toggleLegendType,
+  type LegendFilter,
+  type TypeLegendMap,
+} from '../model/typeLegend'
 
 type GraphLegendProps = Readonly<{
-  t: TFunction
   legend: TypeLegendMap
-  legendOpen: boolean
-  setLegendOpen: (open: boolean) => void
-  hiddenTypes: Set<string>
-  setHiddenTypes: (updater: (prev: Set<string>) => Set<string>) => void
-  hiddenSubTypes: Set<string>
-  setHiddenSubTypes: (updater: (prev: Set<string>) => Set<string>) => void
-  expandedSubtypeGroups: Set<string>
-  setExpandedSubtypeGroups: (updater: (prev: Set<string>) => Set<string>) => void
+  filter: LegendFilter
+  onFilterChange: Dispatch<SetStateAction<LegendFilter>>
+  onShowAll: () => void
 }>
 
-function GraphLegendImpl({
-  t,
-  legend,
-  legendOpen,
-  setLegendOpen,
-  hiddenTypes,
-  setHiddenTypes,
-  hiddenSubTypes,
-  setHiddenSubTypes,
-  expandedSubtypeGroups,
-  setExpandedSubtypeGroups,
-}: GraphLegendProps) {
-  const handleShowAll = useCallback(() => {
-    setHiddenTypes(() => new Set())
-    setHiddenSubTypes(() => new Set())
-  }, [setHiddenTypes, setHiddenSubTypes])
+const DEFAULT_VISIBLE_SUBTYPES = 6
 
-  const handleInvert = useCallback(() => {
-    setHiddenTypes((prev) => {
-      const allTypes = Object.keys(GRAPH_NODE_COLORS)
-      const next = new Set<string>()
-      for (const tp of allTypes) {
-        if (!prev.has(tp)) next.add(tp)
-      }
-      return next
-    })
-  }, [setHiddenTypes])
+/** Ctrl (or ⌘ on macOS) inverts a legend click into "show only this". */
+function isIsolateClick(event: MouseEvent): boolean {
+  return event.ctrlKey || event.metaKey
+}
 
-  const handleTypeClick = useCallback(
-    (type: string, meta: boolean) => {
-      if (meta) {
-        setHiddenTypes((prev) => {
-          const next = new Set(prev)
-          if (next.has(type)) next.delete(type)
-          else next.add(type)
-          return next
-        })
-        return
-      }
-      const allTypes = Object.keys(GRAPH_NODE_COLORS)
-      const othersHidden = allTypes.filter((t2) => t2 !== type).every((t2) => hiddenTypes.has(t2))
-      if (othersHidden && !hiddenTypes.has(type)) {
-        setHiddenTypes(() => new Set())
-        setHiddenSubTypes(() => new Set())
-      } else {
-        setHiddenTypes(() => new Set(allTypes.filter((t2) => t2 !== type)))
-        setHiddenSubTypes(() => new Set())
-      }
-    },
-    [hiddenTypes, setHiddenTypes, setHiddenSubTypes],
+function GraphLegendImpl({ legend, filter, onFilterChange, onShowAll }: GraphLegendProps) {
+  const { t } = useTranslation()
+  const [expandedTypes, setExpandedTypes] = useState<Set<string>>(new Set())
+  const types = useMemo(
+    () =>
+      Array.from(legend.entries())
+        .filter(([, stats]) => stats.count > 0)
+        .sort((left, right) => right[1].count - left[1].count)
+        .map(([type]) => type),
+    [legend],
   )
-
-  const handleSubtypeClick = useCallback(
-    (type: string, sub: string, siblingKeys: string[], meta: boolean) => {
-      const subKey = `${type}:${sub}`
-      if (meta) {
-        setHiddenSubTypes((prev) => {
-          const next = new Set(prev)
-          if (next.has(subKey)) next.delete(subKey)
-          else next.add(subKey)
-          return next
-        })
-        return
-      }
-      if (siblingKeys.length === 1) {
-        setHiddenSubTypes((prev) => {
-          const next = new Set(prev)
-          if (next.has(subKey)) next.delete(subKey)
-          else next.add(subKey)
-          return next
-        })
-        return
-      }
-      const othersHidden = siblingKeys
-        .filter((k) => k !== subKey)
-        .every((k) => hiddenSubTypes.has(k))
-      if (othersHidden && !hiddenSubTypes.has(subKey)) {
-        setHiddenSubTypes((prev) => {
-          const next = new Set(prev)
-          for (const k of siblingKeys) next.delete(k)
-          return next
-        })
-      } else {
-        setHiddenSubTypes((prev) => {
-          const next = new Set(prev)
-          for (const k of siblingKeys) {
-            if (k === subKey) next.delete(k)
-            else next.add(k)
-          }
-          return next
-        })
-      }
-    },
-    [hiddenSubTypes, setHiddenSubTypes],
-  )
-
-  const toggleGroupExpanded = useCallback(
-    (type: string) => {
-      setExpandedSubtypeGroups((prev) => {
-        const next = new Set(prev)
-        if (next.has(type)) next.delete(type)
-        else next.add(type)
-        return next
-      })
-    },
-    [setExpandedSubtypeGroups],
-  )
-
-  // Pre-compute the entries list once per legend change so the render pass
-  // only walks it.
-  const typeEntries = useMemo(() => Object.entries(GRAPH_NODE_COLORS), [])
-
-  if (!legendOpen) {
-    return (
-      <button
-        onClick={() => setLegendOpen(true)}
-        className="absolute left-3 top-3 cursor-pointer workbench-surface p-2 transition-colors hover:bg-muted"
-        title={t('graph.showLegend')}
-      >
-        <Layers className="h-4 w-4 text-muted-foreground" />
-      </button>
-    )
-  }
 
   return (
-    <div className="absolute bottom-3 left-3 top-3 flex max-h-[calc(100%-24px)] min-w-[150px] max-w-[250px] flex-col overflow-y-auto workbench-surface text-xs">
-      <div className="flex items-center gap-1 border-b px-3 py-2">
-        <span className="section-label flex-1">{t('graph.legend')}</span>
-        <button
-          onClick={handleShowAll}
-          className="cursor-pointer rounded p-1 transition-colors hover:bg-muted"
-          title={t('graph.showAll')}
-        >
-          <Eye className="h-3.5 w-3.5 text-muted-foreground" />
-        </button>
-        <button
-          onClick={handleInvert}
-          className="cursor-pointer rounded p-1 transition-colors hover:bg-muted"
-          title={t('graph.invert')}
-        >
-          <RotateCcw className="h-3.5 w-3.5 text-muted-foreground" />
-        </button>
-        <button
-          onClick={() => setLegendOpen(false)}
-          className="cursor-pointer rounded p-1 transition-colors hover:bg-muted"
-          title={t('graph.hideLegend')}
-        >
-          <EyeOff className="h-3.5 w-3.5 text-muted-foreground" />
+    <aside className="graph-legend" aria-label={t('graph.legend')}>
+      <div className="legend-heading">
+        <strong>{t('graph.legend')}</strong>
+        <button type="button" onClick={onShowAll}>
+          {t('graph.showAll')}
         </button>
       </div>
-
-      <div className="px-2 py-1.5 flex-1 overflow-y-auto">
-        {typeEntries.map(([type, color]) => {
-          const isHidden = hiddenTypes.has(type)
+      <p className="graph-legend__hint">{t('graph.legendHint')}</p>
+      <div className="graph-legend__list">
+        {types.map((type) => {
           const stats = legend.get(type)
-          const count = stats?.count ?? 0
-          if (count === 0 && type !== 'document') return null
-          const realSubs = stats?.subs
-            ? Array.from(stats.subs.entries()).sort((a, b) => b[1] - a[1])
-            : []
-          const subs =
-            stats && stats.noSubtypeCount > 0 && realSubs.length > 0
-              ? [...realSubs, [NO_SUBTYPE_KEY, stats.noSubtypeCount] as const]
-              : realSubs
-          const isSubtypeGroupExpanded = expandedSubtypeGroups.has(type)
-          const visibleSubs = isSubtypeGroupExpanded ? subs : subs.slice(0, SUBTYPE_PREVIEW_LIMIT)
-          const hiddenSubtypeCount = Math.max(0, subs.length - SUBTYPE_PREVIEW_LIMIT)
-          const siblingKeys = subs.map(([s]) => `${type}:${s}`)
+          const isHidden = filter.hiddenTypes.has(type)
+          const subTypes = legendSubtypes(stats)
+          const isExpanded = expandedTypes.has(type)
+          const visibleSubTypes = isExpanded
+            ? subTypes
+            : subTypes.slice(0, DEFAULT_VISIBLE_SUBTYPES)
+          const hiddenSubtypeCount = subTypes.length - visibleSubTypes.length
+
           return (
-            <div key={type} className={`mb-0.5 ${isHidden ? 'opacity-35' : ''}`}>
+            <div className={`graph-legend__group ${isHidden ? 'is-hidden' : ''}`} key={type}>
               <button
-                className={`flex items-center gap-1.5 w-full px-2 py-1 rounded-md transition-all cursor-pointer ${
-                  isHidden ? 'line-through' : 'hover:bg-muted'
-                }`}
-                onClick={(e) => handleTypeClick(type, e.ctrlKey || e.metaKey)}
-                title={t(`graph.nodeTypes.${type}`)}
+                className="graph-legend__type"
+                type="button"
+                aria-pressed={!isHidden}
+                onClick={(event) => {
+                  const isolate = isIsolateClick(event)
+                  onFilterChange((current) =>
+                    isolate
+                      ? isolateLegendType(current, legend, type)
+                      : toggleLegendType(current, type),
+                  )
+                }}
               >
-                <span className="w-2.5 h-2.5 rounded-full shrink-0" style={{ background: color }} />
-                <span className="font-semibold truncate">{t(`graph.nodeTypes.${type}`)}</span>
-                <span className="ml-auto tabular-nums text-muted-foreground">{count}</span>
+                <span
+                  className="node-swatch"
+                  style={{ backgroundColor: GRAPH_NODE_COLORS[type] ?? GRAPH_NODE_COLORS.entity }}
+                />
+                <span>{t(`graph.nodeTypes.${type}`)}</span>
+                <small>{stats?.count ?? 0}</small>
+                {isHidden ? <EyeOff size={12} /> : <Eye size={12} />}
               </button>
-              {subs.length > 0 && !isHidden && (
-                <div className="pl-6 pr-1 mt-0.5 mb-1">
-                  <div className="flex flex-wrap gap-x-1.5 gap-y-0.5">
-                    {visibleSubs.map(([sub, subCount]) => {
-                      const subKey = `${type}:${sub}`
-                      const isSubHidden = hiddenSubTypes.has(subKey)
-                      return (
-                        <button
-                          key={sub}
-                          className={`text-2xs whitespace-nowrap cursor-pointer rounded px-1 py-0.5 transition-colors ${
-                            isSubHidden
-                              ? 'opacity-35 line-through text-muted-foreground'
-                              : 'text-muted-foreground hover:bg-muted'
-                          }`}
-                          onClick={(e) => {
-                            e.stopPropagation()
-                            handleSubtypeClick(type, sub, siblingKeys, e.ctrlKey || e.metaKey)
-                          }}
-                          title={subtypeLegendLabel(t, sub)}
-                        >
-                          <span
-                            className="inline-block w-1.5 h-1.5 rounded-full mr-0.5 align-middle"
-                            style={{ background: color, opacity: 0.6 }}
-                          />
-                          {subtypeLegendLabel(t, sub)}{' '}
-                          <span className="tabular-nums">{subCount}</span>
-                        </button>
-                      )
-                    })}
-                  </div>
-                  {subs.length > SUBTYPE_PREVIEW_LIMIT && (
+              {!isHidden && subTypes.length > 0 && (
+                <div className="graph-legend__subtypes">
+                  {visibleSubTypes.map(([subType, count]) => {
+                    const key = subtypeFilterKey(type, subType)
+                    const hidden = filter.hiddenSubTypes.has(key)
+                    return (
+                      <button
+                        type="button"
+                        className={hidden ? 'is-hidden' : ''}
+                        aria-pressed={!hidden}
+                        key={key}
+                        onClick={(event) => {
+                          const isolate = isIsolateClick(event)
+                          onFilterChange((current) =>
+                            isolate
+                              ? isolateLegendSubType(current, legend, type, key)
+                              : toggleLegendSubType(current, key),
+                          )
+                        }}
+                      >
+                        <span>
+                          {subType === NO_SUBTYPE_KEY
+                            ? t('graph.noSubType')
+                            : humanizeToken(subType)}
+                        </span>
+                        <small>{count}</small>
+                      </button>
+                    )
+                  })}
+                  {hiddenSubtypeCount > 0 && (
                     <button
                       type="button"
-                      className="mt-1 inline-flex h-6 items-center rounded-md px-1.5 text-2xs font-medium text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
-                      onClick={(e) => {
-                        e.stopPropagation()
-                        toggleGroupExpanded(type)
-                      }}
+                      className="graph-legend__more"
+                      onClick={() => setExpandedTypes((current) => new Set(current).add(type))}
                     >
-                      {isSubtypeGroupExpanded
-                        ? t('graph.hideSubTypes')
-                        : t('graph.showAllSubTypes', { count: hiddenSubtypeCount })}
+                      {t('graph.moreSubtypes', { count: hiddenSubtypeCount })}
+                    </button>
+                  )}
+                  {isExpanded && subTypes.length > DEFAULT_VISIBLE_SUBTYPES && (
+                    <button
+                      type="button"
+                      className="graph-legend__more"
+                      onClick={() =>
+                        setExpandedTypes((current) => {
+                          const next = new Set(current)
+                          next.delete(type)
+                          return next
+                        })
+                      }
+                    >
+                      {t('graph.showLess')}
                     </button>
                   )}
                 </div>
@@ -254,7 +143,7 @@ function GraphLegendImpl({
           )
         })}
       </div>
-    </div>
+    </aside>
   )
 }
 

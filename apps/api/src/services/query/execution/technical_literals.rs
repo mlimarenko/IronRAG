@@ -9,7 +9,7 @@ pub(super) use super::technical_literal_extractors::{
     extract_parameter_literals, extract_prefix_literals, extract_url_literals, push_unique_limited,
 };
 pub(super) use super::technical_literal_focus::{
-    document_local_focus_keywords, select_document_balanced_chunks,
+    DocumentBalancedChunkSelection, document_local_focus_keywords, select_document_balanced_chunks,
     technical_chunk_selection_score, technical_keyword_weight,
     technical_literal_focus_keyword_segments, technical_literal_focus_keywords,
 };

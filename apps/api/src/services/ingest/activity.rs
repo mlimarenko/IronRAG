@@ -123,6 +123,10 @@ impl IngestActivityService {
         graph_ready: bool,
         now: DateTime<Utc>,
     ) -> RuntimeDocumentActivityStatus {
+        if document_head_has_no_recorded_work(latest_mutation, latest_job, text_ready, graph_ready)
+        {
+            return RuntimeDocumentActivityStatus::Stalled;
+        }
         let signal = document_activity_signal(latest_mutation, latest_job, text_ready, graph_ready);
         self.derive_status(
             signal.run_status,
@@ -142,6 +146,10 @@ impl IngestActivityService {
         graph_ready: bool,
         now: DateTime<Utc>,
     ) -> Option<String> {
+        if document_head_has_no_recorded_work(latest_mutation, latest_job, text_ready, graph_ready)
+        {
+            return Some("admitted without content; no ingest work exists".to_string());
+        }
         let signal = document_activity_signal(latest_mutation, latest_job, text_ready, graph_ready);
         self.stalled_reason(
             signal.run_status,
@@ -151,6 +159,27 @@ impl IngestActivityService {
             now,
         )
     }
+}
+
+/// True when nothing about this document's pipeline history is knowable: no
+/// ingest job, no mutation, and no readable content either way. Distinct from
+/// every other shape `document_activity_signal` maps to `Queued` — those
+/// always carry a `claimed_at` (from the job or the mutation) that lets
+/// `derive_status`'s idle timer age the document into `Stalled` on its own.
+/// This one carries neither, so without this check it is `Queued` forever.
+///
+/// Reached only by documents whose `content_document_head.latest_mutation_id`
+/// is unset — every live admission path (`admit_content_with_failpoint` /
+/// `promote_pending_head`) has written that column unconditionally since the
+/// atomic-admission refactor of 2026-07-15; the six documents this shape was
+/// found on all predate it (IRG-107).
+fn document_head_has_no_recorded_work(
+    latest_mutation: Option<&ContentMutation>,
+    latest_job: Option<&ContentDocumentPipelineJob>,
+    text_ready: bool,
+    graph_ready: bool,
+) -> bool {
+    latest_mutation.is_none() && latest_job.is_none() && !text_ready && !graph_ready
 }
 
 struct DocumentActivitySignal<'a> {
@@ -179,7 +208,7 @@ fn document_activity_signal<'a>(
     if let Some(mutation) = latest_mutation {
         let run_status = match mutation.mutation_state.as_str() {
             "accepted" | "running" => RuntimeIngestionStatus::Processing,
-            "failed" | "conflicted" => RuntimeIngestionStatus::Failed,
+            "failed" => RuntimeIngestionStatus::Failed,
             "canceled" => ready_ingestion_status(text_ready, graph_ready)
                 .unwrap_or(RuntimeIngestionStatus::Failed),
             _ if graph_ready => RuntimeIngestionStatus::Ready,
@@ -386,25 +415,35 @@ mod tests {
         );
     }
 
-    #[test]
-    fn applied_document_mutation_without_job_is_ready_when_text_is_readable() {
-        let service = IngestActivityService::default();
-        let now = Utc::now();
-        let mutation = ContentMutation {
+    fn mutation_fixture(
+        operation_kind: &str,
+        mutation_state: &str,
+        requested_secs_ago: i64,
+        completed_secs_ago: i64,
+        now: chrono::DateTime<Utc>,
+    ) -> ContentMutation {
+        ContentMutation {
             id: Uuid::now_v7(),
             workspace_id: Uuid::now_v7(),
             library_id: Uuid::now_v7(),
-            operation_kind: "web_capture".to_string(),
-            mutation_state: "applied".to_string(),
-            requested_at: now - Duration::seconds(10),
-            completed_at: Some(now - Duration::seconds(5)),
+            operation_kind: operation_kind.to_string(),
+            mutation_state: mutation_state.to_string(),
+            requested_at: now - Duration::seconds(requested_secs_ago),
+            completed_at: Some(now - Duration::seconds(completed_secs_ago)),
             requested_by_principal_id: None,
             request_surface: "test".to_string(),
             idempotency_key: None,
             source_identity: None,
             failure_code: None,
             conflict_code: None,
-        };
+        }
+    }
+
+    #[test]
+    fn applied_document_mutation_without_job_is_ready_when_text_is_readable() {
+        let service = IngestActivityService::default();
+        let now = Utc::now();
+        let mutation = mutation_fixture("web_capture", "applied", 10, 5, now);
 
         assert_eq!(
             service.derive_document_activity(Some(&mutation), None, true, false, now),
@@ -446,21 +485,7 @@ mod tests {
     fn canceled_mutation_is_ready_when_text_is_already_readable() {
         let service = IngestActivityService::default();
         let now = Utc::now();
-        let mutation = ContentMutation {
-            id: Uuid::now_v7(),
-            workspace_id: Uuid::now_v7(),
-            library_id: Uuid::now_v7(),
-            operation_kind: "upload".to_string(),
-            mutation_state: "canceled".to_string(),
-            requested_at: now - Duration::seconds(600),
-            completed_at: Some(now - Duration::seconds(300)),
-            requested_by_principal_id: None,
-            request_surface: "test".to_string(),
-            idempotency_key: None,
-            source_identity: None,
-            failure_code: None,
-            conflict_code: None,
-        };
+        let mutation = mutation_fixture("upload", "canceled", 600, 300, now);
 
         assert_eq!(
             service.derive_document_activity(Some(&mutation), None, true, false, now),
@@ -494,6 +519,21 @@ mod tests {
         assert_eq!(
             service.derive_document_activity(None, Some(&job), false, false, now),
             RuntimeDocumentActivityStatus::Failed
+        );
+    }
+
+    #[test]
+    fn document_with_no_mutation_no_job_and_no_readable_content_is_stalled() {
+        let service = IngestActivityService::default();
+        let now = Utc::now();
+
+        assert_eq!(
+            service.derive_document_activity(None, None, false, false, now),
+            RuntimeDocumentActivityStatus::Stalled
+        );
+        assert_eq!(
+            service.document_stalled_reason(None, None, false, false, now),
+            Some("admitted without content; no ingest work exists".to_string())
         );
     }
 }

@@ -1,4 +1,4 @@
-//! Canonical HTTP surface for whole-workspace snapshot export and import.
+//! Primary HTTP surface for whole-workspace snapshot export and import.
 //!
 //! This is a materially different granularity than the per-library snapshot
 //! in `content::snapshot` (that one archives a single library; this one
@@ -28,6 +28,7 @@ use axum::{
     routing::MethodRouter,
 };
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use tracing::Instrument;
 use uuid::Uuid;
 
@@ -40,13 +41,15 @@ use crate::{
             POLICY_WORKSPACE_ADMIN, POLICY_WORKSPACE_READ, load_workspace_and_authorize,
         },
         content::snapshot::{
-            SnapshotBodySpool, mark_snapshot_import_operation_failed,
-            mark_snapshot_import_operation_ready, spool_snapshot_body,
+            SnapshotBodySpool, authorize_snapshot_history_export,
+            mark_snapshot_import_operation_failed, mark_snapshot_import_operation_ready,
+            snapshot_result_payload, spool_snapshot_body,
         },
         router_support::ApiError,
     },
     services::content::service::snapshot::{
-        IncludeKind, OverwriteMode, export_workspace_archive, restore_workspace_archive,
+        IncludeKind, OverwriteMode, SnapshotImportError, WorkspaceSnapshotImportReport,
+        export_workspace_archive, restore_workspace_archive,
     },
     services::ops::service::CreateAsyncOperationCommand,
 };
@@ -78,6 +81,59 @@ pub struct WorkspaceSnapshotImportAcceptedResponse {
     pub archive_bytes: u64,
 }
 
+/// What a settled workspace-snapshot import wrote, published as the operation's
+/// `resultJson`. The per-library breakdown is the same shape the library-scoped
+/// import publishes, so one poller reads both.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceSnapshotImportReportResponse {
+    pub workspace_id: Uuid,
+    pub overwrite_mode: OverwriteMode,
+    pub libraries_restored: u64,
+    pub libraries: Vec<WorkspaceLibraryImportReportResponse>,
+    pub blobs_verified: u64,
+    pub unverifiable_blobs: u64,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceLibraryImportReportResponse {
+    pub library_id: Uuid,
+    pub slug: String,
+    pub postgres_rows_by_table: BTreeMap<String, u64>,
+    pub blobs_restored: u64,
+    pub blobs_verified: u64,
+    pub unverifiable_blobs: u64,
+}
+
+impl From<&WorkspaceSnapshotImportReport> for WorkspaceSnapshotImportReportResponse {
+    fn from(report: &WorkspaceSnapshotImportReport) -> Self {
+        Self {
+            workspace_id: report.workspace_id,
+            overwrite_mode: report.overwrite_mode,
+            libraries_restored: report.libraries_restored,
+            libraries: report
+                .libraries
+                .iter()
+                .map(|library| WorkspaceLibraryImportReportResponse {
+                    library_id: library.library_id,
+                    slug: library.slug.clone(),
+                    postgres_rows_by_table: library
+                        .postgres_rows_by_table
+                        .iter()
+                        .cloned()
+                        .collect(),
+                    blobs_restored: library.blobs_restored,
+                    blobs_verified: library.blobs_verified,
+                    unverifiable_blobs: library.unverifiable_blobs,
+                })
+                .collect(),
+            blobs_verified: report.blobs_verified,
+            unverifiable_blobs: report.unverifiable_blobs,
+        }
+    }
+}
+
 fn spawn_workspace_snapshot_import_worker(
     state: AppState,
     operation_id: Uuid,
@@ -89,10 +145,11 @@ fn spawn_workspace_snapshot_import_worker(
         async move {
             let archive_bytes = spooled.bytes_written;
             let result = Box::pin(async {
-                let reader = spooled.open().await?;
-                Box::pin(restore_workspace_archive(&state, workspace_id, reader, overwrite))
+                let reader = spooled
+                    .open()
                     .await
-                    .map_err(ApiError::from)
+                    .map_err(|error| SnapshotImportError::new(anyhow::Error::new(error)))?;
+                Box::pin(restore_workspace_archive(&state, workspace_id, reader, overwrite)).await
             })
             .await;
 
@@ -103,18 +160,39 @@ fn spawn_workspace_snapshot_import_worker(
                         operation_id = %operation_id,
                         archive_bytes,
                         libraries_restored = report.libraries_restored,
+                        blobs_verified = report.blobs_verified,
+                        unverifiable_blobs = report.unverifiable_blobs,
                         "workspace snapshot import restored from spooled request body",
                     );
-                    mark_snapshot_import_operation_ready(&state, operation_id).await;
+                    if report.unverifiable_blobs > 0 {
+                        tracing::warn!(
+                            workspace_id = %report.workspace_id,
+                            operation_id = %operation_id,
+                            unverifiable_blobs = report.unverifiable_blobs,
+                            blobs_verified = report.blobs_verified,
+                            "workspace snapshot import accepted blobs whose bytes could not be proven against content_revision.checksum; \
+                             this check only proves the archive is internally consistent, not that it is authentic, \
+                             because substituting both a blob and its checksum would also pass it",
+                        );
+                    }
+                    let payload = snapshot_result_payload(
+                        &WorkspaceSnapshotImportReportResponse::from(&report),
+                    );
+                    mark_snapshot_import_operation_ready(&state, operation_id, payload).await;
                 }
-                Err(error) => {
+                Err(failure) => {
                     tracing::error!(
                         %operation_id,
                         %workspace_id,
-                        error = ?error,
+                        failure_code = failure.failure_code(),
                         "workspace snapshot import worker failed",
                     );
-                    mark_snapshot_import_operation_failed(&state, operation_id).await;
+                    mark_snapshot_import_operation_failed(
+                        &state,
+                        operation_id,
+                        failure.failure_code(),
+                    )
+                    .await;
                 }
             }
         }
@@ -157,6 +235,7 @@ pub async fn export_workspace_snapshot(
     Path(workspace_id): Path<Uuid>,
     Query(query): Query<ExportQuery>,
 ) -> Result<Response, ApiError> {
+    authorize_snapshot_history_export(&auth)?;
     let workspace =
         load_workspace_and_authorize(&auth, &state, workspace_id, POLICY_WORKSPACE_READ).await?;
 
@@ -181,17 +260,15 @@ pub async fn export_workspace_snapshot(
     tokio::spawn(async move {
         match join.await {
             Ok(Ok(())) => {}
-            Ok(Err(error)) => {
+            Ok(Err(_error)) => {
                 tracing::error!(
                     workspace_id = %observer_ws_id,
-                    error = format!("{error:#}"),
                     "workspace snapshot export failed",
                 );
             }
-            Err(join_error) => {
+            Err(_join_error) => {
                 tracing::error!(
                     workspace_id = %observer_ws_id,
-                    error = format!("{join_error}"),
                     "workspace snapshot export task panicked or was cancelled",
                 );
             }
@@ -243,7 +320,7 @@ pub async fn export_workspace_snapshot(
         description = "Plain tar archive previously emitted by GET /v1/catalog/workspaces/{workspaceId}/snapshot",
     ),
     responses(
-        (status = 202, description = "Workspace snapshot import accepted; poll /v1/ops/operations/{operationId}", body = WorkspaceSnapshotImportAcceptedResponse),
+        (status = 202, description = "Workspace snapshot import accepted; poll /v1/ops/operations/{operationId} until it is terminal. A failed bundle deletes the libraries it created, and its `failureCode` names the reason (`snapshot_target_populated`, `snapshot_source_already_present`, `snapshot_unsupported_schema_version`, `snapshot_archive_invalid`, or `snapshot_import_failed`)", body = WorkspaceSnapshotImportAcceptedResponse),
         (status = 401, description = "Caller is not authenticated"),
         (status = 403, description = "Caller is not authorized for the workspace"),
         (status = 404, description = "Workspace not found"),
@@ -256,6 +333,7 @@ pub async fn import_workspace_snapshot(
     Query(query): Query<ImportQuery>,
     body: Body,
 ) -> Result<Response, ApiError> {
+    authorize_snapshot_history_export(&auth)?;
     let workspace =
         load_workspace_and_authorize(&auth, &state, workspace_id, POLICY_WORKSPACE_ADMIN).await?;
 
@@ -264,7 +342,7 @@ pub async fn import_workspace_snapshot(
     let spooled = spool_snapshot_body(body, "workspace").await?;
     let archive_bytes = spooled.bytes_written;
     let operation = state
-        .canonical_services
+        .application_services
         .ops
         .create_async_operation(
             &state,

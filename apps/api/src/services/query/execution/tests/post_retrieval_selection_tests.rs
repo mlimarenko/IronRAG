@@ -57,7 +57,6 @@ fn raw_acronym_how_to_does_not_select_commands_from_an_unbound_sibling() {
     );
 
     let answer = super::super::answer::build_update_procedure_sequence_answer(
-        question,
         &acronym_how_to_ir(question, "ZX"),
         &[relevant, distractor],
     );
@@ -85,7 +84,6 @@ fn lowercase_short_structured_identity_still_requires_bound_evidence() {
     );
 
     let answer = super::super::answer::build_update_procedure_sequence_answer(
-        question,
         &acronym_how_to_ir(question, "zx"),
         &[relevant, distractor],
     );
@@ -110,7 +108,7 @@ fn literal_provenance_uses_the_same_direct_acronym_binding_guard() {
          1. Remove sample-keyboard-utils.\n\
          2. Install sample-keyboard-utils.",
     );
-    let evidence = CanonicalAnswerEvidence {
+    let evidence = AuthoritativeAnswerEvidence {
         bundle: None,
         chunk_rows: Vec::new(),
         structured_blocks: Vec::new(),
@@ -141,7 +139,7 @@ fn deterministic_answer_keeps_a_bound_direct_acronym_procedure() {
          2. Attach the ZX adapter.\n\
          3. Restart the ZX worker.",
     );
-    let evidence = CanonicalAnswerEvidence {
+    let evidence = AuthoritativeAnswerEvidence {
         bundle: None,
         chunk_rows: Vec::new(),
         structured_blocks: Vec::new(),
@@ -172,7 +170,6 @@ fn direct_acronym_does_not_match_a_lowercase_ordinary_word() {
     );
 
     let answer = super::super::answer::build_update_procedure_sequence_answer(
-        question,
         &acronym_how_to_ir(question, "AS"),
         &[unrelated],
     );
@@ -206,7 +203,6 @@ fn full_subject_identity_beats_a_colliding_generated_acronym() {
     exact.score = Some(1.0);
 
     let answer = super::super::answer::build_update_procedure_sequence_answer(
-        question,
         &acronym_how_to_ir(question, "Alpha Service"),
         &[colliding, exact],
     )
@@ -255,7 +251,6 @@ fn generic_target_runbook_beats_a_repeated_incidental_step_in_a_specialized_runb
     query_ir.target_types = vec![QueryTargetKind::Procedure, QueryTargetKind::Version];
 
     let answer = super::super::answer::build_update_procedure_sequence_answer(
-        question,
         &query_ir,
         &[specialized, duplicated_projection, generic],
     )

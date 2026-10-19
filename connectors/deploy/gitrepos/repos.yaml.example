@@ -1,0 +1,95 @@
+# Tracked git repositories. This file is also the complete schema reference.
+#
+# Top-level `repos` is an optional list of repository mappings (default `[]`).
+# Each entry describes one repository and the branches the connector should
+# mirror into IronRAG. A single connector can track many repos; every
+# (repo, branch, path) triple becomes one IronRAG document.
+#
+# Repository-entry schema (all available keys)
+# ------------------------------------------------
+# `name` required string, 1..128 characters, unique in this file. Accepted
+#        characters: letters, digits, `-`, `_`, `.`. It becomes the `repo`
+#        routing fact and part of every stable external key.
+# `url` optional string accepted by the Git CLI (for example HTTPS or SSH).
+#       A remote is bare-cloned once and fetched on every sweep.
+# `local_path` optional filesystem path string. The existing checkout is read
+#              in place and `~` is expanded. The container must be able to see
+#              the path (mount it when needed).
+# Exactly one of `url` and `local_path` is required; setting both or neither is
+# invalid. SSH keys and credential helpers are supplied at container level;
+# the connector stores no repository credential.
+# `branches` required non-empty list of strings. Each value is an exact branch
+#            name; it cannot be empty or begin with `-`.
+# `include` optional list of glob strings, default `[]`. An empty list includes
+#           every path not excluded.
+# `exclude` optional list of glob strings, default `[]`. These are added to the
+#           built-in DEFAULT_EXCLUDES. Exclusion always wins over inclusion.
+# `facts` optional mapping from string keys to any YAML value, default `{}`.
+#         Every pair becomes a routing fact on every file from this repo. List
+#         values support membership matching in routing.yaml. Avoid the built-in
+#         keys `repo`, `branch`, `path`, `dir`, `ext`, `top_dir`, `repo_url`:
+#         a collision replaces the connector-generated value.
+# `max_file_bytes` optional positive integer, default `1048576` (1 MiB).
+#                  This is a per-repository ceiling; the effective limit is the
+#                  smaller of it and `GITREPOS_MAX_FILE_BYTES`. Raise both when
+#                  files larger than 1 MiB must be accepted. Files above the
+#                  effective uncompressed blob-size limit are skipped.
+#
+# Glob syntax is case-sensitive and segment-aware: `*` stays within one path
+# segment, while `**` crosses any directory depth. `.git/**`, common dependency
+# directories, caches, `dist`, `build`, and Rust debug/release outputs are
+# excluded automatically. The built-in values are:
+#   .git/**, **/.git/**, **/node_modules/**, **/__pycache__/**, **/.venv/**,
+#   **/target/debug/**, **/target/release/**, **/dist/**, **/build/**,
+#   **/.pytest_cache/**, **/.mypy_cache/**, **/.ruff_cache/**
+# Unlisted repository-entry keys are currently ignored by the parser; use only
+# the schema above so misspellings do not silently lose configuration.
+#
+# The generated `repo_url` fact exists only for `url` entries. See
+# `routing.yaml.example` for all routing facts and exact match semantics.
+
+repos:
+  - name: docs-public
+    url: https://github.com/example-org/docs.git
+    branches:
+      - main
+      - release/v1
+    include:
+      - "**/*.md"
+      - "**/*.mdx"
+      - "**/*.rst"
+    exclude:
+      - "drafts/**"
+      - "**/CHANGELOG.md"
+    facts:
+      project: example-docs
+      tier: public
+      audiences:
+        - readers
+        - developers
+
+  - name: api-server
+    url: git@github.com:example-org/api-server.git
+    branches:
+      - main
+    include:
+      - "src/**/*.py"
+      - "docs/**/*.md"
+      - "README.md"
+    facts:
+      project: api-server
+      tier: production
+
+  - name: local-playground
+    local_path: /srv/checkouts/playground
+    branches:
+      - main
+      - experimental
+    include:
+      - "**/*.md"
+      - "**/*.txt"
+    facts:
+      project: playground
+      tier: scratch
+    # Positive integer bytes; lower this repo below the global 1 MiB ceiling.
+    max_file_bytes: 524288

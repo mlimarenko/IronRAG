@@ -50,6 +50,7 @@ impl IamGrantResourceKind {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum IamPermissionKind {
+    IamAdmin,
     WorkspaceAdmin,
     WorkspaceRead,
     LibraryRead,
@@ -62,13 +63,13 @@ pub enum IamPermissionKind {
     QueryRun,
     OpsRead,
     AuditRead,
-    IamAdmin,
 }
 
 impl IamPermissionKind {
     #[must_use]
     pub const fn as_str(&self) -> &'static str {
         match self {
+            Self::IamAdmin => "iam_admin",
             Self::WorkspaceAdmin => "workspace_admin",
             Self::WorkspaceRead => "workspace_read",
             Self::LibraryRead => "library_read",
@@ -81,7 +82,6 @@ impl IamPermissionKind {
             Self::QueryRun => "query_run",
             Self::OpsRead => "ops_read",
             Self::AuditRead => "audit_read",
-            Self::IamAdmin => "iam_admin",
         }
     }
 }
@@ -100,6 +100,14 @@ pub enum IamPrincipalKind {
 #[into_params(parameter_in = Query)]
 pub struct ListTokensQuery {
     pub workspace_id: Option<Uuid>,
+}
+
+#[derive(Debug, Deserialize, utoipa::ToSchema, utoipa::IntoParams)]
+#[serde(rename_all = "camelCase")]
+#[into_params(parameter_in = Query)]
+pub struct SessionContextQuery {
+    pub active_workspace_id: Option<Uuid>,
+    pub active_library_id: Option<Uuid>,
 }
 
 #[derive(Debug, Deserialize, utoipa::ToSchema)]
@@ -216,7 +224,6 @@ pub struct TokenLibrarySummaryResponse {
 #[derive(Debug, Serialize, PartialEq, Eq, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum TokenScopeKind {
-    System,
     Workspace,
     Library,
 }
@@ -276,6 +283,111 @@ pub struct TokenResponse {
 pub struct MintTokenResponse {
     pub token: String,
     pub api_token: TokenResponse,
+}
+
+#[derive(Debug, Deserialize, utoipa::ToSchema, utoipa::IntoParams)]
+#[serde(rename_all = "camelCase")]
+#[into_params(parameter_in = Query)]
+pub struct ListServiceIdentitiesQuery {
+    pub workspace_id: Option<Uuid>,
+}
+
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct CreateServiceIdentityRequest {
+    pub idempotency_key: String,
+    pub workspace_id: Option<Uuid>,
+    pub label: String,
+    pub expires_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub library_ids: Vec<Uuid>,
+    #[serde(default)]
+    pub permission_kinds: Vec<IamPermissionKind>,
+    pub provisioning_authority: Option<IamProvisioningAuthority>,
+}
+
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum IamProvisioningAuthority {
+    Integration,
+}
+
+impl IamProvisioningAuthority {
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::Integration => "integration",
+        }
+    }
+}
+
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct PatchServiceIdentityRequest {
+    pub label: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_double_option")]
+    pub expires_at: Option<Option<DateTime<Utc>>>,
+    pub library_ids: Vec<Uuid>,
+    pub permission_kinds: Vec<IamPermissionKind>,
+}
+
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ServiceIdentityOperationRequest {
+    pub idempotency_key: String,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ServiceIdentityOwnerResponse {
+    pub issuer: String,
+    pub subject: String,
+}
+
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ServiceIdentityResponse {
+    pub principal_id: Uuid,
+    pub label: String,
+    pub credential_prefix: String,
+    pub status: String,
+    pub expires_at: Option<DateTime<Utc>>,
+    pub revoked_at: Option<DateTime<Utc>>,
+    pub last_used_at: Option<DateTime<Utc>>,
+    pub owner: ServiceIdentityOwnerResponse,
+    pub scope: TokenScopeResponse,
+    pub grants: Vec<TokenGrantSummaryResponse>,
+}
+
+#[derive(Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ServiceIdentityCredentialResponse {
+    pub credential: String,
+    pub service_identity: ServiceIdentityResponse,
+    pub replayed: bool,
+}
+
+impl std::fmt::Debug for ServiceIdentityCredentialResponse {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ServiceIdentityCredentialResponse")
+            .field("credential", &"<redacted>")
+            .field("service_identity", &self.service_identity)
+            .field("replayed", &self.replayed)
+            .finish()
+    }
+}
+
+impl Drop for ServiceIdentityCredentialResponse {
+    fn drop(&mut self) {
+        self.credential.zeroize();
+    }
+}
+
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ServiceIdentityMutationResponse {
+    pub service_identity: ServiceIdentityResponse,
+    pub replayed: bool,
 }
 
 impl std::fmt::Debug for MintTokenResponse {
@@ -382,10 +494,9 @@ pub struct MeResponse {
 
 #[derive(Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
-pub struct LoginSessionRequest {
-    pub login: String,
-    pub password: String,
-    pub remember_me: Option<bool>,
+pub(crate) struct LoginSessionRequest {
+    pub(crate) login: String,
+    pub(crate) password: String,
 }
 
 impl std::fmt::Debug for LoginSessionRequest {
@@ -394,7 +505,6 @@ impl std::fmt::Debug for LoginSessionRequest {
             .debug_struct("LoginSessionRequest")
             .field("login", &self.login)
             .field("password", &"<redacted>")
-            .field("remember_me", &self.remember_me)
             .finish()
     }
 }
@@ -409,6 +519,7 @@ impl Drop for LoginSessionRequest {
 #[serde(rename_all = "camelCase")]
 pub struct BootstrapSetupRequest {
     pub login: String,
+    pub email: String,
     pub display_name: Option<String>,
     pub password: String,
     pub ai_setup: Option<BootstrapSetupAiRequest>,
@@ -419,6 +530,7 @@ impl std::fmt::Debug for BootstrapSetupRequest {
         formatter
             .debug_struct("BootstrapSetupRequest")
             .field("login", &self.login)
+            .field("email", &self.email)
             .field("display_name", &self.display_name)
             .field("password", &"<redacted>")
             .field("ai_setup", &self.ai_setup)
@@ -495,10 +607,10 @@ mod secret_debug_tests {
         let login = LoginSessionRequest {
             login: "owner".into(),
             password: "login-password-regression".into(),
-            remember_me: Some(true),
         };
         let bootstrap = BootstrapSetupRequest {
             login: "owner".into(),
+            email: "owner@example.com".into(),
             display_name: None,
             password: "bootstrap-password-regression".into(),
             ai_setup: Some(BootstrapSetupAiRequest {

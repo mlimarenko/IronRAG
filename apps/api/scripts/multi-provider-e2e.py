@@ -15,7 +15,7 @@ IRONRAG_UI_BOOTSTRAP_ADMIN_* variables written by the local install flow.
 PROVIDER ∈ {openai, deepseek, qwen, gptunnel, openrouter, routerai, minimax}.
 
 Embed fallback: if the chosen provider exposes no embedding catalog
-row, the canonical embed_chunk binding is wired through the gptunnel
+row, the authoritative embed_chunk binding is wired through the gptunnel
 text-embedding-3-large model. Providers with native 3072-dim embedding
 presets must use their own embedding lane.
 
@@ -53,7 +53,7 @@ ALPHA_RELAY_TEXT = (
     "Alpha Relay runbook.\n"
     "Alpha Relay retentionWindowDays = 37.\n"
     "Incident escalation target is Delta Ops Queue.\n"
-    "Canonical endpoint: https://alpha.example.test/relay.\n"
+    "Primary endpoint: https://alpha.example.test/relay.\n"
 )
 ALPHA_RELAY_QUESTION = (
     "What retention window does Alpha Relay use, and what is its "
@@ -61,20 +61,21 @@ ALPHA_RELAY_QUESTION = (
 )
 REQUIRED_TERMS = ["37", "Delta Ops Queue"]
 
-OPENAI_SMALL_CHAT_MODEL = "gpt-5.4-mini"
-OPENAI_PRIMARY_CHAT_MODEL = "gpt-5.4"
-OPENAI_LEGACY_SMALL_MODEL = "gpt-4.1-mini"
-OPENAI_MULTIMODAL_SMALL_MODEL = "gpt-4o-mini"
-OPENAI_MULTIMODAL_MODEL = "gpt-4o"
-QWEN_PLUS_MODEL = "qwen3.6-plus"
-QWEN_LEGACY_PLUS_MODEL = "qwen3.5-plus"
-ROUTER_SMALL_OPENAI_MODEL = "openai/gpt-4o-mini"
-ROUTER_SMALL_ANTHROPIC_MODEL = "anthropic/claude-3-haiku"
-ROUTER_OPENAI_MODEL = "openai/gpt-4o"
-ROUTER_ANTHROPIC_MODEL = "anthropic/claude-3.5-sonnet"
+OPENAI_SMALL_CHAT_MODEL = "gpt-5.6-luna"
+OPENAI_PRIMARY_CHAT_MODEL = "gpt-6-astra"
+OPENAI_LEGACY_SMALL_MODEL = "gpt-5.6-terra"
+OPENAI_MULTIMODAL_SMALL_MODEL = "gpt-5.6-terra"
+OPENAI_MULTIMODAL_MODEL = "gpt-6-astra"
+QWEN_MAX_MODEL = "qwen3.8-max"
+QWEN_PLUS_MODEL = "qwen3.7-plus"
+QWEN_LEGACY_PLUS_MODEL = "qwen3.8-flash"
+ROUTER_SMALL_OPENAI_MODEL = "openai/gpt-5.4-mini"
+ROUTER_SMALL_ANTHROPIC_MODEL = "anthropic/claude-haiku-4.5"
+ROUTER_OPENAI_MODEL = "openai/gpt-6-astra"
+ROUTER_ANTHROPIC_MODEL = "anthropic/claude-sonnet-5"
 
 # Per-provider model preferences keyed by the public binding contract. The
-# harness picks the first available preset for each canonical purpose.
+# harness picks the first available preset for each configured purpose.
 PROVIDER_PROFILES: dict[str, dict[str, list[str]]] = {
     "openai": {
         "extract_graph": [
@@ -90,8 +91,8 @@ PROVIDER_PROFILES: dict[str, dict[str, list[str]]] = {
             OPENAI_LEGACY_SMALL_MODEL,
             OPENAI_MULTIMODAL_SMALL_MODEL,
         ],
-        "query_answer": [OPENAI_PRIMARY_CHAT_MODEL, "gpt-4.1", OPENAI_MULTIMODAL_MODEL],
-        "agent": [OPENAI_PRIMARY_CHAT_MODEL, "gpt-4.1", OPENAI_MULTIMODAL_MODEL],
+        "query_answer": [OPENAI_PRIMARY_CHAT_MODEL, "gpt-5.6-sol", OPENAI_MULTIMODAL_MODEL],
+        "agent": [OPENAI_PRIMARY_CHAT_MODEL, "gpt-5.6-sol", OPENAI_MULTIMODAL_MODEL],
         "extract_text": [
             OPENAI_MULTIMODAL_MODEL,
             OPENAI_MULTIMODAL_SMALL_MODEL,
@@ -99,20 +100,20 @@ PROVIDER_PROFILES: dict[str, dict[str, list[str]]] = {
         ],
     },
     "deepseek": {
-        "extract_graph": ["deepseek-v4-flash", "deepseek-chat", "deepseek-v3.2"],
+        "extract_graph": ["deepseek-flash", "deepseek-v4-pro"],
         "embed_chunk": [],
-        "query_compile": ["deepseek-v4-flash", "deepseek-chat", "deepseek-v3.2"],
-        "query_answer": ["deepseek-v4-pro", "deepseek-reasoner", "deepseek-chat"],
-        "agent": ["deepseek-v4-pro", "deepseek-reasoner", "deepseek-chat"],
-        "extract_text": [],
+        "query_compile": ["deepseek-flash", "deepseek-v4-pro"],
+        "query_answer": ["deepseek-v4-pro", "deepseek-flash"],
+        "agent": ["deepseek-v4-pro", "deepseek-flash"],
+        "extract_text": ["deepseek-flash"],
     },
     "qwen": {
-        "extract_graph": [QWEN_PLUS_MODEL, QWEN_LEGACY_PLUS_MODEL, "qwen-plus"],
+        "extract_graph": [QWEN_PLUS_MODEL, QWEN_LEGACY_PLUS_MODEL, QWEN_MAX_MODEL],
         "embed_chunk": [],
-        "query_compile": [QWEN_PLUS_MODEL, QWEN_LEGACY_PLUS_MODEL, "qwen-plus"],
-        "query_answer": ["qwen3.6-max-preview", QWEN_PLUS_MODEL, QWEN_LEGACY_PLUS_MODEL],
-        "agent": ["qwen3.6-max-preview", QWEN_PLUS_MODEL, QWEN_LEGACY_PLUS_MODEL],
-        "extract_text": ["qwen3-vl-plus", "qwen-vl-max", "qwen-vl-plus"],
+        "query_compile": [QWEN_PLUS_MODEL, QWEN_LEGACY_PLUS_MODEL, QWEN_MAX_MODEL],
+        "query_answer": [QWEN_MAX_MODEL, QWEN_PLUS_MODEL, QWEN_LEGACY_PLUS_MODEL],
+        "agent": [QWEN_MAX_MODEL, QWEN_PLUS_MODEL, QWEN_LEGACY_PLUS_MODEL],
+        "extract_text": ["qwen3-vl-plus", "qwen3-vl-flash"],
     },
     "gptunnel": {
         "extract_graph": [OPENAI_MULTIMODAL_SMALL_MODEL, OPENAI_LEGACY_SMALL_MODEL],
@@ -120,18 +121,18 @@ PROVIDER_PROFILES: dict[str, dict[str, list[str]]] = {
         "query_compile": [OPENAI_MULTIMODAL_SMALL_MODEL, OPENAI_LEGACY_SMALL_MODEL],
         "query_answer": [OPENAI_MULTIMODAL_MODEL, OPENAI_PRIMARY_CHAT_MODEL],
         "agent": [OPENAI_MULTIMODAL_MODEL, OPENAI_PRIMARY_CHAT_MODEL],
-        "extract_text": [OPENAI_MULTIMODAL_MODEL, "claude-4.6-sonnet", "gemini-3.1-pro"],
+        "extract_text": [OPENAI_MULTIMODAL_MODEL, "claude-sonnet-5", "gemini-3.1-pro-preview"],
     },
     "openrouter": {
         "extract_graph": [ROUTER_SMALL_OPENAI_MODEL, ROUTER_SMALL_ANTHROPIC_MODEL],
-        "embed_chunk": ["openai/text-embedding-3-large", "qwen/qwen3-embedding-8b"],
+        "embed_chunk": ["openai/text-embedding-3-large", "openai/text-embedding-3-small"],
         "query_compile": [ROUTER_SMALL_OPENAI_MODEL, ROUTER_SMALL_ANTHROPIC_MODEL],
         "query_answer": [ROUTER_OPENAI_MODEL, ROUTER_ANTHROPIC_MODEL],
         "agent": [ROUTER_OPENAI_MODEL, ROUTER_ANTHROPIC_MODEL],
         "extract_text": [
             ROUTER_OPENAI_MODEL,
             ROUTER_ANTHROPIC_MODEL,
-            "google/gemini-pro-vision",
+            "google/gemini-3.6-flash",
         ],
     },
     "routerai": {
@@ -150,21 +151,11 @@ PROVIDER_PROFILES: dict[str, dict[str, list[str]]] = {
             "MiniMax-M3",
             "MiniMax-M2.7",
             "MiniMax-M2.7-highspeed",
-            "MiniMax-M2.5",
-            "MiniMax-M2.5-highspeed",
-            "MiniMax-M2.1",
-            "MiniMax-M2.1-highspeed",
-            "MiniMax-M2",
         ],
         "agent": [
             "MiniMax-M3",
             "MiniMax-M2.7",
             "MiniMax-M2.7-highspeed",
-            "MiniMax-M2.5",
-            "MiniMax-M2.5-highspeed",
-            "MiniMax-M2.1",
-            "MiniMax-M2.1-highspeed",
-            "MiniMax-M2",
         ],
         "extract_text": ["MiniMax-M3"],
     },
@@ -174,9 +165,9 @@ FALLBACK_PROVIDER = "gptunnel"
 EMBED_FALLBACK_MODELS = ["text-embedding-3-large"]
 
 EXTRACT_TEXT_FALLBACK_MODELS = [
-    "gpt-4o",
-    "claude-4.6-sonnet",
-    "gemini-3.1-pro",
+    "gpt-6-astra",
+    "claude-sonnet-5",
+    "gemini-3.1-pro-preview",
 ]
 
 # Purposes that may fall back to gptunnel when the chosen provider has
@@ -362,10 +353,10 @@ def wait_ingest(s: requests.Session, library_id: str, timeout_s: int = 240) -> d
     fail("ingest timeout")
 
 
-def run_query(s: requests.Session, workspace_id: str, library_id: str) -> dict:
+def run_query(s: requests.Session, library_id: str) -> dict:
     step("create query session")
-    r = s.post(f"{BASE}/query/sessions",
-               json={"workspaceId": workspace_id, "libraryId": library_id})
+    r = s.post(f"{BASE}/query/libraries/{library_id}/sessions",
+               json={})
     if r.status_code not in (200, 201):
         fail(f"create session status={r.status_code}", r.text[:500])
     session_id = r.json()["id"]
@@ -647,7 +638,7 @@ def run_provider_smoke(provider: str) -> tuple[dict, Path]:
     document_id = upload_doc(session, library_id)
     print(f"  documentId={document_id}", flush=True)
     wait_ingest(session, library_id)
-    answer = run_query(session, workspace_id, library_id)
+    answer = run_query(session, library_id)
     execution_id = (answer.get("responseTurn") or {}).get("executionId")
     provider_calls = (
         list_query_provider_calls(session, execution_id, providers, catalog)

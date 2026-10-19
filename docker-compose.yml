@@ -1,4 +1,4 @@
-# IronRAG — single canonical Compose stack.
+# IronRAG — single Compose stack.
 #
 # This one file replaces the former four (base / local / large / s4). Every
 # dimension that used to need a separate file is now driven by env vars or a
@@ -28,14 +28,19 @@
 #     IRONRAG_WORKER_MEMORY_LIMIT=4096M \
 #       docker compose up -d
 #
-#   local source build     build the images from this tree instead of pulling:
+#   local source build     build the images from this tree instead of pulling.
+#                          IRONRAG_VERSION is the build identity baked into the
+#                          image and served by /v1/version; the build refuses to
+#                          run without it rather than invent one:
+#     IRONRAG_VERSION=$(git describe --always --abbrev=40 --dirty --match '') \
 #     IRONRAG_BACKEND_IMAGE=ironrag-backend:local \
 #     IRONRAG_FRONTEND_IMAGE=ironrag-frontend:local \
 #       docker compose build backend frontend
 #     IRONRAG_BACKEND_IMAGE=ironrag-backend:local \
 #     IRONRAG_FRONTEND_IMAGE=ironrag-frontend:local \
 #       docker compose up -d
-#     (`make docker-local-*` wires these names in for you.)
+#     (`make docker-local-*` wires these names in and derives IRONRAG_VERSION
+#      from git for you.)
 #
 #   scale ingest workers   run N ingest workers. Default 1 keeps the baseline
 #                          stack simple and light enough for weak machines.
@@ -53,40 +58,52 @@
 # setting the matching IRONRAG_*/OTEL_* env var.
 x-ironrag-runtime-env: &ironrag-runtime-env
   IRONRAG_ENVIRONMENT: ${IRONRAG_ENVIRONMENT:-production}
-  # Optional stable telemetry id. It is ignored unless OTLP export is enabled
-  # below; an empty value is derived from Postgres only after that opt-in.
-  IRONRAG_DEPLOYMENT_ID: ${IRONRAG_DEPLOYMENT_ID:-}
+  # The opaque deployment identity is derived from PostgreSQL and shared by
+  # runtime metadata, telemetry and lifecycle benchmark evidence.
   IRONRAG_DATABASE_URL: postgres://${IRONRAG_POSTGRES_USER:-postgres}:${IRONRAG_POSTGRES_PASSWORD:-postgres}@${IRONRAG_POSTGRES_HOST:-postgres}:5432/${IRONRAG_POSTGRES_DB:-ironrag}
+  IRONRAG_DATABASE_TLS_LEAF_CERTIFICATE: ${IRONRAG_DATABASE_TLS_LEAF_CERTIFICATE:-}
   # Deployment-wide app connection budget. The backend divides it across the
   # expected API + worker replicas before opening per-process SQLx pools.
   IRONRAG_DATABASE_MAX_CONNECTIONS: ${IRONRAG_DATABASE_MAX_CONNECTIONS:-20}
   IRONRAG_API_REPLICAS: ${IRONRAG_API_REPLICAS:-1}
   IRONRAG_WORKER_REPLICAS: ${IRONRAG_WORKER_REPLICAS:-1}
+  IRONRAG_QUERY_TURN_MAX_CONCURRENT: ${IRONRAG_QUERY_TURN_MAX_CONCURRENT:-32}
+  IRONRAG_QUERY_TURN_ADMISSION_QUEUE: ${IRONRAG_QUERY_TURN_ADMISSION_QUEUE:-80}
+  IRONRAG_QUERY_TURN_ADMISSION_TIMEOUT_MS: ${IRONRAG_QUERY_TURN_ADMISSION_TIMEOUT_MS:-15000}
   IRONRAG_KNOWLEDGE_PLANE_BACKEND: postgres
   IRONRAG_REDIS_URL: ${IRONRAG_REDIS_URL:-redis://redis:6379}
+  IRONRAG_REDIS_TLS_LEAF_CERTIFICATE: ${IRONRAG_REDIS_TLS_LEAF_CERTIFICATE:-}
   IRONRAG_LOG_FILTER: ${IRONRAG_LOG_FILTER:-info}
   # Shared UI CORS and MCP Streamable HTTP Origin allowlist.
   IRONRAG_FRONTEND_ORIGIN: ${IRONRAG_FRONTEND_ORIGIN:-http://127.0.0.1:19000,http://localhost:19000}
   IRONRAG_OPENAPI_PUBLIC_ORIGIN: ${IRONRAG_OPENAPI_PUBLIC_ORIGIN:-}
+  # Optional OIDC SSO. Bare mappings inherit only explicitly supplied values,
+  # so disabled SSO does not inject blank variables into any application role.
+  IRONRAG_OIDC_ISSUER_URL:
+  IRONRAG_OIDC_CLIENT_ID:
+  IRONRAG_OIDC_CLIENT_SECRET:
+  IRONRAG_OIDC_REDIRECT_URL:
+  IRONRAG_OIDC_REQUIRED_GROUP:
+  IRONRAG_OIDC_BOOTSTRAP_ADMIN_SUBJECT:
   IRONRAG_CREDENTIAL_MASTER_KEY: ${IRONRAG_CREDENTIAL_MASTER_KEY:-}
   IRONRAG_CREDENTIAL_MASTER_KEY_ID: ${IRONRAG_CREDENTIAL_MASTER_KEY_ID:-}
   IRONRAG_CREDENTIAL_PREVIOUS_MASTER_KEYS: ${IRONRAG_CREDENTIAL_PREVIOUS_MASTER_KEYS:-}
-  IRONRAG_CREDENTIAL_ENCRYPTION_WRITE_ENABLED: ${IRONRAG_CREDENTIAL_ENCRYPTION_WRITE_ENABLED:-false}
   IRONRAG_UI_BOOTSTRAP_ADMIN_LOGIN: ${IRONRAG_UI_BOOTSTRAP_ADMIN_LOGIN:-}
+  IRONRAG_UI_BOOTSTRAP_ADMIN_EMAIL: ${IRONRAG_UI_BOOTSTRAP_ADMIN_EMAIL:-}
   IRONRAG_UI_BOOTSTRAP_ADMIN_PASSWORD: ${IRONRAG_UI_BOOTSTRAP_ADMIN_PASSWORD:-}
   IRONRAG_UI_BOOTSTRAP_ADMIN_API_TOKEN: ${IRONRAG_UI_BOOTSTRAP_ADMIN_API_TOKEN:-}
   IRONRAG_UI_BOOTSTRAP_EXTRACT_GRAPH_PROVIDER_KIND: ${IRONRAG_UI_BOOTSTRAP_EXTRACT_GRAPH_PROVIDER_KIND:-openai}
-  IRONRAG_UI_BOOTSTRAP_EXTRACT_GRAPH_MODEL_NAME: ${IRONRAG_UI_BOOTSTRAP_EXTRACT_GRAPH_MODEL_NAME:-gpt-5.4-mini}
+  IRONRAG_UI_BOOTSTRAP_EXTRACT_GRAPH_MODEL_NAME: ${IRONRAG_UI_BOOTSTRAP_EXTRACT_GRAPH_MODEL_NAME:-gpt-6-luna}
   IRONRAG_UI_BOOTSTRAP_EMBED_CHUNK_PROVIDER_KIND: ${IRONRAG_UI_BOOTSTRAP_EMBED_CHUNK_PROVIDER_KIND:-openai}
   IRONRAG_UI_BOOTSTRAP_EMBED_CHUNK_MODEL_NAME: ${IRONRAG_UI_BOOTSTRAP_EMBED_CHUNK_MODEL_NAME:-text-embedding-3-large}
   IRONRAG_UI_BOOTSTRAP_QUERY_COMPILE_PROVIDER_KIND: ${IRONRAG_UI_BOOTSTRAP_QUERY_COMPILE_PROVIDER_KIND:-openai}
-  IRONRAG_UI_BOOTSTRAP_QUERY_COMPILE_MODEL_NAME: ${IRONRAG_UI_BOOTSTRAP_QUERY_COMPILE_MODEL_NAME:-gpt-5.4-nano}
+  IRONRAG_UI_BOOTSTRAP_QUERY_COMPILE_MODEL_NAME: ${IRONRAG_UI_BOOTSTRAP_QUERY_COMPILE_MODEL_NAME:-gpt-6-luna}
   IRONRAG_UI_BOOTSTRAP_QUERY_ANSWER_PROVIDER_KIND: ${IRONRAG_UI_BOOTSTRAP_QUERY_ANSWER_PROVIDER_KIND:-openai}
-  IRONRAG_UI_BOOTSTRAP_QUERY_ANSWER_MODEL_NAME: ${IRONRAG_UI_BOOTSTRAP_QUERY_ANSWER_MODEL_NAME:-gpt-5.4-mini}
+  IRONRAG_UI_BOOTSTRAP_QUERY_ANSWER_MODEL_NAME: ${IRONRAG_UI_BOOTSTRAP_QUERY_ANSWER_MODEL_NAME:-gpt-6-luna}
   IRONRAG_UI_BOOTSTRAP_AGENT_PROVIDER_KIND: ${IRONRAG_UI_BOOTSTRAP_AGENT_PROVIDER_KIND:-openai}
-  IRONRAG_UI_BOOTSTRAP_AGENT_MODEL_NAME: ${IRONRAG_UI_BOOTSTRAP_AGENT_MODEL_NAME:-gpt-5.4-mini}
+  IRONRAG_UI_BOOTSTRAP_AGENT_MODEL_NAME: ${IRONRAG_UI_BOOTSTRAP_AGENT_MODEL_NAME:-gpt-6-luna}
   IRONRAG_UI_BOOTSTRAP_EXTRACT_TEXT_PROVIDER_KIND: ${IRONRAG_UI_BOOTSTRAP_EXTRACT_TEXT_PROVIDER_KIND:-openai}
-  IRONRAG_UI_BOOTSTRAP_EXTRACT_TEXT_MODEL_NAME: ${IRONRAG_UI_BOOTSTRAP_EXTRACT_TEXT_MODEL_NAME:-gpt-5.4-mini}
+  IRONRAG_UI_BOOTSTRAP_EXTRACT_TEXT_MODEL_NAME: ${IRONRAG_UI_BOOTSTRAP_EXTRACT_TEXT_MODEL_NAME:-gpt-6-luna}
   IRONRAG_AI_PROVIDER_API_KEYS_JSON_B64: ${IRONRAG_AI_PROVIDER_API_KEYS_JSON_B64:-}
   IRONRAG_UI_DEFAULT_LOCALE: ${IRONRAG_UI_DEFAULT_LOCALE:-ru}
   IRONRAG_STARTUP_AUTHORITY_MODE: compose_one_shot
@@ -121,7 +138,9 @@ x-ironrag-runtime-env: &ironrag-runtime-env
   IRONRAG_DOCLING_PAGE_BATCH_SIZE: ${IRONRAG_DOCLING_PAGE_BATCH_SIZE:-10}
   IRONRAG_DOCLING_PAGE_STREAM_WINDOW_PAGES: ${IRONRAG_DOCLING_PAGE_STREAM_WINDOW_PAGES:-40}
   IRONRAG_DOCLING_MAX_CONCURRENCY: ${IRONRAG_DOCLING_MAX_CONCURRENCY:-auto}
+  IRONRAG_DOCLING_ACQUIRE_TIMEOUT_SECS: ${IRONRAG_DOCLING_ACQUIRE_TIMEOUT_SECS:-1800}
   IRONRAG_INGESTION_HEAVY_PIPELINE_PARALLELISM: ${IRONRAG_INGESTION_HEAVY_PIPELINE_PARALLELISM:-auto}
+  IRONRAG_INGESTION_HEAVY_ACQUIRE_TIMEOUT_SECS: ${IRONRAG_INGESTION_HEAVY_ACQUIRE_TIMEOUT_SECS:-1800}
   IRONRAG_INGESTION_EMBEDDING_PARALLELISM: ${IRONRAG_INGESTION_EMBEDDING_PARALLELISM:-8}
   IRONRAG_INGESTION_GRAPH_EXTRACT_PARALLELISM_PER_DOC: ${IRONRAG_INGESTION_GRAPH_EXTRACT_PARALLELISM_PER_DOC:-16}
   IRONRAG_PROVIDER_CONCURRENCY_MAX_OUTBOUND: ${IRONRAG_PROVIDER_CONCURRENCY_MAX_OUTBOUND:-16}
@@ -129,9 +148,15 @@ x-ironrag-runtime-env: &ironrag-runtime-env
   IRONRAG_PROVIDER_CONCURRENCY_ACQUIRE_TIMEOUT_MS: ${IRONRAG_PROVIDER_CONCURRENCY_ACQUIRE_TIMEOUT_MS:-30000}
   IRONRAG_PROVIDER_CONCURRENCY_REGISTRY_MAX_ENTRIES: ${IRONRAG_PROVIDER_CONCURRENCY_REGISTRY_MAX_ENTRIES:-64}
   IRONRAG_PROVIDER_CONCURRENCY_REGISTRY_IDLE_TTL_SECONDS: ${IRONRAG_PROVIDER_CONCURRENCY_REGISTRY_IDLE_TTL_SECONDS:-900}
+  IRONRAG_PROVIDER_RATE_LIMIT_REQUESTS_PER_SECOND: ${IRONRAG_PROVIDER_RATE_LIMIT_REQUESTS_PER_SECOND:-8}
+  IRONRAG_PROVIDER_RATE_LIMIT_BURST: ${IRONRAG_PROVIDER_RATE_LIMIT_BURST:-16}
+  IRONRAG_PROVIDER_RETRY_MAX_ATTEMPTS: ${IRONRAG_PROVIDER_RETRY_MAX_ATTEMPTS:-3}
+  IRONRAG_PROVIDER_RETRY_INITIAL_BACKOFF_MS: ${IRONRAG_PROVIDER_RETRY_INITIAL_BACKOFF_MS:-200}
+  IRONRAG_PROVIDER_RETRY_MAX_BACKOFF_MS: ${IRONRAG_PROVIDER_RETRY_MAX_BACKOFF_MS:-5000}
   # pgvector applies lane filters after approximate HNSW traversal. Iterative
   # scans use explicit tuple/memory bounds; small underfilled lanes get one
   # bounded exact retry rather than silently returning a truncated candidate set.
+  IRONRAG_PG_HNSW_BUILD_BUDGET_BYTES: ${IRONRAG_PG_HNSW_BUILD_BUDGET_BYTES:-3000000000}
   IRONRAG_PG_HNSW_EF_SEARCH: ${IRONRAG_PG_HNSW_EF_SEARCH:-400}
   IRONRAG_PG_HNSW_MAX_SCAN_TUPLES: ${IRONRAG_PG_HNSW_MAX_SCAN_TUPLES:-50000}
   IRONRAG_PG_HNSW_SCAN_MEM_MULTIPLIER: ${IRONRAG_PG_HNSW_SCAN_MEM_MULTIPLIER:-2}
@@ -151,7 +176,7 @@ x-ironrag-runtime-env: &ironrag-runtime-env
   IRONRAG_QUERY_RERANK_ENABLED: ${IRONRAG_QUERY_RERANK_ENABLED:-true}
   IRONRAG_QUERY_RERANK_CANDIDATE_LIMIT: ${IRONRAG_QUERY_RERANK_CANDIDATE_LIMIT:-24}
   IRONRAG_QUERY_SEMANTIC_RERANK_MODE: ${IRONRAG_QUERY_SEMANTIC_RERANK_MODE:-off}
-  IRONRAG_QUERY_SEMANTIC_RERANK_TIMEOUT_MS: ${IRONRAG_QUERY_SEMANTIC_RERANK_TIMEOUT_MS:-1500}
+  IRONRAG_QUERY_SEMANTIC_RERANK_TIMEOUT_MS: ${IRONRAG_QUERY_SEMANTIC_RERANK_TIMEOUT_MS:-1000}
   IRONRAG_QUERY_SEMANTIC_RERANK_CANDIDATE_LIMIT: ${IRONRAG_QUERY_SEMANTIC_RERANK_CANDIDATE_LIMIT:-16}
   IRONRAG_QUERY_SEMANTIC_RERANK_CANDIDATE_TEXT_CHARS: ${IRONRAG_QUERY_SEMANTIC_RERANK_CANDIDATE_TEXT_CHARS:-1200}
   IRONRAG_QUERY_SEMANTIC_RERANK_TOTAL_TEXT_CHARS: ${IRONRAG_QUERY_SEMANTIC_RERANK_TOTAL_TEXT_CHARS:-18000}
@@ -173,10 +198,6 @@ x-ironrag-runtime-env: &ironrag-runtime-env
   OTEL_EXPORTER_OTLP_PROTOCOL: ${OTEL_EXPORTER_OTLP_PROTOCOL:-}
   OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
   OTEL_EXPORTER_OTLP_METRICS_TEMPORALITY_PREFERENCE: ${OTEL_EXPORTER_OTLP_METRICS_TEMPORALITY_PREFERENCE:-cumulative}
-
-x-ironrag-dns: &ironrag-dns
-  - ${IRONRAG_DOCKER_DNS_PRIMARY:-1.1.1.1}
-  - ${IRONRAG_DOCKER_DNS_SECONDARY:-8.8.8.8}
 
 # ─── Memory containment (Docling-capable local baseline, swap = 0) ────────────
 # The steady-state sum of `memory` LIMITS is the real lever here: Compose does
@@ -281,7 +302,19 @@ services:
     # pins the heaviest topology scans to a non-parallel plan (see
     # runtime_graph_repository::begin_topology_scan_tx) so correctness never
     # depends on this value alone.
+    # `shm_size` must exceed `shared_buffers`. Trigram matching-terms on a
+    # multi-GiB knowledge_chunk table needs ~1 GB shared_buffers and therefore
+    # `IRONRAG_POSTGRES_SHM_SIZE=2g` on the 6 GiB stage Postgres; the 256 MiB
+    # default is only enough for the 128 MB laptop default.
     shm_size: ${IRONRAG_POSTGRES_SHM_SIZE:-256mb}
+    command:
+      - postgres
+      - -c
+      - max_connections=${IRONRAG_POSTGRES_MAX_CONNECTIONS:-100}
+      - -c
+      - shared_buffers=${IRONRAG_POSTGRES_SHARED_BUFFERS:-128MB}
+      - -c
+      - work_mem=${IRONRAG_POSTGRES_WORK_MEM:-4MB}
     environment:
       POSTGRES_PASSWORD: ${IRONRAG_POSTGRES_PASSWORD:-postgres}
       POSTGRES_USER: ${IRONRAG_POSTGRES_USER:-postgres}
@@ -304,7 +337,7 @@ services:
       resources:
         <<: *ironrag-resources-db
   redis:
-    image: ${IRONRAG_REDIS_IMAGE:-redis:8.8}
+    image: ${IRONRAG_REDIS_IMAGE:-redis:8.10.1}
     restart: unless-stopped
     command:
       - redis-server
@@ -377,7 +410,6 @@ services:
       OTEL_SERVICE_NAME: ironrag-startup
     extra_hosts:
       - "host.docker.internal:host-gateway"
-    dns: *ironrag-dns
     # One-shot migrator; neutral OOM priority — it exits before steady state
     # so it does not co-reside under load.
     oom_score_adj: 0
@@ -392,8 +424,11 @@ services:
       context: .
       dockerfile: apps/api/Dockerfile
       args:
-        APP_VERSION: ${IRONRAG_VERSION:-0.0.0-dev}
-        DOCLING_VERSION: ${DOCLING_VERSION:-2.107.0}
+        # Empty, never a placeholder: the Dockerfile rejects an empty
+        # APP_VERSION, so `IRONRAG_VERSION=<tag-or-commit>` is required to build
+        # an image. Interpolation stays harmless for `pull`/`up`/`ps`, which
+        # never read this argument.
+        APP_VERSION: ${IRONRAG_VERSION:-}
         TORCH_VERSION: ${TORCH_VERSION:-2.12.0+cpu}
         TORCHVISION_VERSION: ${TORCHVISION_VERSION:-0.27.0+cpu}
     restart: unless-stopped
@@ -414,7 +449,6 @@ services:
       - "8080"
     extra_hosts:
       - "host.docker.internal:host-gateway"
-    dns: *ironrag-dns
     volumes:
       - content_storage_data:/var/lib/ironrag/content-storage
     healthcheck:
@@ -450,7 +484,6 @@ services:
       - "8080"
     extra_hosts:
       - "host.docker.internal:host-gateway"
-    dns: *ironrag-dns
     volumes:
       - content_storage_data:/var/lib/ironrag/content-storage
     healthcheck:
@@ -473,12 +506,14 @@ services:
       context: apps/web
       dockerfile: Dockerfile
       args:
-        APP_VERSION: ${IRONRAG_VERSION:-0.0.0-dev}
+        # Same contract as the backend image: empty here, rejected by the
+        # frontend Dockerfile, so the bundle can never carry a made-up version.
+        APP_VERSION: ${IRONRAG_VERSION:-}
         # Browser traces are off unless the image is explicitly built with an
         # operator-controlled OTLP/HTTP traces endpoint.
         VITE_OTEL_EXPORTER_OTLP_ENDPOINT: ${VITE_OTEL_EXPORTER_OTLP_ENDPOINT:-}
         VITE_OTEL_SERVICE_NAME: ${VITE_OTEL_SERVICE_NAME:-ironrag-web}
-        VITE_OTEL_SERVICE_VERSION: ${VITE_OTEL_SERVICE_VERSION:-${IRONRAG_VERSION:-0.0.0-dev}}
+        VITE_OTEL_SERVICE_VERSION: ${VITE_OTEL_SERVICE_VERSION:-${IRONRAG_VERSION:-}}
         VITE_OTEL_DEPLOYMENT_ENVIRONMENT: ${VITE_OTEL_DEPLOYMENT_ENVIRONMENT:-production}
         VITE_ENABLE_QUERY_DEVTOOLS: ${VITE_ENABLE_QUERY_DEVTOOLS:-false}
     restart: unless-stopped
@@ -487,7 +522,6 @@ services:
         condition: service_healthy
     environment:
       IRONRAG_API_UPSTREAM: http://backend:8080
-    dns: *ironrag-dns
     ports:
       - "${IRONRAG_PORT:-19000}:8080"
     healthcheck:
@@ -503,5 +537,9 @@ services:
         <<: *ironrag-resources-frontend
 volumes:
   postgres_data:
+    # Override only for an explicit data cutover. The default preserves normal
+    # Compose project scoping; `name` selects one physical volume
+    # without a second Compose file or destructive volume replacement.
+    name: ${IRONRAG_POSTGRES_VOLUME_NAME:-${COMPOSE_PROJECT_NAME}_postgres_data}
   content_storage_data:
   s4core_data:

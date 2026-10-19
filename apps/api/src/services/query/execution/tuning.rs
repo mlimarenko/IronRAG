@@ -27,7 +27,7 @@ pub(crate) const SINGLE_SHOT_MIN_ANSWER_CHARS: usize = 24;
 
 /// When retrieval surfaces several candidate documents but the
 /// single-shot answer is still very short, the LLM almost certainly
-/// capitulated in front of good evidence. Retry through canonical
+/// capitulated in front of good evidence. Retry through the evidence preflight
 /// preflight over the same retrieved evidence so the model gives the
 /// user an actual answer. The threshold is structural — no
 /// decline-phrase matching — so language or provider changes do not

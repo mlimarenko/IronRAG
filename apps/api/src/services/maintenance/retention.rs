@@ -3,7 +3,7 @@
 //!
 //! Each retention sweeper:
 //!
-//! * Filters by the table's canonical timestamp column (e.g.
+//! * Filters by the table's authoritative timestamp column (e.g.
 //!   `ingest_stage_event.recorded_at`).
 //! * Issues the DELETE in batches of up to [`BATCH_SIZE`] rows so the
 //!   transaction never holds more than that many tuples worth of
@@ -12,9 +12,9 @@
 //! * Returns the total number of rows removed once the table is empty
 //!   for the configured TTL window.
 //!
-//! Indexes on the filter columns are pre-created in migration 0017 so
-//! the predicate compiles to an index range scan rather than a
-//! sequential scan that would blow up the lock footprint.
+//! Indexes on the filter columns are defined in the fresh baseline schema so
+//! the predicate compiles to an index range scan rather than a sequential scan
+//! that would blow up the lock footprint.
 
 use std::time::Duration;
 

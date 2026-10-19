@@ -9,7 +9,7 @@ use crate::mcp_types::{
 
 use super::super::{
     McpToolDescriptor, McpToolResult,
-    audit::{build_mcp_mutation_subjects, build_mcp_search_subjects, record_canonical_mcp_audit},
+    audit::{self, build_mcp_mutation_subjects, build_mcp_search_subjects, record_mcp_audit},
     ok_tool_result, parse_tool_args, tool_error_result,
 };
 use super::ToolCallContext;
@@ -188,6 +188,7 @@ pub(crate) fn descriptor(name: &str) -> Option<McpToolDescriptor> {
             input_schema: json!({
                 "type": "object",
                 "required": ["library", "documentId", "mode"],
+                "additionalProperties": false,
                 "properties": {
                     "library": {
                         "type": "string",
@@ -211,6 +212,11 @@ pub(crate) fn descriptor(name: &str) -> Option<McpToolDescriptor> {
                         "type": "string",
                         "description": "Required when mode=append. Good for small incremental notes."
                     },
+                    "baseRevisionId": {
+                        "type": "string",
+                        "format": "uuid",
+                        "description": "Required when mode=append. Exact source revision UUID; never inferred from the current head."
+                    },
                     "replacementFileName": {
                         "type": "string",
                         "description": "Required when mode=replace."
@@ -220,8 +226,29 @@ pub(crate) fn descriptor(name: &str) -> Option<McpToolDescriptor> {
                         "description": "Required when mode=replace."
                     },
                     "replacementMimeType": {
-                        "type": "string",
+                        "type": ["string", "null"],
                         "description": "Optional when mode=replace."
+                    },
+                    "title": {
+                        "type": ["string", "null"],
+                        "description": "Nullable replacement title; only accepted when mode=replace."
+                    },
+                    "languageCode": {
+                        "type": ["string", "null"],
+                        "description": "Nullable replacement language; only accepted when mode=replace."
+                    },
+                    "sourceUri": {
+                        "type": ["string", "null"],
+                        "description": "Nullable replacement source URI; only accepted when mode=replace."
+                    },
+                    "documentHint": {
+                        "type": ["string", "null"],
+                        "description": "Nullable replacement extraction hint; only accepted when mode=replace."
+                    },
+                    "visibilityIntentId": {
+                        "type": ["string", "null"],
+                        "format": "uuid",
+                        "description": "Bind this replacement to an accepted visibilityintent/1 obligation. Only accepted when mode=replace; metadata and bytes must match the obligation exactly."
                     }
                 }
             }),
@@ -243,7 +270,7 @@ pub(crate) fn descriptor(name: &str) -> Option<McpToolDescriptor> {
         }),
         "get_operation" => Some(McpToolDescriptor {
             name: "get_operation",
-            description: "Check the lifecycle of a previously accepted create_documents or create_document_revision operation. Reads the same canonical async-operation store as GET /v1/ops/operations/{operationId}. Use this to confirm backend completion; read/search visibility can arrive slightly before or after the terminal operation state.",
+            description: "Check the lifecycle of a previously accepted create_documents or create_document_revision operation. Reads the same shared async-operation store as GET /v1/ops/operations/{operationId}. Use this to confirm backend completion; read/search visibility can arrive slightly before or after the terminal operation state.",
             input_schema: json!({
                 "type": "object",
                 "required": ["operationId"],
@@ -270,7 +297,7 @@ pub(crate) async fn call_tool(
         READ_DOCUMENT_TOOL_NAME => read_document(context, arguments).await,
         "list_documents" => list_documents(context, arguments).await,
         "create_documents" => create_documents(context, arguments).await,
-        "create_document_revision" => create_document_revision(context, arguments).await,
+        "create_document_revision" => Box::pin(create_document_revision(context, arguments)).await,
         "delete_document" => delete_document(context, arguments).await,
         "get_operation" => get_operation(context, arguments).await,
         _ => return None,
@@ -424,22 +451,24 @@ async fn search_documents(context: ToolCallContext<'_>, arguments: &Value) -> Mc
         .await
         {
             Ok(payload) => {
-                record_canonical_mcp_audit(
+                record_mcp_audit(
                     context.state,
                     context.auth,
                     context.request_id,
-                    "agent.memory.search",
-                    "succeeded",
-                    Some(format!(
-                        "completed MCP document search with {} hit(s)",
-                        payload.hits.len()
-                    )),
-                    Some(format!(
-                        "principal {} completed MCP document search across {} library scope(s)",
-                        context.auth.principal_id,
-                        payload.libraries.len()
-                    )),
-                    build_mcp_search_subjects(context.state, &payload),
+                    audit::McpAuditEvent {
+                        action_kind: "agent.memory.search",
+                        result_kind: "succeeded",
+                        redacted_message: Some(format!(
+                            "completed MCP document search with {} hit(s)",
+                            payload.hits.len()
+                        )),
+                        internal_message: Some(format!(
+                            "principal {} completed MCP document search across {} library scope(s)",
+                            context.auth.principal_id,
+                            payload.libraries.len()
+                        )),
+                        subjects: build_mcp_search_subjects(context.state, &payload),
+                    },
                 )
                 .await;
                 ok_tool_result(&search_documents_result_text(&payload), json!(payload))
@@ -460,22 +489,26 @@ async fn read_document(context: ToolCallContext<'_>, arguments: &Value) -> McpTo
         .await
         {
             Ok(payload) => {
-                record_canonical_mcp_audit(
+                record_mcp_audit(
                     context.state,
                     context.auth,
                     context.request_id,
-                    "agent.memory.read",
-                    "succeeded",
-                    Some("MCP document read completed".to_string()),
-                    Some(format!(
-                        "principal {} read knowledge document {} via MCP",
-                        context.auth.principal_id, payload.document_id
-                    )),
-                    vec![context.state.canonical_services.audit.knowledge_document_subject(
-                        payload.document_id,
-                        payload.workspace_id,
-                        payload.library_id,
-                    )],
+                    audit::McpAuditEvent {
+                        action_kind: "agent.memory.read",
+                        result_kind: "succeeded",
+                        redacted_message: Some("MCP document read completed".to_string()),
+                        internal_message: Some(format!(
+                            "principal {} read knowledge document {} via MCP",
+                            context.auth.principal_id, payload.document_id
+                        )),
+                        subjects: vec![
+                            context.state.application_services.audit.knowledge_document_subject(
+                                payload.document_id,
+                                payload.workspace_id,
+                                payload.library_id,
+                            ),
+                        ],
+                    },
                 )
                 .await;
                 ok_tool_result(&read_document_result_text(&payload), json!(payload))
@@ -525,18 +558,20 @@ async fn list_documents(context: ToolCallContext<'_>, arguments: &Value) -> McpT
             .await
             {
                 Ok(payload) => {
-                    record_canonical_mcp_audit(
+                    record_mcp_audit(
                         context.state,
                         context.auth,
                         context.request_id,
-                        "agent.memory.list_documents",
-                        "succeeded",
-                        Some("listed library documents".to_string()),
-                        Some(format!(
-                            "principal {} listed documents for library {}",
-                            context.auth.principal_id, library_id
-                        )),
-                        Vec::new(),
+                        audit::McpAuditEvent {
+                            action_kind: "agent.memory.list_documents",
+                            result_kind: "succeeded",
+                            redacted_message: Some("listed library documents".to_string()),
+                            internal_message: Some(format!(
+                                "principal {} listed documents for library {}",
+                                context.auth.principal_id, library_id
+                            )),
+                            subjects: Vec::new(),
+                        },
                     )
                     .await;
                     ok_tool_result("Documents listed.", payload)
@@ -558,21 +593,26 @@ async fn create_documents(context: ToolCallContext<'_>, arguments: &Value) -> Mc
         .await
         {
             Ok(payload) => {
-                let canonical_subjects = build_mcp_mutation_subjects(context.state, &payload);
-                record_canonical_mcp_audit(
+                let normalized_subjects = build_mcp_mutation_subjects(context.state, &payload);
+                record_mcp_audit(
                     context.state,
                     context.auth,
                     context.request_id,
-                    "agent.memory.upload",
-                    "succeeded",
-                    Some(format!("accepted {} MCP upload mutation(s)", payload.len())),
-                    Some(format!(
-                        "principal {} accepted {} MCP upload mutation(s) in library {}",
-                        context.auth.principal_id,
-                        payload.len(),
-                        args.library
-                    )),
-                    canonical_subjects,
+                    audit::McpAuditEvent {
+                        action_kind: "agent.memory.upload",
+                        result_kind: "succeeded",
+                        redacted_message: Some(format!(
+                            "accepted {} MCP upload mutation(s)",
+                            payload.len()
+                        )),
+                        internal_message: Some(format!(
+                            "principal {} accepted {} MCP upload mutation(s) in library {}",
+                            context.auth.principal_id,
+                            payload.len(),
+                            args.library
+                        )),
+                        subjects: normalized_subjects,
+                    },
                 )
                 .await;
                 ok_tool_result("Document uploads accepted.", json!({ "receipts": payload }))
@@ -587,29 +627,37 @@ async fn create_document_revision(
     context: ToolCallContext<'_>,
     arguments: &Value,
 ) -> McpToolResult {
+    if let Err(error) = validate_revision_mode_properties(arguments) {
+        return tool_error_result(error);
+    }
     match parse_tool_args::<McpUpdateDocumentRequest>(arguments.clone()) {
-        Ok(args) => match crate::services::mcp::mutations::update_document(
+        Ok(args) => match Box::pin(crate::services::mcp::mutations::update_document(
             context.auth,
             context.state,
             args.clone(),
-        )
+        ))
         .await
         {
             Ok(payload) => {
-                let canonical_subjects =
+                let normalized_subjects =
                     build_mcp_mutation_subjects(context.state, std::slice::from_ref(&payload));
-                record_canonical_mcp_audit(
+                record_mcp_audit(
                     context.state,
                     context.auth,
                     context.request_id,
-                    "agent.memory.update",
-                    "succeeded",
-                    Some(format!("accepted MCP document {:?} mutation", payload.operation_kind)),
-                    Some(format!(
-                        "principal {} accepted MCP operation {} for document {:?}",
-                        context.auth.principal_id, payload.operation_id, payload.document_id
-                    )),
-                    canonical_subjects,
+                    audit::McpAuditEvent {
+                        action_kind: "agent.memory.update",
+                        result_kind: "succeeded",
+                        redacted_message: Some(format!(
+                            "accepted MCP document {:?} mutation",
+                            payload.operation_kind
+                        )),
+                        internal_message: Some(format!(
+                            "principal {} accepted MCP operation {} for document {:?}",
+                            context.auth.principal_id, payload.operation_id, payload.document_id
+                        )),
+                        subjects: normalized_subjects,
+                    },
                 )
                 .await;
                 ok_tool_result("Document mutation accepted.", json!(payload))
@@ -618,6 +666,27 @@ async fn create_document_revision(
         },
         Err(error) => tool_error_result(error),
     }
+}
+
+fn validate_revision_mode_properties(arguments: &Value) -> Result<(), ApiError> {
+    let forbidden: &[&str] = match arguments["mode"].as_str() {
+        Some("append") => &[
+            "replacementFileName",
+            "replacementContentBase64",
+            "replacementMimeType",
+            "title",
+            "languageCode",
+            "sourceUri",
+            "documentHint",
+            "visibilityIntentId",
+        ],
+        Some("replace") => &["baseRevisionId", "appendedText"],
+        _ => return Err(ApiError::invalid_mcp_tool_call("mode must be append or replace")),
+    };
+    if forbidden.iter().any(|field| arguments.get(field).is_some()) {
+        return Err(ApiError::invalid_mcp_tool_call("mode does not accept these properties"));
+    }
+    Ok(())
 }
 
 async fn delete_document(context: ToolCallContext<'_>, arguments: &Value) -> McpToolResult {
@@ -632,18 +701,20 @@ async fn delete_document(context: ToolCallContext<'_>, arguments: &Value) -> Mcp
             .await
             {
                 Ok(payload) => {
-                    record_canonical_mcp_audit(
+                    record_mcp_audit(
                         context.state,
                         context.auth,
                         context.request_id,
-                        "agent.memory.delete_document",
-                        "succeeded",
-                        Some(format!("deleted document {document_id}")),
-                        Some(format!(
-                            "principal {} deleted document {} via MCP",
-                            context.auth.principal_id, document_id
-                        )),
-                        Vec::new(),
+                        audit::McpAuditEvent {
+                            action_kind: "agent.memory.delete_document",
+                            result_kind: "succeeded",
+                            redacted_message: Some(format!("deleted document {document_id}")),
+                            internal_message: Some(format!(
+                                "principal {} deleted document {} via MCP",
+                                context.auth.principal_id, document_id
+                            )),
+                            subjects: Vec::new(),
+                        },
                     )
                     .await;
                     ok_tool_result("Document deletion accepted.", payload)
@@ -681,6 +752,44 @@ mod tests {
 
     fn test_uuid(value: u128) -> Uuid {
         Uuid::from_u128(value)
+    }
+
+    #[test]
+    fn replacement_schema_and_mode_properties_are_strict_including_null() {
+        let tool = descriptor("create_document_revision").unwrap();
+        for field in ["title", "languageCode", "sourceUri", "documentHint", "visibilityIntentId"] {
+            assert_eq!(tool.input_schema["properties"][field]["type"], json!(["string", "null"]));
+            let mut args = json!({"mode":"append"});
+            args[field] = Value::Null;
+            assert!(validate_revision_mode_properties(&args).is_err(), "{field}");
+        }
+        for field in ["baseRevisionId", "appendedText"] {
+            let mut args = json!({"mode":"replace"});
+            args[field] = Value::Null;
+            assert!(validate_revision_mode_properties(&args).is_err(), "{field}");
+        }
+        for mode in [json!("retired"), Value::Null, json!(42)] {
+            assert!(validate_revision_mode_properties(&json!({"mode":mode})).is_err());
+        }
+        for field in ["visibilityPolicy", "visibility_policy"] {
+            let mut args = json!({"library":"ws/lib", "documentId":test_uuid(1), "mode":"replace"});
+            args[field] = Value::Null;
+            assert!(parse_tool_args::<McpUpdateDocumentRequest>(args).is_err());
+        }
+    }
+
+    #[test]
+    fn visibility_contract_append_tool_documents_explicit_base() {
+        let tool = descriptor("create_document_revision").expect("revision tool");
+        let property = &tool.input_schema["properties"]["baseRevisionId"];
+        assert_eq!(property["format"], "uuid");
+        assert!(property["description"].as_str().unwrap().contains("Required when mode=append"));
+        let request: McpUpdateDocumentRequest = serde_json::from_value(json!({
+            "library":"ws/lib","documentId":test_uuid(1),"mode":"append",
+            "baseRevisionId":test_uuid(2),"appendedText":"tail"
+        }))
+        .unwrap();
+        assert_eq!(request.base_revision_id, Some(test_uuid(2)));
     }
 
     #[test]

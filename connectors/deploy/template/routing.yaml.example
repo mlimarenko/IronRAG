@@ -1,0 +1,56 @@
+# Complete routing.yaml schema. Unknown structural keys are rejected. Keys
+# inside `match` and direct keys below `policies` are intentionally open-ended:
+# they are adapter routing-fact names and SourceItemRef kinds, respectively.
+#
+# Top-level keys (all optional):
+#   default  mapping | null   Fallback target. Default: no fallback.
+#   rules    list             Ordered conditional targets. Default: [].
+#   policies mapping          Per-item-kind policy overrides. Default: {}.
+#
+# A library value is IronRAG's canonical catalog ref:
+#   <workspace-slug>/<library-slug>
+# Both slugs are shown in IronRAG Admin → Libraries and are the same refs used
+# by MCP. UUIDs and display names are not accepted. The connector resolves all
+# refs through IronRAG's permission-filtered catalog before it starts syncing.
+#
+# default keys:
+#   library  string, required Canonical library ref.
+default:
+  library: main/knowledge-base
+
+# rules item keys:
+#   description string | null, optional  Free text used only in logs.
+#   match       mapping, required/nonempty. Every criterion must match (AND).
+#   target      mapping, required, with exactly one required `library` string.
+#
+# Rules are checked top-to-bottom; the first full match wins. Match keys are
+# whatever SourceAdapter placed in SourceItemRef.routing_facts. Expected values
+# below are YAML scalars. Scalar facts use case-sensitive exact equality; when
+# the actual fact is a list/tuple/set, the expected scalar must be a member.
+# Regex, glob, substring, coercion, OR, and display-name matching are not used.
+# If no rule matches and `default` is absent, the item is `unrouted` and skipped.
+rules:
+  - description: Reference section
+    match:
+      section: reference
+    target:
+      library: main/reference
+
+  - description: Archived items in a separate workspace
+    match:
+      tag: archive
+    target:
+      library: archive/historical
+
+# policies is keyed by the exact SourceItemRef.kind emitted by the adapter.
+# Each field is optional and otherwise inherits its DEFAULT_POLICY_* setting:
+#   on_new               create | skip     default create
+#   on_changed           replace | skip    default replace
+#   on_missing           delete | ignore   default delete
+#   on_duplicate_content skip | fail       default skip
+policies:
+  page:
+    on_new: create
+    on_changed: replace
+    on_missing: delete
+    on_duplicate_content: skip

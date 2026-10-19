@@ -1,13 +1,13 @@
 import type { MintTokenRequest } from '@/shared/api/admin'
 import type { IamPermissionKind } from '@/shared/api/generated'
 
-type TokenScope = 'system' | 'workspace' | 'library'
+type TokenScope = 'workspace' | 'library'
 
 interface BuildMintTokenRequestInput {
   label: string
   expiryDays: string
   scope: TokenScope
-  workspaceId?: string
+  workspaceId: string
   libraryIds: string[]
   permissionKinds: IamPermissionKind[]
 }
@@ -29,7 +29,7 @@ export function buildMintTokenRequest(input: BuildMintTokenRequestInput): MintTo
   const expiresAt = resolveTokenExpiry(input.expiryDays)
   return {
     label: input.label.trim(),
-    ...(input.scope === 'system' ? {} : { workspaceId: input.workspaceId }),
+    workspaceId: input.workspaceId,
     ...(expiresAt ? { expiresAt } : {}),
     libraryIds: input.scope === 'library' ? input.libraryIds : [],
     permissionKinds: input.permissionKinds,

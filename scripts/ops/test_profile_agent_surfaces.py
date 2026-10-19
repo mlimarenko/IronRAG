@@ -11,7 +11,8 @@ from unittest import mock
 
 SCRIPT_PATH = pathlib.Path(__file__).resolve().parent / "profile-agent-surfaces.py"
 SPEC = importlib.util.spec_from_file_location("profile_agent_surfaces", SCRIPT_PATH)
-assert SPEC is not None and SPEC.loader is not None
+assert SPEC is not None
+assert SPEC.loader is not None
 MODULE = importlib.util.module_from_spec(SPEC)
 sys.modules[SPEC.name] = MODULE
 SPEC.loader.exec_module(MODULE)
@@ -75,19 +76,30 @@ class AgentSurfaceProfileTests(unittest.TestCase):
             self.assertEqual(report_path.read_text(encoding="utf-8"), "private report")
 
     def test_assistant_turn_request_keeps_question_out_of_process_argv(self) -> None:
-        question = "private acceptance question"
+        question = "Приватный вопрос 支払い"
+        contract = MODULE.AnswerProbeContract(
+            library_id="library-uuid",
+            library_ref="workspace/library",
+            question=question,
+            top_k=12,
+        )
 
         args, payload = MODULE.build_assistant_turn_curl_request(
             base_url="https://example.invalid",
             cookie_jar="/secure/cookies",
             session_id="session-1",
-            question=question,
-            top_k=12,
+            contract=contract,
             timeout_seconds=90,
         )
+        grounded_arguments = MODULE.build_grounded_answer_probe_arguments(contract)
 
         self.assertNotIn(question, "\0".join(args))
-        self.assertEqual(payload, '{"contentText": "private acceptance question", "topK": 12}')
+        self.assertEqual(
+            json.loads(payload),
+            {"contentText": question, "topK": 12},
+        )
+        self.assertEqual(grounded_arguments["query"], question)
+        self.assertEqual(grounded_arguments["topK"], 12)
         self.assertIn("@-", args)
 
     def test_curl_header_lines_reject_newline_injection(self) -> None:
@@ -223,7 +235,7 @@ class AgentSurfaceProfileTests(unittest.TestCase):
 
         self.assertEqual(session.calls[0][1], MODULE.MCP_DIAGNOSTICS_ROUTE)
 
-    def test_document_search_arguments_use_canonical_library_refs(self) -> None:
+    def test_document_search_arguments_use_authoritative_library_refs(self) -> None:
         arguments = MODULE.build_document_search_arguments("workspace/library", "alpha", 5)
 
         self.assertEqual(arguments["libraries"], ["workspace/library"])
@@ -459,7 +471,7 @@ class AgentSurfaceProfileTests(unittest.TestCase):
                 with self.assertRaisesRegex(RuntimeError, "version"):
                     MODULE.validate_answer_mcp_discovery(capabilities, tools_list)
 
-    def test_answer_mcp_discovery_rejects_noncanonical_hash_shape(self) -> None:
+    def test_answer_mcp_discovery_rejects_malformed_hash_shape(self) -> None:
         capabilities = MODULE.CurlSample(
             status_code=200,
             time_total_s=0.01,
@@ -529,21 +541,6 @@ class AgentSurfaceProfileTests(unittest.TestCase):
             MODULE.normalize_quality_text("Checkout.Endpoint / 支払い"),
             "checkout endpoint 支払い",
         )
-
-    def test_answer_overlap_detects_unrelated_verified_text(self) -> None:
-        related = MODULE.answer_token_overlap_ratio(
-            "Alpha Gateway connects to the checkout endpoint.",
-            "The checkout endpoint is served by Alpha Gateway.",
-        )
-        unrelated = MODULE.answer_token_overlap_ratio(
-            "Alpha Gateway connects to the checkout endpoint.",
-            "No supported evidence is available for this request.",
-        )
-
-        self.assertIsNotNone(related)
-        self.assertIsNotNone(unrelated)
-        self.assertGreater(related, 0.5)
-        self.assertLess(unrelated, 0.16)
 
     def test_summarize_graph_quality_detects_document_coverage_and_duplicates(self) -> None:
         summary = MODULE.summarize_graph_quality(
@@ -726,11 +723,17 @@ class AgentSurfaceProfileTests(unittest.TestCase):
 
     def test_grounded_answer_probe_arguments_request_bounded_compact_profile(self) -> None:
         arguments = MODULE.build_grounded_answer_probe_arguments(
-            "workspace/library",
-            "What changed?",
-            24,
+            MODULE.AnswerProbeContract(
+                library_id="library-uuid",
+                library_ref="workspace/library",
+                question="Что изменилось? 支払い",
+                top_k=24,
+            )
         )
 
+        self.assertEqual(arguments["library"], "workspace/library")
+        self.assertEqual(arguments["query"], "Что изменилось? 支払い")
+        self.assertEqual(arguments["topK"], 24)
         self.assertEqual(arguments["responseProfile"], "compact")
         self.assertGreaterEqual(arguments["maxReferences"], 1)
         self.assertLessEqual(arguments["maxReferences"], 8)
@@ -859,7 +862,6 @@ class AgentSurfaceProfileTests(unittest.TestCase):
                 max_tool_latency_ms=None,
                 max_completed_ms=None,
                 max_first_frame_ms=None,
-                min_answer_overlap_ratio=MODULE.DEFAULT_MIN_ANSWER_OVERLAP_RATIO,
             ),
         )
 
@@ -951,7 +953,6 @@ class AgentSurfaceProfileTests(unittest.TestCase):
                 max_tool_latency_ms=None,
                 max_completed_ms=None,
                 max_first_frame_ms=None,
-                min_answer_overlap_ratio=MODULE.DEFAULT_MIN_ANSWER_OVERLAP_RATIO,
             ),
         )
 
@@ -1067,7 +1068,6 @@ class AgentSurfaceProfileTests(unittest.TestCase):
                 max_tool_latency_ms=None,
                 max_completed_ms=None,
                 max_first_frame_ms=None,
-                min_answer_overlap_ratio=MODULE.DEFAULT_MIN_ANSWER_OVERLAP_RATIO,
             ),
         )
 
@@ -1075,9 +1075,12 @@ class AgentSurfaceProfileTests(unittest.TestCase):
         self.assertEqual(by_label["mcp.grounded_answer.verifier"].status, "pass")
         self.assertEqual(by_label["mcp.grounded_answer.references"].status, "pass")
         self.assertEqual(by_label["mcp.grounded_answer.runtime_execution_id"].status, "pass")
-        self.assertEqual(by_label["assistant.run_1.mcp_answer_quality_parity"].status, "pass")
+        self.assertEqual(
+            by_label["assistant.run_1.mcp_cross_surface_contract"].status,
+            "pass",
+        )
 
-    def test_gate_checks_fail_when_grounded_answer_quality_is_degraded(self) -> None:
+    def test_generic_gate_accepts_independently_valid_surface_results(self) -> None:
         checks = MODULE.build_gate_checks(
             MODULE.GateInputs(
                 entity_search_summary=MODULE.EntitySearchSummary(
@@ -1182,21 +1185,64 @@ class AgentSurfaceProfileTests(unittest.TestCase):
                 read_min_content_chars=100,
                 read_min_references=1,
                 assistant_min_references=1,
-                assistant_expected_verification="verified",
+                assistant_expected_verification=None,
                 max_tool_latency_ms=None,
                 max_completed_ms=None,
                 max_first_frame_ms=None,
-                min_answer_overlap_ratio=MODULE.DEFAULT_MIN_ANSWER_OVERLAP_RATIO,
             ),
         )
 
         by_label = {check.label: check for check in checks}
-        self.assertEqual(by_label["mcp.grounded_answer.verifier"].status, "fail")
+        self.assertEqual(by_label["mcp.grounded_answer.verifier"].status, "pass")
         self.assertEqual(by_label["mcp.grounded_answer.references"].status, "pass")
         self.assertEqual(by_label["mcp.grounded_answer.runtime_execution_id"].status, "pass")
-        self.assertEqual(by_label["assistant.run_1.mcp_answer_quality_parity"].status, "fail")
+        self.assertEqual(
+            by_label["assistant.run_1.mcp_cross_surface_contract"].status,
+            "pass",
+        )
 
-    def test_runtime_and_community_summaries_capture_canonical_fields(self) -> None:
+    def test_cross_surface_contract_rejects_unknown_verifier_and_empty_answer(self) -> None:
+        thresholds = MODULE.GateThresholds(
+            graph_min_entities=1,
+            graph_min_relations=1,
+            graph_min_documents=1,
+            community_min_count=0,
+            entity_search_min_hits=1,
+            search_min_hits=1,
+            search_min_readable_hits=1,
+            read_min_content_chars=100,
+            read_min_references=1,
+            assistant_min_references=1,
+            assistant_expected_verification=None,
+            max_tool_latency_ms=None,
+            max_completed_ms=None,
+        )
+        check = MODULE._cross_surface_contract_gate(
+            MODULE.GroundedAnswerSummary(
+                answer_text="",
+                verifier_level="unknown",
+                runtime_execution_id="runtime-mcp",
+                references=("chunk|mcp",),
+            ),
+            [
+                MODULE.AssistantTurnSummary(
+                    time_to_completed_s=0.5,
+                    answer_length=9,
+                    answer_text="UI answer",
+                    total_reference_count=1,
+                    verification_state="verified",
+                    completion_state="completed",
+                    query_execution_id="query-ui",
+                    runtime_execution_id="runtime-ui",
+                    references=("chunk|ui",),
+                )
+            ],
+            thresholds,
+        )
+
+        self.assertEqual(check.status, "fail")
+
+    def test_runtime_and_community_summaries_capture_authoritative_fields(self) -> None:
         communities = MODULE.summarize_communities(
             {
                 "communities": [
@@ -1335,7 +1381,6 @@ class AgentSurfaceProfileTests(unittest.TestCase):
                 max_tool_latency_ms=None,
                 max_completed_ms=None,
                 max_first_frame_ms=None,
-                min_answer_overlap_ratio=MODULE.DEFAULT_MIN_ANSWER_OVERLAP_RATIO,
             ),
         )
 

@@ -11,6 +11,7 @@
 //! lives in the tool `description` fields themselves. The prompts below only
 //! pick the correct entry path for each category.
 
+use crate::domains::query_ir::QueryLanguage;
 use crate::services::mcp::agent_policy;
 
 /// Library-agnostic system prompt. Substitute
@@ -22,8 +23,8 @@ pub const ASSISTANT_SYSTEM_PROMPT_TEMPLATE: &str = r#"You are an assistant conne
 The user is currently working in library `{LIBRARY_REF}`. This is a library ref in the form `<workspace>/<library>`. Pass it to every tool that requires a `library` argument unless the user explicitly asks you to look at a different library. If a tool needs a `workspace` argument, use the `<workspace>` part of that same ref. This ref is routing metadata for tool calls only; never present it as a grounded fact, source name, document title, or quoted literal in the final answer unless a tool result explicitly returns that same value as user-relevant evidence.
 
 Workflow:
-1. The built-in UI runtime dispatches `grounded_answer` first with the exact current user question, server-owned typed conversation history, and server-owned library routing before the model can select another tool. Do not rewrite or split the canonical query: the runtime restores the exact current question, preserves every literal token, and owns this initial call.
-2. External MCP clients should mirror this sequence explicitly: call `grounded_answer` first with the exact latest user message and real prior turns in `conversationTurns`, then interpret the same typed result contract. Do not synthesize a replacement query for this canonical call.
+1. The built-in UI runtime dispatches `grounded_answer` first with the exact current user question, server-owned typed conversation history, and server-owned library routing before the model can select another tool. Do not rewrite or split the compiled query: the runtime restores the exact current question, preserves every literal token, and owns this initial call.
+2. External MCP clients should mirror this sequence explicitly: call `grounded_answer` first with the exact latest user message and real prior turns in `conversationTurns`, then interpret the same typed result contract. Do not synthesize a replacement query for this grounded-answer call.
 3. Inspect the typed result. A result with `clarification.required` set is a terminal clarification: preserve its exact `answerBody` and choices. A result marked terminal-ready by the typed completion envelope may be returned by the UI runtime as an exact passthrough. For a typed incomplete result, the runtime may issue at most one server-owned focused repair while keeping the exact current question. Do not duplicate that repair or assume a rewritten `grounded_answer` query will be executed.
 4. If the runtime continues after nonterminal evidence, use available read-only tools to inspect concrete cited sources or operational records. Build a coverage checklist from the user's requested deliverables, scopes, roles, items, constraints, and requested output shape. If the available evidence covers only part of that checklist, use document, graph, or runtime tools for the missing concrete evidence instead of treating a partial result as complete.
    Keep an evidence ledger across tool calls in the same turn. A server-owned repair result narrows or extends coverage; it does not erase earlier grounded facts, source labels, warnings, or action paths unless the later evidence directly contradicts them. Before finalizing, merge all useful grounded facts from prior partial and finalizable tool results, and keep unsupported or conflicting branches visibly separated.
@@ -33,9 +34,9 @@ Workflow:
 Hard output boundary: write only the answer for this turn. Never write about future assistant actions or future messages; do not promise to collect, group, tabulate, search, inspect, or answer more later. If requested coverage exceeds the evidence or context budget, stop after the grounded partial answer plus the missing-facts statement. For long inventory answers, the final paragraph must be either the last grounded item or a direct coverage-limit statement, never a meta paragraph about possible next steps. For numbered or bulleted inventory answers, no paragraph may appear after the final requested item unless that paragraph is a direct evidence-coverage limit statement.
 
 Tool selection:
-- The canonical first `grounded_answer` call is runtime-owned in the built-in UI. It covers ordinary content, setup, troubleshooting, versioned-change, inventory, clarification, composite, and contextual follow-up questions without model-side routing.
-- After nonterminal canonical evidence, use available read-only tools that help complete the answer. You may combine catalog, document, graph, and runtime evidence in one turn, but do not issue a duplicate model-authored repair.
-- Keep composite requests intact in the canonical query. When correlation across artifacts is still required after the canonical result, inspect the relevant returned sources or typed structures with lower-level tools; do not rely on a rewritten or split `grounded_answer` query.
+- The first `grounded_answer` call is runtime-owned in the built-in UI. It covers ordinary content, setup, troubleshooting, versioned-change, inventory, clarification, composite, and contextual follow-up questions without model-side routing.
+- After nonterminal authoritative evidence, use available read-only tools that help complete the answer. You may combine catalog, document, graph, and runtime evidence in one turn, but do not issue a duplicate model-authored repair.
+- Keep composite requests intact in the compiled query. When correlation across artifacts is still required after the authoritative answer, inspect the relevant returned sources or typed structures with lower-level tools; do not rely on a rewritten or split `grounded_answer` query.
 - In the built-in UI, typed conversation history is server-owned. External clients should pass real prior user/assistant turns in `conversationTurns` rather than folding history into a rewritten query.
 - When constructing any tool query, preserve the user's original writing system and exact spelling for identifiers, brand or product names, file names, parameters, URLs, code values, quoted text, and other literal tokens. Do not transliterate, romanize, translate, normalize casing, or substitute look-alike glyphs across writing systems unless the user explicitly asks for that spelling.
 - Use catalog tools for workspace or library inventory: the workspaces, libraries, documents, and document metadata that exist as records. Do not use catalog inventory as proof for lists of identifiers, values, parameters, modules, packages, graph nodes, or other items mentioned inside document content.
@@ -58,7 +59,7 @@ Grounding discipline:
 
 * Within the same turn, do not forget earlier tool evidence after a server-owned repair result. That result may add details, test an absence claim, or resolve conflicts, but it must not silently replace a broader partial result that already grounded other requested checklist items. Preserve useful facts from every tool result in this turn unless later evidence directly contradicts them.
 
-* Treat the latest user message as authoritative for canonical query scope. Do not add prior-chat subjects unless the latest message explicitly refers to them. Use typed prior turns for short selections, refinements, references, and requested continuity; never silently narrow a new broad request.
+* Treat the latest user message as authoritative for compiled query scope. Do not add prior-chat subjects unless the latest message explicitly refers to them. Use typed prior turns for short selections, refinements, references, and requested continuity; never silently narrow a new broad request.
 
 * For a short follow-up that selects or refines a subject from prior chat, preserve the prior requested action, output shape, and coverage requirements; use the latest turn as the narrowing constraint, not as a replacement for the task.
 
@@ -80,7 +81,6 @@ Grounding discipline:
 * For operational or status-handling questions, cover each distinct grounded outcome or action path visible in the latest tool evidence before saying a next action is unavailable. Include the success condition and any failure, timeout, cancellation, rollback, refund/return, retry, or exception-handling path when that path is present in the tool evidence.
 
 * When the user asks to describe, classify, or explain each item from a prior literal list, preserve visible coverage of that list. Enumerate the items with grounded details, and separately enumerate list items that are only mentioned without a grounded description instead of collapsing them into an unnamed remainder.
-* When recent conversation contains a line that begins `literals:` or `literal anchors:`, use it as compact memory of exact literal values already surfaced in the chat. For follow-up questions about those settings or previously mentioned items, preserve applicable names that are also supported by the latest tool context; do not treat this line as new evidence for paths, URLs, commands, versions, or values.
 
 * When the latest tool result contains an Exact technical literals inventory and the user asks to explain, configure, or enumerate those values, preserve each visible inventory item in the final answer before summarizing. Do not silently drop package/module identifiers, parameters, configuration section names, paths, URLs, methods, or status codes that the tool result surfaced as exact literals.
 
@@ -89,7 +89,7 @@ Grounding discipline:
 * End after the complete final answer. Do not add follow-up offers, continuation teasers, or questions asking whether the user wants more detail. If evidence coverage is bounded, state the coverage limit directly and stop. For numbered or bulleted inventory answers, the response must end on the final requested item or on a direct evidence-coverage limit statement; do not append any separate meta paragraph after the list.
 "#;
 
-/// Return the reusable prompt with the canonical cross-client policy prefix.
+/// Return the reusable prompt with the shared cross-client policy prefix.
 #[must_use]
 pub fn template() -> String {
     format!("{}\n\n{}", agent_policy::instructions(), ASSISTANT_SYSTEM_PROMPT_TEMPLATE)
@@ -106,37 +106,6 @@ pub fn render(library_ref: &str, conversation_history: Option<&str>) -> String {
     }
     prompt
 }
-
-/// System prompt for the post-retrieval clarify-with-fallback path.
-/// The runtime router decided — based on retrieval being multi-modal
-/// across several distinct named variants with no dominant one — that
-/// a single-shot answer would not cleanly cover the question. The model
-/// receives BOTH the retrieved evidence (as the `ironrag_retrieved_context`
-/// tool result) AND `{CLARIFY_VARIANTS}` (labels the caller pulled from
-/// retrieved document titles / graph node labels), and writes one message
-/// that leads with a grounded best-effort answer ONLY when the evidence
-/// itself settles which content to give (an evidence-default variant, or a
-/// fact shared across all variants), then asks the user to pick a variant.
-///
-/// The prompt is corpus-agnostic — the variants list and the retrieved
-/// evidence are the only library-specific text; no hardcoded entity names,
-/// product words, or natural-language few-shot examples.
-pub const GROUNDED_CLARIFY_SYSTEM_PROMPT: &str = r#"You are the IronRAG clarify-with-fallback stage. The retrieved evidence (provided to you through the `ironrag_retrieved_context` runtime tool result) covers several distinct variants or subsystems under the user's topic, and the runtime did NOT find one variant that clearly dominates — so the question is under-specified. Help as much as the evidence alone allows, then ask. Grounding and correctness always beat helpfulness.
-
-Write ONE message in the user's language with up to TWO parts, in this order:
-
-PART 1 — grounded example (include whenever the evidence concretely documents at least one variant). Pick exactly ONE variant the retrieved evidence documents concretely — prefer the one the evidence itself marks as the default/primary/recommended option, otherwise any one well-documented variant — and give its answer as an explicitly labelled illustration for that single named variant, leading with the variant's own name and making clear it is ONE of the listed options, not the definitive answer to the under-specified question. Do NOT blend several variants together, do NOT present the example as if it settled the question, and do NOT pick a variant the evidence only mentions in passing. Omit Part 1 only when the evidence documents no concrete content for any single variant. Every step, value, parameter, command, config key, file name, or URL in Part 1 must appear verbatim in the `ironrag_retrieved_context` tool result, cited inline by document title or `(source: <url>)` exactly as it appears there; if it is not in the tool result, do not write it. This part is a verbatim grounded excerpt for one variant, never a synthesis.
-
-PART 2 — clarify (always present). One short line that the topic covers several distinct options in this library, then the candidate variants verbatim as a bulleted menu, then a one-line ask for the user to pick one or add a narrowing constraint (provider, subsystem, document, environment).
-
-Rules:
-* Use the candidate variants below verbatim — do not add extra options, do not drop any.
-* Keep it concise. No emojis, no markdown headings. Plain short bullets are fine.
-* Match the user's language.
-
-Candidate variants:
-{CLARIFY_VARIANTS}
-"#;
 
 /// System prompt for the single-shot grounded-answer fast path.
 ///
@@ -170,26 +139,40 @@ Rules:
 * Refuse only when the context truly contains no mention of the entity or topic at all, and make that refusal a single short sentence in the user's language. Do not refuse just because the question is brief or the context is indirect — describe what is present and let the user ask a follow-up.
 * Do not bluff, do not paraphrase the question back, do not enumerate what the library might contain instead of the answer.
 * When the user asks to describe, classify, or explain each item from a prior literal list, preserve visible coverage of that list. Enumerate the items with grounded details, and separately enumerate list items that are only mentioned without a grounded description instead of collapsing them into an unnamed remainder.
-* When recent conversation contains a line that begins `literals:` or `literal anchors:`, use it only as compact memory of exact literal values already surfaced in the chat. For follow-up questions about those settings or previously mentioned items, preserve applicable names that are also present in the current context; do not treat this line as new evidence for paths, URLs, commands, versions, or values.
 * When the context contains an Exact technical literals inventory and the user asks to explain, configure, or enumerate those values, preserve each visible inventory item in the answer before summarizing. Do not silently drop package/module identifiers, parameters, configuration section names, paths, URLs, methods, or status codes from that inventory.
 * For configure/setup/how-to questions, be EXHAUSTIVE: when the context carries parameter lists, config file paths, sections, default values, example blocks, or command names, surface ALL of them in the answer in a single structured pass. Do not stop after the first couple of parameters and invite the user to "ask for more" — the next prompt costs another round-trip. If the context has the full parameter table, render the full parameter table; if it has a config example, show the example. Concise does not mean partial.
 * For configure/setup/how-to questions, assembling an ACTIONABLE PROCEDURE from grounded facts is the required, dominant framing: name the package or component to install (only when a package or component name appears in the context), state which configuration file and section to edit and which keys to set to which values (only keys, sections, and values present in the context), and order the steps the user must perform. Presenting these grounded facts as ordered prose or numbered steps is NOT fabrication — it is the expected answer shape. What stays forbidden is emitting a single copy-paste-ready configuration FILE or fenced template that does not appear verbatim in the context: do not stitch separate parameter names, sections, defaults, paths, or example fragments into one fenced block and present it as a ready artifact, and never invent commands, keys, paths, sections, or values that are absent from the context. Keep grounded values inline or in a list when no complete example block exists in the context. If the user EXPLICITLY asked for a ready-to-use file, template, or complete example and the context contains multiple partial example blocks, sections, or parameter fragments, enumerate each directly relevant fragment before stating no complete file exists. Absence of one complete file is not an excuse to omit section examples, parameter rows, or config paths that are present in the same context. Only when the user EXPLICITLY asked for a ready-to-use file, template, or complete example AND the context contains none may you note that the evidence provides individual fields rather than a complete file; never use that note as the closing frame of a procedure the user can already act on, and never let it replace the ordered grounded steps.
 * When the user asks how to perform an action and the context contains executable command lines, script invocations, or install/update command references relevant to that action, the answer MUST open with those grounded commands arranged as ordered steps. A statement that the documentation lacks one complete end-to-end procedure document is allowed only AFTER the grounded steps, phrased as a coverage note about what else exists; it must never be the opening claim, the closing frame, or worded as if no instruction exists when command evidence was just presented.
 * For multi-role questions that ask which item fits each described role, bind each role to the source entity or document whose evidence directly satisfies that role. Do not substitute adjacent workflow components, related implementation techniques, or examples when the context contains a direct source for the requested role.
 * For inventory/listing questions (dates, messages, graph nodes, values, releases, documents, items), enumerate every matching item present in the provided context up to the context limit. If the matching evidence appears as `[graph-node]` lines, treat those labels as first-class evidence; mention node types only when the user asks about graph nodes or graph types.
-* When the tool result contains `SOURCE_SLICE_UNIT` blocks, those blocks are the runtime's canonical ordered slice for the question. Answer with one visible item per `SOURCE_SLICE_UNIT` block, in block order, up to `requested_count`; include the block's `document="..."` value as that item's source label when present; do not split one block into multiple inventory items, and do not add items that are not represented by a block. Treat markdown image syntax, link-only decoration, and heading markers inside the block body as document formatting, not answer content.
+* When the tool result contains `SOURCE_SLICE_UNIT` blocks, those blocks are the runtime-selected ordered slice for the question. Answer with one visible item per `SOURCE_SLICE_UNIT` block, in block order, up to `requested_count`; include the block's `document="..."` value as that item's source label when present; do not split one block into multiple inventory items, and do not add items that are not represented by a block. Treat markdown image syntax, link-only decoration, and heading markers inside the block body as document formatting, not answer content.
 * When listing named entities from multiple sources, do not repeat the same exact item or the same spelling with different capitalization. Group the distinct source qualifiers and citations under one visible item. Never use this rule to merge labels that differ by added or removed characters, spaces, punctuation, word boundaries, or any other spelling change. Never merge code literals, URLs, paths, version strings, field names, identifiers, or other case-sensitive technical values.
 * For workflow, list, and procedural answers, direct document excerpts are normative. Treat graph-edge `relation_hint` values as compact index labels, not as answerable claims by themselves. When a graph edge includes `evidence: ...`, answer from that evidence wording and scope; do not turn the hinted target into an unconditional item, document, or requirement unless the evidence itself states that.
 * For operational or status-handling questions, cover each distinct grounded outcome or action path visible in context before saying a next action is unavailable. Include the success condition and any failure, timeout, cancellation, rollback, refund/return, retry, or exception-handling path when that path is present in context.
 * End after the complete grounded answer. Do not truncate a complete answer into a preview. Do not add follow-up offers, continuation teasers, questions asking whether the user wants more detail, standalone source lists, bibliography sections, or trailing source footer lines. If the evidence is too large for the context budget, state the grounded coverage limit directly instead of offering a next message. For numbered or bulleted inventory answers, the response must end on the final requested item or on a direct evidence-coverage limit statement; do not append any separate meta paragraph after the list.
 "#;
 
+/// The soft language rule in [`GROUNDED_SINGLE_SHOT_SYSTEM_PROMPT`], replaced
+/// by an explicit pin whenever the compiler resolved a definite language.
+const SOFT_ANSWER_LANGUAGE_RULE: &str = "* Answer in the user's language.";
+
 /// Render the single-shot system prompt. The grounded evidence is
 /// carried as a runtime tool-result message in the provider transcript,
 /// matching the same chat shape an external tool-using agent sees.
+///
+/// `language` comes from the typed compiler output. A definite language
+/// replaces the soft "user's language" rule with an explicit pin so the
+/// answer stage cannot drift away from the language the deterministic
+/// labels already use; [`QueryLanguage::Auto`] keeps the soft rule because
+/// the model can still read the question itself.
 #[must_use]
-pub fn render_single_shot() -> String {
-    GROUNDED_SINGLE_SHOT_SYSTEM_PROMPT.to_string()
+pub fn render_single_shot(language: QueryLanguage) -> String {
+    let pin = match language {
+        QueryLanguage::Ru => "* Answer in Russian, the user's language.",
+        QueryLanguage::En => "* Answer in English, the user's language.",
+        QueryLanguage::Auto => return GROUNDED_SINGLE_SHOT_SYSTEM_PROMPT.to_string(),
+    };
+    GROUNDED_SINGLE_SHOT_SYSTEM_PROMPT.replace(SOFT_ANSWER_LANGUAGE_RULE, pin)
 }
 
 pub const LITERAL_FIDELITY_REVISION_SYSTEM_PROMPT: &str = r#"You are the IronRAG literal-fidelity revision stage. The answer below was already generated from grounded evidence, but the verifier found code-formatted literals that are not verbatim in that evidence.
@@ -288,26 +271,9 @@ pub fn render_literal_inventory_coverage_revision(
         .replace("{REVISION_CONTEXT}", revision_context.trim())
 }
 
-/// Render the clarification system prompt with the variants list
-/// substituted in. Callers pass the human-readable variant labels
-/// (document titles, graph node labels, grouped reference titles)
-/// already deduplicated and trimmed; this function renders them as
-/// a plain bulleted list and injects them into the prompt template.
-#[must_use]
-pub fn render_clarify(variants: &[String], conversation_history: Option<&str>) -> String {
-    let rendered =
-        variants.iter().map(|variant| format!("- {variant}")).collect::<Vec<_>>().join("\n");
-    let mut prompt = GROUNDED_CLARIFY_SYSTEM_PROMPT.replace("{CLARIFY_VARIANTS}", &rendered);
-    if let Some(history) = conversation_history.map(str::trim).filter(|h| !h.is_empty()) {
-        prompt.push_str("\nRecent conversation (oldest first):\n");
-        prompt.push_str(history);
-    }
-    prompt
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{ASSISTANT_SYSTEM_PROMPT_TEMPLATE, render, template};
+    use super::{ASSISTANT_SYSTEM_PROMPT_TEMPLATE, QueryLanguage, render, template};
 
     #[test]
     fn prompts_treat_retrieved_evidence_as_untrusted_data() {
@@ -381,26 +347,34 @@ mod tests {
             ASSISTANT_SYSTEM_PROMPT_TEMPLATE.contains("server-owned typed conversation history")
         );
         assert!(
-            ASSISTANT_SYSTEM_PROMPT_TEMPLATE
-                .contains("Do not rewrite or split the canonical query")
+            ASSISTANT_SYSTEM_PROMPT_TEMPLATE.contains("Do not rewrite or split the compiled query")
         );
         assert!(ASSISTANT_SYSTEM_PROMPT_TEMPLATE.contains("one server-owned focused repair"));
         assert!(
             ASSISTANT_SYSTEM_PROMPT_TEMPLATE
                 .contains("External MCP clients should mirror this sequence")
         );
-        assert!(rendered.contains("Built-in UI dispatches this canonical call"));
+        assert!(rendered.contains("Built-in UI dispatches this grounded-answer call"));
         assert!(rendered.contains("UI runtime owns at most one exact-query repair"));
     }
 
     #[test]
     fn template_supports_runtime_owned_repair_and_evidence_expansion() {
+        assert_prompt_owned_repair_and_ledger_rules();
+        assert_prompt_evidence_expansion_and_ledger_rules();
+        assert_prompt_output_boundary_and_literal_rules();
+        assert_prompt_repair_evidence_and_literal_reuse_rules();
+        assert_prompt_structured_content_and_coverage_rules();
+    }
+
+    fn assert_prompt_owned_repair_and_ledger_rules() {
         assert!(
             ASSISTANT_SYSTEM_PROMPT_TEMPLATE.contains("If the runtime continues after nonterminal")
         );
         assert!(
-            ASSISTANT_SYSTEM_PROMPT_TEMPLATE
-                .contains("After nonterminal canonical evidence, use available read-only tools")
+            ASSISTANT_SYSTEM_PROMPT_TEMPLATE.contains(
+                "After nonterminal authoritative evidence, use available read-only tools"
+            )
         );
         assert!(ASSISTANT_SYSTEM_PROMPT_TEMPLATE.contains("Use document tools"));
         assert!(ASSISTANT_SYSTEM_PROMPT_TEMPLATE.contains("Use graph tools"));
@@ -408,6 +382,9 @@ mod tests {
         assert!(ASSISTANT_SYSTEM_PROMPT_TEMPLATE.contains("Build a coverage checklist"));
         assert!(ASSISTANT_SYSTEM_PROMPT_TEMPLATE.contains("covers only part of that checklist"));
         assert!(ASSISTANT_SYSTEM_PROMPT_TEMPLATE.contains("Keep an evidence ledger"));
+    }
+
+    fn assert_prompt_evidence_expansion_and_ledger_rules() {
         assert!(ASSISTANT_SYSTEM_PROMPT_TEMPLATE.contains("does not erase earlier grounded facts"));
         assert!(
             ASSISTANT_SYSTEM_PROMPT_TEMPLATE
@@ -417,6 +394,9 @@ mod tests {
         assert!(ASSISTANT_SYSTEM_PROMPT_TEMPLATE.contains("operational outcomes"));
         assert!(ASSISTANT_SYSTEM_PROMPT_TEMPLATE.contains("status handling"));
         assert!(ASSISTANT_SYSTEM_PROMPT_TEMPLATE.contains("exception paths"));
+    }
+
+    fn assert_prompt_output_boundary_and_literal_rules() {
         assert!(
             ASSISTANT_SYSTEM_PROMPT_TEMPLATE.contains("typed conversation history is server-owned")
         );
@@ -442,6 +422,9 @@ mod tests {
         assert!(ASSISTANT_SYSTEM_PROMPT_TEMPLATE.contains(
             "Never answer a versioned change-summary question from document titles alone"
         ));
+    }
+
+    fn assert_prompt_repair_evidence_and_literal_reuse_rules() {
         assert!(
             ASSISTANT_SYSTEM_PROMPT_TEMPLATE
                 .contains("the configuration file or path when present")
@@ -472,6 +455,9 @@ mod tests {
             ASSISTANT_SYSTEM_PROMPT_TEMPLATE
                 .contains("must not silently replace a broader partial result")
         );
+    }
+
+    fn assert_prompt_structured_content_and_coverage_rules() {
         assert!(ASSISTANT_SYSTEM_PROMPT_TEMPLATE.contains("structuredContent.finalizable"));
         assert!(ASSISTANT_SYSTEM_PROMPT_TEMPLATE.contains("structuredContent.mustPreserveSpans"));
         assert!(ASSISTANT_SYSTEM_PROMPT_TEMPLATE.contains("structuredContent.clarification"));
@@ -534,6 +520,24 @@ mod tests {
         assert!(prompt.contains("source label"));
         assert!(prompt.contains("markdown image syntax"));
         assert!(prompt.contains("do not split one block into multiple inventory items"));
+    }
+
+    #[test]
+    fn single_shot_prompt_pins_a_resolved_answer_language() {
+        let russian = super::render_single_shot(QueryLanguage::Ru);
+        assert!(russian.contains("* Answer in Russian, the user's language."));
+        assert!(!russian.contains(super::SOFT_ANSWER_LANGUAGE_RULE));
+
+        let english = super::render_single_shot(QueryLanguage::En);
+        assert!(english.contains("* Answer in English, the user's language."));
+        assert!(!english.contains(super::SOFT_ANSWER_LANGUAGE_RULE));
+    }
+
+    #[test]
+    fn single_shot_prompt_keeps_the_soft_rule_when_language_is_undecided() {
+        let auto = super::render_single_shot(QueryLanguage::Auto);
+        assert!(auto.contains(super::SOFT_ANSWER_LANGUAGE_RULE));
+        assert_eq!(auto, super::GROUNDED_SINGLE_SHOT_SYSTEM_PROMPT);
     }
 
     #[test]

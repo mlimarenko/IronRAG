@@ -1,188 +1,106 @@
-import { lazy, Suspense, type ReactNode } from 'react'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { BrowserRouter, Route, Routes, Navigate } from 'react-router-dom'
-import { Toaster as Sonner } from '@/shared/components/ui/sonner'
-import { TooltipProvider } from '@/shared/components/ui/tooltip'
-import { FeatureErrorBoundary } from '@/shared/components/FeatureErrorBoundary'
+import { lazy, Suspense } from 'react'
+import { BrowserRouter, Navigate, Route, Routes, useLocation } from 'react-router-dom'
+import { Toaster } from 'sonner'
 import { AppProvider } from '@/shared/contexts/AppContext'
-import { PreferencesProvider } from '@/shared/contexts/PreferencesProvider'
 import { useApp } from '@/shared/contexts/app-context'
-import { AppShell } from '@/app/components/AppShell'
-import { useTranslation } from 'react-i18next'
+import { ScreenState } from '@/shared/ui'
+import { AppShell } from './AppShell'
+import { returnToFromLocation } from './returnTo'
+import { PreferencesProvider } from './PreferencesContext'
 import LoginPage from '@/features/auth/LoginPage'
 import DashboardPage from '@/features/dashboard/DashboardPage'
 
-// Lazy-load every non-landing route so the initial bundle drops by the
-// weight of admin (Radix-heavy), graph (Sigma + Graphology, ~190 KB
-// gzipped), assistant (Tiptap markdown surface), and the Swagger UI
-// runtime (≈1 MB on its own). Login + Dashboard stay eager because they
-// are reached on first paint or right after auth.
 const DocumentsPage = lazy(() => import('@/features/documents/DocumentsPage'))
 const GraphPage = lazy(() => import('@/features/graph/GraphPage'))
 const AssistantPage = lazy(() => import('@/features/assistant/AssistantPage'))
-const AdminPage = lazy(() => import('@/features/admin/AdminPage'))
-const SwaggerPage = lazy(() => import('@/features/swagger/SwaggerPage'))
-const NotFoundPage = lazy(() => import('@/app/NotFoundPage'))
-function queryDevtoolsEnabled() {
-  if (import.meta.env.DEV !== true) return false
-  if (import.meta.env.VITE_ENABLE_QUERY_DEVTOOLS === 'true') return true
-  return new URLSearchParams(window.location.search).get('queryDevtools') === '1'
-}
+const AdminLayout = lazy(() => import('@/features/admin/AdminLayout'))
+const NotFoundPage = lazy(() => import('./NotFoundPage'))
 
-const ReactQueryDevtools = queryDevtoolsEnabled()
-  ? lazy(async () => {
-      const { ReactQueryDevtools } = await import('@tanstack/react-query-devtools')
-      return { default: ReactQueryDevtools }
-    })
-  : null
-
-// Shared QueryClient. Defaults tuned for an internal back-office app:
-//   - staleTime 30s: small but non-zero so a remount inside the same screen
-//     reuses the cached payload without a flicker.
-//   - refetchOnWindowFocus disabled: noisy and rarely useful for the kinds of
-//     surfaces IronRAG renders (long-lived dashboards, document lists). Pages
-//     that do need it can opt in per-query.
-//   - retry once: the API is on the same origin behind an internal proxy, so
-//     three retries adds latency without buying reliability.
 const queryClient = new QueryClient({
   defaultOptions: {
-    queries: {
-      staleTime: 30_000,
-      gcTime: 5 * 60_000,
-      refetchOnWindowFocus: false,
-      retry: 1,
-    },
-    mutations: {
-      retry: 0,
-    },
+    queries: { staleTime: 30_000, retry: 1, refetchOnWindowFocus: false },
+    mutations: { retry: 0 },
   },
 })
 
-function RouteSuspenseFallback() {
-  const { t } = useTranslation()
-  return <div className="flex items-center justify-center h-screen">{t('common.loading')}</div>
-}
-
-function FeatureRoute({ feature, children }: Readonly<{ feature: string; children: ReactNode }>) {
-  return <FeatureErrorBoundary feature={feature}>{children}</FeatureErrorBoundary>
-}
-
-function LazyFeatureRoute({
-  feature,
-  children,
-}: Readonly<{ feature: string; children: ReactNode }>) {
-  return (
-    <FeatureRoute feature={feature}>
-      <Suspense fallback={<RouteSuspenseFallback />}>{children}</Suspense>
-    </FeatureRoute>
-  )
-}
-
-function QueryDevtools() {
-  if (ReactQueryDevtools === null) return null
-  return (
-    <Suspense fallback={null}>
-      <ReactQueryDevtools initialIsOpen={false} />
-    </Suspense>
-  )
-}
-
 function AuthenticatedRoutes() {
-  const { t } = useTranslation()
-  const { isAuthenticated, isLoading } = useApp()
+  const { user, isLoading, isBootstrapRequired, isBootstrapMode } = useApp()
+  const location = useLocation()
+
   if (isLoading) {
-    return <div className="flex items-center justify-center h-screen">{t('common.loading')}</div>
+    return (
+      <ScreenState scenario="loading">
+        <span />
+      </ScreenState>
+    )
   }
-  if (!isAuthenticated) return <Navigate to="/login" replace />
+  if (!user || isBootstrapRequired || isBootstrapMode) {
+    // Carry the whole address, not just the path: a session that dies on a
+    // filtered list must come back to that same filtered list.
+    return (
+      <Navigate
+        to="/login"
+        replace
+        state={{ from: `${location.pathname}${location.search}${location.hash}` }}
+      />
+    )
+  }
   return (
     <AppShell>
-      <Routes>
-        <Route
-          path="/dashboard"
-          element={
-            <FeatureRoute feature="dashboard">
-              <DashboardPage />
-            </FeatureRoute>
-          }
-        />
-        <Route
-          path="/documents"
-          element={
-            <LazyFeatureRoute feature="documents">
-              <DocumentsPage />
-            </LazyFeatureRoute>
-          }
-        />
-        <Route
-          path="/graph"
-          element={
-            <LazyFeatureRoute feature="graph">
-              <GraphPage />
-            </LazyFeatureRoute>
-          }
-        />
-        <Route
-          path="/assistant"
-          element={
-            <LazyFeatureRoute feature="assistant">
-              <AssistantPage />
-            </LazyFeatureRoute>
-          }
-        />
-        <Route
-          path="/admin/*"
-          element={
-            <LazyFeatureRoute feature="admin">
-              <AdminPage />
-            </LazyFeatureRoute>
-          }
-        />
-        <Route
-          path="/swagger"
-          element={
-            <LazyFeatureRoute feature="swagger">
-              <SwaggerPage />
-            </LazyFeatureRoute>
-          }
-        />
-        <Route path="/" element={<Navigate to="/dashboard" replace />} />
-        <Route
-          path="*"
-          element={
-            <LazyFeatureRoute feature="not-found">
-              <NotFoundPage />
-            </LazyFeatureRoute>
-          }
-        />
-      </Routes>
+      <Suspense
+        fallback={
+          <ScreenState scenario="loading">
+            <span />
+          </ScreenState>
+        }
+      >
+        <Routes>
+          <Route path="dashboard" element={<DashboardPage />} />
+          <Route path="documents" element={<DocumentsPage />} />
+          <Route path="graph" element={<GraphPage />} />
+          <Route path="assistant" element={<AssistantPage />} />
+          <Route path="admin/*" element={<AdminLayout />} />
+          <Route path="" element={<Navigate to="dashboard" replace />} />
+          <Route path="*" element={<NotFoundPage />} />
+        </Routes>
+      </Suspense>
     </AppShell>
   )
 }
 
-const App = () => (
-  <QueryClientProvider client={queryClient}>
-    <TooltipProvider>
-      <PreferencesProvider>
-        <AppProvider>
-          <Sonner />
-          <BrowserRouter>
-            <Routes>
-              <Route
-                path="/login"
-                element={
-                  <FeatureRoute feature="auth">
-                    <LoginPage />
-                  </FeatureRoute>
-                }
-              />
-              <Route path="/*" element={<AuthenticatedRoutes />} />
-            </Routes>
-          </BrowserRouter>
-        </AppProvider>
-      </PreferencesProvider>
-    </TooltipProvider>
-    <QueryDevtools />
-  </QueryClientProvider>
-)
+// The one authority on where an authenticated visitor to /login goes. Sign-in,
+// bootstrap setup and an already-live session all land here, so there is a
+// single place that honours the page the user was originally heading for.
+function LoginRoute() {
+  const { user, isLoading, isBootstrapRequired, isBootstrapMode } = useApp()
+  const location = useLocation()
+  if (!isLoading && user && !isBootstrapRequired && !isBootstrapMode) {
+    return <Navigate to={returnToFromLocation(location)} replace />
+  }
+  return <LoginPage />
+}
 
-export default App
+function AppRoutes() {
+  return (
+    <Routes>
+      <Route path="/login" element={<LoginRoute />} />
+      <Route path="/*" element={<AuthenticatedRoutes />} />
+    </Routes>
+  )
+}
+
+export default function App() {
+  return (
+    <QueryClientProvider client={queryClient}>
+      <AppProvider>
+        <PreferencesProvider>
+          <BrowserRouter>
+            <AppRoutes />
+            <Toaster richColors position="bottom-right" />
+          </BrowserRouter>
+        </PreferencesProvider>
+      </AppProvider>
+    </QueryClientProvider>
+  )
+}

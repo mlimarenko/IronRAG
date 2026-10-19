@@ -1,6 +1,6 @@
 {
   "suites": {
-    "synthetic_associative_graph_ranker": {
+    "golden_graph_multihop": {
       "cases": {
         "two_hop_bridge_returns_endpoint": {
           "relevantDocuments": ["alpha_relay_topology"],
@@ -20,7 +20,7 @@
         }
       }
     },
-    "wikipedia_baseline_grounded": {
+    "golden_api_baseline": {
       "cases": {
         "knowledge_graph_model_and_entities": {
           "relevantChunks": ["graph-structured data model", "objects", "events"]

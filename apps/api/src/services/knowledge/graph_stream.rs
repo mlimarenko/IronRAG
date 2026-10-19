@@ -5,7 +5,7 @@
 //! / `RuntimeKnowledgeRelationRow` shape which is wasteful: long UUIDs are
 //! repeated in every edge, `metadata_json` fields the client never reads are
 //! serialized, and nested object envelopes cost bytes. This module produces
-//! the canonical compact wire format used by the graph page.
+//! the compact wire format used by the graph page.
 //!
 //! Wire format: NDJSON, one JSON object per line. Sections arrive in this
 //! strict order:
@@ -21,7 +21,7 @@
 //! Field key legend:
 //!   i  id (u32 assigned by `id_map`)
 //!   l  label
-//!   k  `canonical_key` / document `external_key`
+//!   k  `identity_key` / document `external_key`
 //!   t  type (entityType / nodeType)
 //!   ts `sub_type` (only when present)
 //!   s  `support_count` (only when > 1)
@@ -47,15 +47,20 @@ use uuid::Uuid;
 
 use crate::{
     app::state::AppState,
-    infra::repositories::{self, RuntimeGraphEdgeCompactRow, RuntimeGraphNodeRow},
-    services::{
-        graph::canonical_projection::{
-            canonicalize_runtime_graph_document_links, canonicalize_runtime_graph_nodes,
-            remap_node_id,
-        },
-        knowledge::error::KnowledgeServiceError,
-    },
+    infra::repositories::{self, RuntimeGraphNodeRow},
+    services::knowledge::error::KnowledgeServiceError,
 };
+
+mod cache;
+mod render;
+#[cfg(test)]
+mod tests;
+
+use super::runtime_read::{ensure_selected_graph_current, selected_graph_projection};
+#[cfg(test)]
+use super::snapshot_identity::published_snapshot_identity;
+use cache::{CacheWrite, redis_get_bytes, redis_set_bytes};
+use render::render_compact_topology;
 
 const NODE_BATCH: usize = 512;
 const EDGE_BATCH: usize = 1024;
@@ -63,6 +68,8 @@ const DOC_LINK_BATCH: usize = 1024;
 const DOC_BATCH: usize = 512;
 const CACHE_TTL_SECONDS: i64 = 24 * 60 * 60;
 const MAX_CACHE_VALUE_BYTES: usize = 64 * 1024 * 1024;
+const INITIAL_PROJECTION_VERSION: i64 = 1;
+const UNPUBLISHED_TOPOLOGY_GENERATION: i64 = 0;
 
 /// Builds the Redis cache key for one published graph topology generation.
 fn cache_key(library_id: Uuid, projection_version: i64, topology_generation: i64) -> String {
@@ -156,79 +163,139 @@ pub async fn prewarm_graph_topology_cache(state: &AppState, library_id: Uuid) {
 }
 
 async fn run_prewarm_once(state: &AppState, library_id: Uuid) {
-    let snapshot =
-        match repositories::get_runtime_graph_snapshot(&state.persistence.postgres, library_id)
-            .await
-        {
-            Ok(Some(snapshot))
-                if snapshot.graph_status != "empty" && snapshot.projection_version > 0 =>
-            {
-                snapshot
-            }
-            Ok(_) => {
-                tracing::debug!(
-                    %library_id,
-                    "graph topology cache prewarm skipped: no ready snapshot",
-                );
-                return;
-            }
-            Err(error) => {
-                tracing::warn!(
-                    %library_id,
-                    error = format!("{error:#}"),
-                    "graph topology cache prewarm: snapshot lookup failed",
-                );
-                return;
-            }
-        };
-
+    let Some(snapshot) = ready_prewarm_snapshot(state, library_id).await else {
+        return;
+    };
     let projection_version = snapshot.projection_version;
     let topology_generation = snapshot.topology_generation;
-    let built =
-        match build_compact_topology(state, library_id, projection_version, topology_generation)
-            .await
-        {
-            Ok(topology) => topology,
-            Err(error) => {
-                tracing::warn!(
-                    %library_id,
-                    projection_version,
-                    error = format!("{error:#}"),
-                    "graph topology cache prewarm: build failed",
-                );
-                return;
-            }
-        };
-    let mut buffer = Vec::<u8>::with_capacity(estimated_capacity(&built));
-    render_ndjson_into(&mut buffer, &built);
-    let cache_key = cache_key(library_id, projection_version, topology_generation);
-    match redis_set_bytes(&state.persistence.redis, &cache_key, &buffer, CACHE_TTL_SECONDS).await {
-        Ok(CacheWrite::Written) => {
-            tracing::info!(
-                %library_id,
-                projection_version,
-                topology_generation,
-                bytes = buffer.len(),
-                "graph topology cache prewarmed",
-            );
+    let Some(buffer) =
+        build_prewarm_bytes(state, library_id, projection_version, topology_generation).await
+    else {
+        return;
+    };
+    store_prewarm_bytes(state, library_id, projection_version, topology_generation, &buffer).await;
+}
+
+fn log_prewarm_snapshot_skip(library_id: Uuid) {
+    tracing::debug!(
+        %library_id,
+        "graph topology cache prewarm skipped: no ready snapshot",
+    );
+}
+
+fn log_prewarm_snapshot_lookup_failed(library_id: Uuid, error: &impl std::fmt::Display) {
+    tracing::warn!(
+        %library_id,
+        error = format!("{error:#}"),
+        "graph topology cache prewarm: snapshot lookup failed",
+    );
+}
+
+/// Loads the snapshot a prewarm may build from. A missing or non-ready
+/// snapshot is a routine skip, not an error.
+async fn ready_prewarm_snapshot(
+    state: &AppState,
+    library_id: Uuid,
+) -> Option<repositories::RuntimeGraphSnapshotRow> {
+    match repositories::get_runtime_graph_snapshot(&state.persistence.postgres, library_id).await {
+        Ok(Some(snapshot)) if snapshot.graph_status == "ready" => Some(snapshot),
+        Ok(_) => {
+            log_prewarm_snapshot_skip(library_id);
+            None
         }
-        Ok(CacheWrite::SkippedTooLarge) => {
-            tracing::warn!(
-                %library_id,
-                projection_version,
-                topology_generation,
-                bytes = buffer.len(),
-                max_bytes = MAX_CACHE_VALUE_BYTES,
-                "graph topology cache prewarm skipped: payload exceeds cache value budget",
-            );
+        Err(error) => {
+            log_prewarm_snapshot_lookup_failed(library_id, &error);
+            None
         }
+    }
+}
+
+async fn build_prewarm_bytes(
+    state: &AppState,
+    library_id: Uuid,
+    projection_version: i64,
+    topology_generation: i64,
+) -> Option<Vec<u8>> {
+    match build_compact_topology(state, library_id, projection_version, topology_generation).await {
+        Ok(topology) => Some(render_compact_topology(&topology)),
         Err(error) => {
             tracing::warn!(
                 %library_id,
                 projection_version,
                 error = format!("{error:#}"),
-                "graph topology cache prewarm: SET failed",
+                "graph topology cache prewarm: build failed",
             );
+            None
+        }
+    }
+}
+
+fn log_prewarm_written(
+    library_id: Uuid,
+    projection_version: i64,
+    topology_generation: i64,
+    bytes: usize,
+) {
+    tracing::info!(
+        %library_id,
+        projection_version,
+        topology_generation,
+        bytes,
+        "graph topology cache prewarmed",
+    );
+}
+
+fn log_prewarm_skipped_too_large(
+    library_id: Uuid,
+    projection_version: i64,
+    topology_generation: i64,
+    bytes: usize,
+) {
+    tracing::warn!(
+        %library_id,
+        projection_version,
+        topology_generation,
+        bytes,
+        max_bytes = MAX_CACHE_VALUE_BYTES,
+        "graph topology cache prewarm skipped: payload exceeds cache value budget",
+    );
+}
+
+fn log_prewarm_set_failed(
+    library_id: Uuid,
+    projection_version: i64,
+    error: &impl std::fmt::Display,
+) {
+    tracing::warn!(
+        %library_id,
+        projection_version,
+        error = format!("{error:#}"),
+        "graph topology cache prewarm: SET failed",
+    );
+}
+
+async fn store_prewarm_bytes(
+    state: &AppState,
+    library_id: Uuid,
+    projection_version: i64,
+    topology_generation: i64,
+    buffer: &[u8],
+) {
+    let cache_key = cache_key(library_id, projection_version, topology_generation);
+    match redis_set_bytes(&state.persistence.redis, &cache_key, buffer, CACHE_TTL_SECONDS).await {
+        Ok(CacheWrite::Written) => {
+            log_prewarm_written(library_id, projection_version, topology_generation, buffer.len());
+        }
+        Ok(CacheWrite::SkippedTooLarge) => {
+            log_prewarm_skipped_too_large(
+                library_id,
+                projection_version,
+                topology_generation,
+                buffer.len(),
+            );
+        }
+        Err(error) => {
+            log_prewarm_set_failed(library_id, projection_version, &error);
         }
     }
 }
@@ -250,29 +317,80 @@ pub async fn build_graph_topology_bytes(
     state: &AppState,
     library_id: Uuid,
 ) -> Result<Vec<u8>, KnowledgeServiceError> {
+    let (selected, bytes) = load_graph_topology_bytes(state, library_id).await?;
+    if let Some(selected) = selected {
+        ensure_selected_graph_current(state, selected).await?;
+    }
+    Ok(bytes)
+}
+
+async fn load_graph_topology_bytes(
+    state: &AppState,
+    library_id: Uuid,
+) -> Result<(Option<repositories::RuntimeGraphProjectionIdentity>, Vec<u8>), KnowledgeServiceError>
+{
     let snapshot =
         repositories::get_runtime_graph_snapshot(&state.persistence.postgres, library_id)
             .await
             .context("load runtime_graph_snapshot for graph topology")?;
 
     let Some(snapshot) = snapshot else {
-        return Ok(render_empty(library_id, 0, 0));
+        return Ok((
+            None,
+            render_empty(library_id, INITIAL_PROJECTION_VERSION, UNPUBLISHED_TOPOLOGY_GENERATION),
+        ));
     };
 
-    if snapshot.graph_status == "empty" || snapshot.projection_version <= 0 {
-        return Ok(render_empty(
-            library_id,
-            snapshot.projection_version.max(0),
-            snapshot.topology_generation.max(0),
+    let selected = selected_graph_projection(&snapshot)?;
+    let projection_version = selected.projection_version;
+    let topology_generation = selected.topology_generation;
+    if snapshot.graph_status == "empty" {
+        return Ok((
+            Some(selected),
+            render_empty(library_id, projection_version, topology_generation),
         ));
     }
-
-    let projection_version = snapshot.projection_version;
-    let topology_generation = snapshot.topology_generation;
     let cache_key = cache_key(library_id, projection_version, topology_generation);
 
-    if let Some(cached) =
-        redis_get_bytes(&state.persistence.redis, &cache_key).await.unwrap_or_else(|error| {
+    if let Some(cached) = cached_topology_bytes(
+        state,
+        library_id,
+        &cache_key,
+        projection_version,
+        topology_generation,
+    )
+    .await
+    {
+        return Ok((Some(selected), cached));
+    }
+
+    let built =
+        build_compact_topology(state, library_id, projection_version, topology_generation).await?;
+    let buffer = render_compact_topology(&built);
+    backfill_topology_cache(
+        state,
+        library_id,
+        &cache_key,
+        projection_version,
+        topology_generation,
+        &buffer,
+    )
+    .await;
+
+    Ok((Some(selected), buffer))
+}
+
+/// Reads back a cached topology buffer, warning and rebuilding on a Redis
+/// failure so a cache outage never fails the endpoint.
+async fn cached_topology_bytes(
+    state: &AppState,
+    library_id: Uuid,
+    cache_key: &str,
+    projection_version: i64,
+    topology_generation: i64,
+) -> Option<Vec<u8>> {
+    let cached =
+        redis_get_bytes(&state.persistence.redis, cache_key).await.unwrap_or_else(|error| {
             tracing::warn!(
                 %library_id,
                 projection_version,
@@ -281,47 +399,70 @@ pub async fn build_graph_topology_bytes(
                 "graph topology cache GET failed; rebuilding",
             );
             None
-        })
-    {
-        tracing::debug!(
-            %library_id,
-            projection_version,
-            topology_generation,
-            bytes = cached.len(),
-            "graph topology cache hit",
-        );
-        return Ok(cached);
-    }
+        })?;
+    tracing::debug!(
+        %library_id,
+        projection_version,
+        topology_generation,
+        bytes = cached.len(),
+        "graph topology cache hit",
+    );
+    Some(cached)
+}
 
-    let built =
-        build_compact_topology(state, library_id, projection_version, topology_generation).await?;
-    let mut buffer = Vec::<u8>::with_capacity(estimated_capacity(&built));
-    render_ndjson_into(&mut buffer, &built);
+fn log_backfill_skipped_too_large(
+    library_id: Uuid,
+    projection_version: i64,
+    topology_generation: i64,
+    bytes: usize,
+) {
+    tracing::warn!(
+        %library_id,
+        projection_version,
+        topology_generation,
+        bytes,
+        max_bytes = MAX_CACHE_VALUE_BYTES,
+        "graph topology cache backfill skipped: payload exceeds cache value budget",
+    );
+}
 
-    match redis_set_bytes(&state.persistence.redis, &cache_key, &buffer, CACHE_TTL_SECONDS).await {
+fn log_backfill_set_failed(
+    library_id: Uuid,
+    projection_version: i64,
+    topology_generation: i64,
+    error: &impl std::fmt::Display,
+) {
+    tracing::warn!(
+        %library_id,
+        projection_version,
+        topology_generation,
+        error = format!("{error:#}"),
+        "graph topology cache SET failed",
+    );
+}
+
+async fn backfill_topology_cache(
+    state: &AppState,
+    library_id: Uuid,
+    cache_key: &str,
+    projection_version: i64,
+    topology_generation: i64,
+    buffer: &[u8],
+) {
+    match redis_set_bytes(&state.persistence.redis, cache_key, buffer, CACHE_TTL_SECONDS).await {
         Ok(CacheWrite::Written) => {}
         Ok(CacheWrite::SkippedTooLarge) => {
-            tracing::warn!(
-                %library_id,
+            log_backfill_skipped_too_large(
+                library_id,
                 projection_version,
                 topology_generation,
-                bytes = buffer.len(),
-                max_bytes = MAX_CACHE_VALUE_BYTES,
-                "graph topology cache backfill skipped: payload exceeds cache value budget",
+                buffer.len(),
             );
         }
         Err(error) => {
-            tracing::warn!(
-                %library_id,
-                projection_version,
-                topology_generation,
-                error = format!("{error:#}"),
-                "graph topology cache SET failed",
-            );
+            log_backfill_set_failed(library_id, projection_version, topology_generation, &error);
         }
     }
-
-    Ok(buffer)
 }
 
 fn render_empty(library_id: Uuid, projection_version: i64, topology_generation: i64) -> Vec<u8> {
@@ -336,9 +477,7 @@ fn render_empty(library_id: Uuid, projection_version: i64, topology_generation: 
         edges: Vec::new(),
         document_links: Vec::new(),
     };
-    let mut buffer = Vec::<u8>::with_capacity(256);
-    render_ndjson_into(&mut buffer, &built);
-    buffer
+    render_compact_topology(&built)
 }
 
 // ---------------------------------------------------------------------------
@@ -368,7 +507,7 @@ struct CompactDocument {
 struct CompactEntity {
     num: u32,
     label: String,
-    canonical_key: String,
+    identity_key: String,
     entity_type: String,
     entity_sub_type: Option<String>,
     summary: Option<String>,
@@ -392,31 +531,38 @@ struct CompactDocumentLink {
     support_count: i64,
 }
 
-fn canonicalize_compact_edges(
-    edges: Vec<RuntimeGraphEdgeCompactRow>,
-    node_id_remap: &HashMap<Uuid, Uuid>,
-) -> Vec<RuntimeGraphEdgeCompactRow> {
-    let mut edges = edges
-        .into_iter()
-        .filter_map(|mut edge| {
-            edge.from_node_id = remap_node_id(edge.from_node_id, node_id_remap);
-            edge.to_node_id = remap_node_id(edge.to_node_id, node_id_remap);
-            (edge.from_node_id != edge.to_node_id).then_some(edge)
-        })
-        .collect::<Vec<_>>();
-    edges.sort_by(|left, right| {
-        right
-            .support_count
-            .cmp(&left.support_count)
-            .then_with(|| left.relation_type.cmp(&right.relation_type))
-            .then_with(|| left.from_node_id.cmp(&right.from_node_id))
-            .then_with(|| left.to_node_id.cmp(&right.to_node_id))
-    });
-    let mut seen = HashSet::new();
-    edges.retain(|edge| {
-        seen.insert((edge.from_node_id, edge.relation_type.trim().to_string(), edge.to_node_id))
-    });
-    edges
+fn log_topology_edges_loaded(
+    library_id: Uuid,
+    projection_version: i64,
+    edge_count: usize,
+    document_link_count: usize,
+    elapsed_ms: u64,
+) {
+    tracing::debug!(
+        %library_id,
+        projection_version,
+        edge_count,
+        document_link_count,
+        elapsed_ms,
+        "graph topology: edges + document_links loaded",
+    );
+}
+
+fn log_topology_nodes_loaded(
+    library_id: Uuid,
+    projection_version: i64,
+    node_count: usize,
+    admitted_ids: usize,
+    elapsed_ms: u64,
+) {
+    tracing::debug!(
+        %library_id,
+        projection_version,
+        node_count,
+        admitted_ids,
+        elapsed_ms,
+        "graph topology: nodes loaded via admitted ids",
+    );
 }
 
 async fn build_compact_topology(
@@ -425,7 +571,7 @@ async fn build_compact_topology(
     projection_version: i64,
     topology_generation: i64,
 ) -> anyhow::Result<CompactTopology> {
-    // Canonical topology load in 0.3.3:
+    // Primary topology load in 0.3.3:
     //   1. Load the compact edge list (slim columns) in parallel with
     //      the document-link aggregate — both are library-scoped scans.
     //   2. Derive the admitted node id set from the edge endpoints once,
@@ -436,41 +582,17 @@ async fn build_compact_topology(
     //   a single `id = any($3) or node_type = 'document'` index probe
     //   instead of a full-library CTE edge scan.
     let edges_started_at = std::time::Instant::now();
-    let (edge_rows_compact, document_link_rows) = tokio::try_join!(
-        async {
-            repositories::list_admitted_runtime_graph_edges_compact_by_library(
-                &state.persistence.postgres,
-                library_id,
-                projection_version,
-            )
-            .await
-            .context("load admitted runtime_graph_edge rows for topology stream")
-        },
-        async {
-            repositories::list_runtime_graph_document_links_by_library(
-                &state.persistence.postgres,
-                library_id,
-                projection_version,
-            )
-            .await
-            .context("load runtime_graph_document_link rows for topology stream")
-        },
-    )?;
-    tracing::debug!(
-        %library_id,
+    let (edge_rows_compact, document_link_rows) =
+        load_topology_edges(state, library_id, projection_version).await?;
+    log_topology_edges_loaded(
+        library_id,
         projection_version,
-        edge_count = edge_rows_compact.len(),
-        document_link_count = document_link_rows.len(),
-        elapsed_ms = edges_started_at.elapsed().as_millis() as u64,
-        "graph topology: edges + document_links loaded",
+        edge_rows_compact.len(),
+        document_link_rows.len(),
+        edges_started_at.elapsed().as_millis() as u64,
     );
 
-    let mut admitted_node_ids: HashSet<Uuid> = HashSet::with_capacity(edge_rows_compact.len() * 2);
-    for edge in &edge_rows_compact {
-        admitted_node_ids.insert(edge.from_node_id);
-        admitted_node_ids.insert(edge.to_node_id);
-    }
-    let admitted_node_ids_vec: Vec<Uuid> = admitted_node_ids.iter().copied().collect();
+    let admitted_node_ids_vec = admitted_edge_node_ids(&edge_rows_compact);
 
     let nodes_started_at = std::time::Instant::now();
     let node_rows = repositories::list_runtime_graph_nodes_by_ids_or_document_type(
@@ -481,43 +603,20 @@ async fn build_compact_topology(
     )
     .await
     .context("load admitted runtime_graph_node rows for topology stream")?;
-    tracing::debug!(
-        %library_id,
+    log_topology_nodes_loaded(
+        library_id,
         projection_version,
-        node_count = node_rows.len(),
-        admitted_ids = admitted_node_ids_vec.len(),
-        elapsed_ms = nodes_started_at.elapsed().as_millis() as u64,
-        "graph topology: nodes loaded via admitted ids",
+        node_rows.len(),
+        admitted_node_ids_vec.len(),
+        nodes_started_at.elapsed().as_millis() as u64,
     );
-    let canonical_nodes = canonicalize_runtime_graph_nodes(node_rows);
-    let node_rows = canonical_nodes.nodes;
-    let edge_rows_compact =
-        canonicalize_compact_edges(edge_rows_compact, &canonical_nodes.node_id_remap);
-    let document_link_rows = canonicalize_runtime_graph_document_links(
-        document_link_rows,
-        &node_rows,
-        &canonical_nodes.node_id_remap,
-    );
-
     // `document` nodes carry their original content_document.id inside
     // metadata_json.document_id — that is the UUID the frontend uses to
     // navigate to the documents page, so we fetch the knowledge-plane
     // title/file payloads keyed by that id.
     let document_node_ids: HashSet<Uuid> =
         node_rows.iter().filter(|row| row.node_type == "document").map(|row| row.id).collect();
-
-    let document_uuid_by_runtime_node: HashMap<Uuid, Uuid> = node_rows
-        .iter()
-        .filter(|row| row.node_type == "document")
-        .filter_map(|row| {
-            let document_uuid = row
-                .metadata_json
-                .get("document_id")
-                .and_then(Value::as_str)
-                .and_then(|value| value.parse::<Uuid>().ok())?;
-            Some((row.id, document_uuid))
-        })
-        .collect();
+    let document_uuid_by_runtime_node = runtime_document_uuid_map(&node_rows);
 
     let document_ids: Vec<Uuid> = document_uuid_by_runtime_node
         .values()
@@ -568,45 +667,10 @@ async fn build_compact_topology(
 
     // Edges between entity nodes only — document supports are represented
     // via the doc_links section, matching existing frontend semantics.
-    let mut compact_edges: Vec<CompactEdge> = Vec::with_capacity(edge_rows_compact.len());
-    for row in &edge_rows_compact {
-        if document_node_ids.contains(&row.from_node_id)
-            || document_node_ids.contains(&row.to_node_id)
-        {
-            continue;
-        }
-        let (Some(&from), Some(&to)) = (id_map.get(&row.from_node_id), id_map.get(&row.to_node_id))
-        else {
-            continue;
-        };
-        compact_edges.push(CompactEdge {
-            from,
-            to,
-            relation_type: row.relation_type.clone(),
-            support_count: row.support_count,
-        });
-    }
+    let compact_edges = build_compact_edges(&edge_rows_compact, &document_node_ids, &id_map);
 
-    let mut compact_document_links: Vec<CompactDocumentLink> =
-        Vec::with_capacity(document_link_rows.len());
-    for row in &document_link_rows {
-        let document_uuid = match document_by_uuid.get(&row.document_id) {
-            Some(_) => row.document_id,
-            None => continue,
-        };
-        let Some(&document_num) = id_map.get(&document_uuid) else {
-            continue;
-        };
-        let Some(&target_num) = id_map.get(&row.target_node_id) else {
-            continue;
-        };
-        compact_document_links.push(CompactDocumentLink {
-            document: document_num,
-            target: target_num,
-            relation_type: row.relation_type.clone(),
-            support_count: row.support_count,
-        });
-    }
+    let compact_document_links =
+        build_compact_document_links(&document_link_rows, &document_by_uuid, &id_map);
 
     // Fill in any document rows that were not yet enriched by the knowledge
     // store (the projection holds the runtime_graph_node for them, but the
@@ -636,6 +700,114 @@ async fn build_compact_topology(
     })
 }
 
+async fn load_topology_edges(
+    state: &AppState,
+    library_id: Uuid,
+    projection_version: i64,
+) -> anyhow::Result<(
+    Vec<repositories::RuntimeGraphEdgeCompactRow>,
+    Vec<repositories::RuntimeGraphDocumentLinkRow>,
+)> {
+    tokio::try_join!(
+        async {
+            repositories::list_admitted_runtime_graph_edges_compact_by_library(
+                &state.persistence.postgres,
+                library_id,
+                projection_version,
+            )
+            .await
+            .context("load admitted runtime_graph_edge rows for topology stream")
+        },
+        async {
+            repositories::list_runtime_graph_document_links_by_library(
+                &state.persistence.postgres,
+                library_id,
+                projection_version,
+            )
+            .await
+            .context("load runtime_graph_document_link rows for topology stream")
+        },
+    )
+}
+
+fn admitted_edge_node_ids(edges: &[repositories::RuntimeGraphEdgeCompactRow]) -> Vec<Uuid> {
+    let mut admitted_node_ids: HashSet<Uuid> = HashSet::with_capacity(edges.len() * 2);
+    for edge in edges {
+        admitted_node_ids.insert(edge.from_node_id);
+        admitted_node_ids.insert(edge.to_node_id);
+    }
+    admitted_node_ids.into_iter().collect()
+}
+
+fn runtime_document_uuid_map(node_rows: &[RuntimeGraphNodeRow]) -> HashMap<Uuid, Uuid> {
+    node_rows
+        .iter()
+        .filter(|row| row.node_type == "document")
+        .filter_map(|row| {
+            let document_uuid = row
+                .metadata_json
+                .get("document_id")
+                .and_then(Value::as_str)
+                .and_then(|value| value.parse::<Uuid>().ok())?;
+            Some((row.id, document_uuid))
+        })
+        .collect()
+}
+
+fn build_compact_edges(
+    edge_rows_compact: &[repositories::RuntimeGraphEdgeCompactRow],
+    document_node_ids: &HashSet<Uuid>,
+    id_map: &HashMap<Uuid, u32>,
+) -> Vec<CompactEdge> {
+    let mut compact_edges: Vec<CompactEdge> = Vec::with_capacity(edge_rows_compact.len());
+    for row in edge_rows_compact {
+        if document_node_ids.contains(&row.from_node_id)
+            || document_node_ids.contains(&row.to_node_id)
+        {
+            continue;
+        }
+        let (Some(&from), Some(&to)) = (id_map.get(&row.from_node_id), id_map.get(&row.to_node_id))
+        else {
+            continue;
+        };
+        compact_edges.push(CompactEdge {
+            from,
+            to,
+            relation_type: row.relation_type.clone(),
+            support_count: row.support_count,
+        });
+    }
+    compact_edges
+}
+
+fn build_compact_document_links(
+    document_link_rows: &[repositories::RuntimeGraphDocumentLinkRow],
+    document_by_uuid: &HashMap<Uuid, &crate::infra::knowledge_rows::KnowledgeDocumentRow>,
+    id_map: &HashMap<Uuid, u32>,
+) -> Vec<CompactDocumentLink> {
+    let mut compact_document_links: Vec<CompactDocumentLink> =
+        Vec::with_capacity(document_link_rows.len());
+    for row in document_link_rows {
+        let document_uuid = match document_by_uuid.get(&row.document_id) {
+            Some(_) => row.document_id,
+            None => continue,
+        };
+        let Some(&document_num) = id_map.get(&document_uuid) else {
+            continue;
+        };
+        let Some(&target_num) = id_map.get(&row.target_node_id) else {
+            continue;
+        };
+        compact_document_links.push(CompactDocumentLink {
+            document: document_num,
+            target: target_num,
+            relation_type: row.relation_type.clone(),
+            support_count: row.support_count,
+        });
+    }
+    compact_document_links
+}
+
 fn append_runtime_only_documents(
     node_rows: &[RuntimeGraphNodeRow],
     document_uuid_by_runtime_node: &HashMap<Uuid, Uuid>,
@@ -655,7 +827,7 @@ fn append_runtime_only_documents(
         id_map.insert(document_uuid, num);
         documents.push(CompactDocument {
             num,
-            external_key: row.canonical_key.clone(),
+            external_key: row.identity_key.clone(),
             title: Some(row.label.clone()),
             file_name: None,
         });
@@ -691,7 +863,7 @@ fn map_entity(row: &RuntimeGraphNodeRow, num: u32) -> CompactEntity {
     CompactEntity {
         num,
         label: row.label.clone(),
-        canonical_key: row.canonical_key.clone(),
+        identity_key: row.identity_key.clone(),
         entity_type: row.node_type.clone(),
         entity_sub_type,
         summary: row.summary.clone(),
@@ -699,195 +871,5 @@ fn map_entity(row: &RuntimeGraphNodeRow, num: u32) -> CompactEntity {
         support_count: row.support_count,
         confidence,
         entity_state,
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Compact topology → NDJSON bytes
-// ---------------------------------------------------------------------------
-
-fn estimated_capacity(topology: &CompactTopology) -> usize {
-    // Rough upper-bound: 128 bytes per entity, 32 per edge, 64 per doc.
-    // Good enough to amortize allocations without over-allocating.
-    256 + topology.documents.len() * 160
-        + topology.entities.len() * 160
-        + topology.edges.len() * 64
-        + topology.document_links.len() * 72
-        + topology.id_map.len() * 48
-}
-
-fn render_ndjson_into(buffer: &mut Vec<u8>, topology: &CompactTopology) {
-    push_line(
-        buffer,
-        &json!({
-            "s": "meta",
-            "v": 1,
-            "library_id": topology.library_id,
-            "projection_version": topology.projection_version,
-            "topology_generation": topology.topology_generation,
-            "generated_at": topology.generated_at.to_rfc3339(),
-            "node_count": topology.entities.len() + topology.documents.len(),
-            "edge_count": topology.edges.len() + topology.document_links.len(),
-            "document_count": topology.documents.len(),
-        }),
-    );
-
-    // id_map as a single object. 25k UUID→u32 pairs is ~1.2 MB uncompressed,
-    // compresses well under gzip/zstd. Sent as one frame so the client can
-    // build its reverse map before materializing nodes/edges.
-    let mut id_map_object = serde_json::Map::with_capacity(topology.id_map.len());
-    for (uuid, num) in &topology.id_map {
-        id_map_object.insert(uuid.to_string(), Value::from(*num));
-    }
-    push_line(buffer, &json!({ "s": "id_map", "m": Value::Object(id_map_object) }));
-
-    for chunk in topology.documents.chunks(DOC_BATCH) {
-        let data: Vec<Value> = chunk.iter().map(doc_to_value).collect();
-        push_line(buffer, &json!({ "s": "docs", "d": data }));
-    }
-
-    for chunk in topology.entities.chunks(NODE_BATCH) {
-        let data: Vec<Value> = chunk.iter().map(entity_to_value).collect();
-        push_line(buffer, &json!({ "s": "nodes", "d": data }));
-    }
-
-    for chunk in topology.edges.chunks(EDGE_BATCH) {
-        let data: Vec<Value> = chunk
-            .iter()
-            .map(|edge| json!([edge.from, edge.to, edge.relation_type, edge.support_count]))
-            .collect();
-        push_line(buffer, &json!({ "s": "edges", "d": data }));
-    }
-
-    for chunk in topology.document_links.chunks(DOC_LINK_BATCH) {
-        let data: Vec<Value> = chunk
-            .iter()
-            .map(|link| json!([link.document, link.target, link.relation_type, link.support_count]))
-            .collect();
-        push_line(buffer, &json!({ "s": "doc_links", "d": data }));
-    }
-
-    push_line(buffer, &json!({ "s": "end" }));
-}
-
-fn doc_to_value(doc: &CompactDocument) -> Value {
-    // Note: the UUID is NOT repeated here — the id_map frame already
-    // binds `doc.num` to the real UUID, so the client reverses the
-    // mapping once per payload rather than carrying 36 redundant bytes
-    // on every row.
-    let mut obj = serde_json::Map::with_capacity(5);
-    obj.insert("i".into(), Value::from(doc.num));
-    if !doc.external_key.is_empty() {
-        obj.insert("k".into(), Value::from(doc.external_key.clone()));
-    }
-    if let Some(title) = doc.title.as_ref().filter(|value| !value.is_empty()) {
-        obj.insert("t".into(), Value::from(title.clone()));
-    }
-    if let Some(file_name) = doc.file_name.as_ref().filter(|value| !value.is_empty()) {
-        obj.insert("fn".into(), Value::from(file_name.clone()));
-    }
-    Value::Object(obj)
-}
-
-fn entity_to_value(entity: &CompactEntity) -> Value {
-    let mut obj = serde_json::Map::with_capacity(10);
-    obj.insert("i".into(), Value::from(entity.num));
-    obj.insert("l".into(), Value::from(entity.label.clone()));
-    obj.insert("k".into(), Value::from(entity.canonical_key.clone()));
-    obj.insert("t".into(), Value::from(entity.entity_type.clone()));
-    if let Some(sub_type) = entity.entity_sub_type.as_ref().filter(|value| !value.is_empty()) {
-        obj.insert("ts".into(), Value::from(sub_type.clone()));
-    }
-    if entity.support_count > 1 {
-        obj.insert("s".into(), Value::from(entity.support_count));
-    }
-    if let Some(confidence) = entity.confidence {
-        obj.insert("c".into(), Value::from(confidence));
-    }
-    if entity.entity_state != "active" {
-        obj.insert("es".into(), Value::from(entity.entity_state.clone()));
-    }
-    if !entity.aliases.is_empty() {
-        obj.insert("a".into(), Value::from(entity.aliases.clone()));
-    }
-    if let Some(summary) = entity.summary.as_ref().filter(|value| !value.is_empty()) {
-        obj.insert("sm".into(), Value::from(summary.clone()));
-    }
-    Value::Object(obj)
-}
-
-fn push_line(buffer: &mut Vec<u8>, value: &Value) {
-    // Using serde_json::to_writer keeps one allocation-free path into the
-    // already reserved Vec<u8>.
-    if serde_json::to_writer(&mut *buffer, value).is_ok() {
-        buffer.push(b'\n');
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Redis helpers
-// ---------------------------------------------------------------------------
-
-/// redis-rs 1.2 defaults the per-command response timeout to 500 ms,
-/// which is fine for ~100-byte IR cache reads but blows up on the
-/// graph topology payload (17+ MB on a reference-sized library).
-/// The prod symptom was `redis SET EX graph topology cache: timed out:
-/// timed out` right after every prewarm — the cache appeared populated
-/// in the log then disappeared because the SET had already failed at
-/// the client. 10 s comfortably covers a 20 MB SET over the bridged
-/// Docker network; any slower and something else is wrong.
-const TOPOLOGY_CACHE_RESPONSE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
-
-fn topology_connection_config() -> redis::AsyncConnectionConfig {
-    redis::AsyncConnectionConfig::new().set_response_timeout(Some(TOPOLOGY_CACHE_RESPONSE_TIMEOUT))
-}
-
-async fn redis_get_bytes(client: &redis::Client, key: &str) -> anyhow::Result<Option<Vec<u8>>> {
-    let mut conn = client
-        .get_multiplexed_async_connection_with_config(&topology_connection_config())
-        .await
-        .context("connect to redis for graph topology cache read")?;
-    let value: Option<Vec<u8>> = conn.get(key).await.context("redis GET graph topology cache")?;
-    Ok(value)
-}
-
-enum CacheWrite {
-    Written,
-    SkippedTooLarge,
-}
-
-async fn redis_set_bytes(
-    client: &redis::Client,
-    key: &str,
-    value: &[u8],
-    ttl_seconds: i64,
-) -> anyhow::Result<CacheWrite> {
-    if value.len() > MAX_CACHE_VALUE_BYTES {
-        return Ok(CacheWrite::SkippedTooLarge);
-    }
-    let mut conn = client
-        .get_multiplexed_async_connection_with_config(&topology_connection_config())
-        .await
-        .context("connect to redis for graph topology cache write")?;
-    let _: () = conn
-        .set_ex(key, value, ttl_seconds.max(1) as u64)
-        .await
-        .context("redis SET EX graph topology cache")?;
-    Ok(CacheWrite::Written)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn cache_key_includes_topology_generation() {
-        let library_id =
-            Uuid::parse_str("019dcb4d-49f4-7cb1-a19b-f9ee0a10c509").expect("valid uuid");
-
-        assert_eq!(
-            cache_key(library_id, 7, 42),
-            "graph:019dcb4d-49f4-7cb1-a19b-f9ee0a10c509:v7:g42"
-        );
     }
 }

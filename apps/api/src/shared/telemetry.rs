@@ -165,17 +165,6 @@ pub fn resolve_memory_soft_limit_mib(explicit_mib: u64) -> u64 {
     limit_mib.saturating_mul(9) / 10
 }
 
-/// Logs the current worker RSS alongside a stage tag. Emitted at INFO so
-/// ingest telemetry is easy to follow in `docker logs` without bumping the
-/// global filter. Callers pass a short stable tag so the log stream can be
-/// grep-ed into a per-stage memory timeline.
-pub fn log_worker_rss(tag: &'static str, context: impl std::fmt::Display) {
-    if let Some(bytes) = current_process_rss_bytes() {
-        let mib = bytes / (1024 * 1024);
-        info!(stage = "rss", tag, rss_mib = mib, context = %context, "worker rss");
-    }
-}
-
 pub(crate) fn compose_env_filter(filter: &str) -> EnvFilter {
     let mut directives = String::from(filter);
     for ceiling in NOISY_CRATE_CEILINGS {
@@ -204,16 +193,28 @@ pub fn web_run_event(
     );
 }
 
-pub fn web_candidate_event(
-    event: &str,
-    run_id: Uuid,
-    candidate_id: Uuid,
-    candidate_state: &str,
-    normalized_url: &str,
-    depth: i32,
-    classification_reason: Option<&str>,
-    host_classification: Option<&str>,
-) {
+pub struct WebCandidateEvent<'a> {
+    pub event: &'a str,
+    pub run_id: Uuid,
+    pub candidate_id: Uuid,
+    pub candidate_state: &'a str,
+    pub normalized_url: &'a str,
+    pub depth: i32,
+    pub classification_reason: Option<&'a str>,
+    pub host_classification: Option<&'a str>,
+}
+
+pub fn web_candidate_event(event: WebCandidateEvent<'_>) {
+    let WebCandidateEvent {
+        event,
+        run_id,
+        candidate_id,
+        candidate_state,
+        normalized_url,
+        depth,
+        classification_reason,
+        host_classification,
+    } = event;
     info!(
         event,
         %run_id,
@@ -227,16 +228,28 @@ pub fn web_candidate_event(
     );
 }
 
-pub fn web_failure_event(
-    event: &str,
-    run_id: Uuid,
-    candidate_id: Option<Uuid>,
-    failure_code: &str,
-    classification_reason: Option<&str>,
-    final_url: Option<&str>,
-    content_type: Option<&str>,
-    http_status: Option<i32>,
-) {
+pub struct WebFailureEvent<'a> {
+    pub event: &'a str,
+    pub run_id: Uuid,
+    pub candidate_id: Option<Uuid>,
+    pub failure_code: &'a str,
+    pub classification_reason: Option<&'a str>,
+    pub final_url: Option<&'a str>,
+    pub content_type: Option<&'a str>,
+    pub http_status: Option<i32>,
+}
+
+pub fn web_failure_event(event: WebFailureEvent<'_>) {
+    let WebFailureEvent {
+        event,
+        run_id,
+        candidate_id,
+        failure_code,
+        classification_reason,
+        final_url,
+        content_type,
+        http_status,
+    } = event;
     warn!(
         event,
         %run_id,

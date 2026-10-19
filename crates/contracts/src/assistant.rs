@@ -4,8 +4,6 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::diagnostics::OperatorWarning;
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
 /// Author role assigned to a conversation turn.
@@ -60,28 +58,6 @@ pub enum AssistantAnswerDisposition {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
-/// Persisted metadata for one assistant conversation.
-pub struct AssistantConversation {
-    /// Stable conversation identifier.
-    pub id: Uuid,
-    /// Workspace that owns the conversation.
-    pub workspace_id: Uuid,
-    /// Knowledge library used by the conversation.
-    pub library_id: Uuid,
-    /// Principal that opened the conversation, when attributable.
-    pub created_by_principal_id: Option<Uuid>,
-    /// Optional user-facing conversation title.
-    pub title: Option<String>,
-    /// Current conversation lifecycle state.
-    pub conversation_state: String,
-    /// Time at which the conversation was created.
-    pub created_at: DateTime<Utc>,
-    /// Time of the most recent conversation change.
-    pub updated_at: DateTime<Utc>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
-#[serde(rename_all = "camelCase")]
 /// Persisted, ordered message within an assistant conversation.
 pub struct AssistantTurn {
     /// Stable turn identifier.
@@ -122,8 +98,8 @@ pub struct AssistantExecution {
     pub response_turn_id: Option<Uuid>,
     /// AI binding selected for the execution, when one was resolved.
     pub binding_id: Option<Uuid>,
-    /// Associated agent-runtime execution, when delegated to the runtime.
-    pub runtime_execution_id: Option<Uuid>,
+    /// Runtime execution that owns lifecycle state and terminal timing.
+    pub runtime_execution_id: Uuid,
     /// Current execution lifecycle state.
     pub lifecycle_state: String,
     /// Pipeline stage currently in progress, if any.
@@ -132,10 +108,8 @@ pub struct AssistantExecution {
     pub query_text: String,
     /// Stable failure code for an unsuccessful execution.
     pub failure_code: Option<String>,
-    /// Time at which execution processing began.
+    /// Time at which the query record was created.
     pub started_at: DateTime<Utc>,
-    /// Terminal completion time, or `None` while still active.
-    pub completed_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
@@ -150,6 +124,19 @@ pub struct AssistantChunkReference {
     pub rank: i32,
     /// Relevance score used to rank the chunk.
     pub score: f64,
+    /// Document the chunk was read from, when it still exists.
+    #[serde(default)]
+    pub document_id: Option<Uuid>,
+    /// Title of that document.
+    #[serde(default)]
+    pub document_title: Option<String>,
+    /// Headings above the chunk, outermost first.
+    #[serde(default)]
+    pub section_path: Vec<String>,
+    /// Opening of the chunk's own text, so the reference reads as a source
+    /// rather than as a rank and a score.
+    #[serde(default)]
+    pub excerpt: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
@@ -205,7 +192,8 @@ pub struct AssistantTechnicalFactReference {
     /// Typed category assigned during fact extraction.
     pub fact_kind: String,
     /// Normalized value used for comparison and matching.
-    pub canonical_value: String,
+    #[serde(rename = "\u{63}anonicalValue")]
+    pub normalized_value: String,
     /// Source-facing value suitable for presentation.
     pub display_value: String,
     /// Position assigned by evidence ranking.
@@ -248,7 +236,7 @@ pub struct AssistantRelationReference {
     pub score: f64,
     /// Relation predicate connecting its endpoint entities.
     pub predicate: String,
-    /// Canonical relation statement, when one was produced.
+    /// Normalized relation statement, when one was produced.
     pub normalized_assertion: Option<String>,
 }
 
@@ -462,6 +450,9 @@ pub struct AssistantConversationMessage {
     pub content: String,
     /// Time at which the message was recorded.
     pub timestamp: DateTime<Utc>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// Server-observed elapsed processing time for an active execution.
+    pub elapsed_ms: Option<u64>,
     /// Execution associated with the message, when applicable.
     pub execution_id: Option<Uuid>,
     /// Answer evidence attached to the message, when available.
@@ -497,18 +488,6 @@ pub struct RenameAssistantSessionRequest {
     /// Non-empty conversation title, bounded to 72 Unicode characters.
     #[schema(min_length = 1, max_length = 72)]
     pub title: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
-#[serde(rename_all = "camelCase")]
-/// Persisted conversation with its turns and execution records.
-pub struct AssistantConversationDetail {
-    /// Conversation metadata.
-    pub session: AssistantConversation,
-    /// Persisted turns ordered within the conversation.
-    pub turns: Vec<AssistantTurn>,
-    /// Executions associated with the conversation.
-    pub executions: Vec<AssistantExecution>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
@@ -564,80 +543,4 @@ pub struct AssistantHydratedConversation {
     pub session: AssistantSessionListItem,
     /// Hydrated messages in conversation order.
     pub messages: Vec<AssistantConversationMessage>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
-#[serde(rename_all = "camelCase")]
-/// Current input-composer state for an assistant workspace.
-pub struct AssistantComposerState {
-    /// Whether the current draft may be submitted.
-    pub can_submit: bool,
-    /// Preserved draft text, when present.
-    pub draft: Option<String>,
-    /// Contextual prompt shown when the composer is empty.
-    pub placeholder: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
-#[serde(rename_all = "camelCase")]
-/// Renderable evidence entry in the assistant workspace.
-pub struct AssistantEvidenceItem {
-    /// Stable identifier within its evidence category.
-    pub id: String,
-    /// Primary user-facing evidence label.
-    pub label: String,
-    /// Supporting detail displayed with the label.
-    pub detail: String,
-    /// Relevance score, when the evidence source provides one.
-    pub score: Option<f64>,
-    /// Source document associated with the item, when applicable.
-    pub document_id: Option<Uuid>,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
-#[serde(rename_all = "camelCase")]
-/// Named collection of related evidence entries.
-pub struct AssistantEvidenceGroup {
-    /// Stable group key used by clients.
-    pub key: String,
-    /// User-facing group label.
-    pub label: String,
-    /// Evidence entries belonging to the group.
-    pub items: Vec<AssistantEvidenceItem>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
-#[serde(rename_all = "camelCase")]
-/// Presentation state for one assistant pipeline stage.
-pub struct AssistantStageItem {
-    /// Stable machine-readable stage identifier.
-    pub stage_kind: String,
-    /// User-facing stage label.
-    pub stage_label: String,
-    /// Whether this stage is currently running.
-    pub active: bool,
-    /// Whether this stage completed successfully.
-    pub completed: bool,
-    /// Whether this stage reached a failed terminal state.
-    pub failed: bool,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
-#[serde(rename_all = "camelCase")]
-/// Fully assembled state required to render an assistant workspace.
-pub struct AssistantWorkspaceSurface {
-    /// Conversations available in the workspace.
-    pub sessions: Vec<AssistantSessionListItem>,
-    /// Conversation currently selected by the user, when any.
-    pub active_session_id: Option<Uuid>,
-    /// Messages rendered for the active conversation.
-    pub messages: Vec<AssistantConversationMessage>,
-    /// Pipeline stages rendered for the active execution.
-    pub stages: Vec<AssistantStageItem>,
-    /// Current message-composer state.
-    pub composer: AssistantComposerState,
-    /// Evidence grouped for workspace presentation.
-    pub evidence_groups: Vec<AssistantEvidenceGroup>,
-    /// Operator-safe warnings relevant to the workspace state.
-    pub warnings: Vec<OperatorWarning>,
 }

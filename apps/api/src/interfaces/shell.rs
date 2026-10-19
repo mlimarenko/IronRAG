@@ -13,9 +13,10 @@ use crate::{
     infra::repositories::iam_repository,
     interfaces::http::{
         auth::AuthContext,
-        authorization::{authorize_library_discovery, authorize_workspace_discovery},
+        authorization::{authorize_workspace_discovery, library_discovery_ids},
         router_support::ApiError,
     },
+    services::catalog_service::{CatalogService, SearchCatalogLibraryPage},
     services::iam::service::BootstrapStatusOutcome,
 };
 use ironrag_contracts::{
@@ -43,12 +44,21 @@ use ironrag_contracts::{
 
 use crate::infra::repositories::iam_repository::SystemRole;
 
+const SHELL_BOOTSTRAP_LIBRARY_LIMIT: u32 = 8;
+
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct ShellSelection {
+    pub active_workspace_id: Option<uuid::Uuid>,
+    pub active_library_id: Option<uuid::Uuid>,
+}
+
 pub(crate) async fn build_shell_bootstrap(
     state: &AppState,
     auth: &AuthContext,
+    selection: ShellSelection,
 ) -> Result<ShellBootstrap, ApiError> {
     let workspaces = state
-        .canonical_services
+        .application_services
         .catalog
         .list_workspaces(state, None)
         .await?
@@ -56,26 +66,38 @@ pub(crate) async fn build_shell_bootstrap(
         .filter(|workspace| authorize_workspace_discovery(auth, workspace.id).is_ok())
         .collect::<Vec<_>>();
 
-    let active_workspace_id = auth
-        .workspace_id
+    let active_workspace_id = selection
+        .active_workspace_id
         .filter(|workspace_id| workspaces.iter().any(|workspace| workspace.id == *workspace_id))
+        .or(auth.workspace_id.filter(|workspace_id| {
+            workspaces.iter().any(|workspace| workspace.id == *workspace_id)
+        }))
         .or_else(|| workspaces.first().map(|workspace| workspace.id));
 
-    // Load libraries from ALL visible workspaces so the UI can switch freely
-    let mut libraries = Vec::new();
-    for workspace in &workspaces {
-        let ws_libs = state
-            .canonical_services
-            .catalog
-            .list_libraries(state, workspace.id)
-            .await?
-            .into_iter()
-            .filter(|library| {
-                authorize_library_discovery(auth, library.workspace_id, library.id).is_ok()
-            })
-            .collect::<Vec<_>>();
-        libraries.extend(ws_libs);
-    }
+    let library_page = if let Some(workspace_id) = active_workspace_id {
+        let visible_library_ids = library_discovery_ids(auth, workspace_id);
+        Some(
+            CatalogService
+                .search_library_page(
+                    state,
+                    SearchCatalogLibraryPage {
+                        workspace_id,
+                        search: None,
+                        visible_library_ids: visible_library_ids.as_deref(),
+                        pinned_library_id: selection.active_library_id,
+                        offset: 0,
+                        limit: SHELL_BOOTSTRAP_LIBRARY_LIMIT,
+                    },
+                )
+                .await?,
+        )
+    } else {
+        None
+    };
+    let library_total_count =
+        library_page.as_ref().and_then(|page| u64::try_from(page.total_count).ok()).unwrap_or(0);
+    let libraries =
+        cap_shell_bootstrap_libraries(library_page.map_or_else(Vec::new, |page| page.items));
     let active_library_id = libraries.first().map(|library| library.id);
 
     let user =
@@ -84,7 +106,7 @@ pub(crate) async fn build_shell_bootstrap(
             .map_err(|e| ApiError::internal_with_log(e, "internal"))?
             .ok_or(ApiError::Unauthorized)?;
 
-    // The shell role is the canonical system role stored on the user (it gates
+    // The shell role is the persisted system role stored on the user (it gates
     // the UI capability matrix). `is_admin` mirrors the auth context's
     // system-admin flag, which is grant-derived and remains the server-side
     // authorization boundary.
@@ -131,12 +153,18 @@ pub(crate) async fn build_shell_bootstrap(
                 }
             })
             .collect(),
+        library_total_count,
         active_library_id,
         workspace_memberships: Vec::new(),
         effective_grants: Vec::new(),
         capabilities: Vec::new(),
         warnings: Vec::new(),
     })
+}
+
+fn cap_shell_bootstrap_libraries<T>(mut libraries: Vec<T>) -> Vec<T> {
+    libraries.truncate(SHELL_BOOTSTRAP_LIBRARY_LIMIT as usize);
+    libraries
 }
 
 const fn map_shell_role(role: SystemRole) -> ShellRole {
@@ -168,6 +196,8 @@ const fn map_contract_provider_auth_scheme(
     match value {
         ProviderAuthScheme::Bearer => ContractProviderAuthScheme::Bearer,
         ProviderAuthScheme::RawAuthorization => ContractProviderAuthScheme::RawAuthorization,
+        ProviderAuthScheme::AnthropicApiKey => ContractProviderAuthScheme::AnthropicApiKey,
+        ProviderAuthScheme::GoogleApiKey => ContractProviderAuthScheme::GoogleApiKey,
     }
 }
 
@@ -282,10 +312,11 @@ fn map_contract_provider_model_discovery(
             .paths
             .iter()
             .map(|path| ContractProviderModelDiscoveryPath {
-                capability_kind: path.capability_kind.clone(),
+                capability_kind: path.capability_kind,
                 path: path.path.clone(),
             })
             .collect(),
+        listed_pricing_currency: value.listed_pricing_currency.clone(),
     }
 }
 
@@ -309,6 +340,8 @@ fn map_contract_provider_capabilities(
         streaming: map_contract_provider_capability_state(value.streaming),
         tools: map_contract_provider_capability_state(value.tools),
         model_discovery: map_contract_provider_capability_state(value.model_discovery),
+        decision: map_contract_provider_capability_state(value.decision),
+        flex_tier: map_contract_provider_capability_state(value.flex_tier),
     }
 }
 
@@ -356,7 +389,11 @@ pub(crate) fn to_bootstrap_contract(value: &BootstrapStatusOutcome) -> Bootstrap
             })
             .collect(),
     });
-    BootstrapStatus { setup_required: value.setup_required, ai_setup }
+    BootstrapStatus {
+        setup_required: value.setup_required,
+        sso_available: value.sso_available,
+        ai_setup,
+    }
 }
 
 const fn catalog_lifecycle_label(value: &CatalogLifecycleState) -> &'static str {
@@ -382,6 +419,17 @@ fn shell_library_query_ready(missing: &[AiBindingPurpose]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const LARGE_LIBRARY_SET_SIZE: usize = 2_154;
+
+    #[test]
+    fn shell_bootstrap_library_set_stays_capped() {
+        let libraries =
+            cap_shell_bootstrap_libraries((0..LARGE_LIBRARY_SET_SIZE).collect::<Vec<_>>());
+
+        assert_eq!(libraries.len(), SHELL_BOOTSTRAP_LIBRARY_LIMIT as usize);
+        assert_eq!(libraries.first(), Some(&0));
+    }
 
     #[test]
     fn shell_query_readiness_blocks_on_required_query_and_agent_purposes() {

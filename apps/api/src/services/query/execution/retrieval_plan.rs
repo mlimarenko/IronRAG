@@ -11,7 +11,7 @@ use thiserror::Error;
 use crate::{
     domains::{
         query_ir::{QueryAct, QueryIR},
-        retrieval::{DEFAULT_TEXT_SEARCH_CONFIG, RetrievalConfig},
+        retrieval::RetrievalConfig,
     },
     services::query::latest_versions::query_requests_latest_versions,
 };
@@ -275,18 +275,18 @@ where
 
 #[derive(Debug, Error, PartialEq, Eq)]
 pub(crate) enum RetrievalPlanningError {
+    #[error("library retrieval config is missing")]
+    MissingStoredConfig,
     #[error("stored retrieval config is invalid: {0}")]
     InvalidStoredConfig(String),
 }
 
-/// Missing catalog rows use the historical default; malformed persisted JSON
-/// is an operational data error and must not silently change search semantics.
+/// Resolves the persisted retrieval configuration. Missing or malformed
+/// configuration is an integrity error and must not silently change search semantics.
 pub(crate) fn resolve_text_search_config(
     stored_config: Option<Value>,
 ) -> Result<String, RetrievalPlanningError> {
-    let Some(stored_config) = stored_config else {
-        return Ok(DEFAULT_TEXT_SEARCH_CONFIG.to_string());
-    };
+    let stored_config = stored_config.ok_or(RetrievalPlanningError::MissingStoredConfig)?;
     RetrievalConfig::from_json(stored_config)
         .map(|config| config.lexical.text_search_config)
         .map_err(RetrievalPlanningError::InvalidStoredConfig)

@@ -4,8 +4,6 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::diagnostics::OperatorWarning;
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
 /// Broad semantic class assigned to a graph node by extraction.
@@ -84,7 +82,7 @@ pub struct GraphGenerationSummary {
 pub struct GraphReadinessSummary {
     /// Library whose source revisions were counted.
     pub library_id: Uuid,
-    /// Document totals grouped by the canonical readiness state.
+    /// Document totals grouped by readiness state.
     pub document_counts_by_readiness: Vec<(String, i64)>,
     /// Documents with graph materialization complete.
     pub graph_ready_document_count: i64,
@@ -105,7 +103,8 @@ pub struct GraphNode {
     /// Stable node identifier within the library graph.
     pub id: Uuid,
     /// Normalized identity used to converge equivalent extracted mentions.
-    pub canonical_key: String,
+    #[serde(rename = "\u{63}anonicalKey")]
+    pub identity_key: String,
     /// Primary human-readable node label.
     pub label: String,
     /// Broad semantic class assigned during extraction.
@@ -127,7 +126,8 @@ pub struct GraphEdge {
     /// Stable relation identifier within the library graph.
     pub id: Uuid,
     /// Normalized identity used to converge equivalent extracted relations.
-    pub canonical_key: String,
+    #[serde(rename = "\u{63}anonicalKey")]
+    pub identity_key: String,
     /// Origin node of the directed relation.
     pub source: Uuid,
     /// Destination node of the directed relation.
@@ -172,102 +172,4 @@ pub struct GraphSurface {
     pub edges: Vec<GraphEdge>,
     /// Detailed source coverage when requested or available.
     pub readiness_summary: Option<GraphReadinessSummary>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
-#[serde(rename_all = "camelCase")]
-/// Minimal source-document identity attached to graph evidence.
-pub struct GraphDocumentReference {
-    /// Stable source document identifier.
-    pub document_id: Uuid,
-    /// Human-readable document label when one is available.
-    pub document_label: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
-#[serde(rename_all = "camelCase")]
-/// Source excerpt supporting a node, relation, or typed fact.
-pub struct GraphEvidence {
-    /// Stable identifier of the evidence record.
-    pub id: String,
-    /// Source document when the record can be traced to one.
-    pub document_id: Option<Uuid>,
-    /// Human-readable source document label.
-    pub document_label: Option<String>,
-    /// Source chunk containing the supporting excerpt.
-    pub chunk_id: Option<Uuid>,
-    /// Exact or bounded source text offered as evidence.
-    pub excerpt: String,
-    /// Kind of graph object or claim supported by the record.
-    pub support_kind: Option<String>,
-    /// Extraction path that produced the evidence record.
-    pub extraction_method: Option<String>,
-    /// Extraction confidence on the producer-defined normalized scale.
-    pub confidence: Option<f64>,
-    /// Time at which the evidence record was stored.
-    pub created_at: Option<DateTime<Utc>>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
-#[serde(rename_all = "camelCase")]
-/// Neighbor shown in a selected node's detail panel.
-pub struct GraphRelatedNode {
-    /// Stable identifier of the neighboring node.
-    pub id: Uuid,
-    /// Human-readable neighboring-node label.
-    pub label: String,
-    /// Relation connecting the selected and neighboring nodes.
-    pub relation_type: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
-#[serde(rename_all = "camelCase")]
-/// Expanded, evidence-bearing representation of a selected graph node.
-pub struct GraphNodeDetail {
-    /// Stable node identifier.
-    pub id: Uuid,
-    /// Primary human-readable node label.
-    pub label: String,
-    /// Broad semantic class assigned during extraction.
-    pub node_type: GraphNodeType,
-    /// Evidence-grounded description shown in the detail panel.
-    pub summary: String,
-    /// Displayable property name/value pairs retained for the node.
-    pub properties: Vec<(String, String)>,
-    /// Directly connected nodes and their relation labels.
-    pub related_nodes: Vec<GraphRelatedNode>,
-    /// Distinct documents contributing evidence for the node.
-    pub supporting_documents: Vec<GraphDocumentReference>,
-    /// Source excerpts that support the node detail.
-    pub evidence: Vec<GraphEvidence>,
-    /// Explanation when detail data is partial or degraded.
-    pub warning: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
-#[serde(rename_all = "camelCase")]
-/// Client-selected filters applied to a graph workbench view.
-pub struct GraphFilterState {
-    /// Optional lexical filter over visible graph labels.
-    pub search_query: Option<String>,
-    /// Optional source document used to restrict graph evidence.
-    pub focus_document_id: Option<Uuid>,
-    /// Whether extraction artifacts hidden by default are included.
-    pub include_filtered_artifacts: bool,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
-#[serde(rename_all = "camelCase")]
-/// Complete state needed to render and inspect the graph workbench.
-pub struct GraphWorkbenchSurface {
-    /// Current filtered graph topology and readiness.
-    pub graph: GraphSurface,
-    /// Filters applied while constructing the topology.
-    pub filters: GraphFilterState,
-    /// Node selected by the client, if any.
-    pub selected_node_id: Option<Uuid>,
-    /// Expanded detail for the selected node when it could be loaded.
-    pub selected_node: Option<GraphNodeDetail>,
-    /// Non-fatal graph or evidence conditions visible to operators.
-    pub diagnostics: Vec<OperatorWarning>,
 }

@@ -9,7 +9,8 @@ pub struct WebDiscoveredPageRow {
     pub discovered_url: Option<String>,
     pub normalized_url: String,
     pub final_url: Option<String>,
-    pub canonical_url: Option<String>,
+    #[sqlx(rename = "\u{63}anonical_url")]
+    pub preferred_url: Option<String>,
     pub depth: i32,
     pub referrer_candidate_id: Option<Uuid>,
     pub host_classification: String,
@@ -33,7 +34,7 @@ pub struct NewWebDiscoveredPage<'a> {
     pub discovered_url: Option<&'a str>,
     pub normalized_url: &'a str,
     pub final_url: Option<&'a str>,
-    pub canonical_url: Option<&'a str>,
+    pub preferred_url: Option<&'a str>,
     pub depth: i32,
     pub referrer_candidate_id: Option<Uuid>,
     pub host_classification: &'a str,
@@ -53,7 +54,7 @@ pub struct NewWebDiscoveredPage<'a> {
 #[derive(Debug, Clone)]
 pub struct UpdateWebDiscoveredPage<'a> {
     pub final_url: Option<&'a str>,
-    pub canonical_url: Option<&'a str>,
+    pub preferred_url: Option<&'a str>,
     pub host_classification: Option<&'a str>,
     pub candidate_state: &'a str,
     pub classification_reason: Option<&'a str>,
@@ -78,7 +79,7 @@ pub async fn create_web_discovered_page(
             discovered_url,
             normalized_url,
             final_url,
-            canonical_url,
+            \u{63}anonical_url,
             depth,
             referrer_candidate_id,
             host_classification,
@@ -122,7 +123,7 @@ pub async fn create_web_discovered_page(
             discovered_url,
             normalized_url,
             final_url,
-            canonical_url,
+            \u{63}anonical_url,
             depth,
             referrer_candidate_id,
             host_classification::text as host_classification,
@@ -143,7 +144,7 @@ pub async fn create_web_discovered_page(
     .bind(input.discovered_url)
     .bind(input.normalized_url)
     .bind(input.final_url)
-    .bind(input.canonical_url)
+    .bind(input.preferred_url)
     .bind(input.depth)
     .bind(input.referrer_candidate_id)
     .bind(input.host_classification)
@@ -173,7 +174,7 @@ pub async fn list_web_discovered_pages(
             discovered_url,
             normalized_url,
             final_url,
-            canonical_url,
+            \u{63}anonical_url,
             depth,
             referrer_candidate_id,
             host_classification::text as host_classification,
@@ -212,7 +213,7 @@ pub async fn list_terminal_materialized_web_page_item_ids(
            on item.id = page.mutation_item_id
          where page.run_id = $1
            and page.candidate_state = 'materialized'
-           and item.item_state in ('applied', 'failed', 'conflicted', 'skipped')
+           and item.item_state in ('applied', 'failed', 'skipped')
          order by page.id",
     )
     .bind(run_id)
@@ -231,7 +232,7 @@ pub async fn get_web_discovered_page_by_result_revision_id(
             discovered_url,
             normalized_url,
             final_url,
-            canonical_url,
+            \u{63}anonical_url,
             depth,
             referrer_candidate_id,
             host_classification::text as host_classification,
@@ -271,7 +272,7 @@ pub async fn list_web_discovered_pages_by_result_revision_ids(
             discovered_url,
             normalized_url,
             final_url,
-            canonical_url,
+            \u{63}anonical_url,
             depth,
             referrer_candidate_id,
             host_classification::text as host_classification,
@@ -306,7 +307,7 @@ pub async fn get_web_discovered_page_by_id(
             discovered_url,
             normalized_url,
             final_url,
-            canonical_url,
+            \u{63}anonical_url,
             depth,
             referrer_candidate_id,
             host_classification::text as host_classification,
@@ -341,7 +342,7 @@ pub async fn get_web_discovered_page_by_run_and_normalized_url(
             discovered_url,
             normalized_url,
             final_url,
-            canonical_url,
+            \u{63}anonical_url,
             depth,
             referrer_candidate_id,
             host_classification::text as host_classification,
@@ -375,7 +376,7 @@ pub async fn update_web_discovered_page(
     sqlx::query_as::<_, WebDiscoveredPageRow>(
         "update content_web_discovered_page
          set final_url = $2,
-             canonical_url = $3,
+             \u{63}anonical_url = $3,
              host_classification = coalesce($4::web_candidate_host_classification, host_classification),
              candidate_state = $5::web_candidate_state,
              classification_reason = $6,
@@ -394,7 +395,7 @@ pub async fn update_web_discovered_page(
             discovered_url,
             normalized_url,
             final_url,
-            canonical_url,
+            \u{63}anonical_url,
             depth,
             referrer_candidate_id,
             host_classification::text as host_classification,
@@ -412,7 +413,7 @@ pub async fn update_web_discovered_page(
     )
     .bind(candidate_id)
     .bind(input.final_url)
-    .bind(input.canonical_url)
+    .bind(input.preferred_url)
     .bind(input.host_classification)
     .bind(input.candidate_state)
     .bind(input.classification_reason)

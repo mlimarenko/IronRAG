@@ -18,6 +18,10 @@ HARDENING_RENDER="${RENDER_DIR}/hardening.yaml"
 EXTRA_INGRESS_RENDER="${RENDER_DIR}/hardening-extra-ingress.yaml"
 CREDENTIAL_RENDER="${RENDER_DIR}/credential-secret.yaml"
 EXISTING_SECRET_RENDER="${RENDER_DIR}/existing-runtime-secret.yaml"
+OIDC_RENDER="${RENDER_DIR}/oidc-runtime.yaml"
+MIGRATION_RENDER="${RENDER_DIR}/migration-contract.yaml"
+S4_MIGRATION_RENDER="${RENDER_DIR}/s4-migration-contract.yaml"
+ARGO_HOOK_RENDER="${RENDER_DIR}/argocd-sync-hook.yaml"
 
 "${HELM_BIN}" lint "${CHART_DIR}"
 "${HELM_BIN}" template ironrag "${CHART_DIR}" \
@@ -39,7 +43,6 @@ EXISTING_SECRET_RENDER="${RENDER_DIR}/existing-runtime-secret.yaml"
   >"${EXTRA_INGRESS_RENDER}"
 "${HELM_BIN}" template ironrag "${CHART_DIR}" \
   --set-string app.credentialMasterKey=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA= \
-  --set app.credentialEncryptionWriteEnabled=true \
   --set-string app.providerSecrets.provider_zeta=second-provider-key \
   --set-string app.providerSecrets.provider_alpha=synthetic-provider-key \
   >"${CREDENTIAL_RENDER}"
@@ -47,6 +50,90 @@ EXISTING_SECRET_RENDER="${RENDER_DIR}/existing-runtime-secret.yaml"
   --set-string runtimeSecret.existingSecret=ironrag-runtime-external \
   --set-string runtimeSecret.restartNonce=rotation-2026-07-10 \
   >"${EXISTING_SECRET_RENDER}"
+"${HELM_BIN}" template ironrag "${CHART_DIR}" \
+  --set-string runtimeSecret.existingSecret=ironrag-runtime-external \
+  --set-string runtimeSecret.restartNonce=oidc-runtime-rotation-1 \
+  --set-string app.frontendOrigin=https://ironrag.example.test \
+  --set-string app.oidc.issuerUrl=https://issuer.example.test/realms/graph \
+  --set-string app.oidc.clientId=ironrag-graph \
+  --set-string app.oidc.redirectUrl=https://ironrag.example.test/v1/iam/oidc/callback \
+  --set-string app.oidc.requiredGroup=ironrag-users \
+  >"${OIDC_RENDER}"
+
+# The chart-managed runtime Secret has no field for the OIDC client secret
+# (it must come from an operator-managed Secret instead), so enabling OIDC
+# without runtimeSecret.existingSecret must fail the render rather than
+# silently ship a Secret nothing can complete.
+set +e
+OIDC_WITHOUT_EXISTING_SECRET_OUTPUT="$("${HELM_BIN}" template ironrag "${CHART_DIR}" \
+  --set-string app.oidc.issuerUrl=https://issuer.example.test/realms/graph \
+  --set-string app.oidc.clientId=ironrag-graph \
+  --set-string app.oidc.redirectUrl=https://ironrag.example.test/v1/iam/oidc/callback \
+  --set-string app.oidc.requiredGroup=ironrag-users 2>&1)"
+OIDC_WITHOUT_EXISTING_SECRET_STATUS=$?
+set -e
+if [ "${OIDC_WITHOUT_EXISTING_SECRET_STATUS}" -eq 0 ]; then
+  printf 'app.oidc without runtimeSecret.existingSecret must fail the render, but it rendered:\n%s\n' \
+    "${OIDC_WITHOUT_EXISTING_SECRET_OUTPUT}" >&2
+  exit 1
+fi
+case "${OIDC_WITHOUT_EXISTING_SECRET_OUTPUT}" in
+  *"runtimeSecret.existingSecret"*) ;;
+  *)
+    printf 'app.oidc render without runtimeSecret.existingSecret failed for the wrong reason:\n%s\n' \
+      "${OIDC_WITHOUT_EXISTING_SECRET_OUTPUT}" >&2
+    exit 1
+    ;;
+esac
+printf 'validated app.oidc without runtimeSecret.existingSecret is rejected\n'
+
+"${HELM_BIN}" template ironrag "${CHART_DIR}" \
+  --values "${CHART_DIR}/values/examples/filesystem-single-node.yaml" \
+  --set-string runtimeSecret.existingSecret=ironrag-runtime-external \
+  --set-string runtimeSecret.restartNonce=runtime-rotation-1 \
+  --set-string bundledDependencySecret.existingSecret=ironrag-bundled-external \
+  --set-string bundledDependencySecret.restartNonce=postgres-rotation-1 \
+  --set-string dependencies.postgres.persistence.existingClaim=ironrag-postgres-data \
+  --set-string dependencies.postgres.shmSize=2Gi \
+  --set dependencies.postgres.maxConnections=300 \
+  --set-string dependencies.postgres.sharedBuffers=3GB \
+  --set-string dependencies.postgres.workMem=12MB \
+  --set-string dependencies.postgres.resources.requests.memory=3Gi \
+  --set-string dependencies.postgres.resources.limits.memory=6144Mi \
+  --set app.ingestion.maxParallelJobsGlobal=12 \
+  --set app.ingestion.maxParallelJobsPerWorkspace=12 \
+  --set app.ingestion.maxParallelJobsPerLibrary=12 \
+  --set app.ingestion.doclingPageBatchSize=5 \
+  --set app.ingestion.doclingPageStreamWindowPages=5 \
+  --set app.ingestion.doclingMaxConcurrency=1 \
+  --set app.ingestion.graphExtractParallelismPerDocument=2 \
+  --set-string storage.filesystem.existingClaim=ironrag-content-data \
+  --set-string api.image.digest=sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
+  --set-string worker.image.digest=sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
+  --set-string web.image.digest=sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb \
+  --set-string dependencies.postgres.image.digest=sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc \
+  --set-string dependencies.redis.image.digest=sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd \
+  --set-string startup.wait.image.digest=sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee \
+  >"${MIGRATION_RENDER}"
+"${HELM_BIN}" template ironrag "${CHART_DIR}" \
+  --values "${CHART_DIR}/values/examples/bundled-s3.yaml" \
+  --set-string bundledDependencySecret.existingSecret=ironrag-bundled-external \
+  --set-string bundledDependencySecret.restartNonce=r2 \
+  --set-string dependencies.postgres.persistence.existingClaim=ironrag-postgres-data \
+  --set-string storage.s3.persistence.existingClaim=ironrag-s4-data \
+  --set-string storage.s3.image.digest=sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff \
+  >"${S4_MIGRATION_RENDER}"
+"${HELM_BIN}" template ironrag "${CHART_DIR}" \
+  --set-json 'startup.jobAnnotations={"argocd.argoproj.io/hook":"Sync","argocd.argoproj.io/hook-delete-policy":"BeforeHookCreation"}' \
+  --set-json startup.ttlSecondsAfterFinished=null \
+  >"${ARGO_HOOK_RENDER}"
+
+grep -q 'argocd.argoproj.io/hook: Sync' "${ARGO_HOOK_RENDER}"
+grep -q 'argocd.argoproj.io/hook-delete-policy: BeforeHookCreation' "${ARGO_HOOK_RENDER}"
+if grep -q 'ttlSecondsAfterFinished:' "${ARGO_HOOK_RENDER}"; then
+  echo "Argo-retained startup Job must not have a TTL" >&2
+  exit 1
+fi
 
 if grep -E -n '127\.0\.0\.11|ironrag-(backend|frontend):0\.3\.1|pipingspace/ironrag-(backend|frontend):0\.3\.1' \
   "${ROOT_DIR}/apps/web/nginx.conf.template" \
@@ -74,7 +161,10 @@ python3 - \
   "${EXTRA_INGRESS_RENDER}" \
   "${BUNDLED_RENDER}" \
   "${CREDENTIAL_RENDER}" \
-  "${EXISTING_SECRET_RENDER}" <<'PY'
+  "${EXISTING_SECRET_RENDER}" \
+  "${MIGRATION_RENDER}" \
+  "${S4_MIGRATION_RENDER}" \
+  "${OIDC_RENDER}" <<'PY'
 import base64
 import re
 import sys
@@ -109,7 +199,7 @@ for network_policy in network_policies:
 web_network_policy = [policy for policy in network_policies if "name: ironrag-ironrag-web" in policy]
 assert len(web_network_policy) == 1, "missing web NetworkPolicy"
 assert "app.kubernetes.io/component: web" in web_network_policy[0]
-assert "port: 80" in web_network_policy[0]
+assert "port: http" in web_network_policy[0]
 
 for kind in ("PodDisruptionBudget", "HorizontalPodAutoscaler"):
     resources = documents_of_kind(kind)
@@ -160,11 +250,13 @@ assert 'IRONRAG_WORKER_REPLICAS: "10"' in runtime_configs[0]
 assert 'IRONRAG_QUERY_RERANK_ENABLED: "true"' in runtime_configs[0]
 assert 'IRONRAG_QUERY_RERANK_CANDIDATE_LIMIT: "24"' in runtime_configs[0]
 assert 'IRONRAG_QUERY_SEMANTIC_RERANK_MODE: "off"' in runtime_configs[0]
-assert 'IRONRAG_QUERY_SEMANTIC_RERANK_TIMEOUT_MS: "1500"' in runtime_configs[0]
+assert 'IRONRAG_QUERY_SEMANTIC_RERANK_TIMEOUT_MS: "1000"' in runtime_configs[0]
 assert 'IRONRAG_QUERY_SEMANTIC_RERANK_CANDIDATE_LIMIT: "16"' in runtime_configs[0]
 assert 'IRONRAG_QUERY_SEMANTIC_RERANK_CANDIDATE_TEXT_CHARS: "1200"' in runtime_configs[0]
 assert 'IRONRAG_QUERY_SEMANTIC_RERANK_TOTAL_TEXT_CHARS: "18000"' in runtime_configs[0]
-assert 'IRONRAG_CREDENTIAL_ENCRYPTION_WRITE_ENABLED: "false"' in runtime_configs[0]
+assert not re.search(r"^\s*IRONRAG_OIDC_[A-Z_]+:", runtime_configs[0], re.MULTILINE), (
+    "default runtime ConfigMap must omit disabled OIDC settings"
+)
 
 extra_ingress_documents = load_documents(sys.argv[2])
 api_extra_policies = [
@@ -191,6 +283,22 @@ for component in ("api", "worker", "web"):
     assert len(deployment) == 1, f"missing default Deployment for {component}"
     assert re.search(r"^  replicas: 2$", deployment[0], re.MULTILINE), (
         f"non-HPA Deployment {component} must retain its configured replica count"
+    )
+
+default_postgres = [
+    document
+    for document in default_documents
+    if "kind: Deployment" in document
+    and "app.kubernetes.io/component: postgres" in document
+]
+assert len(default_postgres) == 1, "missing default PostgreSQL Deployment"
+for postgres_arg in (
+    '"max_connections=100"',
+    '"shared_buffers=128MB"',
+    '"work_mem=4MB"',
+):
+    assert postgres_arg in default_postgres[0], (
+        f"default PostgreSQL workload is missing {postgres_arg}"
     )
 
 
@@ -326,7 +434,7 @@ provider_map_match = re.search(
     runtime_secrets[0],
     re.MULTILINE,
 )
-assert provider_map_match, "provider JSON base64 value was not rendered canonically"
+assert provider_map_match, "provider JSON base64 value was not rendered consistently"
 assert base64.b64decode(provider_map_match.group(1), validate=True).decode("utf-8") == (
     '{"provider_alpha":"synthetic-provider-key","provider_zeta":"second-provider-key"}'
 ), "provider map JSON must render in deterministic key order"
@@ -336,10 +444,6 @@ credential_runtime_configs = [
     if "kind: ConfigMap" in document and "name: ironrag-ironrag-runtime" in document
 ]
 assert len(credential_runtime_configs) == 1, "missing credential runtime ConfigMap"
-assert (
-    'IRONRAG_CREDENTIAL_ENCRYPTION_WRITE_ENABLED: "true"'
-    in credential_runtime_configs[0]
-), "credential write gate was not rendered into the runtime ConfigMap"
 assert all(
     "IRONRAG_CREDENTIAL_MASTER_KEY" not in document
     for document in credential_documents
@@ -357,6 +461,110 @@ assert_runtime_rollout_annotations(
     inline_secret=False,
     restart_nonce="rotation-2026-07-10",
 )
+
+oidc_documents = load_documents(sys.argv[8])
+oidc_runtime_configs = [
+    document
+    for document in oidc_documents
+    if "kind: ConfigMap" in document
+    and "name: ironrag-ironrag-runtime" in document
+]
+assert len(oidc_runtime_configs) == 1, "missing OIDC runtime ConfigMap"
+oidc_runtime_config = oidc_runtime_configs[0]
+expected_oidc_settings = {
+    "IRONRAG_OIDC_ISSUER_URL": "https://issuer.example.test/realms/graph",
+    "IRONRAG_OIDC_CLIENT_ID": "ironrag-graph",
+    "IRONRAG_OIDC_REDIRECT_URL": "https://ironrag.example.test/v1/iam/oidc/callback",
+    "IRONRAG_OIDC_REQUIRED_GROUP": "ironrag-users",
+}
+rendered_oidc_settings = set(
+    re.findall(r"^\s*(IRONRAG_OIDC_[A-Z_]+):", oidc_runtime_config, re.MULTILINE)
+)
+assert rendered_oidc_settings == set(expected_oidc_settings), (
+    "OIDC runtime ConfigMap must render exactly the four non-secret settings"
+)
+for oidc_env, oidc_value in expected_oidc_settings.items():
+    assert f'{oidc_env}: "{oidc_value}"' in oidc_runtime_config, (
+        f"OIDC runtime ConfigMap is missing {oidc_env}"
+    )
+
+migration_documents = load_documents(sys.argv[6])
+assert not any("kind: PersistentVolumeClaim" in document for document in migration_documents), (
+    "pre-created migration claims must suppress chart-owned PVCs"
+)
+assert not any("kind: Secret" in document for document in migration_documents), (
+    "operator-managed runtime and bundled dependency Secrets must suppress inline Secrets"
+)
+migration_render = "\n".join(migration_documents)
+assert "claimName: ironrag-postgres-data" in migration_render
+assert "claimName: ironrag-content-data" in migration_render
+assert "pipingspace/ironrag-backend@sha256:" + "a" * 64 in migration_render
+assert "pipingspace/ironrag-frontend@sha256:" + "b" * 64 in migration_render
+assert "pgvector/pgvector@sha256:" + "c" * 64 in migration_render
+assert "redis@sha256:" + "d" * 64 in migration_render
+assert "registry.k8s.io/kubectl@sha256:" + "e" * 64 in migration_render
+migration_runtime_configs = [
+    document
+    for document in migration_documents
+    if "kind: ConfigMap" in document
+    and "name: ironrag-ironrag-runtime" in document
+]
+assert len(migration_runtime_configs) == 1
+for runtime_setting in (
+    'IRONRAG_INGESTION_MAX_PARALLEL_JOBS_GLOBAL: "12"',
+    'IRONRAG_INGESTION_MAX_PARALLEL_JOBS_PER_WORKSPACE: "12"',
+    'IRONRAG_INGESTION_MAX_PARALLEL_JOBS_PER_LIBRARY: "12"',
+    'IRONRAG_DOCLING_PAGE_BATCH_SIZE: "5"',
+    'IRONRAG_DOCLING_PAGE_STREAM_WINDOW_PAGES: "5"',
+    'IRONRAG_DOCLING_MAX_CONCURRENCY: "1"',
+    'IRONRAG_INGESTION_HEAVY_PIPELINE_PARALLELISM: "auto"',
+    'IRONRAG_INGESTION_EMBEDDING_PARALLELISM: "8"',
+    'IRONRAG_INGESTION_GRAPH_EXTRACT_PARALLELISM_PER_DOC: "2"',
+):
+    assert runtime_setting in migration_runtime_configs[0], (
+        f"migration runtime ConfigMap is missing {runtime_setting}"
+    )
+postgres_workloads = [
+    document
+    for document in migration_documents
+    if "kind: Deployment" in document
+    and "app.kubernetes.io/component: postgres" in document
+]
+assert len(postgres_workloads) == 1
+postgres_workload = postgres_workloads[0]
+assert 'ironrag-bundled-secret-restart-nonce: "postgres-rotation-1"' in postgres_workload
+for postgres_arg in (
+    '"max_connections=300"',
+    '"shared_buffers=3GB"',
+    '"work_mem=12MB"',
+):
+    assert postgres_arg in postgres_workload, (
+        f"migration PostgreSQL workload is missing {postgres_arg}"
+    )
+assert "sizeLimit: 2Gi" in postgres_workload
+assert re.search(
+    r"resources:\n\s+limits:\n(?:\s+[^\n]+\n)*?\s+memory: 6144Mi",
+    postgres_workload,
+), "migration PostgreSQL workload must preserve its 6 GiB memory limit"
+assert re.search(
+    r"resources:\n(?:\s+[^\n]+\n)*?\s+requests:\n(?:\s+[^\n]+\n)*?\s+memory: 3Gi",
+    postgres_workload,
+), "migration PostgreSQL workload must reserve its shared-buffer budget"
+
+s4_migration_documents = load_documents(sys.argv[7])
+assert not any("kind: PersistentVolumeClaim" in document for document in s4_migration_documents)
+s4_migration_render = "\n".join(s4_migration_documents)
+assert "claimName: ironrag-postgres-data" in s4_migration_render
+assert "claimName: ironrag-s4-data" in s4_migration_render
+assert "s4core/s4core@sha256:" + "f" * 64 in s4_migration_render
+s4_workloads = [
+    document
+    for document in s4_migration_documents
+    if "kind: Deployment" in document
+    and "app.kubernetes.io/component: s4core" in document
+]
+assert len(s4_workloads) == 1
+assert 'ironrag-bundled-secret-restart-nonce: "r2"' in s4_workloads[0]
 PY
 
 if "${HELM_BIN}" template ironrag "${CHART_DIR}" \
@@ -370,20 +578,6 @@ if "${HELM_BIN}" template ironrag "${CHART_DIR}" \
   --set-string app.providerSecrets.provider_alpha=synthetic-provider-key >/dev/null 2>&1
 then
   echo "Helm validation accepted an inline provider secret without a credential master key" >&2
-  exit 1
-fi
-
-if "${HELM_BIN}" template ironrag "${CHART_DIR}" \
-  --set-string app.credentialEncryptionWriteEnabled=true >/dev/null 2>&1
-then
-  echo "Helm schema accepted a string credential write gate" >&2
-  exit 1
-fi
-
-if "${HELM_BIN}" template ironrag "${CHART_DIR}" \
-  --set app.credentialEncryptionWriteEnabled=true >/dev/null 2>&1
-then
-  echo "Helm validation accepted credential writes without an inline master key" >&2
   exit 1
 fi
 
@@ -409,6 +603,80 @@ if "${HELM_BIN}" template ironrag "${CHART_DIR}" \
   --set-string runtimeSecret.existingSecret=ironrag-runtime-external >/dev/null 2>&1
 then
   echo "Helm schema accepted an external runtime Secret without an explicit restart nonce" >&2
+  exit 1
+fi
+
+if "${HELM_BIN}" template ironrag "${CHART_DIR}" \
+  --set-string app.oidc.issuerUrl=https://issuer.example.test/realms/graph \
+  >/dev/null 2>&1
+then
+  echo "Helm validation accepted a partial OIDC configuration" >&2
+  exit 1
+fi
+
+if "${HELM_BIN}" template ironrag "${CHART_DIR}" \
+  --set-string bundledDependencySecret.existingSecret=ironrag-bundled-external \
+  >/dev/null 2>&1
+then
+  echo "Helm schema accepted an external bundled dependency Secret without an explicit restart nonce" >&2
+  exit 1
+fi
+
+if "${HELM_BIN}" template ironrag "${CHART_DIR}" \
+  --set-string api.image.digest=sha256:not-a-digest >/dev/null 2>&1
+then
+  echo "Helm validation accepted an invalid application image digest" >&2
+  exit 1
+fi
+
+if "${HELM_BIN}" template ironrag "${CHART_DIR}" \
+  --set-string dependencies.postgres.maxConnections=not-an-integer >/dev/null 2>&1
+then
+  echo "Helm schema accepted a non-integer PostgreSQL connection limit" >&2
+  exit 1
+fi
+
+if "${HELM_BIN}" template ironrag "${CHART_DIR}" \
+  --set-string dependencies.postgres.sharedBuffers=3Gi >/dev/null 2>&1
+then
+  echo "Helm schema accepted an unsupported PostgreSQL memory unit" >&2
+  exit 1
+fi
+
+if "${HELM_BIN}" template ironrag "${CHART_DIR}" \
+  --set-string dependencies.postgres.shmSize=4096MB >/dev/null 2>&1
+then
+  echo "Helm schema accepted an unsupported Kubernetes shmSize unit" >&2
+  exit 1
+fi
+
+if "${HELM_BIN}" template ironrag "${CHART_DIR}" \
+  --set-json dependencies.postgres.workMem=null >/dev/null 2>&1
+then
+  echo "Helm schema accepted a missing PostgreSQL memory setting" >&2
+  exit 1
+fi
+
+if "${HELM_BIN}" template ironrag "${CHART_DIR}" \
+  --set app.ingestion.doclingMaxConcurrency=0 >/dev/null 2>&1
+then
+  echo "Helm schema accepted zero Docling concurrency" >&2
+  exit 1
+fi
+
+if "${HELM_BIN}" template ironrag "${CHART_DIR}" \
+  --set app.ingestion.maxParallelJobsGlobal=4 \
+  --set app.ingestion.maxParallelJobsPerWorkspace=5 >/dev/null 2>&1
+then
+  echo "Helm validation accepted workspace ingestion concurrency above global" >&2
+  exit 1
+fi
+
+if "${HELM_BIN}" template ironrag "${CHART_DIR}" \
+  --set app.ingestion.maxParallelJobsPerWorkspace=2 \
+  --set app.ingestion.maxParallelJobsPerLibrary=3 >/dev/null 2>&1
+then
+  echo "Helm validation accepted library ingestion concurrency above workspace" >&2
   exit 1
 fi
 
@@ -451,7 +719,7 @@ then
 fi
 
 if "${HELM_BIN}" template ironrag "${CHART_DIR}" \
-  --set app.queryRerank.semantic.timeoutMs=3001 >/dev/null 2>&1
+  --set app.queryRerank.semantic.timeoutMs=5001 >/dev/null 2>&1
 then
   echo "Helm schema accepted a semantic rerank timeout above the runtime hard cap" >&2
   exit 1
@@ -563,8 +831,8 @@ for rendered in "${BUNDLED_RENDER}" "${FILESYSTEM_RENDER}"; do
     echo "rendered Helm chart ${rendered} is missing bundled postgres image pgvector/pgvector:pg18" >&2
     exit 1
   fi
-  if ! grep -F -q 'image: "redis:8.8"' "${rendered}"; then
-    echo "rendered Helm chart ${rendered} is missing bundled redis image redis:8.8" >&2
+  if ! grep -F -q 'image: "redis:8.10.1"' "${rendered}"; then
+    echo "rendered Helm chart ${rendered} is missing bundled redis image redis:8.10.1" >&2
     exit 1
   fi
 done

@@ -1,0 +1,24 @@
+{
+  "cases": [
+    {"id": "library", "question": "What is a library?"},
+    {"id": "documents", "question": "List all documents in this library."},
+    {"id": "central-entity", "question": "Which entity is most central in the knowledge graph?"},
+    {"id": "chunk-count", "question": "How many chunks are indexed in total?"},
+    {"id": "relationships", "question": "What relationships exist between the top entities?"},
+    {"id": "topics", "question": "Summarize the main topics covered by this library."},
+    {"id": "recent-documents", "question": "Which documents were added most recently?"},
+    {"id": "concepts", "question": "What are the key concepts mentioned across all documents?"},
+    {"id": "graph-structure", "question": "How is the graph structured around the primary entity?"},
+    {"id": "cited-facts", "question": "What facts are most frequently cited across documents?"},
+    {"id": "top-relationships", "question": "Describe the relationships between the top five entities."},
+    {"id": "referenced-facts", "question": "Which document contains the most referenced facts?"},
+    {"id": "theme", "question": "What is the overall theme of the knowledge base?"},
+    {"id": "entity-types", "question": "List all entity types present in the graph."},
+    {"id": "document-relations", "question": "How do the documents relate to each other thematically?"},
+    {"id": "least-connected", "question": "What are the least-connected nodes in the graph?"},
+    {"id": "key-fact", "question": "Give an example of a key fact from any document."},
+    {"id": "communities", "question": "What communities or clusters exist in the entity graph?"},
+    {"id": "frequent-entities", "question": "Which entities appear in the most documents?"},
+    {"id": "retrieval-test", "question": "What question would best test retrieval quality for this library?"}
+  ]
+}

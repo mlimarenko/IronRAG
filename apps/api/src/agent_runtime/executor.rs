@@ -16,7 +16,7 @@ use crate::{
     domains::agent_runtime::{
         RuntimeActionKind, RuntimeActionRecord, RuntimeActionState, RuntimeDecisionKind,
         RuntimeDecisionTargetKind, RuntimeExecution, RuntimeLifecycleState, RuntimePolicyDecision,
-        RuntimeStageKind, RuntimeStageRecord, RuntimeStageState,
+        RuntimeStageKind, RuntimeStageRecord, RuntimeStageState, RuntimeTaskKind,
     },
 };
 
@@ -41,6 +41,39 @@ pub struct RuntimeExecutionSession {
     pub trace: RuntimeExecutionTraceView,
     action_semaphore: Arc<Semaphore>,
     remaining_turns: u8,
+}
+
+/// A policy decision and the optional stage/action rows it belongs to.
+struct PolicyDecisionEntry {
+    target_kind: RuntimeDecisionTargetKind,
+    decision_kind: RuntimeDecisionKind,
+    reason_code: Option<String>,
+    reason_summary_redacted: Option<String>,
+    stage_record_id: Option<Uuid>,
+    action_record_id: Option<Uuid>,
+}
+
+/// Scope and reason presented to policy and hooks for one runtime target.
+struct TargetEvaluation {
+    execution_id: Uuid,
+    task_kind: RuntimeTaskKind,
+    stage_kind: Option<RuntimeStageKind>,
+    action_kind: Option<RuntimeActionKind>,
+    target_kind: RuntimeDecisionTargetKind,
+    reason_code: Option<String>,
+}
+
+/// A completed stage row to append to a session trace. `started_at` is the
+/// wall-clock moment captured when the stage entered (returned by
+/// [`RuntimeExecutor::begin_stage`]); `completed_at` is stamped when the row is
+/// written.
+pub struct StageCompletion {
+    pub stage_kind: RuntimeStageKind,
+    pub stage_state: RuntimeStageState,
+    pub deterministic: bool,
+    pub failure_code: Option<String>,
+    pub failure_summary_redacted: Option<String>,
+    pub started_at: DateTime<Utc>,
 }
 
 impl RuntimeExecutionSession {
@@ -124,48 +157,22 @@ impl RuntimeExecutionSession {
         action_id
     }
 
-    pub fn record_policy_decision(
-        &mut self,
-        target_kind: RuntimeDecisionTargetKind,
-        decision_kind: RuntimeDecisionKind,
-        reason_code: Option<String>,
-        reason_summary_redacted: Option<String>,
-        stage_record_id: Option<Uuid>,
-        action_record_id: Option<Uuid>,
-    ) {
-        self.trace.policy_decisions.push(RuntimePolicyDecision {
-            id: Uuid::now_v7(),
-            runtime_execution_id: self.execution.id,
-            stage_record_id,
-            action_record_id,
-            target_kind,
-            decision_kind,
-            reason_code: reason_code.unwrap_or_else(|| "runtime_policy".to_string()),
-            reason_summary_redacted: reason_summary_redacted
-                .unwrap_or_else(|| "runtime policy decision".to_string()),
-            created_at: Utc::now(),
-        });
+    fn record_policy_decision(&mut self, entry: PolicyDecisionEntry) {
+        self.trace.policy_decisions.push(build_policy_decision(self.execution.id, entry));
     }
 }
 
-fn build_policy_decision(
-    execution_id: Uuid,
-    target_kind: RuntimeDecisionTargetKind,
-    decision_kind: RuntimeDecisionKind,
-    reason_code: Option<String>,
-    reason_summary_redacted: Option<String>,
-    stage_record_id: Option<Uuid>,
-    action_record_id: Option<Uuid>,
-) -> RuntimePolicyDecision {
+fn build_policy_decision(execution_id: Uuid, entry: PolicyDecisionEntry) -> RuntimePolicyDecision {
     RuntimePolicyDecision {
         id: Uuid::now_v7(),
         runtime_execution_id: execution_id,
-        stage_record_id,
-        action_record_id,
-        target_kind,
-        decision_kind,
-        reason_code: reason_code.unwrap_or_else(|| "runtime_policy".to_string()),
-        reason_summary_redacted: reason_summary_redacted
+        stage_record_id: entry.stage_record_id,
+        action_record_id: entry.action_record_id,
+        target_kind: entry.target_kind,
+        decision_kind: entry.decision_kind,
+        reason_code: entry.reason_code.unwrap_or_else(|| "runtime_policy".to_string()),
+        reason_summary_redacted: entry
+            .reason_summary_redacted
             .unwrap_or_else(|| "runtime policy decision".to_string()),
         created_at: Utc::now(),
     }
@@ -237,13 +244,16 @@ impl RuntimeExecutor {
 
     async fn evaluate_target(
         &self,
-        execution_id: Uuid,
-        task_kind: crate::domains::agent_runtime::RuntimeTaskKind,
-        stage_kind: Option<RuntimeStageKind>,
-        action_kind: Option<RuntimeActionKind>,
-        target_kind: RuntimeDecisionTargetKind,
-        reason_code: Option<String>,
+        evaluation: TargetEvaluation,
     ) -> crate::agent_runtime::policy::RuntimePolicyOutcome {
+        let TargetEvaluation {
+            execution_id,
+            task_kind,
+            stage_kind,
+            action_kind,
+            target_kind,
+            reason_code,
+        } = evaluation;
         let hook_context =
             RuntimeHookContext { execution_id, stage_kind, action_kind, target_kind };
         self.run_before_hooks(&hook_context).await;
@@ -268,6 +278,23 @@ impl RuntimeExecutor {
         session: &mut RuntimeExecutionSession,
         stage_kind: RuntimeStageKind,
     ) -> Result<DateTime<Utc>, RuntimeExecutionError> {
+        if session.execution.lifecycle_state.is_terminal() {
+            let reason_code = session
+                .execution
+                .failure_code
+                .clone()
+                .unwrap_or_else(|| "runtime_execution_already_terminal".to_string());
+            let reason_summary_redacted = session
+                .execution
+                .failure_summary_redacted
+                .clone()
+                .unwrap_or_else(|| "runtime execution is already terminal".to_string());
+            return Err(RuntimeExecutionError::PolicyBlocked {
+                decision_kind: RuntimeDecisionKind::Terminate,
+                reason_code,
+                reason_summary_redacted,
+            });
+        }
         // Capture the real stage-entry timestamp BEFORE the policy
         // round-trip — evaluate_target can take several ms on some
         // policies, and attributing that setup cost to the stage
@@ -275,23 +302,23 @@ impl RuntimeExecutor {
         // trace row was hiding.
         let started_at = Utc::now();
         let decision = self
-            .evaluate_target(
-                session.execution.id,
-                session.execution.task_kind,
-                Some(stage_kind),
-                None,
-                RuntimeDecisionTargetKind::StageTransition,
-                Some(format!("stage_transition:{}", stage_kind.as_str())),
-            )
+            .evaluate_target(TargetEvaluation {
+                execution_id: session.execution.id,
+                task_kind: session.execution.task_kind,
+                stage_kind: Some(stage_kind),
+                action_kind: None,
+                target_kind: RuntimeDecisionTargetKind::StageTransition,
+                reason_code: Some(format!("stage_transition:{}", stage_kind.as_str())),
+            })
             .await;
-        session.record_policy_decision(
-            RuntimeDecisionTargetKind::StageTransition,
-            decision.decision_kind,
-            decision.reason_code.clone(),
-            decision.reason_summary_redacted.clone(),
-            None,
-            None,
-        );
+        session.record_policy_decision(PolicyDecisionEntry {
+            target_kind: RuntimeDecisionTargetKind::StageTransition,
+            decision_kind: decision.decision_kind,
+            reason_code: decision.reason_code.clone(),
+            reason_summary_redacted: decision.reason_summary_redacted.clone(),
+            stage_record_id: None,
+            action_record_id: None,
+        });
         match decision.decision_kind {
             RuntimeDecisionKind::Allow => {
                 session.execution.lifecycle_state = RuntimeLifecycleState::Running;
@@ -319,13 +346,16 @@ impl RuntimeExecutor {
     pub fn complete_stage(
         &self,
         session: &mut RuntimeExecutionSession,
-        stage_kind: RuntimeStageKind,
-        stage_state: RuntimeStageState,
-        deterministic: bool,
-        failure_code: Option<String>,
-        failure_summary_redacted: Option<String>,
-        started_at: DateTime<Utc>,
+        completion: StageCompletion,
     ) -> Uuid {
+        let StageCompletion {
+            stage_kind,
+            stage_state,
+            deterministic,
+            failure_code,
+            failure_summary_redacted,
+            started_at,
+        } = completion;
         let stage_id = session.record_stage(stage_kind, stage_state, deterministic, started_at);
         if let Some(record) = session.trace.stages.iter_mut().find(|record| record.id == stage_id) {
             record.failure_code = failure_code;
@@ -349,25 +379,25 @@ impl RuntimeExecutor {
         }
         if let Some(target_kind) = map_action_target_kind(action_kind) {
             let decision = self
-                .evaluate_target(
-                    session.execution.id,
-                    session.execution.task_kind,
-                    Some(stage_kind),
-                    Some(action_kind),
+                .evaluate_target(TargetEvaluation {
+                    execution_id: session.execution.id,
+                    task_kind: session.execution.task_kind,
+                    stage_kind: Some(stage_kind),
+                    action_kind: Some(action_kind),
                     target_kind,
-                    Some(format!("action:{}", action_kind.as_str())),
-                )
+                    reason_code: Some(format!("action:{}", action_kind.as_str())),
+                })
                 .await;
             let action_id =
                 session.record_action(stage_record_id, action_kind, RuntimeActionState::Running);
-            session.record_policy_decision(
+            session.record_policy_decision(PolicyDecisionEntry {
                 target_kind,
-                decision.decision_kind,
-                decision.reason_code.clone(),
-                decision.reason_summary_redacted.clone(),
-                Some(stage_record_id),
-                Some(action_id),
-            );
+                decision_kind: decision.decision_kind,
+                reason_code: decision.reason_code.clone(),
+                reason_summary_redacted: decision.reason_summary_redacted.clone(),
+                stage_record_id: Some(stage_record_id),
+                action_record_id: Some(action_id),
+            });
             return match decision.decision_kind {
                 RuntimeDecisionKind::Allow => Ok(action_id),
                 RuntimeDecisionKind::Reject | RuntimeDecisionKind::Terminate => {
@@ -430,14 +460,14 @@ impl RuntimeExecutor {
 
         let execution_id = Uuid::now_v7();
         let decision = self
-            .evaluate_target(
+            .evaluate_target(TargetEvaluation {
                 execution_id,
-                spec.task_kind,
-                None,
-                None,
-                RuntimeDecisionTargetKind::FinalOutcome,
-                Some("execution_acceptance".to_string()),
-            )
+                task_kind: spec.task_kind,
+                stage_kind: None,
+                action_kind: None,
+                target_kind: RuntimeDecisionTargetKind::FinalOutcome,
+                reason_code: Some("execution_acceptance".to_string()),
+            })
             .await;
 
         let lifecycle_state = match decision.decision_kind {
@@ -496,15 +526,28 @@ impl RuntimeExecutor {
         request: &RuntimeTaskRequest<TTask>,
     ) -> Result<(RuntimeExecution, RuntimeExecutionTraceView), RuntimeExecutionError> {
         let (execution, decision) = self.prepare_with_policy(request).await?;
+        if matches!(
+            decision.decision_kind,
+            RuntimeDecisionKind::Reject | RuntimeDecisionKind::Terminate
+        ) {
+            return Err(RuntimeExecutionError::PolicyBlocked {
+                decision_kind: decision.decision_kind,
+                reason_code: decision.resolved_reason_code(),
+                reason_summary_redacted: decision
+                    .resolved_reason_summary("runtime policy blocked execution acceptance"),
+            });
+        }
         let mut trace = RuntimeExecutionTraceView::new(execution.clone());
         trace.policy_decisions.push(build_policy_decision(
             execution.id,
-            RuntimeDecisionTargetKind::FinalOutcome,
-            decision.decision_kind,
-            decision.reason_code,
-            decision.reason_summary_redacted,
-            None,
-            None,
+            PolicyDecisionEntry {
+                target_kind: RuntimeDecisionTargetKind::FinalOutcome,
+                decision_kind: decision.decision_kind,
+                reason_code: decision.reason_code,
+                reason_summary_redacted: decision.reason_summary_redacted,
+                stage_record_id: None,
+                action_record_id: None,
+            },
         ));
         Ok((execution, trace))
     }
@@ -565,23 +608,23 @@ impl RuntimeExecutor {
         outcome: RuntimeTerminalOutcome<TTask::Success, TTask::Failure>,
     ) -> RuntimeTaskResult<TTask> {
         let decision = self
-            .evaluate_target(
-                session.execution.id,
-                session.execution.task_kind,
-                session.execution.active_stage,
-                None,
-                RuntimeDecisionTargetKind::FinalOutcome,
-                Some(final_outcome_reason_code(&outcome)),
-            )
+            .evaluate_target(TargetEvaluation {
+                execution_id: session.execution.id,
+                task_kind: session.execution.task_kind,
+                stage_kind: session.execution.active_stage,
+                action_kind: None,
+                target_kind: RuntimeDecisionTargetKind::FinalOutcome,
+                reason_code: Some(final_outcome_reason_code(&outcome)),
+            })
             .await;
-        session.record_policy_decision(
-            RuntimeDecisionTargetKind::FinalOutcome,
-            decision.decision_kind,
-            decision.reason_code.clone(),
-            decision.reason_summary_redacted.clone(),
-            None,
-            None,
-        );
+        session.record_policy_decision(PolicyDecisionEntry {
+            target_kind: RuntimeDecisionTargetKind::FinalOutcome,
+            decision_kind: decision.decision_kind,
+            reason_code: decision.reason_code.clone(),
+            reason_summary_redacted: decision.reason_summary_redacted.clone(),
+            stage_record_id: None,
+            action_record_id: None,
+        });
         match decision.decision_kind {
             RuntimeDecisionKind::Allow => {
                 Self::apply_terminal_outcome::<TTask>(&mut session, &outcome);
@@ -643,5 +686,286 @@ fn final_outcome_reason_code<TSuccess, TFailure>(
         RuntimeTerminalOutcome::Recovered { .. } => "final_outcome_recovered".to_string(),
         RuntimeTerminalOutcome::Failed { summary, .. }
         | RuntimeTerminalOutcome::Canceled { summary, .. } => summary.code.clone(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::{Arc, Mutex};
+
+    use async_trait::async_trait;
+    use uuid::Uuid;
+
+    use super::*;
+    use crate::{
+        agent_runtime::{
+            hooks::NoopRuntimeHooks,
+            policy::{RuntimePolicy, RuntimePolicyContext, RuntimePolicyOutcome},
+            task::RuntimeTaskSpec,
+        },
+        domains::agent_runtime::{
+            RuntimeExecutionOwner, RuntimeOutputMode, RuntimeRecoveryPolicy, RuntimeSurfaceKind,
+            RuntimeTaskKind,
+        },
+    };
+
+    struct TestTask;
+
+    impl RuntimeTask for TestTask {
+        type Input = String;
+        type Success = String;
+        type Failure = String;
+
+        const CONTRACT_NAME: &'static str = "executor_test";
+        const CONTRACT_VERSION: &'static str = "1";
+
+        fn spec() -> RuntimeTaskSpec {
+            RuntimeTaskSpec {
+                task_kind: RuntimeTaskKind::GraphExtract,
+                surface_kind: RuntimeSurfaceKind::Worker,
+                binding_purpose: None,
+                machine_consumed: false,
+                max_turns: 2,
+                max_parallel_actions: 1,
+                stage_catalog: &[RuntimeStageKind::ExtractGraph],
+                recovery_policy: RuntimeRecoveryPolicy::None,
+                output_mode: RuntimeOutputMode::Text,
+            }
+        }
+
+        fn policy_failure(reason_code: &str, reason_summary_redacted: &str) -> Self::Failure {
+            format!("{reason_code}:{reason_summary_redacted}")
+        }
+    }
+
+    struct AllowPolicy;
+
+    #[async_trait]
+    impl RuntimePolicy for AllowPolicy {
+        async fn evaluate(&self, _context: &RuntimePolicyContext) -> RuntimePolicyOutcome {
+            RuntimePolicyOutcome::allow()
+        }
+    }
+
+    struct RejectModelRequestPolicy;
+
+    #[async_trait]
+    impl RuntimePolicy for RejectModelRequestPolicy {
+        async fn evaluate(&self, context: &RuntimePolicyContext) -> RuntimePolicyOutcome {
+            if context.target_kind == RuntimeDecisionTargetKind::ModelRequest {
+                RuntimePolicyOutcome::reject("model_denied", "model request denied")
+            } else {
+                RuntimePolicyOutcome::allow()
+            }
+        }
+    }
+
+    struct RejectFinalOutcomePolicy {
+        final_outcome_calls: Mutex<u8>,
+    }
+
+    #[async_trait]
+    impl RuntimePolicy for RejectFinalOutcomePolicy {
+        async fn evaluate(&self, context: &RuntimePolicyContext) -> RuntimePolicyOutcome {
+            if context.target_kind != RuntimeDecisionTargetKind::FinalOutcome {
+                return RuntimePolicyOutcome::allow();
+            }
+            let mut calls = self.final_outcome_calls.lock().expect("lock final outcome calls");
+            *calls += 1;
+            if *calls == 1 {
+                RuntimePolicyOutcome::allow()
+            } else {
+                RuntimePolicyOutcome::terminate("outcome_denied", "final outcome denied")
+            }
+        }
+    }
+
+    fn request() -> RuntimeTaskRequest<TestTask> {
+        RuntimeTaskRequest::new(
+            "test input".to_string(),
+            RuntimeExecutionOwner::graph_extraction_attempt(Uuid::nil()),
+        )
+    }
+
+    fn executor(policy: Arc<dyn RuntimePolicy>) -> RuntimeExecutor {
+        RuntimeExecutor::new(
+            RuntimeTaskRegistry::default().register_task::<TestTask>(),
+            policy,
+            Arc::new(NoopRuntimeHooks),
+        )
+    }
+
+    #[test]
+    fn policy_decision_preserves_scope_and_defaults_only_absent_reasons() {
+        let execution_id = Uuid::from_u128(1);
+        let stage_id = Uuid::from_u128(2);
+        let action_id = Uuid::from_u128(3);
+        for (reason_code, reason_summary, expected_code, expected_summary) in [
+            (None, None, "runtime_policy", "runtime policy decision"),
+            (Some(""), Some(""), "", ""),
+            (
+                Some("model_denied"),
+                Some("model request denied"),
+                "model_denied",
+                "model request denied",
+            ),
+        ] {
+            let decision = build_policy_decision(
+                execution_id,
+                PolicyDecisionEntry {
+                    target_kind: RuntimeDecisionTargetKind::ModelRequest,
+                    decision_kind: RuntimeDecisionKind::Reject,
+                    stage_record_id: Some(stage_id),
+                    action_record_id: Some(action_id),
+                    reason_code: reason_code.map(str::to_owned),
+                    reason_summary_redacted: reason_summary.map(str::to_owned),
+                },
+            );
+            assert_eq!(decision.runtime_execution_id, execution_id);
+            assert_eq!(decision.stage_record_id, Some(stage_id));
+            assert_eq!(decision.action_record_id, Some(action_id));
+            assert_eq!(decision.target_kind, RuntimeDecisionTargetKind::ModelRequest);
+            assert_eq!(decision.decision_kind, RuntimeDecisionKind::Reject);
+            assert_eq!(decision.reason_code, expected_code);
+            assert_eq!(decision.reason_summary_redacted, expected_summary);
+        }
+    }
+
+    #[tokio::test]
+    async fn records_allowed_stage_action_and_failed_terminal_outcome() {
+        let executor = executor(Arc::new(AllowPolicy));
+        let mut session = executor.seed_session(&request()).await.expect("seed session");
+        let started_at = executor
+            .begin_stage(&mut session, RuntimeStageKind::ExtractGraph)
+            .await
+            .expect("allow stage");
+        let stage_id = executor.complete_stage(
+            &mut session,
+            StageCompletion {
+                stage_kind: RuntimeStageKind::ExtractGraph,
+                stage_state: RuntimeStageState::Completed,
+                deterministic: false,
+                failure_code: None,
+                failure_summary_redacted: None,
+                started_at,
+            },
+        );
+        let action_id = executor
+            .begin_action(
+                &mut session,
+                stage_id,
+                RuntimeStageKind::ExtractGraph,
+                RuntimeActionKind::ModelRequest,
+            )
+            .await
+            .expect("allow model action");
+        executor.complete_action(&mut session, action_id, RuntimeActionState::Completed);
+
+        let result = executor
+            .finalize_session::<TestTask>(
+                session,
+                RuntimeTerminalOutcome::Failed {
+                    failure: "task_failed".to_string(),
+                    summary: RuntimeFailureSummary {
+                        code: "task_failed".to_string(),
+                        summary_redacted: Some("task failed".to_string()),
+                    },
+                },
+            )
+            .await;
+
+        assert_eq!(result.execution.lifecycle_state, RuntimeLifecycleState::Failed);
+        assert_eq!(result.execution.turn_count, 1);
+        assert_eq!(result.execution.failure_code.as_deref(), Some("task_failed"));
+        assert!(result.execution.completed_at.is_some());
+        assert_eq!(result.trace.stages[0].stage_state, RuntimeStageState::Completed);
+        assert_eq!(result.trace.actions[0].action_state, RuntimeActionState::Completed);
+        assert_eq!(result.trace.policy_decisions.len(), 4);
+        assert_eq!(
+            result.trace.policy_decisions[0].target_kind,
+            RuntimeDecisionTargetKind::FinalOutcome
+        );
+    }
+
+    #[tokio::test]
+    async fn cancels_session_and_records_action_when_model_policy_rejects() {
+        let executor = executor(Arc::new(RejectModelRequestPolicy));
+        let mut session = executor.seed_session(&request()).await.expect("seed session");
+        let stage_id = Uuid::now_v7();
+
+        let error = executor
+            .begin_action(
+                &mut session,
+                stage_id,
+                RuntimeStageKind::ExtractGraph,
+                RuntimeActionKind::ModelRequest,
+            )
+            .await
+            .expect_err("reject model action");
+
+        assert!(matches!(
+            error,
+            RuntimeExecutionError::PolicyBlocked {
+                decision_kind: RuntimeDecisionKind::Reject,
+                ref reason_code,
+                ..
+            } if reason_code == "model_denied"
+        ));
+        assert_eq!(session.execution.lifecycle_state, RuntimeLifecycleState::Canceled);
+        assert_eq!(session.execution.turn_count, 1);
+        assert_eq!(session.trace.actions.len(), 1);
+        assert_eq!(session.trace.policy_decisions.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn replaces_terminal_outcome_when_final_policy_terminates() {
+        let executor =
+            executor(Arc::new(RejectFinalOutcomePolicy { final_outcome_calls: Mutex::new(0) }));
+
+        let result = executor
+            .execute(
+                &request(),
+                RuntimeTerminalOutcome::Completed { success: "completed".to_string() },
+            )
+            .await
+            .expect("seed execution");
+
+        assert_eq!(result.execution.lifecycle_state, RuntimeLifecycleState::Canceled);
+        assert_eq!(result.execution.failure_code.as_deref(), Some("outcome_denied"));
+        assert!(matches!(
+            result.outcome,
+            RuntimeTerminalOutcome::Canceled { ref failure, ref summary }
+                if failure == "outcome_denied:final outcome denied"
+                    && summary.code == "outcome_denied"
+        ));
+    }
+
+    #[tokio::test]
+    async fn rejects_stage_entry_after_session_becomes_terminal() {
+        let executor = executor(Arc::new(AllowPolicy));
+        let mut session = executor.seed_session(&request()).await.expect("seed session");
+        session.execution.lifecycle_state = RuntimeLifecycleState::Failed;
+        session.execution.failure_code = Some("already_failed".to_string());
+        session.execution.failure_summary_redacted = Some("already failed".to_string());
+
+        let error = executor
+            .begin_stage(&mut session, RuntimeStageKind::ExtractGraph)
+            .await
+            .expect_err("terminal session must reject a new stage");
+
+        assert!(matches!(
+            error,
+            RuntimeExecutionError::PolicyBlocked {
+                decision_kind: RuntimeDecisionKind::Terminate,
+                ref reason_code,
+                ref reason_summary_redacted,
+            } if reason_code == "already_failed" && reason_summary_redacted == "already failed"
+        ));
+        assert_eq!(session.trace.policy_decisions.len(), 1);
+        assert_eq!(
+            session.trace.policy_decisions[0].target_kind,
+            RuntimeDecisionTargetKind::FinalOutcome
+        );
+        assert_eq!(session.trace.policy_decisions[0].decision_kind, RuntimeDecisionKind::Allow);
     }
 }

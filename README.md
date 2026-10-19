@@ -3,7 +3,7 @@
 </p>
 
 <h1 align="center">IronRAG</h1>
-<p align="center"><b>Self-hosted knowledge memory for AI agents and teams.</b><br/>One docker-compose, your data on your servers, any LLM provider.</p>
+<p align="center">Self-hosted document search and grounded answers for teams and AI agents.</p>
 
 <p align="center">
   <a href="https://github.com/mlimarenko/IronRAG/stargazers"><img src="https://img.shields.io/github/stars/mlimarenko/IronRAG?style=flat-square" alt="Stars"></a>
@@ -16,61 +16,10 @@
   <img src="./docs/assets/readme-pipeline-illustration.png" alt="IronRAG pipeline from messy data to structured knowledge" width="980">
 </p>
 
-## What IronRAG provides
-
-- **Typed knowledge graph.** Documents are decomposed into entities, typed relationships, and chunk-level evidence references. Retrieval combines vector, lexical, graph-traversal, and technical-fact lanes; the answer pipeline returns citations to the underlying chunks.
-- **Native MCP server.** 23 tools across documents, graph, web ingest, and grounded `ask`. Connect it to MCP-compatible agents and clients such as Claude Desktop, Claude Code, Cursor, Codex, VS Code with Continue / Cline / Roo, Zed, OpenClaw, Hermes, Lobe-style chat agents, or a custom HTTP MCP client. Tools are scoped per IAM token.
-- **Provider-agnostic AI runtime.** Eight LLM providers ship in the catalog — OpenAI, DeepSeek, Qwen (DashScope-intl), GPTunnel, OpenRouter, RouterAI, MiniMax, Ollama. Five required profiles (`extract_graph`, `embed_chunk`, `query_compile`, `query_answer`, `agent`) and optional multimodal `extract_text` cover every model-backed stage without duplicate query-vector, rerank, or vision bindings. A vector rebuild utility safely applies embedding-space changes.
-- **USD cost catalog.** Every binding stores prices in USD. Per-call billing rows are written for every LLM request and rolled up per document and per query in the UI.
-- **Multi-tenant IAM.** Principals, scoped tokens (system / workspace / library), and permission groups gate every API surface. Audit log captures resource access.
-- **Self-hosted runtime.** The Docker Compose stack includes PostgreSQL with pgvector, Redis, backend, worker, and frontend services. Helm chart available for Kubernetes.
-- **Code-aware ingest.** 15-language tree-sitter AST parsing. Native parsers for JSON / YAML / TOML / CSV / XLSX. Technical-fact extraction for paths, params, endpoints, env vars, and error codes.
-- **CPU-first recognition.** Docling CPU runtime is baked into the backend image; PDF / DOCX / PPTX layout extraction, raster-image OCR, and embedded document-picture OCR run without a GPU. Stored PDFs are extracted through resumable page-range checkpoints, and image OCR can be switched per library to the multimodal Document Understanding (`extract_text`) profile.
-- **Restart-safe processing.** Long document jobs keep durable extraction units, reusable embedding / graph outputs, and lease-guarded finalization, so stack restarts or transient network breaks resume from the last completed unit instead of discarding hours of work.
-- **Durable assistant turns.** UI answer streaming is an activity channel over the same persisted query execution; if the browser or proxy drops the stream after work starts, the frontend reloads the completed session result instead of submitting the question again. LLM debug snapshots are stored per execution for post-reload inspection.
-- **Backup and restore.** Streaming `tar.zst` archive with selective sections (catalog only, with blobs, with graph). Restore to the same or a different deployment.
-- **Pluggable source connectors.** Push content into IronRAG from a vendor system via a small Python adapter. Build your own on the [IronRAG Connector Template](https://github.com/mlimarenko/IronRAG.ConnectorTemplate), or run the [BookStack connector](https://github.com/mlimarenko/IronRAG.BookStack) and [Confluence connector](https://github.com/mlimarenko/IronRAG.Confluence) (pages + attachments + images, periodic poll + webhook intake).
-
-<p align="center">
-  <img src="./docs/assets/readme-flow.gif" alt="IronRAG demo: dashboard, documents, grounded assistant, and graph exploration" width="780">
-</p>
-
----
-
 ## Quick start
-
-Install or update:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/mlimarenko/IronRAG/master/install.sh | bash
-```
-
-The installer is an interactive wizard: it inspects the host (CPU + RAM),
-recommends a resource profile (per-service memory/CPU caps and ingest
-parallelism), and prompts step by step for the port and optional admin
-bootstrap, then shows a review screen before writing anything. Provider keys
-come from the typed environment namespace below or are configured in the UI;
-the installer carries no provider-name table. On a re-run it preserves the existing
-`.env` secrets and tuned caps, while official IronRAG image pins are advanced
-to the selected release tag.
-
-The installer also runs fully non-interactively. With no terminal (the piped
-`curl | bash` form), or with `--yes` / `--non-interactive`, it takes every answer
-from flags, environment variables, and existing `.env` values. Answer precedence
-is flags > env > prompt for non-secret values; secrets (admin password, provider
-API keys) are accepted via environment variables or a pre-seeded `.env` only —
-never as flags, since argv is visible to other processes and shell history. Run
-`./install.sh --help` for the full flag and environment-variable list, or
-`--plan-only` to print the detected profile without writing or deploying anything.
-
-Non-interactive example (CI / Ansible):
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/mlimarenko/IronRAG/master/install.sh -o install.sh
-IRONRAG_PORT=8080 \
-IRONRAG_PROFILE=small \
-IRONRAG_AI_PROVIDER_API_KEYS_JSON_B64="$(printf '%s' '{"provider-alpha":"secret-value"}' | base64 | tr -d '\n')" \
-  bash install.sh --non-interactive
 ```
 
 Or from source:
@@ -78,262 +27,161 @@ Or from source:
 ```bash
 git clone https://github.com/mlimarenko/IronRAG.git
 cd IronRAG
-cp .env.example .env             # add IRONRAG_AI_PROVIDER_API_KEYS_JSON_B64
+# First start only: the API and workers refuse to start without a credential
+# master key, and .env.example ships it empty. Add
+# IRONRAG_AI_PROVIDER_API_KEYS_JSON_B64 to the same file.
+if [ ! -f .env ]; then
+  sed "s|^IRONRAG_CREDENTIAL_MASTER_KEY=.*|IRONRAG_CREDENTIAL_MASTER_KEY=$(openssl rand -base64 32)|" \
+    .env.example > .env
+fi
 docker compose up -d
 ```
 
+The `install.sh` wizard writes such a key for a fresh `.env` on its own. Never
+overwrite an existing `.env`, and never regenerate its key while the deployment's
+PostgreSQL volume persists: the stored credentials would stay undecryptable. To
+change the port, resource profile, provider keys or bootstrap admin on an
+existing install, re-run `install.sh`, which keeps the stored secrets.
+
 Open [http://127.0.0.1:19000](http://127.0.0.1:19000), create an admin account, upload a document, and ask a question.
 
-> **Telemetry.** Fresh installations export nothing. Local structured logs stay
-> available, while OpenTelemetry export requires both
-> `IRONRAG_OTEL_ENABLED=true` and an explicit
-> `OTEL_EXPORTER_OTLP_ENDPOINT` for a collector you control. A stable
-> `ironrag.deployment.id` is derived only after that opt-in. Log export remains
-> separately disabled because logs may contain document or query content.
+Wizard details, non-interactive CI installs, provider keys, and telemetry:
+[docs/en/INSTALL.md](./docs/en/INSTALL.md) · [docs/ru/INSTALL.md](./docs/ru/INSTALL.md)
 
-## Multi-provider configuration
+## Stack and capabilities
 
-Set as many provider keys as you need in one JSON map, encode that map with
-standard base64, and store the encoded value in `.env`. Credentials
-auto-register on the next restart, and discovered catalog models become
-selectable in the admin UI's canonical binding profiles. Provider-kind keys are
-preserved exactly without case folding or separator conversion, so a new
-catalog provider does not require a code change.
-The base64 envelope prevents dotenv/Compose from reinterpreting `$`, `#`,
-quotes, backslashes, or Unicode inside a credential. Credential strings are
-preserved byte-for-byte, including leading or trailing whitespace. The map is
-bounded to 256 entries and 1 MiB of decoded JSON; each exact provider kind is
-at most 128 UTF-8 bytes and each credential at most 64 KiB.
-
-This convention replaces the former provider-specific
-`IRONRAG_<PROVIDER>_API_KEY` variables. Move those entries into the JSON map
-before upgrading;
-startup and `install.sh` reject malformed or removed names instead of silently
-guessing an alias.
-
-```env
-IRONRAG_CREDENTIAL_MASTER_KEY=<canonical-base64-32-byte-random-key>
-# Optional; defaults to `default` for backwards compatibility.
-IRONRAG_CREDENTIAL_MASTER_KEY_ID=current-2026
-# Configure only during rotation; key IDs must be sorted and unique.
-IRONRAG_CREDENTIAL_PREVIOUS_MASTER_KEYS=old-2025=<base64-key>,old-2026=<base64-key>
-# Keep false during the first mixed-version upgrade; enable in a second rollout.
-IRONRAG_CREDENTIAL_ENCRYPTION_WRITE_ENABLED=false
-IRONRAG_AI_PROVIDER_API_KEYS_JSON_B64=<standard-base64-of-compact-JSON-object>
-```
-
-`IRONRAG_CREDENTIAL_MASTER_KEY` is a dedicated at-rest encryption key for
-row-bound v3 envelopes in `ai_account.api_key` and outbound webhook signing
-secrets. Each v3 envelope authenticates a validated key ID. Generate 32 random
-bytes (for example, `openssl rand -base64 32 | tr -d '\n'`), store the result in
-your secret manager, and back it up separately from PostgreSQL. Never derive it
-from the database password. A deployment may start without the key for
-legacy/read-only compatibility. Creating or updating a non-empty stored
-credential fails closed unless both the key is configured and
-`IRONRAG_CREDENTIAL_ENCRYPTION_WRITE_ENABLED=true`.
-
-### First upgrade to encrypted credentials
-
-The write gate defaults to `false` in the application, `.env.example`, Docker
-Compose, and Helm. This is intentional: an older API or worker cannot read new
-v3 envelopes. `install.sh` sets the gate to `true` only when it creates a fresh
-`.env`, because a fresh deployment has no older processes.
-
-Use two separate rollouts for an existing installation:
-
-1. Back up the database and master key. Distribute the active key to every API,
-   worker, and startup process, but keep
-   `IRONRAG_CREDENTIAL_ENCRYPTION_WRITE_ENABLED=false`. Deploy the dual-reader
-   release without changing provider or webhook credentials. Plaintext and old
-   envelopes remain readable; new encrypted writes stay blocked.
-2. Verify **every** API and worker replica runs the dual-reader release. Check
-   each pod/container image digest and its `/v1/version` response; do not rely
-   on a load-balanced response from only one replica.
-3. In a second rollout, set the write gate to `true`, wait for every API and
-   worker replica to restart and become ready, then resume credential changes.
-4. Run the credential migration first without `--apply`, apply it, and run the
-   dry check again. Do not retire legacy support or key material while rows or
-   retained backups still require them.
-
-Helm automatically restarts API, worker, and startup pods when its inline
-ConfigMap or Secret changes. When `runtimeSecret.existingSecret` is used, Helm
-cannot checksum that external object: change `runtimeSecret.restartNonce` on
-**every** external Secret update, including both key-rotation rollouts.
-
-### Three-phase master-key rotation
-
-Key IDs are 1-32 lowercase letters, digits, `.`, `_`, or `-`, starting with an
-alphanumeric character. `IRONRAG_CREDENTIAL_PREVIOUS_MASTER_KEYS` accepts up to
-eight `id=canonical-base64-key` entries with unique IDs, no whitespace, and
-strictly sorted IDs. Previous entries are decrypt/rewrap-only.
-
-Rotate in three phases so replicas from adjacent rollouts can decrypt one
-another's writes:
-
-1. **Distribute, do not switch.** Keep the old key active and add the new key to
-   `IRONRAG_CREDENTIAL_PREVIOUS_MASTER_KEYS` on every API and worker. Complete
-   the rollout and verify every replica has the bridging keyring.
-2. **Switch active.** Make the new key active and keep the old key in the
-   previous-key map. During the rolling overlap, old-config replicas know the
-   new key as previous and new-config replicas know the old key as previous.
-3. **Rewrap, verify, retire.** Inventory and rewrap legacy and old-key rows:
-
-   ```bash
-   docker compose run --rm backend ironrag-maintenance migrate credential-secrets
-   docker compose run --rm backend ironrag-maintenance migrate credential-secrets --apply
-   docker compose run --rm backend ironrag-maintenance migrate credential-secrets
-   ```
-
-   Remove the old key only after the final inventory reports no remaining rows,
-   every replica uses the new active key, and backups containing old-key
-   envelopes have aged out. Roll out the reduced keyring everywhere. Unknown v3
-   key IDs fail closed, so losing or retiring a key early makes matching values
-   unreadable.
-
-
-| Provider                  | Chat | Vision | Embedding | Notes                                                                |
-| ------------------------- | ---- | ------ | --------- | -------------------------------------------------------------------- |
-| **OpenAI**                | ✅    | ✅      | ✅         | Direct API                                                           |
-| **DeepSeek**              | ✅    | —      | —         | Very low cost; may be slower than other APIs; no native vision/embeddings |
-| **Qwen / DashScope-intl** | ✅    | ✅      | ✅         | Cost is close to DeepSeek; API is often faster; strong chat/vision/embedding lane |
-| **GPTunnel**              | ✅    | ✅      | ✅         | Router provider: many upstream model families behind one key         |
-| **OpenRouter**            | ✅    | ✅      | ✅         | Router provider: many upstream model families behind one key         |
-| **RouterAI**              | ✅    | ✅      | ✅         | Router provider: many upstream model families behind one key         |
-| **MiniMax**               | ✅    | ✅      | —         | Direct API or Token Plan subscription key                            |
-| **Ollama**                | ✅    | ✅      | ✅         | Fully local, air-gapped, GPU optional                                |
-| **LiteLLM**               | ✅    | ✅      | ✅         | Self-hosted OpenAI-compatible gateway: add as an OpenAI-compatible account with your LiteLLM base URL; proxies any upstream model family |
-
-
-Configure exactly five required profiles under **Admin → AI → Bindings**:
-`extract_graph`, `embed_chunk`, `query_compile`, `query_answer`, and `agent`.
-Add the optional multimodal `extract_text` profile only when Document
-Understanding is needed. Bindings are scoped to instance, workspace, or library
-— a workspace can override the instance default for a single profile.
-
-Recognition note: the raster-image engine named `vision` uses the active multimodal `extract_text` profile. Switch a library to the `docling` engine to OCR images locally and make no visual-model calls. Document Understanding is optional, but selecting the `vision` engine without a compatible `extract_text` binding fails loudly.
-
-## Common deployments
-
-- **Internal knowledge bot.** A company library is fed from BookStack, Confluence, Google Drive, SharePoint, or a recursive web crawl. Engineering, support, and policy questions are answered through the UI assistant or via MCP, with citations linking back to the original chunks.
-- **Public portal / helpdesk assistant.** A self-hosted assistant fronts your published documentation, release notes, and runbooks. The MCP `ask` tool drives a chat widget; queries do not leave the host infrastructure.
-- **Engineering / coding agent.** AST-parsed source trees and extracted technical facts (endpoints, env vars, config keys, error codes) give an MCP-connected agent structured context for architecture and "what changed" questions across releases.
-- **Personal long-term memory.** A single-tenant deployment used as a long-lived second brain — papers, notes, code snippets, web clippings — queried from any MCP client. The graph grows as the library grows.
-- **On-prem / regulated AI.** Bind every purpose to Ollama for an air-gapped runtime. The deployment is inert outside its own network: no provider telemetry, IAM-scoped tokens, full backup archive for retention.
-
----
-
-## Tech stack
-
-
-| Layer                    | Technology                                                      |
-| ------------------------ | --------------------------------------------------------------- |
-| Backend                  | Rust 1.97, axum 0.8, tokio 1.52, SQLx 0.8, tower 0.5          |
-| Frontend                 | React 19.2, Vite 8.0, TypeScript 6.0, Tailwind 4.3, shadcn/ui |
-| Frontend build/runtime   | Node 26.4.0 + npm 11.17.0 (build), Nginx 1.30 (static serving)  |
-| Graph rendering          | Sigma.js 3 + Graphology 0.26 (WebGL, Web Worker layout)       |
-| Database                 | PostgreSQL 18 (pgvector image)                                  |
-| Knowledge-plane search   | pgvector, PostgreSQL full-text search, `pg_trgm`                |
-| Cache / job queue        | Redis 8.8                                                       |
-| Document recognition     | Docling CPU runtime, native parsers, tree-sitter (15 languages) |
-| MCP                      | Streamable HTTP MCP server (2025-11-25), 23 tools               |
-| Deployment               | Docker Compose, Helm chart                                      |
-
-## Pipeline overview
+- **Self-hosted runtime** — Docker Compose (PostgreSQL + pgvector, Redis, backend, worker, frontend) or Helm on Kubernetes; data stays on your servers
+- **Typed knowledge graph** — entities, typed relations, and chunk-level citations; hybrid retrieval across vector, lexical, graph, and technical-fact lanes
+- **Native MCP server** — 23 tools for documents, graph, web ingest, and grounded `grounded_answer`; works with Claude Desktop / Code, Cursor, Codex, VS Code (Continue / Cline / Roo), Zed, OpenClaw, Hermes, and custom HTTP MCP clients
+- **Provider-agnostic AI** — OpenAI, DeepSeek, Qwen / DashScope, GPTunnel, OpenRouter, RouterAI, MiniMax, Ollama, LiteLLM / OpenAI-compatible gateways; eight binding purposes (`extract_text`, `extract_graph`, `graph_entity_type`, `embed_chunk`, `query_compile`, `query_rerank`, `query_answer`, `agent`) with per-currency cost rollups in the UI
+- **Code-aware + CPU-first ingest** — 15-language tree-sitter AST; JSON / YAML / TOML / CSV / XLSX parsers; technical facts (paths, endpoints, env vars, error codes); Docling CPU OCR for PDF / DOCX / PPTX without a GPU
+- **Multi-tenant IAM** — principals, scoped tokens (system / workspace / library), permission groups, audit log
+- **Durable ops** — restart-safe document jobs with page-range checkpoints; durable assistant turns that recover after stream drops; streaming `tar.zst` backup / restore
+- **Pluggable connectors** — BookStack, Confluence, YouTrack, Git repos, or build your own; see [connectors/](./connectors/README.md). They live in this repository and ship on this version (poll + webhook intake)
 
 <p align="center">
-  <img src="./docs/assets/readme-architecture.png" alt="IronRAG architecture: ingest (sources, recognition, chunking, embed/graph/facts) writes to PostgreSQL with pgvector and Redis; query (ask, hybrid retrieval, grounded answer) reads back; LLM stages resolve through per-purpose provider bindings." width="980">
+  <img src="./docs/assets/readme-flow.gif" alt="IronRAG demo in light and dark themes: document upload, graph layouts, and assistant" width="1280">
 </p>
 
-1. **Ingest.** Files, web pages, and API / MCP uploads enter the recognition router (`extract_text`), stored PDFs are checkpointed by page range, source text is split into structured chunks (`chunk_content` + structured-block preparation), and persisted to PostgreSQL.
-2. **Build memory.** Each chunk is embedded (`embed_chunk`), scanned for technical literals (`extract_technical_facts`), and processed by `extract_graph` to write entities, typed relations, and evidence references.
-3. **Query.** A query session compiles the user request into typed IR (`query_compile`); vector, lexical, graph-traversal, and technical-fact lanes retrieve concurrently; the answer router selects between a grounded answer (`query_answer`) and a clarification, runs the verifier, and persists citations to the response.
-4. **Provider routing.** Every LLM call resolves through the binding for its purpose. Switching `query_answer` from OpenAI to a local Ollama model is a binding change at the matching scope (instance / workspace / library).
+## Configure AI
 
-For deep dives:
+Put provider keys in `IRONRAG_AI_PROVIDER_API_KEYS_JSON_B64` and keep
+`IRONRAG_CREDENTIAL_MASTER_KEY` set (generated by `install.sh` on fresh installs).
+Then bind models under **Admin → AI → Bindings**.
 
+- Provider catalog and binding purposes → [AI-BINDINGS.md](./docs/en/AI-BINDINGS.md)
+- Credential encryption and key rotation → [CREDENTIAL-ENCRYPTION.md](./docs/en/CREDENTIAL-ENCRYPTION.md)
 
-| Topic                        | English                                          | Russian                                          |
-| ---------------------------- | ------------------------------------------------ | ------------------------------------------------ |
-| Architecture overview        | [docs/en/README.md](./docs/en/README.md)         | [docs/ru/README.md](./docs/ru/README.md)         |
-| Ingestion pipeline           | [docs/en/PIPELINE.md](./docs/en/PIPELINE.md)     | [docs/ru/PIPELINE.md](./docs/ru/PIPELINE.md)     |
-| MCP server & tools           | [docs/en/MCP.md](./docs/en/MCP.md)               | [docs/ru/MCP.md](./docs/ru/MCP.md)               |
-| IAM & tokens                 | [docs/en/IAM.md](./docs/en/IAM.md)               | [docs/ru/IAM.md](./docs/ru/IAM.md)               |
-| Credential encryption       | [docs/en/CREDENTIAL-ENCRYPTION.md](./docs/en/CREDENTIAL-ENCRYPTION.md) | [docs/ru/CREDENTIAL-ENCRYPTION.md](./docs/ru/CREDENTIAL-ENCRYPTION.md) |
-| CLI reference                | [docs/en/CLI.md](./docs/en/CLI.md)               | [docs/ru/CLI.md](./docs/ru/CLI.md)               |
-| Frontend architecture        | [docs/en/FRONTEND.md](./docs/en/FRONTEND.md)     | [docs/ru/FRONTEND.md](./docs/ru/FRONTEND.md)     |
-| Frontend transport (TLS/QUIC)| [docs/en/FRONTEND-TRANSPORT.md](./docs/en/FRONTEND-TRANSPORT.md) | [docs/ru/FRONTEND-TRANSPORT.md](./docs/ru/FRONTEND-TRANSPORT.md) |
-| Capacity planning            | [docs/en/CAPACITY-PLANNING.md](./docs/en/CAPACITY-PLANNING.md) | [docs/ru/CAPACITY-PLANNING.md](./docs/ru/CAPACITY-PLANNING.md) |
-| Webhooks                     | [docs/en/WEBHOOK.md](./docs/en/WEBHOOK.md)       | [docs/ru/WEBHOOK.md](./docs/ru/WEBHOOK.md)       |
-| Benchmarks                   | [docs/en/BENCHMARKS.md](./docs/en/BENCHMARKS.md) | [docs/ru/BENCHMARKS.md](./docs/ru/BENCHMARKS.md) |
-| Changelog                    | [CHANGELOG.md](./CHANGELOG.md)                   | —                                                |
-
-
-## Other deployment options
-
-All variants live in the single `docker-compose.yml`, selected by env and one
-profile (see the file header for the full list):
-
-```bash
-# With S3-compatible storage (bundled s4core), via the `s4` profile
-COMPOSE_PROFILES=s4 \
-  IRONRAG_CONTENT_STORAGE_PROVIDER=s3 \
-  IRONRAG_DEPENDENCY_OBJECT_STORAGE_MODE=bundled \
-  IRONRAG_CONTENT_STORAGE_TOPOLOGY=shared_cluster \
-  docker compose up -d
-
-# Local source build for development
-IRONRAG_BACKEND_IMAGE=ironrag-backend:local \
-  IRONRAG_FRONTEND_IMAGE=ironrag-frontend:local \
-  docker compose build backend frontend
-IRONRAG_BACKEND_IMAGE=ironrag-backend:local \
-  IRONRAG_FRONTEND_IMAGE=ironrag-frontend:local \
-  docker compose up -d
-
-# Larger host (24-32 GiB): raise the per-role memory caps
-IRONRAG_DB_MEMORY_LIMIT=6144M \
-  IRONRAG_BACKEND_MEMORY_LIMIT=4096M \
-  IRONRAG_WORKER_MEMORY_LIMIT=4096M \
-  docker compose up -d
-```
-
-The default Compose stack keeps ingest conservative on small swapless hosts:
-`IRONRAG_INGESTION_MAX_PARALLEL_JOBS_GLOBAL=4`,
-`IRONRAG_INGESTION_MAX_PARALLEL_JOBS_PER_WORKSPACE=2`, and
-`IRONRAG_INGESTION_MAX_PARALLEL_JOBS_PER_LIBRARY=1`. Raise those only together
-with worker memory, database connection budget, and provider concurrency.
-Provider calls are bounded per endpoint by default (`16` total, `4` reserved
-for query turns) and fail with a typed overload error after a 30-second permit
-wait. Set both values to `0` only when unlimited upstream fan-out is deliberate.
-
-Helm (Kubernetes):
-
-```bash
-helm upgrade --install ironrag charts/ironrag \
-  --namespace ironrag --create-namespace \
-  --set-string app.providerSecrets.provider_alpha="${PROVIDER_API_KEY}" \
-  --wait --timeout 20m
-```
-
-By default the chart deploys the API, worker, and web images with the
-`v<appVersion>` image tag derived from `Chart.appVersion`. Override
-`api.image.tag`, `worker.image.tag`, and `web.image.tag` only when pinning
-a different published image, for example `--set web.image.tag=v0.5.9`.
-
-Bundled dependencies (same pins as Docker Compose): `pgvector/pgvector:pg18`
-for PostgreSQL and `redis:8.8` for Redis. Override via
-`dependencies.postgres.image.*` and `dependencies.redis.image.*` when needed.
-
-## Star history
+## Pipeline
 
 <p align="center">
-  <a href="https://star-history.com/#mlimarenko/IronRAG&Date">
-    <picture>
-      <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=mlimarenko/IronRAG&type=Date&theme=dark" />
-      <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/svg?repos=mlimarenko/IronRAG&type=Date" />
-      <img alt="Star History Chart" src="https://api.star-history.com/svg?repos=mlimarenko/IronRAG&type=Date" width="700" />
-    </picture>
-  </a>
+  <img src="./docs/assets/readme-architecture.png" alt="IronRAG pipeline: ingest and enrich sources, persist knowledge in PostgreSQL with pgvector, and retrieve evidence for grounded answers. Source storage and Redis workers have separate roles; AI models resolve through per-purpose bindings." width="1280">
 </p>
+
+1. **Ingest** — files, web, API / MCP → recognition → structured chunks → PostgreSQL
+2. **Build memory** — embeddings, technical facts, entities and typed relations
+3. **Query** — hybrid retrieval (vector, lexical, graph, facts) → grounded answer with citations
+4. **Route providers** — each LLM stage uses its binding; switch models without rewriting the pipeline
+
+Deep dive: [docs/en/PIPELINE.md](./docs/en/PIPELINE.md) · [docs/en/README.md](./docs/en/README.md)
+
+## Documentation
+
+| Topic | English | Russian |
+| --- | --- | --- |
+| Install & bootstrap | [INSTALL.md](./docs/en/INSTALL.md) | [INSTALL.md](./docs/ru/INSTALL.md) |
+| Architecture | [README.md](./docs/en/README.md) | [README.md](./docs/ru/README.md) |
+| Pipeline | [PIPELINE.md](./docs/en/PIPELINE.md) | [PIPELINE.md](./docs/ru/PIPELINE.md) |
+| MCP | [MCP.md](./docs/en/MCP.md) | [MCP.md](./docs/ru/MCP.md) |
+| AI bindings | [AI-BINDINGS.md](./docs/en/AI-BINDINGS.md) | [AI-BINDINGS.md](./docs/ru/AI-BINDINGS.md) |
+| Credential encryption | [CREDENTIAL-ENCRYPTION.md](./docs/en/CREDENTIAL-ENCRYPTION.md) | [CREDENTIAL-ENCRYPTION.md](./docs/ru/CREDENTIAL-ENCRYPTION.md) |
+| Capacity & Compose / Helm | [CAPACITY-PLANNING.md](./docs/en/CAPACITY-PLANNING.md) | [CAPACITY-PLANNING.md](./docs/ru/CAPACITY-PLANNING.md) |
+| IAM | [IAM.md](./docs/en/IAM.md) | [IAM.md](./docs/ru/IAM.md) |
+| Changelog | [CHANGELOG.md](./CHANGELOG.md) | — |
+
+More topics (CLI, frontend, webhooks, benchmarks, Ollama) live under [`docs/en/`](./docs/en/README.md) and [`docs/ru/`](./docs/ru/README.md).
+
+## Working on IronRAG
+
+**Vector dimension is a property of a library, not a constant of the product.**
+It comes from the active `EmbedChunk`/`EmbedQuestion` binding. Do not add a
+product-wide `const VECTOR_DIM`. PostgreSQL shards
+(`knowledge_chunk_vector_d{dim}`, `knowledge_entity_vector_d{dim}`) are created
+and configured through `infra/postgres/pg_vector_config.rs` in both the search
+store and snapshot restore, including constraints on existing shards. Changing
+dimension requires re-embedding into a new shard. Test vector storage with at
+least two dimensions.
+
+**No hardcoded user-facing strings in `apps/web/`.** Every visible text is
+`t('namespace.key')`, with the key present in both locales
+(`shared/i18n/ru.json`, `en.json`). Interpolating values is fine; the template
+lives in the locale file. `make frontend-i18n-audit` (part of `frontend-check`)
+walks the TypeScript AST and understands dynamic keys and plural forms.
+
+The audit rejects `defaultValue` on static keys: translations belong in the
+locale files. Dynamic keys may use an API-produced runtime token as a fallback.
+
+**A change to the answer pipeline is verified through both channels.** The
+built-in assistant is an MCP-client-shaped agent over the same tool surface an
+external MCP client gets, and `grounded_answer` stays the one high-level
+grounded-answer tool — the contract is `apps/api/tests/MCP_PARITY.md`. After a
+change in retrieve, answer or the MCP tools, run the regression through the UI
+*and* through an external MCP client. One channel healthy and the other
+degraded is not a release; a tool reachable only from the UI is a defect.
+
+### Documentation
+
+- [`CLI`](./docs/en/CLI.md) — maintenance commands and schema rollout.
+- [`INSTALL`](./docs/en/INSTALL.md), [`PIPELINE`](./docs/en/PIPELINE.md), and
+  [`AI-BINDINGS`](./docs/en/AI-BINDINGS.md) — setup and runtime behavior.
+- [`CHANGELOG`](./CHANGELOG.md) — release changes.
+
+### Development checks
+
+- **Your own database on your own port.** The default in
+  `apps/api/src/app/config/loading.rs` is
+  `postgres://postgres:postgres@127.0.0.1:5432/ironrag`, and
+  `TempPostgresDatabase` starts with `drop database if exists`. Point
+  `IRONRAG_DATABASE_URL` at a PostgreSQL you own — settings are read with the
+  `IRONRAG_` prefix, and a bare `DATABASE_URL` is ignored.
+- **Integration tests are one crate**, `apps/api/tests/it`, not a set of
+  binaries. The required suites are `BACKEND_INTEGRATION_SUITES` in the
+  `Makefile`, and a full run needs `--all-targets` — without it the binaries
+  under `tests/` are skipped along with their compliance gates.
+- **The criterion is the `N passed` line, not the exit code.** A suite with no
+  matching test prints `test result: ok. 0 passed` and exits zero. Some tests
+  sit behind `#[cfg(feature = "test-support")]`, so a run without
+  `--features test-support` produces an empty green binary.
+- **A wedged ingest queue looks like ordinary load.** A poisoned job (a terminal
+  `ops_async_operation` behind a claimable `ingest_job`) holds `leased` rows,
+  and those count against `ingestion_max_parallel_jobs_per_library`. The tell is
+  the same `job_id` in "claimed ingest job" dozens of times in a row and no
+  other. Check with:
+
+  ```sql
+  select j.queue_state, o.status, count(*)
+  from ingest_job j
+  left join ops_async_operation o on o.id = j.async_operation_id
+  where j.queue_state in ('queued', 'leased')
+  group by 1, 2;
+  ```
+
+  The poisoned ones are those whose `o.status` is terminal.
+- **CI checks merge requests and protected default-branch pushes.** Migration
+  checks and ops self-tests run in both. Protected default pushes build backend,
+  frontend, Confluence, YouTrack and BookStack images; backend and BookStack
+  have separate image security gates. Other local checks use the Make targets.
+- **Release publication is opt-in.** Set the pipeline input `release=true` and
+  run the manual `release` job on a protected default-branch push. It requires
+  the version, four deployed image producers, migration/ops checks and both image
+  security gates. `release-bump` selects patch (default), minor or major.
+  `release:promote` verifies reservation and source identity, promotes the four
+  deployed image digests and publishes the GitLab release; `deploy:gitops`
+  follows. BookStack is built separately from that four-image promotion set.
+  Schema-rollout fences guard release, promotion and GitOps deployment.
+- **A snapshot import answers `202`.** The terminal status lives in
+  `GET /v1/ops/operations/{id}`; `curl --fail` is green on an operation that
+  failed afterwards.
 
 ## License
 

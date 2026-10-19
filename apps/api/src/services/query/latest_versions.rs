@@ -7,7 +7,7 @@ pub(crate) const LATEST_VERSION_DEFAULT_COUNT: usize = 10;
 pub(crate) const LATEST_VERSION_MAX_COUNT: usize = 20;
 pub(crate) const LATEST_VERSION_CHUNKS_PER_DOCUMENT: usize = 4;
 
-/// Canonical provenance for release evidence. Titles are intentionally absent:
+/// Normalized provenance for release evidence. Titles are intentionally absent:
 /// two records are the same source only when the content model says they are
 /// the same document revision.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]

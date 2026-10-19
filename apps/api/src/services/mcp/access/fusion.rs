@@ -1,7 +1,7 @@
 //! Per-lane score normalization for `search_documents` result merging.
 //!
-//! The three retrieval lanes (document metadata, lexical chunk, vector
-//! chunk) produce scores on incommensurate scales: metadata and lexical
+//! The retrieval lanes (document metadata, prepared structured blocks, lexical
+//! chunk, and vector chunk) produce scores on incommensurate scales: lexical
 //! scores come from Postgres text ranking and are unbounded `>= 0`, while
 //! vector scores are cosine similarities in `0..=1`. Combining them by a
 //! raw `max` let a single lexical/metadata hit on a larger numeric scale
@@ -33,6 +33,8 @@ pub(crate) const RRF_K: f64 = 60.0;
 pub(crate) enum SearchLane {
     /// Postgres document-metadata text match.
     Metadata,
+    /// Postgres full-text match on a current readable revision's prepared block.
+    StructuredBlock,
     /// Postgres lexical chunk match.
     LexicalChunk,
     /// `PostgreSQL` pgvector (cosine) chunk match.
@@ -57,6 +59,7 @@ pub(crate) fn rrf_contribution(rank: i32) -> f64 {
 #[derive(Debug, Clone, Default)]
 pub(crate) struct LaneRankFusion {
     metadata: Option<i32>,
+    structured_block: Option<i32>,
     lexical_chunk: Option<i32>,
     vector_chunk: Option<i32>,
 }
@@ -67,6 +70,7 @@ impl LaneRankFusion {
     pub(crate) fn observe(&mut self, lane: SearchLane, rank: i32) {
         let slot = match lane {
             SearchLane::Metadata => &mut self.metadata,
+            SearchLane::StructuredBlock => &mut self.structured_block,
             SearchLane::LexicalChunk => &mut self.lexical_chunk,
             SearchLane::VectorChunk => &mut self.vector_chunk,
         };
@@ -80,7 +84,7 @@ impl LaneRankFusion {
     /// lane in which the document appeared. A document absent from all
     /// lanes scores `0.0`.
     pub(crate) fn fused_score(&self) -> f64 {
-        [self.metadata, self.lexical_chunk, self.vector_chunk]
+        [self.metadata, self.structured_block, self.lexical_chunk, self.vector_chunk]
             .into_iter()
             .flatten()
             .map(rrf_contribution)
@@ -115,8 +119,8 @@ mod tests {
     #[test]
     fn multi_lane_document_outranks_equal_single_lane_document() {
         let mut multi = LaneRankFusion::default();
+        multi.observe(SearchLane::StructuredBlock, 1);
         multi.observe(SearchLane::LexicalChunk, 1);
-        multi.observe(SearchLane::VectorChunk, 1);
 
         let mut single = LaneRankFusion::default();
         single.observe(SearchLane::LexicalChunk, 1);
@@ -134,12 +138,14 @@ mod tests {
     fn fusion_is_deterministic_and_order_independent() {
         let mut forward = LaneRankFusion::default();
         forward.observe(SearchLane::Metadata, 3);
+        forward.observe(SearchLane::StructuredBlock, 4);
         forward.observe(SearchLane::LexicalChunk, 2);
         forward.observe(SearchLane::VectorChunk, 1);
 
         let mut reverse = LaneRankFusion::default();
         reverse.observe(SearchLane::VectorChunk, 1);
         reverse.observe(SearchLane::LexicalChunk, 2);
+        reverse.observe(SearchLane::StructuredBlock, 4);
         reverse.observe(SearchLane::Metadata, 3);
 
         assert_eq!(forward.fused_score(), reverse.fused_score());
@@ -179,6 +185,18 @@ mod tests {
     #[test]
     fn empty_fusion_scores_zero() {
         assert_eq!(LaneRankFusion::default().fused_score(), 0.0);
+    }
+
+    #[test]
+    fn structured_block_is_a_distinct_lane() {
+        let mut structured_only = LaneRankFusion::default();
+        structured_only.observe(SearchLane::StructuredBlock, 1);
+
+        let mut structured_and_chunk = structured_only.clone();
+        structured_and_chunk.observe(SearchLane::LexicalChunk, 1);
+
+        assert!(structured_only.fused_score() > 0.0);
+        assert!(structured_and_chunk.fused_score() > structured_only.fused_score());
     }
 
     /// A 0-based index passed by mistake is clamped to rank 1 rather than

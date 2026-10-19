@@ -1,19 +1,16 @@
 //! `repair orphan-knowledge-documents` — purge knowledge-plane documents whose
-//! canonical `content_document` row no longer exists.
+//! stored `content_document` row no longer exists.
 //!
-//! The strict readable-content parity gate compares canonical content rows
-//! against their knowledge-plane projection before every query. A knowledge
-//! document that lost its canonical counterpart (pre-hardening deletes removed
-//! only the canonical side) can never converge, so one orphan permanently
-//! wedges its whole library in `query_content_projection_converging`.
+//! A knowledge document that lost its stored counterpart remains readable but
+//! stale. Queries continue from the readable snapshot and expose the drift as
+//! a catching-up warning until this repair removes the orphan.
 //!
-//! Knowledge-side children (revisions, chunks, mentions, bundles, facts)
-//! cascade from `knowledge_document`. Chunk vectors live in dynamic per-dim
-//! relations without foreign keys and `runtime_graph_evidence` references
-//! documents by plain columns, so both are swept explicitly in the same
-//! transaction. The library source-truth generation is advanced so every
-//! process re-evaluates parity instead of trusting its per-generation cache,
-//! and the runtime graph is re-projected afterwards so node/edge support
+//! The removal itself is
+//! `content_knowledge_projection_repository::purge_knowledge_projection_with_transaction`,
+//! shared with the external-key reclaim so both sweep the same non-cascading
+//! rows. On top of it this repair advances the library source-truth generation
+//! so every process re-evaluates parity instead of trusting its per-generation
+//! cache, and re-projects the runtime graph afterwards so node/edge support
 //! counts stop counting evidence from purged documents. Idempotent.
 
 use anyhow::{Context, Result};
@@ -21,7 +18,10 @@ use serde::Serialize;
 use tracing::{info, warn};
 use uuid::Uuid;
 
-use crate::{app::state::AppState, infra::repositories::catalog_repository};
+use crate::{
+    app::state::AppState,
+    infra::repositories::{catalog_repository, content_knowledge_projection_repository},
+};
 
 #[derive(Debug, Default, Clone, Copy, Serialize)]
 pub struct OrphanKnowledgeDocumentReport {
@@ -50,76 +50,112 @@ pub async fn orphan_knowledge_documents(
 
     let mut report = OrphanKnowledgeDocumentReport::default();
     for library in libraries {
-        let orphan_ids: Vec<Uuid> = sqlx::query_scalar(
-            "select k.document_id from knowledge_document k
-             where k.library_id = $1
-               and not exists (select 1 from content_document cd where cd.id = k.document_id)",
-        )
-        .bind(library.id)
-        .fetch_all(&state.persistence.postgres)
-        .await
-        .context("failed to list orphan knowledge documents")?;
+        let orphan_ids = list_orphan_document_ids(state, library.id).await?;
         if orphan_ids.is_empty() {
             continue;
         }
-
         if dry_run {
-            report.libraries_repaired += 1;
-            report.orphan_documents_removed += orphan_ids.len() as u64;
-            info!(
-                library_id = %library.id,
-                orphan_documents = orphan_ids.len(),
-                "dry-run: orphan knowledge documents would be removed",
-            );
+            record_dry_run_orphans(&mut report, &library, orphan_ids.len());
             continue;
         }
-
-        let removed = purge_library_orphans(state, library.workspace_id, library.id, &orphan_ids)
-            .await
-            .with_context(|| {
-                format!("failed to purge orphan knowledge documents for library {}", library.id)
-            })?;
-        report.libraries_repaired += 1;
-        report.orphan_documents_removed += removed.orphan_documents;
-        report.chunk_vector_rows_removed += removed.chunk_vector_rows;
-        report.graph_evidence_rows_removed += removed.graph_evidence_rows;
-        info!(
-            library_id = %library.id,
-            orphan_documents = removed.orphan_documents,
-            chunk_vector_rows = removed.chunk_vector_rows,
-            graph_evidence_rows = removed.graph_evidence_rows,
-            "orphan knowledge documents removed",
-        );
-
-        match state.canonical_services.graph.rebuild_library_graph(state, library.id).await {
-            Ok(outcome) => {
-                report.graph_rebuilds_completed += 1;
-                info!(
-                    library_id = %library.id,
-                    projection_version = outcome.projection_version,
-                    node_count = outcome.node_count,
-                    edge_count = outcome.edge_count,
-                    "runtime graph re-projected after orphan purge",
-                );
-            }
-            Err(error) => {
-                report.graph_rebuilds_skipped += 1;
-                warn!(
-                    library_id = %library.id,
-                    ?error,
-                    "runtime graph re-projection failed after orphan purge; \
-                     run `rebuild runtime-graph --library` once graph state settles",
-                );
-            }
-        }
+        purge_library_orphans_and_reproject(state, &library, &orphan_ids, &mut report).await?;
     }
     Ok(report)
 }
 
-struct PurgedCounts {
-    orphan_documents: u64,
-    chunk_vector_rows: u64,
-    graph_evidence_rows: u64,
+/// Knowledge-plane documents in `library_id` whose stored `content_document`
+/// counterpart is gone.
+async fn list_orphan_document_ids(state: &AppState, library_id: Uuid) -> Result<Vec<Uuid>> {
+    sqlx::query_scalar::<_, Uuid>(
+        "select k.document_id from knowledge_document k
+         where k.library_id = $1
+           and not exists (select 1 from content_document cd where cd.id = k.document_id)",
+    )
+    .bind(library_id)
+    .fetch_all(&state.persistence.postgres)
+    .await
+    .context("failed to list orphan knowledge documents")
+}
+
+fn record_dry_run_orphans(
+    report: &mut OrphanKnowledgeDocumentReport,
+    library: &catalog_repository::CatalogLibraryRow,
+    orphan_documents: usize,
+) {
+    report.libraries_repaired += 1;
+    report.orphan_documents_removed += orphan_documents as u64;
+    info!(
+        library_id = %library.id,
+        orphan_documents,
+        "dry-run: orphan knowledge documents would be removed",
+    );
+}
+
+/// Purge one library's orphans and re-project its runtime graph, accumulating
+/// the counters into `report`.
+async fn purge_library_orphans_and_reproject(
+    state: &AppState,
+    library: &catalog_repository::CatalogLibraryRow,
+    orphan_ids: &[Uuid],
+    report: &mut OrphanKnowledgeDocumentReport,
+) -> Result<()> {
+    let removed = purge_library_orphans(state, library.workspace_id, library.id, orphan_ids)
+        .await
+        .with_context(|| {
+            format!("failed to purge orphan knowledge documents for library {}", library.id)
+        })?;
+    report.libraries_repaired += 1;
+    report.orphan_documents_removed += removed.documents;
+    report.chunk_vector_rows_removed += removed.chunk_vector_rows;
+    report.graph_evidence_rows_removed += removed.graph_evidence_rows;
+    info!(
+        library_id = %library.id,
+        orphan_documents = removed.documents,
+        chunk_vector_rows = removed.chunk_vector_rows,
+        graph_evidence_rows = removed.graph_evidence_rows,
+        "orphan knowledge documents removed",
+    );
+
+    match state.application_services.graph.rebuild_library_graph(state, library.id).await {
+        Ok(outcome) => {
+            report.graph_rebuilds_completed += 1;
+            log_runtime_graph_reprojected(
+                library.id,
+                outcome.projection_version,
+                outcome.node_count,
+                outcome.edge_count,
+            );
+        }
+        Err(error) => {
+            report.graph_rebuilds_skipped += 1;
+            log_runtime_graph_reproject_failed(library.id, &error);
+        }
+    }
+    Ok(())
+}
+
+fn log_runtime_graph_reprojected(
+    library_id: Uuid,
+    projection_version: i64,
+    node_count: usize,
+    edge_count: usize,
+) {
+    info!(
+        library_id = %library_id,
+        projection_version,
+        node_count,
+        edge_count,
+        "runtime graph re-projected after orphan purge",
+    );
+}
+
+fn log_runtime_graph_reproject_failed<E: std::fmt::Debug>(library_id: Uuid, error: &E) {
+    warn!(
+        library_id = %library_id,
+        ?error,
+        "runtime graph re-projection failed after orphan purge; \
+         run `rebuild runtime-graph --library` once graph state settles",
+    );
 }
 
 async fn purge_library_orphans(
@@ -127,7 +163,7 @@ async fn purge_library_orphans(
     workspace_id: Uuid,
     library_id: Uuid,
     orphan_ids: &[Uuid],
-) -> Result<PurgedCounts> {
+) -> Result<content_knowledge_projection_repository::PurgedKnowledgeProjection> {
     let mut transaction = state
         .persistence
         .postgres
@@ -143,61 +179,14 @@ async fn purge_library_orphans(
     .context("failed to lock library for orphan purge")?;
     anyhow::ensure!(parent_locked, "library {library_id} disappeared during orphan purge");
 
-    let chunk_ids: Vec<Uuid> = sqlx::query_scalar(
-        "select chunk_id from knowledge_chunk
-         where library_id = $1 and document_id = any($2)",
-    )
-    .bind(library_id)
-    .bind(orphan_ids)
-    .fetch_all(&mut *transaction)
-    .await
-    .context("failed to list orphan chunk ids")?;
-
-    let mut chunk_vector_rows = 0_u64;
-    if !chunk_ids.is_empty() {
-        let relations: Vec<String> = sqlx::query_scalar(
-            "select distinct relation_name from knowledge_vector_relation_manifest
-             where library_id = $1 and relation_name like 'knowledge\\_chunk\\_vector\\_d%'",
+    let purged =
+        content_knowledge_projection_repository::purge_knowledge_projection_with_transaction(
+            &mut transaction,
+            library_id,
+            orphan_ids,
         )
-        .bind(library_id)
-        .fetch_all(&mut *transaction)
         .await
-        .context("failed to list chunk vector relations")?;
-        for relation_name in &relations {
-            let relation = validated_chunk_relation_identifier(relation_name)?;
-            chunk_vector_rows += sqlx::query(sqlx::AssertSqlSafe(format!(
-                "delete from {relation} where library_id = $1 and chunk_id = any($2)",
-            )))
-            .bind(library_id)
-            .bind(&chunk_ids)
-            .execute(&mut *transaction)
-            .await
-            .with_context(|| format!("failed to delete orphan chunk vectors from {relation}"))?
-            .rows_affected();
-        }
-    }
-
-    let graph_evidence_rows = sqlx::query(
-        "delete from runtime_graph_evidence
-         where library_id = $1 and document_id = any($2)",
-    )
-    .bind(library_id)
-    .bind(orphan_ids)
-    .execute(&mut *transaction)
-    .await
-    .context("failed to delete orphan graph evidence")?
-    .rows_affected();
-
-    let orphan_documents = sqlx::query(
-        "delete from knowledge_document
-         where library_id = $1 and document_id = any($2)",
-    )
-    .bind(library_id)
-    .bind(orphan_ids)
-    .execute(&mut *transaction)
-    .await
-    .context("failed to delete orphan knowledge documents")?
-    .rows_affected();
+        .context("failed to purge orphan knowledge documents")?;
 
     catalog_repository::touch_library_source_truth_version_with_executor(
         &mut *transaction,
@@ -207,31 +196,5 @@ async fn purge_library_orphans(
     .context("failed to advance library source truth version after orphan purge")?;
 
     transaction.commit().await.context("failed to commit orphan-knowledge-document purge")?;
-    Ok(PurgedCounts { orphan_documents, chunk_vector_rows, graph_evidence_rows })
-}
-
-/// The relation name is interpolated into SQL; accept only per-dim chunk
-/// vector relations (`knowledge_chunk_vector_d` + decimal digits).
-fn validated_chunk_relation_identifier(relation_name: &str) -> Result<&str> {
-    let digits = relation_name
-        .strip_prefix("knowledge_chunk_vector_d")
-        .with_context(|| format!("relation {relation_name} is not a chunk vector relation"))?;
-    anyhow::ensure!(
-        !digits.is_empty() && digits.bytes().all(|byte| byte.is_ascii_digit()),
-        "relation {relation_name} does not end in a plain decimal dimension"
-    );
-    Ok(relation_name)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn accepts_only_chunk_vector_relations() {
-        assert!(validated_chunk_relation_identifier("knowledge_chunk_vector_d3072").is_ok());
-        assert!(validated_chunk_relation_identifier("knowledge_entity_vector_d3072").is_err());
-        assert!(validated_chunk_relation_identifier("knowledge_chunk_vector_d").is_err());
-        assert!(validated_chunk_relation_identifier("knowledge_chunk_vector_d1; drop x").is_err());
-    }
+    Ok(purged)
 }

@@ -1,8 +1,9 @@
 use uuid::Uuid;
 
 use crate::{
-    agent_runtime::task::RuntimeTaskSpec, app::state::AppState,
-    domains::agent_runtime::RuntimeOverrideBudget,
+    agent_runtime::task::RuntimeTaskSpec,
+    app::state::AppState,
+    domains::{agent_runtime::RuntimeOverrideBudget, ai::AiBindingPurpose},
     services::ai_catalog_service::ResolvedRuntimeBinding,
     services::ingest::error::IngestServiceError,
 };
@@ -11,6 +12,11 @@ use crate::{
 pub(crate) struct RuntimeTaskExecutionContext {
     pub runtime_binding: ResolvedRuntimeBinding,
     pub runtime_overrides: RuntimeOverrideBudget,
+    /// The optional `graph_entity_type` binding that types extracted entity
+    /// candidates before identity computation. Resolved once here so the
+    /// extraction cache fingerprint and the paid classifier call share one
+    /// binding state. Always `None` for tasks other than graph extraction.
+    pub entity_type_binding: Option<ResolvedRuntimeBinding>,
 }
 
 #[must_use]
@@ -39,7 +45,7 @@ pub(crate) async fn resolve_runtime_task_execution_context(
             ),
         })?;
     let runtime_binding = state
-        .canonical_services
+        .application_services
         .ai_catalog
         .resolve_active_runtime_binding(state, library_id, binding_purpose)
         .await?
@@ -50,8 +56,34 @@ pub(crate) async fn resolve_runtime_task_execution_context(
             ),
         })?;
 
+    // The optional entity-typing binding is resolved for graph extraction only,
+    // and its absence is the explicit `off` mode, not an error. A binding that
+    // drifted out of eligibility must not fail extraction either: the stage is
+    // optional, so it resolves to `off` with a warning recorded.
+    let entity_type_binding = if binding_purpose == AiBindingPurpose::ExtractGraph {
+        match state
+            .application_services
+            .ai_catalog
+            .resolve_active_runtime_binding(state, library_id, AiBindingPurpose::GraphEntityType)
+            .await
+        {
+            Ok(binding) => binding,
+            Err(error) => {
+                tracing::warn!(
+                    %library_id,
+                    %error,
+                    "graph_entity_type binding did not resolve; entity typing stays off for this extraction"
+                );
+                None
+            }
+        }
+    } else {
+        None
+    };
+
     Ok(RuntimeTaskExecutionContext {
         runtime_binding,
         runtime_overrides: bounded_runtime_overrides(state, task_spec),
+        entity_type_binding,
     })
 }

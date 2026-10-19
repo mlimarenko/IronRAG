@@ -27,7 +27,7 @@
       "minTechnicalFactReferenceCount": 0,
       "minEntityReferenceCount": 0,
       "minRelationReferenceCount": 0,
-      "allowedVerificationStates": ["verified", "unverified"]
+      "allowedVerificationStates": ["verified", "partially_supported"]
     },
     {
       "id": "graphql_mutations",
@@ -43,7 +43,7 @@
       "minTechnicalFactReferenceCount": 0,
       "minEntityReferenceCount": 0,
       "minRelationReferenceCount": 0,
-      "allowedVerificationStates": ["verified", "unverified"]
+      "allowedVerificationStates": ["verified", "partially_supported"]
     },
     {
       "id": "rust_pending_transitions",
@@ -53,13 +53,19 @@
       "searchRequiredAll": ["Pending"],
       "answerRequiredAll": ["PaymentProcessing"],
       "answerRequiredAny": ["Cancelled"],
-      "answerForbiddenAny": ["Shipped", "Delivered", "Refunded"],
+      "answerForbiddenAny": [],
+      "answerForbiddenRegexAny": [
+        "\\bPending\\b\\s*(?:->|→)\\s*`?(?:Shipped|Delivered|Refunded)\\b",
+        "\\bPending\\b(?:(?!\\b(?:cannot|can't|does not|doesn't|not|invalid|disallowed)\\b)[^.!?\\n]){0,80}\\b(?:can\\s+)?(?:transition(?:s|ed|ing)?|move(?:s|d)?|go(?:es)?)\\s+(?:directly\\s+)?to\\s+(?:the\\s+)?`?(?:Shipped|Delivered|Refunded)\\b",
+        "\\b(?:valid|allowed|direct)\\s+transitions?\\s+from\\s+Pending\\b(?:(?!\\b(?:cannot|can't|does not|doesn't|not|invalid|disallowed|except|excluding)\\b)[^.!?\\n]){0,100}\\b(?:Shipped|Delivered|Refunded)\\b",
+        "\\b(?:Shipped|Delivered|Refunded)\\b(?:(?!\\b(?:cannot|can't|does not|doesn't|not|invalid|disallowed)\\b)[^.!?\\n]){0,80}\\b(?:is|are)\\s+(?:an?\\s+)?(?:valid|allowed|direct)\\s+transitions?\\s+from\\s+Pending\\b"
+      ],
       "minChunkReferenceCount": 1,
       "minPreparedSegmentReferenceCount": 0,
       "minTechnicalFactReferenceCount": 0,
       "minEntityReferenceCount": 0,
       "minRelationReferenceCount": 0,
-      "allowedVerificationStates": ["verified", "unverified"]
+      "allowedVerificationStates": ["verified", "partially_supported"]
     },
     {
       "id": "python_retry_policy",
@@ -68,14 +74,14 @@
       "expectedDocumentsContains": ["python_data_pipeline"],
       "searchRequiredAll": ["retry"],
       "answerRequiredAll": ["exponential"],
-      "answerRequiredAny": ["backoff", "3", "jitter", "RETRY_MAX_ATTEMPTS", "60"],
+      "answerRequiredAny": ["backoff", "RETRY_MAX_ATTEMPTS=3", "jitter", "RETRY_MAX_ATTEMPTS", "60 second delay"],
       "answerForbiddenAny": [],
       "minChunkReferenceCount": 1,
       "minPreparedSegmentReferenceCount": 0,
       "minTechnicalFactReferenceCount": 0,
       "minEntityReferenceCount": 0,
       "minRelationReferenceCount": 0,
-      "allowedVerificationStates": ["verified", "unverified"]
+      "allowedVerificationStates": ["verified", "partially_supported"]
     },
     {
       "id": "go_env_vars",
@@ -84,14 +90,14 @@
       "expectedDocumentsContains": ["golang_http_router"],
       "searchRequiredAll": ["environment"],
       "answerRequiredAll": ["HTTP_PORT"],
-      "answerRequiredAny": ["JWT_SECRET", "RATE_LIMIT_REQUESTS", "CORS_ALLOWED_ORIGINS", "8080", "DATABASE_URL"],
+      "answerRequiredAny": ["JWT_SECRET", "RATE_LIMIT_REQUESTS", "CORS_ALLOWED_ORIGINS", "Default: 8080", "DATABASE_URL"],
       "answerForbiddenAny": [],
       "minChunkReferenceCount": 1,
       "minPreparedSegmentReferenceCount": 0,
       "minTechnicalFactReferenceCount": 0,
       "minEntityReferenceCount": 0,
       "minRelationReferenceCount": 0,
-      "allowedVerificationStates": ["verified", "unverified"]
+      "allowedVerificationStates": ["verified", "partially_supported"]
     },
     {
       "id": "terraform_validation_rules",
@@ -107,7 +113,7 @@
       "minTechnicalFactReferenceCount": 0,
       "minEntityReferenceCount": 0,
       "minRelationReferenceCount": 0,
-      "allowedVerificationStates": ["verified", "unverified"]
+      "allowedVerificationStates": ["verified", "partially_supported"]
     },
     {
       "id": "docker_compose_ports",
@@ -116,14 +122,14 @@
       "expectedDocumentsContains": ["docker_compose_microservices"],
       "searchRequiredAll": ["port"],
       "answerRequiredAll": ["5432"],
-      "answerRequiredAny": ["6379", "5672", "15672", "9200", "5601", "8000", "8443"],
+      "answerRequiredAny": ["port 6379", "AMQP port: 5672", "Management UI port: 15672", "HTTP port: 9200", "Port: 5601", "HTTP port: 8000", "HTTPS port: 8443"],
       "answerForbiddenAny": [],
       "minChunkReferenceCount": 1,
       "minPreparedSegmentReferenceCount": 0,
       "minTechnicalFactReferenceCount": 0,
       "minEntityReferenceCount": 0,
       "minRelationReferenceCount": 0,
-      "allowedVerificationStates": ["verified", "unverified"]
+      "allowedVerificationStates": ["verified", "partially_supported"]
     },
     {
       "id": "cross_file_auth_comparison",
@@ -139,7 +145,7 @@
       "minTechnicalFactReferenceCount": 0,
       "minEntityReferenceCount": 0,
       "minRelationReferenceCount": 0,
-      "allowedVerificationStates": ["verified", "unverified"]
+      "allowedVerificationStates": ["verified", "partially_supported"]
     },
     {
       "id": "cross_file_postgresql",
@@ -147,14 +153,14 @@
       "searchQuery": "PostgreSQL database connection configuration DATABASE_URL postgres",
       "expectedDocumentsContains": ["docker_compose_microservices"],
       "searchRequiredAll": ["PostgreSQL"],
-      "answerRequiredAny": ["DATABASE_URL", "5432", "postgres", "connection", "RDS"],
+      "answerRequiredAny": ["DATABASE_URL", "port 5432", "postgres", "connection", "RDS"],
       "answerForbiddenAny": [],
       "minChunkReferenceCount": 2,
       "minPreparedSegmentReferenceCount": 0,
       "minTechnicalFactReferenceCount": 0,
       "minEntityReferenceCount": 0,
       "minRelationReferenceCount": 0,
-      "allowedVerificationStates": ["verified", "unverified"]
+      "allowedVerificationStates": ["verified", "partially_supported"]
     },
     {
       "id": "cross_file_error_handling",
@@ -170,7 +176,7 @@
       "minTechnicalFactReferenceCount": 0,
       "minEntityReferenceCount": 0,
       "minRelationReferenceCount": 0,
-      "allowedVerificationStates": ["verified", "unverified"]
+      "allowedVerificationStates": ["verified", "partially_supported"]
     },
     {
       "id": "rust_traits",
@@ -186,7 +192,7 @@
       "minTechnicalFactReferenceCount": 0,
       "minEntityReferenceCount": 0,
       "minRelationReferenceCount": 0,
-      "allowedVerificationStates": ["verified", "unverified"]
+      "allowedVerificationStates": ["verified", "partially_supported"]
     },
     {
       "id": "react_hooks",
@@ -202,7 +208,7 @@
       "minTechnicalFactReferenceCount": 0,
       "minEntityReferenceCount": 0,
       "minRelationReferenceCount": 0,
-      "allowedVerificationStates": ["verified", "unverified"]
+      "allowedVerificationStates": ["verified", "partially_supported"]
     },
     {
       "id": "k8s_operator_crd",
@@ -218,7 +224,7 @@
       "minTechnicalFactReferenceCount": 0,
       "minEntityReferenceCount": 0,
       "minRelationReferenceCount": 0,
-      "allowedVerificationStates": ["verified", "unverified"]
+      "allowedVerificationStates": ["verified", "partially_supported"]
     },
     {
       "id": "graphql_task_transitions",
@@ -234,7 +240,7 @@
       "minTechnicalFactReferenceCount": 0,
       "minEntityReferenceCount": 0,
       "minRelationReferenceCount": 0,
-      "allowedVerificationStates": ["verified", "unverified"]
+      "allowedVerificationStates": ["verified", "partially_supported"]
     },
     {
       "id": "python_circuit_breaker",
@@ -250,7 +256,7 @@
       "minTechnicalFactReferenceCount": 0,
       "minEntityReferenceCount": 0,
       "minRelationReferenceCount": 0,
-      "allowedVerificationStates": ["verified", "unverified"]
+      "allowedVerificationStates": ["verified", "partially_supported"]
     },
     {
       "id": "terraform_cloudwatch_alarms",
@@ -259,14 +265,14 @@
       "expectedDocumentsContains": ["terraform_modules"],
       "searchRequiredAll": ["alarm"],
       "answerRequiredAll": ["CPU"],
-      "answerRequiredAny": ["85", "memory", "5xx", "connections", "evictions", "Redis"],
+      "answerRequiredAny": ["above 85%", "memory", "5xx", "connections", "evictions", "Redis"],
       "answerForbiddenAny": [],
       "minChunkReferenceCount": 1,
       "minPreparedSegmentReferenceCount": 0,
       "minTechnicalFactReferenceCount": 0,
       "minEntityReferenceCount": 0,
       "minRelationReferenceCount": 0,
-      "allowedVerificationStates": ["verified", "unverified"]
+      "allowedVerificationStates": ["verified", "partially_supported"]
     },
     {
       "id": "docker_compose_rabbitmq_services",
@@ -282,7 +288,7 @@
       "minTechnicalFactReferenceCount": 0,
       "minEntityReferenceCount": 0,
       "minRelationReferenceCount": 0,
-      "allowedVerificationStates": ["verified", "unverified"]
+      "allowedVerificationStates": ["verified", "partially_supported"]
     },
     {
       "id": "go_health_checks",
@@ -298,7 +304,7 @@
       "minTechnicalFactReferenceCount": 0,
       "minEntityReferenceCount": 0,
       "minRelationReferenceCount": 0,
-      "allowedVerificationStates": ["verified", "unverified"]
+      "allowedVerificationStates": ["verified", "partially_supported"]
     },
     {
       "id": "rust_order_model",
@@ -307,14 +313,14 @@
       "expectedDocumentsContains": ["rust_state_machine"],
       "searchRequiredAll": ["Order"],
       "answerRequiredAll": ["total_cents"],
-      "answerRequiredAny": ["subtotal_cents", "tax_cents", "shipping_cost_cents", "items", "shipping_address", "8%", "calculate_shipping"],
+      "answerRequiredAny": ["subtotal_cents", "tax_cents", "shipping_cost_cents", "items", "shipping_address", "8% tax", "calculate_shipping"],
       "answerForbiddenAny": [],
       "minChunkReferenceCount": 1,
       "minPreparedSegmentReferenceCount": 0,
       "minTechnicalFactReferenceCount": 0,
       "minEntityReferenceCount": 0,
       "minRelationReferenceCount": 0,
-      "allowedVerificationStates": ["verified", "unverified"]
+      "allowedVerificationStates": ["verified", "partially_supported"]
     },
     {
       "id": "cross_file_rate_limiting",
@@ -323,14 +329,14 @@
       "expectedDocumentsContains": ["golang_http_router"],
       "searchRequiredAll": ["rate"],
       "answerRequiredAll": ["RATE_LIMIT"],
-      "answerRequiredAny": ["100", "sliding window", "per-IP", "Kong", "429", "RATE_LIMIT_REQUESTS"],
+      "answerRequiredAny": ["Default: 100", "sliding window", "per-IP", "Kong", "StatusCode: 429", "RATE_LIMIT_REQUESTS"],
       "answerForbiddenAny": [],
       "minChunkReferenceCount": 1,
       "minPreparedSegmentReferenceCount": 0,
       "minTechnicalFactReferenceCount": 0,
       "minEntityReferenceCount": 0,
       "minRelationReferenceCount": 0,
-      "allowedVerificationStates": ["verified", "unverified"]
+      "allowedVerificationStates": ["verified", "partially_supported"]
     }
   ]
 }

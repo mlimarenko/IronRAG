@@ -1,8 +1,12 @@
 pub mod bootstrap;
+mod catalog_seed;
 pub mod config;
 pub mod shutdown;
 pub mod state;
 mod supervisor;
+
+#[cfg(test)]
+pub(crate) use catalog_seed::{seeded_model_rate, seeded_provider};
 
 use axum::Router;
 use std::net::SocketAddr;
@@ -10,10 +14,21 @@ use tracing::{info, warn};
 
 use crate::{
     domains::deployment::ServiceRole,
-    infra::persistence::{run_postgres_migrations, validate_canonical_bootstrap_state},
-    interfaces::http::{self, middleware::apply_canonical_middleware},
+    infra::persistence::{run_postgres_migrations, validate_required_bootstrap_state},
+    interfaces::http::{self, middleware::apply_http_middleware},
     services::content::storage::types::ContentStorageProbeStatus,
 };
+
+/// Seeds the required clean-v1 AI provider and model catalog.
+///
+/// Startup authority and integration tests share this entrypoint so catalog
+/// identities, typed purpose eligibility, and provider profiles cannot drift.
+///
+/// # Errors
+/// Returns an error when a catalog row cannot be validated or persisted.
+pub async fn seed_clean_v1_ai_catalog(postgres: &sqlx::PgPool) -> anyhow::Result<()> {
+    catalog_seed::seed_clean_v1_catalog(postgres).await
+}
 
 /// Boots the HTTP server and serves the `IronRAG` API.
 ///
@@ -21,13 +36,14 @@ use crate::{
 /// Returns any configuration, bind, listener, or serve error encountered during startup.
 pub async fn run() -> anyhow::Result<()> {
     let mut config = config::Settings::from_env()?;
-    let deployment_id = crate::observability::resolve_deployment_id(&config.database_url).await;
-    crate::observability::init_tracing(deployment_id)?;
     let role = config.service_role_kind().map_err(anyhow::Error::msg)?;
 
     // `run` retains settings for role-specific listeners. Build state through
     // the in-place path so the retained copy is scrubbed before any clone.
     let state = state::AppState::new_from_retained_settings(&mut config).await?;
+    let deployment_id =
+        crate::observability::resolve_deployment_id(&state.persistence.postgres).await;
+    crate::observability::init_tracing(deployment_id)?;
     let graph_backend = state.graph_runtime.backend_name.as_str();
     let shutdown = shutdown::ShutdownSignal::new();
     let signal_listener = spawn_signal_listener(shutdown.clone());
@@ -101,7 +117,7 @@ fn build_probe_router(state: state::AppState) -> Router {
 
 fn build_http_router(state: state::AppState, probe_only: bool) -> Router {
     let api_router = if probe_only { http::probe_router() } else { http::router() };
-    apply_canonical_middleware(Router::new().nest("/v1", api_router), state)
+    apply_http_middleware(Router::new().nest("/v1", api_router), state)
 }
 
 async fn run_http_api(
@@ -162,9 +178,13 @@ async fn run_http_api(
         "starting ironrag backend"
     );
     let listener = tokio::net::TcpListener::bind(addr).await?;
-    let server = axum::serve(listener, router).with_graceful_shutdown(async move {
-        shutdown.wait().await;
-    });
+    // `with_connect_info` is required for the login-rate-limit source-key
+    // fallback (`ConnectInfo<SocketAddr>`) to ever see a real peer address
+    // instead of always missing; see `interfaces::http::iam::session`.
+    let server = axum::serve(listener, router.into_make_service_with_connect_info::<SocketAddr>())
+        .with_graceful_shutdown(async move {
+            shutdown.wait().await;
+        });
     server.await?;
     Ok(())
 }
@@ -198,6 +218,15 @@ async fn run_startup_authority(
     bootstrap_settings: &config::BootstrapSettings,
     destructive_bootstrap: &config::DestructiveFreshBootstrapSettings,
 ) -> anyhow::Result<()> {
+    report_startup_authority(state);
+    prepare_authority_persistence(state).await?;
+    ensure_content_storage_ready(state).await?;
+    run_startup_bootstraps(state, bootstrap_settings, destructive_bootstrap).await?;
+    info!("startup authority completed");
+    Ok(())
+}
+
+fn report_startup_authority(state: &state::AppState) {
     info!(
         service = %state.settings.service_name,
         service_role = %state.settings.service_role,
@@ -205,9 +234,22 @@ async fn run_startup_authority(
         startup_authority_mode = %state.settings.startup_authority_mode,
         "running startup authority",
     );
+}
 
+/// Runs the ordered persistence preconditions of the startup-authority role:
+/// migrations, the clean-v1 catalog seed, then the required bootstrap state
+/// validation. Kept as one helper so the authority flow states the sequence,
+/// not three indistinguishable `?` hops.
+async fn prepare_authority_persistence(state: &state::AppState) -> anyhow::Result<()> {
     run_postgres_migrations(&state.persistence.postgres).await?;
-    validate_canonical_bootstrap_state(&state.persistence.postgres, &state.settings).await?;
+    seed_clean_v1_ai_catalog(&state.persistence.postgres).await?;
+    validate_required_bootstrap_state(&state.persistence.postgres, &state.settings).await
+}
+
+/// Prepares content storage and fails closed unless the provider reports a
+/// healthy startup state. Extracted from the authority flow so the storage
+/// probe's error formatting does not nest inside it.
+async fn ensure_content_storage_ready(state: &state::AppState) -> anyhow::Result<()> {
     let storage_probe = state.content_storage.prepare_startup().await?;
     if !matches!(storage_probe.status, ContentStorageProbeStatus::Ok) {
         anyhow::bail!(
@@ -217,8 +259,6 @@ async fn run_startup_authority(
                 .unwrap_or_else(|| "provider did not report a healthy startup state".to_string())
         );
     }
-    run_startup_bootstraps(state, bootstrap_settings, destructive_bootstrap).await?;
-    info!("startup authority completed");
     Ok(())
 }
 
@@ -233,19 +273,17 @@ async fn run_startup_bootstraps(
     // `IRONRAG_AI_PROVIDER_API_KEYS_JSON_B64` entries to land as instance-scope
     // accounts; gating that on `ui_bootstrap_admin` was the bug behind "I
     // added a key and it never appeared in admin → AI".
-    state.canonical_services.ai_catalog.ensure_env_ai_accounts(state).await.map_err(|error| {
+    state.application_services.ai_catalog.ensure_env_ai_accounts(state).await.map_err(|error| {
         anyhow::anyhow!("failed to ensure env-keyed provider accounts: {error}")
     })?;
 
     if state.ui_bootstrap_admin.is_some() {
-        bootstrap::ensure_canonical_bootstrap_admin(state).await.map_err(|error| {
-            anyhow::anyhow!("failed to initialize canonical bootstrap admin: {error}")
-        })?;
+        bootstrap::ensure_bootstrap_admin(state)
+            .await
+            .map_err(|error| anyhow::anyhow!("failed to initialize bootstrap admin: {error}"))?;
     } else {
         info!("bootstrap admin side effect not required at startup");
     }
-
-    info!("pricing catalog bootstrap side effect not required at startup");
 
     Ok(())
 }

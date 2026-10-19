@@ -1,0 +1,169 @@
+@media (max-width: 1100px) {
+  .command-trigger {
+    width: 180px;
+  }
+  .metric-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .user-chip strong {
+    display: none;
+  }
+}
+
+@media (max-width: 767px) {
+  /* Still a grid, just a single column: the sidebar becomes a fixed drawer.
+     Switching to `display: block` here would detach `.app-main` from the
+     shell's height, and the footer would start scrolling with the page
+     again on exactly the narrow viewports where it is most in the way. */
+  .app-shell,
+  .app-shell--collapsed {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .sidebar {
+    display: none;
+  }
+  .topbar .mobile-menu {
+    display: inline-flex;
+  }
+  .mobile-overlay {
+    display: block;
+    position: fixed;
+    inset: 0;
+    padding: 0;
+    border: 0;
+    background: rgba(5, 7, 8, 0.55);
+    cursor: pointer;
+    z-index: 40;
+  }
+  .mobile-drawer {
+    display: flex;
+    position: fixed;
+    z-index: 50;
+    inset: 0 auto 0 0;
+    width: min(256px, 86vw);
+    background: var(--sidebar);
+    color: var(--sidebar-text);
+    border-right: 1px solid var(--border);
+    flex-direction: column;
+  }
+  .mobile-drawer > .button {
+    position: absolute;
+    right: 8px;
+    top: 8px;
+    z-index: 2;
+    color: var(--sidebar-text);
+  }
+  .mobile-drawer .sidebar-brand {
+    padding-right: 56px;
+  }
+  .mobile-drawer .sidebar-footer {
+    display: none;
+  }
+  .topbar {
+    padding: 0 12px;
+    gap: 6px;
+  }
+  .context-switcher {
+    min-width: 0;
+    flex: 1;
+    max-width: none;
+    gap: 6px;
+    padding: 6px;
+  }
+  .command-trigger {
+    display: none;
+  }
+  .topbar-actions {
+    margin-left: auto;
+  }
+  .user-chip {
+    padding: 2px;
+  }
+  .degraded-banner {
+    justify-content: flex-start;
+    font-size: 0.75rem;
+  }
+  .page-content__inner {
+    padding: 16px;
+  }
+  .page-header {
+    flex-direction: column;
+    margin-bottom: 20px;
+  }
+  .page-header h1 {
+    font-size: 1.5rem;
+  }
+  .page-header__actions {
+    width: 100%;
+  }
+  .page-header__actions .button {
+    flex: 1;
+  }
+  .metric-grid,
+  .field-grid,
+  .webhook-grid,
+  .inspector-facts {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .metric-grid {
+    gap: 8px;
+  }
+  .metric-card {
+    min-height: 116px;
+    padding: 14px;
+  }
+  .metric-card strong {
+    font-size: 1.625rem;
+  }
+  .desktop-table {
+    display: none;
+  }
+  .mobile-card-list {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    gap: 9px;
+  }
+  .mobile-data-card {
+    width: 100%;
+    padding: 14px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    background: var(--surface);
+    box-shadow: var(--shadow-sm);
+    text-align: left;
+  }
+  .mobile-data-card__top {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 8px;
+    margin-bottom: 9px;
+  }
+  .mobile-data-card p {
+    color: var(--muted);
+    margin: 3px 0;
+    font-size: 0.75rem;
+  }
+  .shell-footer {
+    flex-wrap: wrap;
+    padding: 8px 16px;
+  }
+  .shell-footer .update-badge {
+    width: 100%;
+    margin-left: 0;
+    justify-content: center;
+  }
+}
+
+@media (max-width: 430px) {
+  .metric-card {
+    min-height: 105px;
+  }
+  .context-switcher .context-kicker,
+  .context-divider {
+    display: none;
+  }
+  .context-switcher strong {
+    max-width: 100%;
+  }
+}

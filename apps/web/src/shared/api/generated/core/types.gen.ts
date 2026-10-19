@@ -91,11 +91,6 @@ export interface Config {
   responseValidator?: (data: unknown) => Promise<unknown>;
 }
 
-/**
- * Arbitrary metadata passed through the `meta` request option.
- */
-export type ClientMeta = Record<never, never>
-
 type IsNever<T> = [T] extends [never] ? true : false;
 
 export type OmitNever<T extends Record<string, unknown>> = {

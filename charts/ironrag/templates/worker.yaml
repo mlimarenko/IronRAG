@@ -10,10 +10,10 @@ spec:
   replicas: {{ .Values.worker.replicaCount }}
   {{- end }}
   strategy:
-    type: RollingUpdate
-    rollingUpdate:
-      maxUnavailable: 1
-      maxSurge: 0
+    # Worker releases may retire durable maintenance/queue protocols. Stop
+    # every old worker before starting the new revision so incompatible
+    # consumers can never overlap; API availability is unaffected.
+    type: Recreate
   selector:
     matchLabels:
       {{- include "ironrag.selectorLabels" . | nindent 6 }}
@@ -103,7 +103,7 @@ spec:
         {{- if eq .Values.storage.provider "filesystem" }}
         - name: content-storage
           persistentVolumeClaim:
-            claimName: {{ include "ironrag.fullname" . }}-content-storage
+            claimName: {{ include "ironrag.contentStorageClaimName" . }}
         {{- end }}
       {{- with .Values.imagePullSecrets }}
       imagePullSecrets:

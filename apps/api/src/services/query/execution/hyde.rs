@@ -3,7 +3,7 @@ use crate::services::query::provider_billing::{
 };
 use crate::{app::state::AppState, domains::ai::AiBindingPurpose};
 
-use super::{HYDE_TEMPERATURE, HYDE_TIMEOUT};
+use super::{HYDE_MAX_OUTPUT_TOKENS, HYDE_TEMPERATURE, HYDE_TIMEOUT};
 
 pub(super) async fn generate_hyde_passage(
     state: &AppState,
@@ -13,7 +13,7 @@ pub(super) async fn generate_hyde_passage(
     let library_id = execution_context.library_id;
     let span_started = std::time::Instant::now();
     let binding = state
-        .canonical_services
+        .application_services
         .ai_catalog
         .resolve_active_runtime_binding(state, library_id, AiBindingPurpose::QueryCompile)
         .await
@@ -34,7 +34,7 @@ pub(super) async fn generate_hyde_passage(
     seed.system_prompt = None;
     seed.temperature = Some(HYDE_TEMPERATURE);
     seed.top_p = None;
-    seed.max_output_tokens_override = Some(200);
+    seed.max_output_tokens_override = Some(HYDE_MAX_OUTPUT_TOKENS);
     let request = crate::integrations::llm::build_text_chat_request(seed, prompt);
 
     let mut provider_call = QueryProviderCallReservation::reserve(
@@ -47,26 +47,33 @@ pub(super) async fn generate_hyde_passage(
     .await
     .map_err(|error| anyhow::anyhow!("failed to reserve HyDE provider call: {error}"))?;
 
-    let response =
-        match tokio::time::timeout(HYDE_TIMEOUT, state.llm_gateway.generate(request)).await {
-            Ok(Ok(response)) => response,
-            Ok(Err(error)) => {
-                if let Err(billing_error) = provider_call.fail().await {
-                    tracing::error!(
-                        provider_call_id = %provider_call.provider_call_id(),
-                        %billing_error,
-                        "failed to terminalize HyDE provider-call reservation"
-                    );
-                }
-                return Err(anyhow::anyhow!("HyDE LLM call failed: {error}"));
+    let response = match tokio::time::timeout(
+        HYDE_TIMEOUT,
+        crate::observability::with_provider_call_id(
+            provider_call.provider_call_id(),
+            state.llm_gateway.generate(request),
+        ),
+    )
+    .await
+    {
+        Ok(Ok(response)) => response,
+        Ok(Err(error)) => {
+            if let Err(billing_error) = provider_call.fail().await {
+                tracing::error!(
+                    provider_call_id = %provider_call.provider_call_id(),
+                    %billing_error,
+                    "failed to terminalize HyDE provider-call reservation"
+                );
             }
-            Err(_elapsed) => {
-                return Err(anyhow::anyhow!(
-                    "HyDE LLM call timed out after {} ms",
-                    HYDE_TIMEOUT.as_millis()
-                ));
-            }
-        };
+            return Err(anyhow::anyhow!("HyDE LLM call failed: {error}"));
+        }
+        Err(_elapsed) => {
+            return Err(anyhow::anyhow!(
+                "HyDE LLM call timed out after {} ms",
+                HYDE_TIMEOUT.as_millis()
+            ));
+        }
+    };
     provider_call
         .complete(&response.usage_json)
         .await

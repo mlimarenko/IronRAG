@@ -12,7 +12,7 @@ use crate::{
 };
 
 use super::{
-    RuntimeChunkScoreKind, RuntimeMatchedChunk, canonical_document_revision_id, map_chunk_hit,
+    RuntimeChunkScoreKind, RuntimeMatchedChunk, current_document_revision_id, map_chunk_hit,
     merge_chunks, question_asks_table_aggregation,
 };
 
@@ -53,7 +53,7 @@ pub(crate) async fn load_table_rows_for_documents(
         let Some(document) = document_index.get(document_id) else {
             continue;
         };
-        let Some(revision_id) = canonical_document_revision_id(document) else {
+        let Some(revision_id) = current_document_revision_id(document) else {
             continue;
         };
         let rows = state
@@ -190,11 +190,14 @@ fn table_section_sibling_windows(rows: &[KnowledgeChunkRow]) -> Vec<(Uuid, i32, 
         .collect()
 }
 
+/// Aggregate anchor score per table-section key: score plus occurrence count.
+type TableSectionAnchorScore = (f32, usize);
+
 fn table_section_anchor_scores(
     rows: &[KnowledgeChunkRow],
-    anchor_scores: &HashMap<Uuid, (f32, usize)>,
-) -> HashMap<(Uuid, Vec<String>), (f32, usize)> {
-    let mut scores = HashMap::<(Uuid, Vec<String>), (f32, usize)>::new();
+    anchor_scores: &HashMap<Uuid, TableSectionAnchorScore>,
+) -> HashMap<(Uuid, Vec<String>), TableSectionAnchorScore> {
+    let mut scores = HashMap::<(Uuid, Vec<String>), TableSectionAnchorScore>::new();
     for row in rows
         .iter()
         .filter(|row| is_table_section_anchor_row(row))
@@ -296,7 +299,7 @@ pub(crate) async fn load_table_summary_chunks_for_documents(
         let Some(document) = document_index.get(document_id) else {
             continue;
         };
-        let Some(revision_id) = canonical_document_revision_id(document) else {
+        let Some(revision_id) = current_document_revision_id(document) else {
             continue;
         };
         let revision_chunks =
@@ -332,7 +335,7 @@ pub(crate) fn is_table_analytics_chunk(chunk: &RuntimeMatchedChunk) -> bool {
     is_table_summary_text(text) || (text.starts_with("Sheet: ") && text.contains(" | Row "))
 }
 
-pub(crate) fn merge_canonical_table_aggregation_chunks(
+pub(crate) fn merge_table_aggregation_chunks(
     existing_chunks: Vec<RuntimeMatchedChunk>,
     direct_summary_chunks: Vec<RuntimeMatchedChunk>,
     direct_row_chunks: Vec<RuntimeMatchedChunk>,
@@ -385,7 +388,6 @@ mod tests {
             vector_generation: Some(1),
             quality_score: Some(1.0),
             window_text: None,
-            raptor_level: None,
             occurred_at: None,
             occurred_until: None,
         }

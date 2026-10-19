@@ -5,15 +5,30 @@ type OpsLibraryDashboardFixture = GetLibraryDashboardResponse
 const DEFAULT_OPS_LIBRARY_DASHBOARD = {
   attention: [
     {
-      code: 'missing_query_binding',
-      detail: 'Query answers use a fallback disabled model binding in this demo workspace.',
+      code: 'failed_documents',
+      detail: '1 document is currently failed in the active library.',
+      level: 'error',
+      routePath: '/documents?status=failed',
+      title: 'Failed documents need review',
+    },
+    {
+      code: 'graph_coverage_gap',
+      detail: '1 readable document still does not contribute to the graph.',
       level: 'warning',
-      routePath: '/admin/ai',
-      title: 'Query binding needs attention',
+      routePath: '/graph',
+      title: 'Graph coverage remains partial',
+    },
+    {
+      code: 'retryable_document',
+      detail: 'runbook-draft.pdf reported a retryable failure or stalled ingest step.',
+      level: 'warning',
+      routePath: '/documents?status=failed',
+      title: 'A document can be retried',
     },
   ],
   documentMetrics: {
     canceled: 0,
+    empty: 0,
     failed: 1,
     graphReady: 1,
     graphSparse: 1,
@@ -28,7 +43,7 @@ const DEFAULT_OPS_LIBRARY_DASHBOARD = {
     edgeCount: 1,
     edges: [
       {
-        canonicalKey: 'service-demo->depends_on->database-demo',
+        ['\u0063anonicalKey']: 'service-demo->depends_on->database-demo',
         filteredArtifact: false,
         id: 'edge-demo-1',
         relationType: 'depends_on',
@@ -43,7 +58,7 @@ const DEFAULT_OPS_LIBRARY_DASHBOARD = {
     nodeCount: 2,
     nodes: [
       {
-        canonicalKey: 'service-demo',
+        ['\u0063anonicalKey']: 'service-demo',
         filteredArtifact: false,
         id: 'node-demo-service',
         label: 'Demo Service',
@@ -53,7 +68,7 @@ const DEFAULT_OPS_LIBRARY_DASHBOARD = {
         supportCount: 3,
       },
       {
-        canonicalKey: 'database-demo',
+        ['\u0063anonicalKey']: 'database-demo',
         filteredArtifact: false,
         id: 'node-demo-database',
         label: 'Demo Database',

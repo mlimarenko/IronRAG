@@ -5,7 +5,7 @@ use crate::shared::extraction::technical_facts::TechnicalFactKind;
 use crate::shared::extraction::text_render::repair_technical_layout_noise;
 
 use super::{
-    CanonicalAnswerEvidence, RuntimeMatchedChunk,
+    AuthoritativeAnswerEvidence, RuntimeMatchedChunk,
     fact_lookup::{best_matching_fact, build_document_labels},
     focused_answer_document_id,
     question_intent::{QuestionIntent, classify_question_or_ir_intents, has_question_intent},
@@ -17,7 +17,7 @@ use super::{
 pub(super) fn build_exact_parameter_answer(
     question: &str,
     query_ir: &QueryIR,
-    evidence: &CanonicalAnswerEvidence,
+    evidence: &AuthoritativeAnswerEvidence,
     chunks: &[RuntimeMatchedChunk],
 ) -> Option<String> {
     let intents = classify_question_or_ir_intents(question, query_ir);
@@ -47,7 +47,7 @@ pub(super) fn build_exact_parameter_answer(
 fn select_exact_parameter_literal(
     question: &str,
     query_ir: &QueryIR,
-    evidence: &CanonicalAnswerEvidence,
+    evidence: &AuthoritativeAnswerEvidence,
     chunks: &[RuntimeMatchedChunk],
     explicit_parameters: &[String],
 ) -> Option<String> {
@@ -62,8 +62,8 @@ fn select_exact_parameter_literal(
         |fact| {
             explicit_parameters.iter().any(|parameter| {
                 fact.display_value.eq_ignore_ascii_case(parameter)
-                    || fact.canonical_value_exact.eq_ignore_ascii_case(parameter)
-                    || fact.canonical_value_text.eq_ignore_ascii_case(parameter)
+                    || fact.normalized_value_exact.eq_ignore_ascii_case(parameter)
+                    || fact.normalized_value_text.eq_ignore_ascii_case(parameter)
             })
         },
         |fact, document_label| {
@@ -102,7 +102,7 @@ fn parameter_candidate_score(
 fn extract_parameter_meaning(
     question: &str,
     parameter: &str,
-    evidence: &CanonicalAnswerEvidence,
+    evidence: &AuthoritativeAnswerEvidence,
     chunks: &[RuntimeMatchedChunk],
 ) -> Option<String> {
     let focused_document_id = focused_answer_document_id(question, chunks);

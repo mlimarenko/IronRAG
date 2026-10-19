@@ -106,15 +106,3 @@ pub struct CatalogLibrary {
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
-
-#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
-pub struct CatalogLibraryConnector {
-    pub id: Uuid,
-    pub workspace_id: Uuid,
-    pub library_id: Uuid,
-    pub connector_kind: String,
-    pub display_name: String,
-    pub configuration_json: serde_json::Value,
-    pub created_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
-}

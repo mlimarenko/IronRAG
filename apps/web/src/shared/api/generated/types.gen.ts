@@ -5,104 +5,342 @@ export type ClientOptions = {
 };
 
 /**
- * Independent administration capabilities of the current principal.
+ * Multi-value filters for each library grid column.
+ *
+ * A nullable array per column: an absent key, whole-key `null` or `[]` means
+ * "no constraint"; a `null` element
+ * selects the column's own NULL bucket; several values are OR within the column
+ * and AND across columns. Values are the canonical displayed values, so a
+ * decimal cost keeps its source text and a blocked cost's documents/calls stay
+ * a real NULL rather than a fabricated zero.
  */
-export type AdminCapabilityState = {
+export type AdminLibraryColumnFilters = {
     /**
-     * Whether the administration surface is available at all.
+     * Billed provider call counts; `null` is the blocked-rollup bucket.
      */
-    adminEnabled: boolean;
+    calls?: Array<number | null> | null;
     /**
-     * Whether AI providers, credentials, presets, and bindings may be changed.
+     * Billed cost values as `{amount, currencyCode, coverage, unpricedCallCount}`.
      */
-    canManageAi: boolean;
+    cost?: Array<null | AdminLibraryCostValue> | null;
     /**
-     * Whether access tokens may be created or revoked.
+     * Billed document counts; `null` is the blocked-rollup bucket.
      */
-    canManageTokens: boolean;
+    documents?: Array<number | null> | null;
     /**
-     * Whether audit events may be viewed.
+     * Library display names.
      */
-    canReadAudit: boolean;
+    library?: Array<string | null> | null;
     /**
-     * Whether operational state may be viewed.
+     * Lifecycle state values.
      */
-    canReadOperations: boolean;
+    lifecycle?: Array<string | null> | null;
+    /**
+     * Queued ingest job counts.
+     */
+    queue?: Array<number | null> | null;
+    /**
+     * Ingestion readiness booleans.
+     */
+    readiness?: Array<boolean | null> | null;
+    /**
+     * Workspace display names.
+     */
+    workspace?: Array<string | null> | null;
 };
 
 /**
- * Top-level sections of the administration console.
+ * Billing coverage rendered for an administration library row.
  */
-export type AdminSection = 'access' | 'mcp' | 'operations' | 'queue' | 'ai' | 'pricing' | 'settings';
+export type AdminLibraryCostCoverage = 'complete' | 'partial' | 'unknown';
 
 /**
- * Navigation metadata and access state for an administration section.
+ * Constraints derived from one displayed cost search term. Fields are AND
+ * within one term; several terms are OR. No amount changes currency.
  */
-export type AdminSectionSummary = {
+export type AdminLibraryCostSearch = {
     /**
-     * Access decision for the current principal.
+     * Exact rounded display amount, when the term names one.
      */
-    gate: CapabilityGate;
+    amount?: string | null;
+    coverage?: null | AdminLibraryCostCoverage;
     /**
-     * Optional count of records represented by the section.
+     * Displayed ISO currency code, when present in the term.
      */
-    itemCount?: number | null;
+    currencyCode?: string | null;
     /**
-     * Section represented by the summary.
+     * Unpriced call count indicated by the displayed label.
      */
-    section: AdminSection;
-    /**
-     * Short description of the section contents.
-     */
-    summary: string;
-    /**
-     * Title shown in navigation.
-     */
-    title: string;
+    unpricedCallCount?: number | null;
 };
 
 /**
- * Lightweight administration shell state used before section data loads.
+ * Billed usage rendered for one administration library row.
  */
-export type AdminSurface = {
+export type AdminLibraryCostSummary = {
     /**
-     * Administration capabilities of the current principal.
+     * Whether the reported total covers all provider calls.
      */
-    capabilities: AdminCapabilityState;
+    costCoverage: AdminLibraryCostCoverage;
     /**
-     * Navigation entries and access decisions for each section.
+     * ISO currency code shared by the priced calls.
      */
-    sections: Array<AdminSectionSummary>;
+    currencyCode: string;
     /**
-     * Compact summary of the current principal.
+     * Documents represented by the billing rollup.
      */
-    viewer: AdminViewerSummary;
+    documentCount: number;
     /**
-     * Current warnings that require operator attention.
+     * Provider calls represented by the billing rollup.
      */
-    warnings: Array<OperatorWarning>;
+    providerCallCount: number;
+    /**
+     * Decimal cost encoded as a string to preserve precision.
+     */
+    totalCost: string;
+    /**
+     * Provider calls for which no price was configured.
+     */
+    unpricedProviderCallCount: number;
 };
 
 /**
- * Compact identity and access summary for the administration shell.
+ * Displayed cost identity shared by cells, facets, filters, search and sorting.
+ *
+ * `amount` is the rounded display decimal (two fraction digits by default),
+ * kept as source text
+ * so no float ever touches it, and `currency_code` scopes it so an amount never
+ * silently matches another currency's row.
  */
-export type AdminViewerSummary = {
+export type AdminLibraryCostValue = {
     /**
-     * Human-readable description of the principal's access level.
+     * Rounded display amount, exact decimal source string.
      */
-    accessLabel: string;
+    amount: string;
     /**
-     * Human-readable principal name.
+     * Whether the amount covers all provider calls.
+     */
+    coverage: AdminLibraryCostCoverage;
+    /**
+     * ISO 4217 code of the single currency the amount is denominated in.
+     */
+    currencyCode: string;
+    /**
+     * Provider calls for which no price was configured.
+     */
+    unpricedCallCount: number;
+};
+
+/**
+ * Columns the administration library grid can sort, filter and facet on. Ids
+ * are the server's own vocabulary: the grid column id, the sort key and the
+ * facet column all agree on one name.
+ */
+export type AdminLibraryFacetColumn = 'library' | 'workspace' | 'documents' | 'queue' | 'cost' | 'calls' | 'readiness' | 'lifecycle';
+
+/**
+ * One distinct facet value with its row count.
+ *
+ * Exactly the typed slots the column owns are present: `text` for
+ * library/workspace/lifecycle, `number`
+ * for documents/queue/calls, and `decimal` + `currencyCode` + `coverage` +
+ * `unpricedCallCount` for cost. `flag` is readiness. The
+ * column's NULL bucket carries none of them.
+ */
+export type AdminLibraryFacetValue = {
+    /**
+     * Libraries carrying this value within the self-excluded filter set.
+     */
+    count: number;
+    coverage?: null | AdminLibraryCostCoverage;
+    /**
+     * The cost amount's single ISO currency code.
+     */
+    currencyCode?: string | null;
+    /**
+     * The cost column's canonical rounded display amount, as source text.
+     */
+    decimal?: string | null;
+    /**
+     * The readiness boolean.
+     */
+    flag?: boolean | null;
+    /**
+     * An integer value (documents, queue, calls).
+     */
+    number?: number | null;
+    /**
+     * A text value (library, workspace, lifecycle).
+     */
+    text?: string | null;
+    /**
+     * Unpriced provider calls in the displayed cost value.
+     */
+    unpricedCallCount?: number | null;
+};
+
+/**
+ * Counts used by the administration library summary and filters.
+ */
+export type AdminLibraryFacets = {
+    /**
+     * Filtered libraries in the active lifecycle state.
+     */
+    activeCount: number;
+    /**
+     * Filtered libraries ready for ingestion.
+     */
+    readyCount: number;
+    /**
+     * Distinct workspaces represented by the filtered result.
+     */
+    workspaceCount: number;
+};
+
+/**
+ * One bounded, self-excluding page of distinct values for a facet column.
+ */
+export type AdminLibraryFacetsResponse = {
+    /**
+     * The column whose values this page describes.
+     */
+    column: AdminLibraryFacetColumn;
+    /**
+     * `null` when the last page has been reached.
+     */
+    nextCursor?: string | null;
+    /**
+     * Distinct values ordered ascending with the NULL bucket last.
+     */
+    values: Array<AdminLibraryFacetValue>;
+};
+
+/**
+ * Ingestion binding state rendered for an administration library row.
+ */
+export type AdminLibraryIngestionReadiness = {
+    /**
+     * Required ingestion bindings that are not available.
+     */
+    missingBindingPurposes: Array<AiBindingPurpose>;
+    /**
+     * Whether every ingestion binding required by the library is available.
+     */
+    ready: boolean;
+};
+
+/**
+ * Narrow library row rendered by the administration list.
+ */
+export type AdminLibraryListItem = {
+    costSummary?: null | AdminLibraryCostSummary;
+    costValue?: null | AdminLibraryCostValue;
+    /**
+     * Human-readable library name.
      */
     displayName: string;
     /**
-     * Whether the principal has the system administrator role.
+     * Library identifier.
      */
-    isAdmin: boolean;
+    id: string;
     /**
-     * Principal represented by the current session.
+     * Whether MCP answers include the document hint configured by operators.
      */
-    principalId: string;
+    includeDocumentHintInMcpAnswers: boolean;
+    /**
+     * Ingestion readiness shown by the list and filters.
+     */
+    ingestionReadiness: AdminLibraryIngestionReadiness;
+    /**
+     * Current library lifecycle state.
+     */
+    lifecycleState: string;
+    /**
+     * Ingest jobs waiting in this library's queue (`queue_state = 'queued'`).
+     */
+    queuedJobCount: number;
+    /**
+     * Stable library slug.
+     */
+    slug: string;
+    /**
+     * Owning workspace identity.
+     */
+    workspace: AdminLibraryWorkspaceSummary;
+};
+
+/**
+ * Bounded administration library page.
+ */
+export type AdminLibraryPageResponse = {
+    aggregateCostSummary?: null | AdminLibraryCostSummary;
+    /**
+     * Counts for the current server-side filter set.
+     */
+    facets: AdminLibraryFacets;
+    /**
+     * Rows in the requested page.
+     */
+    items: Array<AdminLibraryListItem>;
+    /**
+     * Number of rows matching the server-side filters over the whole dataset.
+     */
+    totalCount: number;
+};
+
+/**
+ * Typed alternatives to literal whole-table search.
+ *
+ * Hints derived from the term the operator typed: the canonical numbers a
+ * formatted documents/queue/calls
+ * label spells, the canonical rounded decimals a cost label carries, whether
+ * the term names the unavailable/unknown label, and the readiness / lifecycle
+ * values whose localized label matches. Each present group is an OR
+ * alternative to the literal text search, never a lexicon.
+ */
+export type AdminLibrarySearchHints = {
+    /**
+     * Displayed cost constraints, preserving currency and partial-cost metadata.
+     */
+    costs?: Array<AdminLibraryCostSearch> | null;
+    /**
+     * Lifecycle values whose localized label matches the term.
+     */
+    lifecycle?: Array<string> | null;
+    /**
+     * Exact values the documents, queue and calls columns display.
+     */
+    numbers?: Array<number> | null;
+    /**
+     * Readiness booleans whose localized label matches the term.
+     */
+    readiness?: Array<boolean> | null;
+    /**
+     * The term names the unavailable / unknown label the blocked columns show.
+     */
+    unavailable?: boolean | null;
+};
+
+export type AdminLibrarySortKey = 'library' | 'workspace' | 'documents' | 'queue' | 'cost' | 'calls' | 'readiness' | 'lifecycle';
+
+export type AdminLibrarySortOrder = 'asc' | 'desc';
+
+/**
+ * Workspace identity rendered beside an administration library row.
+ */
+export type AdminLibraryWorkspaceSummary = {
+    /**
+     * Human-readable workspace name.
+     */
+    displayName: string;
+    /**
+     * Workspace identifier.
+     */
+    id: string;
+    /**
+     * Stable workspace slug.
+     */
+    slug: string;
 };
 
 /**
@@ -112,7 +350,10 @@ export type AdminViewerSummary = {
  */
 export type AgentLoopMetadata = {
     deadlineMs: number;
+    degradedCompletionCount?: number;
     iterationCap: number;
+    provider429Count?: number;
+    providerRetryCount?: number;
     stoppedReason: AgentStopReason;
     toolCallCount: number;
 };
@@ -120,7 +361,7 @@ export type AgentLoopMetadata = {
 /**
  * Reason the tool-use loop stopped iterating.
  */
-export type AgentStopReason = 'final_answer' | 'iteration_cap' | 'deadline' | 'no_progress' | 'tool_error' | 'provider_error';
+export type AgentStopReason = 'final_answer' | 'iteration_cap' | 'deadline' | 'no_progress' | 'tool_error' | 'provider_error' | 'unknown';
 
 export type AiAccountResponse = {
     apiKeySummary: string;
@@ -137,9 +378,9 @@ export type AiAccountResponse = {
 };
 
 /**
- * The six physical model bindings exposed to operators and runtime stages.
+ * The eight physical model bindings exposed to operators and runtime stages.
  */
-export type AiBindingPurpose = 'extract_text' | 'extract_graph' | 'embed_chunk' | 'query_compile' | 'query_answer' | 'agent';
+export type AiBindingPurpose = 'extract_text' | 'extract_graph' | 'graph_entity_type' | 'embed_chunk' | 'query_compile' | 'query_rerank' | 'query_answer' | 'agent';
 
 export type AiBindingResponse = {
     accountId: string;
@@ -150,6 +391,7 @@ export type AiBindingResponse = {
     libraryId?: string | null;
     maxOutputTokensOverride?: number | null;
     modelCatalogId: string;
+    providerCatalogId: string;
     scopeKind: AiScopeKind;
     systemPrompt?: string | null;
     temperature?: number | null;
@@ -231,6 +473,19 @@ export type AssistantChunkReference = {
      */
     chunkId: string;
     /**
+     * Document the chunk was read from, when it still exists.
+     */
+    documentId?: string | null;
+    /**
+     * Title of that document.
+     */
+    documentTitle?: string | null;
+    /**
+     * Opening of the chunk's own text, so the reference reads as a source
+     * rather than as a rank and a score.
+     */
+    excerpt?: string | null;
+    /**
      * Execution that selected the chunk.
      */
     executionId: string;
@@ -242,6 +497,10 @@ export type AssistantChunkReference = {
      * Relevance score used to rank the chunk.
      */
     score: number;
+    /**
+     * Headings above the chunk, outermost first.
+     */
+    sectionPath?: Array<string>;
 };
 
 /**
@@ -289,6 +548,10 @@ export type AssistantConversationMessage = {
      * Plain-text message content.
      */
     content: string;
+    /**
+     * Server-observed elapsed processing time for an active execution.
+     */
+    elapsedMs?: number | null;
     evidence?: null | AssistantEvidenceBundle;
     /**
      * Execution associated with the message, when applicable.
@@ -408,10 +671,6 @@ export type AssistantExecution = {
      */
     bindingId?: string | null;
     /**
-     * Terminal completion time, or `None` while still active.
-     */
-    completedAt?: string | null;
-    /**
      * Captured context bundle used for this execution.
      */
     contextBundleId: string;
@@ -448,11 +707,11 @@ export type AssistantExecution = {
      */
     responseTurnId?: string | null;
     /**
-     * Associated agent-runtime execution, when delegated to the runtime.
+     * Runtime execution that owns lifecycle state and terminal timing.
      */
-    runtimeExecutionId?: string | null;
+    runtimeExecutionId: string;
     /**
-     * Time at which execution processing began.
+     * Time at which the query record was created.
      */
     startedAt: string;
     /**
@@ -674,7 +933,7 @@ export type AssistantRelationReference = {
      */
     executionId: string;
     /**
-     * Canonical relation statement, when one was produced.
+     * Normalized relation statement, when one was produced.
      */
     normalizedAssertion?: string | null;
     /**
@@ -926,7 +1185,7 @@ export type AssistantVerificationWarning = {
 };
 
 /**
- * Canonical async-operation polling payload. Exposes the raw parent row
+ * Shared async-operation polling payload. Exposes the raw parent row
  * plus aggregated child-operation counts, so any batch endpoint (batch
  * rerun, batch delete, future batch annotate, …) can be polled via the
  * same response shape. `progress` is populated whenever at least one child
@@ -960,6 +1219,32 @@ export type AuditAssistantCallResponse = {
 export type AuditAssistantModelResponse = {
     modelName: string;
     providerKind: string;
+};
+
+/**
+ * A displayed date/time interval, with an exclusive upper bound.
+ */
+export type AuditCreatedAtRangeInput = {
+    max: string;
+    min: string;
+};
+
+export type AuditEventFacetValueResponse = {
+    count: number;
+    /**
+     * The label the grid renders for this value (the actor's display label,
+     * or the enum value itself).
+     */
+    label: string;
+    /**
+     * The raw column value; `null` is the genuine "no actor" bucket.
+     */
+    value?: string | null;
+};
+
+export type AuditEventFacetsResponse = {
+    hasMore: boolean;
+    values: Array<AuditEventFacetValueResponse>;
 };
 
 export type AuditEventPageResponse = {
@@ -1001,6 +1286,17 @@ export type AuditEventSubjectResponse = {
 };
 
 /**
+ * One canonical hint contract for global and column-local facet searches.
+ */
+export type AuditSearchHintsInput = {
+    actionKinds?: Array<string>;
+    actorNull?: boolean;
+    createdAtRange?: null | AuditCreatedAtRangeInput;
+    resultKinds?: Array<string>;
+    surfaceKinds?: Array<string>;
+};
+
+/**
  * Active session metadata and its authenticated user.
  */
 export type AuthenticatedSession = {
@@ -1016,6 +1312,24 @@ export type AuthenticatedSession = {
      * User authenticated by the session.
      */
     user: SessionUser;
+};
+
+/**
+ * One model the provider reports as reachable with an account, and the
+ * catalog row that already represents it when there is one. A router's chat
+ * set is seeded from one listing and may lag it, so this live listing is
+ * where the operator sees what the account reaches now.
+ */
+export type AvailableProviderModelResponse = {
+    contextWindow?: number | null;
+    inputModalities: Array<string>;
+    maxOutputTokens?: number | null;
+    /**
+     * Set when this model already has a catalog row.
+     */
+    modelCatalogId?: string | null;
+    modelName: string;
+    pricing?: null | ModelPricing;
 };
 
 export type BatchCancelRequest = {
@@ -1040,7 +1354,7 @@ export type BatchDeleteRequest = {
 };
 
 /**
- * Canonical 202 Accepted response for async batch document operations.
+ * Standard 202 Accepted response for async batch document operations.
  *
  * The batch is executed on a background task; callers poll
  * `GET /v1/ops/operations/{batchOperationId}` to observe progress and the
@@ -1062,7 +1376,6 @@ export type BatchReprocessRequest = {
 export type BillingCharge = {
     currencyCode: string;
     id: string;
-    priceCatalogId: string;
     pricedAt: string;
     totalPrice: string;
     unitPrice: string;
@@ -1076,12 +1389,14 @@ export type BillingChargePage = {
 };
 
 export type BillingExecutionCost = {
+    costCoverage: CostCoverageStatus;
     currencyCode: string;
     id: string;
     owningExecutionId: string;
     owningExecutionKind: BillingExecutionOwnerKind;
     providerCallCount: number;
     totalCost: string;
+    unpricedProviderCallCount: number;
     updatedAt: string;
 };
 
@@ -1239,6 +1554,7 @@ export type BootstrapSetupAiRequest = {
 export type BootstrapSetupRequest = {
     aiSetup?: null | BootstrapSetupAiRequest;
     displayName?: string | null;
+    email: string;
     login: string;
     password: string;
 };
@@ -1252,6 +1568,13 @@ export type BootstrapStatus = {
      * Whether an owner account must still be created.
      */
     setupRequired: boolean;
+    /**
+     * Whether the deployment has a complete, validated `OpenID` Connect sign-in configuration.
+     *
+     * This is intentionally an availability signal only. `IdP` group membership
+     * authorizes entry to the application, but never grants an application role.
+     */
+    ssoAvailable: boolean;
 };
 
 export type BulkIngestQueueActionRequest = {
@@ -1262,24 +1585,6 @@ export type BulkIngestQueueActionRequest = {
 export type BulkIngestQueueActionResponse = {
     queue: IngestQueueResponse;
     results: Array<IngestQueueBulkResultItem>;
-};
-
-/**
- * Access decision for one administration section.
- */
-export type CapabilityGate = {
-    /**
-     * Whether the current principal may open the section.
-     */
-    allowed: boolean;
-    /**
-     * Explanation shown when access is restricted.
-     */
-    reason?: string | null;
-    /**
-     * Section governed by the decision.
-     */
-    section: AdminSection;
 };
 
 export type CatalogDeletionAcceptedResponse = {
@@ -1293,6 +1598,13 @@ export type CatalogLibraryIngestionReadinessResponse = {
     ready: boolean;
 };
 
+export type CatalogLibraryPageResponse = {
+    items: Array<CatalogLibraryResponse>;
+    limit: number;
+    offset: number;
+    totalCount: number;
+};
+
 export type CatalogLibraryResponse = {
     description?: string | null;
     displayName: string;
@@ -1303,9 +1615,14 @@ export type CatalogLibraryResponse = {
     lifecycleState: string;
     recognitionPolicy: LibraryRecognitionPolicy;
     retrievalConfig: RetrievalConfig;
+    runtimeReadiness: CatalogLibraryRuntimeReadinessResponse;
     slug: string;
     webIngestPolicy: WebIngestPolicy;
     workspaceId: string;
+};
+
+export type CatalogLibraryRuntimeReadinessResponse = {
+    missingBindingPurposes: Array<AiBindingPurpose>;
 };
 
 export type CatalogWorkspaceResponse = {
@@ -1382,7 +1699,7 @@ export type ContentDocument = {
 export type ContentDocumentDetailResponse = {
     activeRevision?: null | ContentRevision;
     document: ContentDocument;
-    fileName: string;
+    fileName: string | null;
     head?: null | ContentDocumentHead;
     lifecycle?: null | DocumentLifecycleDetail;
     pipeline: ContentDocumentPipelineState;
@@ -1402,22 +1719,23 @@ export type ContentDocumentHead = {
     latest_mutation_id?: string | null;
     latest_successful_attempt_id?: string | null;
     readable_revision_id?: string | null;
+    visibility_intent_id?: string | null;
 };
 
 export type ContentDocumentListItem = {
     /**
      * Summed cost across every billable execution attributed to this
      * document (ingest + graph extraction). Serialized as a decimal
-     * string to avoid IEEE-754 rounding in the browser. Always present
-     * (zero when no billable execution landed) so the frontend can
-     * render the column without a second roundtrip.
+     * string to avoid IEEE-754 rounding in the browser. `null` while the
+     * owning rollup reconciles — the amount is unknown, not zero — with
+     * `costCurrencyCode` also `null`.
      */
-    cost: string;
-    costCurrencyCode: string;
+    cost?: string | null;
+    costCurrencyCode?: string | null;
     documentHint?: string | null;
     documentState: string;
     /**
-     * Canonical connector identity (`content_document.external_key`).
+     * Persisted connector identity (`content_document.external_key`).
      * Connectors look this up via list to decide whether to upload or
      * replace; exposed so a paginated list pass is sufficient instead
      * of a per-document detail roundtrip.
@@ -1425,16 +1743,16 @@ export type ContentDocumentListItem = {
     externalKey: string;
     failureCode?: string | null;
     failureMessage?: string | null;
-    fileName: string;
-    fileSize?: number | null;
-    fileType?: string | null;
+    fileName: string | null;
+    fileSize: number | null;
+    fileType: string | null;
     id: string;
     libraryId: string;
     processingFinishedAt?: string | null;
     processingStartedAt?: string | null;
     progressPercent?: number | null;
     /**
-     * Canonical readiness bucket derived server-side.
+     * Readiness bucket derived server-side.
      */
     readiness: DocumentReadiness;
     retryable: boolean;
@@ -1443,7 +1761,7 @@ export type ContentDocumentListItem = {
     sourceUri?: string | null;
     stage?: string | null;
     /**
-     * Canonical status bucket derived server-side.
+     * Status bucket derived server-side.
      */
     status: DocumentStatus;
     uploadedAt: string;
@@ -1494,6 +1812,15 @@ export type ContentMutationDetailResponse = {
     items: Array<ContentMutationItem>;
     jobId?: string | null;
     mutation: ContentMutation;
+    /**
+     * Durable admission visibility policy of this mutation. Always emitted so
+     * a client can never treat the field as absent and silently assume
+     * readability; unknown values are a decode error, not a default.
+     */
+    operationStatus?: string | null;
+    requestFingerprint?: string | null;
+    resultChecksum?: string | null;
+    resultRevisionId?: string | null;
 };
 
 export type ContentMutationItem = {
@@ -1543,6 +1870,26 @@ export type ContentSourceAccess = {
 
 export type ContentSourceAccessKind = 'stored_document' | 'external_url';
 
+/**
+ * Whether a reported cost covers every provider call in its scope.
+ *
+ * A price catalog entry is operator-configured, so a call can produce usage
+ * with no charge. Without this status a caller cannot tell an execution that
+ * genuinely cost nothing from one whose price was never configured — both
+ * report a zero total.
+ */
+export type CostCoverageStatus = 'complete' | 'partial' | 'unknown';
+
+/**
+ * Whether a cost read reflects every committed provider call in its scope.
+ *
+ * Independent of [`CostCoverageStatus`], which is a *pricing* fact: a scope
+ * can be fully priced yet still be reconciling a provider call that has not
+ * been folded into its rollup, and the reverse. A `Reconciling` read withholds
+ * its cost fields instead of serving a stale aggregate as exact.
+ */
+export type CostRollupFreshness = 'current' | 'reconciling';
+
 export type CreateAiAccountRequest = {
     apiKey?: string | null;
     baseUrl?: string | null;
@@ -1556,6 +1903,12 @@ export type CreateAiAccountRequest = {
 export type CreateAiBindingRequest = {
     accountId: string;
     bindingPurpose: AiBindingPurpose;
+    /**
+     * `active` (default) or `disabled`. An operator may store a
+     * decision-provider binding `disabled` and activate it later; omitting the
+     * field keeps the historical active default.
+     */
+    bindingState?: string | null;
     extraParametersJson?: unknown;
     libraryId?: string | null;
     maxOutputTokensOverride?: number | null;
@@ -1578,12 +1931,31 @@ export type CreateCatalogWorkspaceRequest = {
     slug?: string | null;
 };
 
+/**
+ * Multipart form for a file-backed document admission.
+ *
+ * The names intentionally remain snake_case because multipart field names are
+ * protocol literals parsed directly by `parse_upload_multipart`.
+ */
+export type CreateDocumentMultipartRequest = {
+    document_hint?: string | null;
+    external_key?: string | null;
+    file: Blob | File;
+    idempotency_key?: string | null;
+    parent_external_key?: string | null;
+    title?: string | null;
+};
+
 export type CreateDocumentRequest = {
     byteSize?: number | null;
     checksum?: string | null;
     contentSourceKind?: string | null;
     documentHint?: string | null;
     externalKey?: string | null;
+    /**
+     * Explicit source filename, required when admitting replacement metadata.
+     */
+    fileName?: string | null;
     idempotencyKey?: string | null;
     languageCode?: string | null;
     mimeType?: string | null;
@@ -1604,15 +1976,29 @@ export type CreateDocumentResponse = {
     mutation: ContentMutationDetailResponse;
 };
 
+export type CreateKeyRequest = {
+    expiresAt?: string | null;
+    idempotencyKey: string;
+    label: string;
+    libraryIds: Array<string>;
+    permissionKinds: Array<string>;
+    workspaceId: string;
+};
+
+export type CreateLibraryRequest = {
+    description?: string | null;
+    displayName: string;
+    slug?: string | null;
+};
+
 export type CreateModelCatalogRequest = {
     allowedBindingPurposes?: Array<AiBindingPurpose>;
-    capabilityKind: string;
     contextWindow?: number | null;
     lifecycleState: string;
     maxOutputTokens?: number | null;
     metadataJson?: unknown;
-    modalityKind: string;
     modelName: string;
+    pricing: ModelPricing;
     providerCatalogId: string;
 };
 
@@ -1626,6 +2012,19 @@ export type CreateProviderCatalogRequest = {
 };
 
 /**
+ * Multipart form for a file-backed document revision.
+ */
+export type CreateRevisionMultipartRequest = {
+    document_hint?: string | null;
+    file: Blob | File;
+    idempotency_key?: string | null;
+    language_code?: string | null;
+    source_uri?: string | null;
+    title?: string | null;
+    visibility_intent_id?: string | null;
+};
+
+/**
  * JSON body for `POST /v1/content/documents/{documentId}/revisions`.
  * `mode = "append"` requires `appendedText`; `mode = "replace"` requires
  * `markdown`. Replacing the underlying file bytes instead of markdown text
@@ -1633,9 +2032,30 @@ export type CreateProviderCatalogRequest = {
  */
 export type CreateRevisionRequest = {
     appendedText?: string | null;
+    /**
+     * Required for append; the exact immutable source revision.
+     */
+    baseRevisionId?: string | null;
+    documentHint?: string | null;
+    fileName?: string | null;
     idempotencyKey?: string | null;
+    languageCode?: string | null;
     markdown?: string | null;
+    mimeType?: string | null;
     mode: RevisionMode;
+    sourceUri?: string | null;
+    title?: string | null;
+    visibilityIntentId?: string | null;
+};
+
+export type CreateServiceIdentityRequest = {
+    expiresAt?: string | null;
+    idempotencyKey: string;
+    label: string;
+    libraryIds?: Array<string>;
+    permissionKinds?: Array<IamPermissionKind>;
+    provisioningAuthority?: null | IamProvisioningAuthority;
+    workspaceId?: string | null;
 };
 
 export type CreateSessionRequest = {
@@ -1669,6 +2089,28 @@ export type CreateUserRequest = {
     role: SystemRole;
 };
 
+/**
+ * Denial is admitted separately from replacement work, including when payload is busy.
+ */
+export type CreateVisibilityIntentRequest = {
+    /**
+     * Required durable key reused only for retransmission of this observation.
+     */
+    idempotencyKey: string;
+    /**
+     * Required even when null. The backend compares opaque tokens only for equality.
+     */
+    materializationToken: string | null;
+    /**
+     * Complete SAFE replacement descriptor expected by this obligation.
+     */
+    replacement: ReplacementIdentity;
+    /**
+     * Required opaque source identity, preserved without rewriting.
+     */
+    sourceIdentity: string;
+};
+
 export type CreateWebIngestRunRequest = {
     boundaryPolicy?: null | WebBoundaryPolicy;
     crawlFilter: WebIngestUrlFilter;
@@ -1681,14 +2123,9 @@ export type CreateWebIngestRunRequest = {
     seedUrl: string;
 };
 
-export type CreateWorkspacePriceOverrideRequest = {
-    billingUnit: string;
-    currencyCode: string;
-    effectiveFrom: string;
-    effectiveTo?: string | null;
-    modelCatalogId: string;
-    unitPrice: string;
-    workspaceId: string;
+export type CreateWorkspaceRequest = {
+    displayName: string;
+    slug?: string | null;
 };
 
 /**
@@ -1726,7 +2163,7 @@ export type DashboardSurface = {
      */
     attention: Array<DashboardAttentionItem>;
     /**
-     * Canonical mutually exclusive document lifecycle and graph-readiness counts.
+     * Mutually exclusive document lifecycle and graph-readiness counts.
      */
     documentMetrics: LibraryDocumentMetrics;
     /**
@@ -1806,17 +2243,94 @@ export type DocumentAttempt = {
     totalElapsedMs?: number | null;
 };
 
+export type DocumentColumnFilters = {
+    cost?: Array<string | null> | null;
+    fileName?: Array<string | null> | null;
+    fileSize?: Array<number | null> | null;
+    fileType?: Array<string | null> | null;
+    finishedAt?: Array<string | null> | null;
+    pipelineTime?: Array<number | null> | null;
+    status?: Array<null | DocumentStatus> | null;
+    uploadedAt?: Array<string | null> | null;
+};
+
 export type DocumentCostPage = {
+    /**
+     * Freshness of the owning library rollup. While `reconciling` `items` is
+     * empty, `nextCursor` is absent and `total` is absent: a per-document
+     * cost is never ordered, paginated or counted from a stale aggregate.
+     */
+    costRollupFreshness: CostRollupFreshness;
     items: Array<DocumentCostSummary>;
     nextCursor?: string | null;
     total?: number | null;
 };
 
 export type DocumentCostSummary = {
+    costCoverage: CostCoverageStatus;
     currencyCode: string;
     documentId: string;
     providerCallCount: number;
     totalCost: string;
+    unpricedProviderCallCount: number;
+};
+
+/**
+ * RFC3339 UTC bound, inclusive lower / exclusive upper, `min <= max`.
+ */
+export type DocumentDateRange = {
+    max: string;
+    min: string;
+};
+
+export type DocumentFacetColumn = 'uploaded_at' | 'file_name' | 'file_type' | 'file_size' | 'status' | 'cost' | 'pipeline_time' | 'finished_at';
+
+export type DocumentFacetValue = {
+    count: number;
+    value: FacetValue;
+};
+
+export type DocumentFacetsResponse = {
+    column: DocumentFacetColumn;
+    /**
+     * Freshness of the library billing rollup. `reconciling` means the facet
+     * could not be resolved exactly if it reads cost: `values` is empty and
+     * `nextCursor` is absent (not "no values"), so a cost-dependent facet is
+     * never an arbitrary stale distribution. Independent of pricing coverage.
+     */
+    costRollupFreshness: CostRollupFreshness;
+    /**
+     * `null` when the last page has been reached.
+     */
+    nextCursor?: string | null;
+    /**
+     * Whether this facet result was withheld because it reads cost while the
+     * library rollup reconciles. `true` means the cost-dependent facet could
+     * not be answered exactly — the facet column is `cost`, or the scope
+     * carries an effective cost filter or literal/normalized search — so
+     * `values` is empty and `nextCursor` is absent. A non-cost facet on a
+     * dirty rollup is `false` with real values and a truthful reconciling
+     * freshness.
+     */
+    scopePending: boolean;
+    snapshotAt: string;
+    values: Array<DocumentFacetValue>;
+};
+
+/**
+ * Indexing invariants the documents list can filter on. Each value resolves to
+ * an exact document set the dashboard already counts, so the notice and the
+ * list it opens cannot disagree.
+ */
+export type DocumentIndexingFilter = 'graph_gap' | 'graph_ready' | 'vector_gap';
+
+/**
+ * Integer bound, inclusive lower / exclusive upper. Both endpoints are
+ * nonnegative and `min <= max`; a value outside `i64` fails deserialization.
+ */
+export type DocumentIntRange = {
+    max: number;
+    min: number;
 };
 
 export type DocumentLifecycleDetail = {
@@ -1826,18 +2340,41 @@ export type DocumentLifecycleDetail = {
 };
 
 export type DocumentListPageResponse = {
+    /**
+     * Freshness of the library billing rollup this page was read against.
+     * `reconciling` means every row's cost is withheld (`cost: null`) and a
+     * cost-dependent read would return no rows. Independent of pricing
+     * coverage; a clean library stays `current`.
+     */
+    costRollupFreshness: CostRollupFreshness;
     items: Array<ContentDocumentListItem>;
     nextCursor?: string | null;
+    /**
+     * Whether this query result was withheld because it reads cost while the
+     * library rollup reconciles — distinct from `cost_rollup_freshness`, which
+     * describes the rollup itself. `true` means the cost-dependent query
+     * (cost sort, cost filter, literal/normalized text search) could not be
+     * answered exactly: `items` is empty, `nextCursor` and `totalCount` are
+     * absent. A metadata read on a dirty rollup is `false` with real rows, a
+     * real total and a truthful `reconciling` freshness.
+     */
+    scopePending: boolean;
+    /**
+     * Instant captured once for the whole cursor chain. Send it to the facets
+     * endpoint so facet counts agree with this page's pipeline durations.
+     */
+    snapshotAt: string;
     statusCounts?: null | DocumentListStatusCounts;
     totalCount?: number | null;
 };
 
-export type DocumentListSortKey = 'uploaded_at' | 'file_name' | 'file_type' | 'file_size' | 'status';
+export type DocumentListSortKey = 'uploaded_at' | 'file_name' | 'file_type' | 'file_size' | 'status' | 'cost' | 'pipeline_time' | 'finished_at';
 
 export type DocumentListSortOrder = 'asc' | 'desc';
 
 export type DocumentListStatusCounts = {
     canceled: number;
+    empty: number;
     failed: number;
     processing: number;
     queued: number;
@@ -1848,7 +2385,7 @@ export type DocumentListStatusCounts = {
 /**
  * Highest query capability currently available for a document.
  */
-export type DocumentReadiness = 'processing' | 'readable' | 'graph_sparse' | 'graph_ready' | 'failed';
+export type DocumentReadiness = 'processing' | 'empty' | 'readable' | 'graph_sparse' | 'graph_ready' | 'failed';
 
 export type DocumentReadinessSummary = {
     activeRevisionId?: string | null;
@@ -1862,6 +2399,12 @@ export type DocumentReadinessSummary = {
     stalledReason?: string | null;
     typedFactCoverage?: number | null;
     updatedAt: string;
+};
+
+export type DocumentSearchRanges = {
+    date?: null | DocumentDateRange;
+    fileSize?: null | DocumentIntRange;
+    pipelineTime?: null | DocumentIntRange;
 };
 
 export type DocumentStageEvent = {
@@ -1901,7 +2444,7 @@ export type DocumentStageEvent = {
 /**
  * Operational lifecycle of a document ingestion attempt.
  */
-export type DocumentStatus = 'queued' | 'processing' | 'ready' | 'failed' | 'canceled';
+export type DocumentStatus = 'queued' | 'processing' | 'ready' | 'failed' | 'canceled' | 'empty';
 
 /**
  * List-view metadata and current processing state for one document.
@@ -1920,17 +2463,17 @@ export type DocumentSummary = {
      */
     failureMessage?: string | null;
     /**
-     * Display name derived from the source or upload.
+     * Immutable published source name, absent when publication is unavailable.
      */
-    fileName: string;
+    fileName: string | null;
     /**
      * Source payload size in bytes.
      */
-    fileSize: number;
+    fileSize: number | null;
     /**
      * Source format or media-type label shown in document lists.
      */
-    fileType: string;
+    fileType: string | null;
     /**
      * Stable document identifier.
      */
@@ -1976,6 +2519,8 @@ export type DocumentSummary = {
      */
     workspaceId?: string | null;
 };
+
+export type FacetValue = string | number | null;
 
 /**
  * Resource scopes to which a permission grant can apply.
@@ -2102,7 +2647,7 @@ export type GraphNodeType = 'entity' | 'person' | 'organization' | 'location' | 
  */
 export type GraphReadinessSummary = {
     /**
-     * Document totals grouped by the canonical readiness state.
+     * Document totals grouped by readiness state.
      */
     documentCountsByReadiness: Array<[
         string,
@@ -2129,6 +2674,43 @@ export type GraphReadinessSummary = {
      * Time at which this coverage snapshot was assembled.
      */
     updatedAt?: string | null;
+};
+
+export type GraphReextractBatchRequest = {
+    /**
+     * Number of documents to enqueue in this request. Must be between 1 and
+     * 256 when provided; omitted requests use the service default.
+     */
+    batchSize?: number | null;
+    /**
+     * Also retry readable documents that have never produced any extraction
+     * row. Defaults to true for explicit operator recovery and for the
+     * bounded periodic background sweep.
+     */
+    includeNeverExtracted?: boolean | null;
+};
+
+export type GraphReextractBatchResponse = {
+    batchSize: number;
+    candidates: number;
+    enqueued: number;
+    failures: number;
+    includeNeverExtracted: boolean;
+    progress: GraphReextractProgressResponse;
+    skippedLiveJobs: number;
+};
+
+export type GraphReextractProgressResponse = {
+    currentExtractionDocumentCount: number;
+    extractionVersion: string;
+    knownEligibleDocumentCount: number;
+    leasedJobCount: number;
+    missingCurrentExtractionDocumentCount: number;
+    neverExtractedDocumentCount: number;
+    outdatedOrIncompleteDocumentCount: number;
+    pausedJobCount: number;
+    queuedJobCount: number;
+    readableDocumentCount: number;
 };
 
 /**
@@ -2220,9 +2802,11 @@ export type IamMe = {
     workspaceMemberships: Array<WorkspaceMembership>;
 };
 
-export type IamPermissionKind = 'workspace_admin' | 'workspace_read' | 'library_read' | 'library_write' | 'document_read' | 'document_write' | 'connector_admin' | 'credential_admin' | 'binding_admin' | 'query_run' | 'ops_read' | 'audit_read' | 'iam_admin';
+export type IamPermissionKind = 'iam_admin' | 'workspace_admin' | 'workspace_read' | 'library_read' | 'library_write' | 'document_read' | 'document_write' | 'connector_admin' | 'credential_admin' | 'binding_admin' | 'query_run' | 'ops_read' | 'audit_read';
 
 export type IamPrincipalKind = 'user' | 'api_token' | 'worker' | 'bootstrap';
+
+export type IamProvisioningAuthority = 'integration';
 
 export type IngestAttempt = {
     attempt_number: number;
@@ -2370,6 +2954,10 @@ export type IngestStageTimelineResponse = {
     stages: Array<IngestStageEvent>;
 };
 
+export type KeyOperationRequest = {
+    idempotencyKey: string;
+};
+
 export type KnowledgeBundleChunkReferenceRow = {
     bundle_id: string;
     chunk_id: string;
@@ -2404,68 +2992,6 @@ export type KnowledgeBundleRelationReferenceRow = {
     rank: number;
     relation_id: string;
     score: number;
-};
-
-export type KnowledgeChunkRow = {
-    chunk_id: string;
-    chunk_index: number;
-    chunk_kind?: string | null;
-    chunk_state: string;
-    content_text: string;
-    document_id: string;
-    heading_trail: Array<string>;
-    library_id: string;
-    literal_digest?: string | null;
-    normalized_text: string;
-    /**
-     * Earliest record timestamp aggregated into this chunk (JSONL ingest
-     * only; None for non-temporal sources). Mirrored from
-     * `content_chunk.occurred_at` so search can hard-bound by time.
-     */
-    occurred_at?: string | null;
-    /**
-     * Latest record timestamp aggregated into this chunk. Equals
-     * `occurred_at` for single-record chunks; None when `occurred_at`
-     * is None.
-     */
-    occurred_until?: string | null;
-    quality_score?: number | null;
-    raptor_level?: number | null;
-    revision_id: string;
-    section_path: Array<string>;
-    span_end?: number | null;
-    span_start?: number | null;
-    support_block_ids?: Array<string>;
-    text_generation?: number | null;
-    token_count?: number | null;
-    vector_generation?: number | null;
-    window_text?: string | null;
-    workspace_id: string;
-};
-
-export type KnowledgeChunkSearchRow = {
-    chunk_id: string;
-    content_text: string;
-    heading_trail: Array<string>;
-    library_id: string;
-    normalized_text: string;
-    quality_score?: number | null;
-    revision_id: string;
-    score: number;
-    section_path: Array<string>;
-    workspace_id: string;
-};
-
-export type KnowledgeChunkVectorSearchRow = {
-    chunk_id: string;
-    embedding_model_key: string;
-    freshness_generation: number;
-    library_id: string;
-    revision_id: string;
-    score: number;
-    vector_id: string;
-    vector_kind: string;
-    workspace_id: string;
 };
 
 export type KnowledgeContextBundleDetailResponse = {
@@ -2508,54 +3034,26 @@ export type KnowledgeDocumentProvenanceSummary = {
     vectorChunkCount: number;
 };
 
-export type KnowledgeDocumentRow = {
-    active_revision_id?: string | null;
-    created_at: string;
-    deleted_at?: string | null;
-    document_hint?: string | null;
-    document_id: string;
-    /**
-     * Typed document role mirrored from `content_document.document_role`
-     * (`primary` | `attachment` | `attached_context`).
-     */
-    document_role?: string;
-    document_state: string;
-    external_key: string;
-    file_name?: string | null;
-    latest_revision_no?: number | null;
-    library_id: string;
-    /**
-     * Canonical structural source parent (mirrored from
-     * `content_document.parent_document_id`). `None` for primary documents.
-     */
-    parent_document_id?: string | null;
-    readable_revision_id?: string | null;
-    source_uri?: string | null;
-    title?: string | null;
-    updated_at: string;
-    workspace_id: string;
-};
-
 export type KnowledgeDocumentSearchResponse = {
     documentHits: Array<KnowledgeSearchDocumentHit>;
     embeddingModelCatalogId: string;
     embeddingModelName: string;
     embeddingProviderKind: string;
-    entityHits: Array<KnowledgeEntitySearchRow>;
+    entityHits: Array<KnowledgeSearchEntityHit>;
     freshnessGeneration: number;
     libraryId: string;
     limit: number;
     queryText: string;
-    relationHits: Array<KnowledgeRelationSearchRow>;
-    vectorChunkHits: Array<KnowledgeChunkVectorSearchRow>;
-    vectorEntityHits: Array<KnowledgeEntityVectorSearchRow>;
+    relationHits: Array<KnowledgeSearchRelationHit>;
+    vectorChunkHits: Array<KnowledgeSearchVectorChunkHit>;
+    vectorEntityHits: Array<KnowledgeSearchVectorEntityHit>;
 };
 
 export type KnowledgeEntityDetailResponse = {
     entity: RuntimeKnowledgeEntityRow;
     graphEvidenceSummary: KnowledgeGraphEvidenceSummary;
     mentionEdges: Array<KnowledgeEntityMentionEdgeRow>;
-    mentionedChunks: Array<KnowledgeChunkRow>;
+    mentionedChunks: Array<KnowledgeMentionedChunkRow>;
     supportingEvidence: Array<RuntimeKnowledgeEvidenceRow>;
     supportingEvidenceEdges: Array<KnowledgeEvidenceSupportEntityEdgeRow>;
     supportingTypedFacts: Array<TypedTechnicalFact>;
@@ -2568,49 +3066,6 @@ export type KnowledgeEntityMentionEdgeRow = {
     inclusionReason?: string | null;
     rank?: number | null;
     score?: number | null;
-};
-
-export type KnowledgeEntitySearchRow = {
-    canonical_label: string;
-    entity_id: string;
-    entity_type: string;
-    library_id: string;
-    score: number;
-    summary?: string | null;
-    workspace_id: string;
-};
-
-export type KnowledgeEntityVectorSearchRow = {
-    embedding_model_key: string;
-    entity_id: string;
-    freshness_generation: number;
-    library_id: string;
-    score: number;
-    vector_id: string;
-    vector_kind: string;
-    workspace_id: string;
-};
-
-export type KnowledgeEvidenceRow = {
-    block_id?: string | null;
-    chunk_id?: string | null;
-    confidence?: number | null;
-    created_at: string;
-    document_id: string;
-    evidence_id: string;
-    evidence_kind?: string;
-    evidence_state: string;
-    extraction_method: string;
-    fact_id?: string | null;
-    freshness_generation: number;
-    library_id: string;
-    literal_spans_json?: unknown;
-    quote_text?: string;
-    revision_id: string;
-    span_end?: number | null;
-    span_start?: number | null;
-    updated_at: string;
-    workspace_id: string;
 };
 
 export type KnowledgeEvidenceSupportEntityEdgeRow = {
@@ -2678,6 +3133,37 @@ export type KnowledgeLibrarySummaryResponse = {
     updatedAt: string;
 };
 
+/**
+ * Wire-facing projection of [`KnowledgeChunkRow`] used for
+ * `mentionedChunks` (camelCase, no `workspace_id` — the same convention
+ * `search.rs`'s `KnowledgeSearch*` DTOs follow for the hybrid search
+ * response).
+ */
+export type KnowledgeMentionedChunkRow = {
+    chunkId: string;
+    chunkIndex: number;
+    chunkKind?: string | null;
+    chunkState: string;
+    contentText: string;
+    documentId: string;
+    headingTrail: Array<string>;
+    libraryId: string;
+    literalDigest?: string | null;
+    normalizedText: string;
+    occurredAt?: string | null;
+    occurredUntil?: string | null;
+    qualityScore?: number | null;
+    revisionId: string;
+    sectionPath: Array<string>;
+    spanEnd?: number | null;
+    spanStart?: number | null;
+    supportBlockIds: Array<string>;
+    textGeneration?: number | null;
+    tokenCount?: number | null;
+    vectorGeneration?: number | null;
+    windowText?: string | null;
+};
+
 export type KnowledgeRelationDetailResponse = {
     graphEvidenceSummary: KnowledgeGraphEvidenceSummary;
     relation: RuntimeKnowledgeRelationRow;
@@ -2690,16 +3176,6 @@ export type KnowledgeRelationListResponse = {
     items: Array<RuntimeKnowledgeRelationRow>;
     nextCursor?: string | null;
     total?: number | null;
-};
-
-export type KnowledgeRelationSearchRow = {
-    library_id: string;
-    normalized_assertion: string;
-    predicate: string;
-    relation_id: string;
-    score: number;
-    summary?: string | null;
-    workspace_id: string;
 };
 
 export type KnowledgeRetrievalTraceRow = {
@@ -2718,10 +3194,26 @@ export type KnowledgeRetrievalTraceRow = {
     workspace_id: string;
 };
 
+/**
+ * Wire-facing projection of [`KnowledgeChunkSearchRow`] (camelCase, no
+ * `workspace_id`).
+ */
+export type KnowledgeSearchChunkHit = {
+    chunkId: string;
+    contentText: string;
+    headingTrail: Array<string>;
+    libraryId: string;
+    normalizedText: string;
+    qualityScore?: number | null;
+    revisionId: string;
+    score: number;
+    sectionPath: Array<string>;
+};
+
 export type KnowledgeSearchDocumentHit = {
-    chunkHits: Array<KnowledgeChunkSearchRow>;
-    document: KnowledgeDocumentRow;
-    evidenceSamples: Array<KnowledgeEvidenceRow>;
+    chunkHits: Array<KnowledgeSearchChunkHit>;
+    document: KnowledgeSearchDocumentSummary;
+    evidenceSamples: Array<KnowledgeSearchEvidenceSample>;
     graphEvidenceSummary: KnowledgeGraphEvidenceSummary;
     lexicalRank?: number | null;
     lexicalScore?: number | null;
@@ -2730,9 +3222,84 @@ export type KnowledgeSearchDocumentHit = {
     score: number;
     technicalFactSamples: Array<TypedTechnicalFact>;
     technicalFactSummary: KnowledgeTechnicalFactProvenanceSummary;
-    vectorChunkHits: Array<KnowledgeChunkVectorSearchRow>;
+    vectorChunkHits: Array<KnowledgeSearchVectorChunkHit>;
     vectorRank?: number | null;
     vectorScore?: number | null;
+};
+
+/**
+ * Wire-facing projection of [`KnowledgeDocumentRow`]: camelCase and without
+ * the internal `workspace_id` tenancy column, which the raw infra row
+ * carries only for storage-layer scoping.
+ */
+export type KnowledgeSearchDocumentSummary = {
+    activeRevisionId?: string | null;
+    createdAt: string;
+    deletedAt?: string | null;
+    documentHint?: string | null;
+    documentId: string;
+    documentRole: string;
+    documentState: string;
+    externalKey: string;
+    fileName?: string | null;
+    latestRevisionNo?: number | null;
+    libraryId: string;
+    parentDocumentId?: string | null;
+    readableRevisionId?: string | null;
+    sourceUri?: string | null;
+    title?: string | null;
+    updatedAt: string;
+};
+
+/**
+ * Wire-facing projection of [`KnowledgeEntitySearchRow`] (camelCase, no
+ * `workspace_id`).
+ */
+export type KnowledgeSearchEntityHit = {
+    canonicalLabel: string;
+    entityId: string;
+    entityType: string;
+    libraryId: string;
+    score: number;
+    summary?: string | null;
+};
+
+/**
+ * Wire-facing projection of [`KnowledgeEvidenceRow`] (camelCase, no
+ * `workspace_id`).
+ */
+export type KnowledgeSearchEvidenceSample = {
+    blockId?: string | null;
+    chunkId?: string | null;
+    confidence?: number | null;
+    createdAt: string;
+    documentId: string;
+    evidenceId: string;
+    evidenceKind: string;
+    evidenceState: string;
+    extractionMethod: string;
+    factId?: string | null;
+    freshnessGeneration: number;
+    libraryId: string;
+    literalSpansJson: unknown;
+    quoteText: string;
+    revisionId: string;
+    spanEnd?: number | null;
+    spanStart?: number | null;
+    updatedAt: string;
+};
+
+/**
+ * Wire-facing projection of [`KnowledgeRelationSearchRow`] (camelCase, no
+ * `workspace_id`).
+ */
+export type KnowledgeSearchRelationHit = {
+    libraryId: string;
+    normalizedAssertion: string;
+    predicate: string;
+    relationId: string;
+    score: number;
+    summary?: string | null;
 };
 
 /**
@@ -2765,6 +3332,36 @@ export type KnowledgeSearchRevisionSummary = {
     vectorState: string;
 };
 
+/**
+ * Wire-facing projection of [`KnowledgeChunkVectorSearchRow`] (camelCase, no
+ * `workspace_id`). Shared by the per-document hit and the top-level
+ * response, mirroring the single raw row it wraps.
+ */
+export type KnowledgeSearchVectorChunkHit = {
+    chunkId: string;
+    embeddingModelKey: string;
+    freshnessGeneration: number;
+    libraryId: string;
+    revisionId: string;
+    score: number;
+    vectorId: string;
+    vectorKind: string;
+};
+
+/**
+ * Wire-facing projection of [`KnowledgeEntityVectorSearchRow`] (camelCase,
+ * no `workspace_id`).
+ */
+export type KnowledgeSearchVectorEntityHit = {
+    embeddingModelKey: string;
+    entityId: string;
+    freshnessGeneration: number;
+    libraryId: string;
+    score: number;
+    vectorId: string;
+    vectorKind: string;
+};
+
 export type KnowledgeTechnicalFactProvenanceSummary = {
     conflictGroupCount: number;
     factKindCounts: {
@@ -2784,21 +3381,30 @@ export type LibraryAccessEntryRequest = {
 };
 
 export type LibraryCostSummary = {
-    currencyCode: string;
-    documentCount: number;
-    providerCallCount: number;
-    totalCost: string;
+    costCoverage?: null | CostCoverageStatus;
+    /**
+     * Freshness of the owning library rollup, independent of `costCoverage`
+     * (pricing). While `reconciling` every value field below is `null`: a
+     * stale aggregate is never served as exact and a fake zero is never
+     * substituted.
+     */
+    costRollupFreshness: CostRollupFreshness;
+    currencyCode?: string | null;
+    documentCount?: number | null;
+    providerCallCount?: number | null;
+    totalCost?: string | null;
+    unpricedProviderCallCount?: number | null;
 };
 
 /**
- * Canonical per-library document metrics — one authoritative shape for all surfaces.
+ * Per-library document metrics — one authoritative shape for all surfaces.
  *
  * Every surface (`/ops/libraries/{id}/dashboard`,
  * `/content/libraries/{id}/documents?includeTotal=true`,
  * `/knowledge/libraries/{id}/summary`) MUST read from this shape.
  *
- * Invariants enforced by the canonical aggregator:
- * * `total == ready + processing + queued + failed + canceled`
+ * Invariants enforced by the shared aggregator:
+ * * `total == ready + processing + queued + failed + canceled + empty`
  * * `graph_ready + graph_sparse == ready` (graph readiness is a
  * split of the ready bucket; it does not overlap with processing
  * / queued / failed / canceled).
@@ -2812,6 +3418,11 @@ export type LibraryDocumentMetrics = {
      * Documents whose current attempt was canceled or superseded.
      */
     canceled: number;
+    /**
+     * Documents with no content and no ingest work pending — admitted
+     * with no revision, no readable revision, and no active mutation.
+     */
+    empty: number;
     /**
      * Documents whose current attempt failed.
      */
@@ -2904,7 +3515,7 @@ export type LlmContextSnapshot = {
     iterations: Array<LlmIterationDebug>;
     libraryId: string;
     /**
-     * Canonical `QueryIR` produced by `QueryCompilerService` before the
+     * Compiled `QueryIR` produced by `QueryCompilerService` before the
      * answer stage ran. Surfaced to the debug panel as a JSON tree so
      * operators see act / scope / target_types / literal_constraints /
      * confidence that actually drove routing and verification. `None`
@@ -2918,7 +3529,7 @@ export type LlmContextSnapshot = {
      * surface where time went and operators can catch heavy sections. Empty
      * on records written before span capture existed.
      */
-    spans?: Array<TurnSpan>;
+    spans: Array<TurnSpan>;
     totalIterations: number;
 };
 
@@ -2936,7 +3547,7 @@ export type LlmIterationDebug = {
      * into a child `grounded_answer` execution. (The runtime IDs above
      * key a different table and are not directly fetchable.)
      */
-    childQueryExecutionIds?: Array<string>;
+    childQueryExecutionIds: Array<string>;
     /**
      * Runtime execution IDs spawned by tool calls in this iteration.
      * Populated on tool-use turns when a tool such as
@@ -2944,7 +3555,7 @@ export type LlmIterationDebug = {
      * snapshot. Empty on iterations whose tools do not spawn child
      * query executions and on single-shot grounded-answer turns.
      */
-    childRuntimeExecutionIds?: Array<string>;
+    childRuntimeExecutionIds: Array<string>;
     /**
      * Wall-clock the model spent on this iteration — request sent to
      * response received ("model think time"). `None` on records written
@@ -2963,7 +3574,6 @@ export type LlmIterationDebug = {
 export type LoginSessionRequest = {
     login: string;
     password: string;
-    rememberMe?: boolean | null;
 };
 
 export type McpCapabilitySnapshot = {
@@ -2978,14 +3588,14 @@ export type McpCapabilitySnapshot = {
     tokenKind: string;
     /**
      * SHA-256 over the ordered visible tool names, descriptions, and
-     * canonical input schemas. The in-process UI agent and external MCP
+     * declared input schemas. The in-process UI agent and external MCP
      * transport derive this value from the same descriptors.
      */
     toolContractHash: string;
     /**
-     * Version of the canonical hash framing used for the visible MCP
+     * Version of the required hash framing used for the visible MCP
      * tool contract. Consumers compare this together with
-     * `tool_contract_hash`; a future incompatible canonicalization can
+     * `tool_contract_hash`; a future incompatible normalization can
      * increment the version without making old hashes ambiguous.
      */
     toolContractVersion: number;
@@ -3031,14 +3641,45 @@ export type ModelCatalogEntryResponse = {
     allowedBindingPurposes: Array<AiBindingPurpose>;
     availabilityState: ModelAvailabilityState;
     availableAccountIds: Array<string>;
-    capabilityKind: string;
     contextWindow?: number | null;
     id: string;
     lifecycleState: string;
     maxOutputTokens?: number | null;
-    modalityKind: string;
+    /**
+     * Carries `seedSource` on rows this build seeded. Its absence is what
+     * tells a client the row came from an operator, whose purpose list is a
+     * record of what has been bound rather than a statement of capability.
+     */
+    metadataJson: unknown;
     modelName: string;
+    pricing: ModelPricing;
     providerCatalogId: string;
+};
+
+/**
+ * Rates applied when a request's input exceeds the threshold. All fields are
+ * present together or the tier does not exist.
+ */
+export type ModelLongContextPricing = {
+    cachedInputPricePer1m: string;
+    inputPricePer1m: string;
+    outputPricePer1m: string;
+    thresholdTokens: number;
+};
+
+/**
+ * Vendor rates carried by every model row, in the model's currency per one
+ * million tokens. Zero is an honest price (local models, embedding output);
+ * an absent price is unrepresentable, which is the point: the separate
+ * price-catalog entity rotted apart from the models actually in use.
+ */
+export type ModelPricing = {
+    cacheWriteInputPricePer1m: string;
+    cachedInputPricePer1m: string;
+    currencyCode: string;
+    inputPricePer1m: string;
+    longContext?: null | ModelLongContextPricing;
+    outputPricePer1m: string;
 };
 
 export type MoveIngestQueueJobRequest = {
@@ -3071,10 +3712,25 @@ export type OpsAsyncOperation = {
     completedAt?: string | null;
     createdAt: string;
     failureCode?: string | null;
+    failureDisposition?: null | OpsFailureDisposition;
     id: string;
     libraryId?: string | null;
     operationKind: string;
     parentAsyncOperationId?: string | null;
+    /**
+     * What the operation produced, for the kinds that produce something a
+     * caller cannot reconstruct afterwards.
+     *
+     * A poller that is told `ready` otherwise learns only that the work
+     * stopped. For a snapshot import that is not enough: a restore that moved
+     * every row and one that silently moved none settle identically. The shape
+     * is per `operation_kind` and deliberately untyped here — the kind that
+     * writes it owns the schema — and `null` is the honest answer for every
+     * kind that publishes nothing and for every operation still in flight.
+     */
+    resultJson?: {
+        [key: string]: unknown;
+    } | null;
     status: OpsAsyncOperationStatus;
     subjectId?: string | null;
     subjectKind?: string | null;
@@ -3095,6 +3751,27 @@ export type OpsAsyncOperationProgress = {
 };
 
 export type OpsAsyncOperationStatus = 'accepted' | 'processing' | 'ready' | 'failed' | 'superseded' | 'canceled';
+
+/**
+ * Server-authoritative terminal disposition of a failed operation.
+ *
+ * Only the operation finalisation that owns an authoritative ingest failure
+ * classification writes this: `fail_content_ingest_attempt` maps the
+ * already-computed `ContentIngestFailureClassification` into it. `null` on the
+ * row is the honest answer whenever the server holds no terminal proof — an
+ * older row created before the column existed, an operation that has not
+ * settled, or an operation kind whose failure path is out of scope (web runs,
+ * deletes, query executions).
+ *
+ * `content_unsupported` is the only value a connector may treat as
+ * `skipped_unsupported`: it marks a deterministic content admission/rejection
+ * (a byte-level `UnsupportedBinary`, `InvalidUtf8` or malformed local content
+ * — never the `upload_extraction_failed` code as a whole, which now also
+ * carries operational failures). A retryable failure that exhausted its
+ * attempt budget is `retry_exhausted`; any other terminal storage,
+ * configuration or worker failure is `operational_terminal`.
+ */
+export type OpsFailureDisposition = 'content_unsupported' | 'retry_exhausted' | 'operational_terminal';
 
 export type OpsLibraryStateResponse = {
     knowledgeGenerations: Array<KnowledgeGenerationResponse>;
@@ -3134,6 +3811,13 @@ export type PatchDocumentMetadataRequest = {
     documentHint?: string | null;
 };
 
+export type PatchServiceIdentityRequest = {
+    expiresAt?: string | null;
+    label?: string | null;
+    libraryIds: Array<string>;
+    permissionKinds: Array<IamPermissionKind>;
+};
+
 /**
  * Partial update for `PATCH /iam/tokens/{tokenId}`. Only `label` and
  * `expiresAt` are mutable post-mint — the permission scope
@@ -3154,7 +3838,7 @@ export type PatchTokenRequest = {
 /**
  * Actions that may be granted to a principal.
  */
-export type PermissionKind = 'workspace_admin' | 'workspace_read' | 'library_read' | 'library_write' | 'document_read' | 'document_write' | 'connector_admin' | 'credential_admin' | 'binding_admin' | 'query_run' | 'ops_read' | 'audit_read' | 'iam_admin';
+export type PermissionKind = 'iam_admin' | 'workspace_admin' | 'workspace_read' | 'library_read' | 'library_write' | 'document_read' | 'document_write' | 'connector_admin' | 'credential_admin' | 'binding_admin' | 'query_run' | 'ops_read' | 'audit_read';
 
 export type PreparedSegmentDetail = {
     codeLanguage?: string | null;
@@ -3185,21 +3869,6 @@ export type PreparedSegmentsPageResponse = {
     offset: number;
     revisionId?: string | null;
     total: number;
-};
-
-export type PriceCatalogEntryResponse = {
-    billingUnit: string;
-    catalogScope: string;
-    currencyCode: string;
-    effectiveFrom: string;
-    effectiveTo?: string | null;
-    id: string;
-    modelCatalogId: string;
-    priceVariantKey: string;
-    requestInputTokensMax?: number | null;
-    requestInputTokensMin?: number | null;
-    unitPrice: string;
-    workspaceId?: string | null;
 };
 
 /**
@@ -3236,7 +3905,7 @@ export type PrincipalResponse = {
 /**
  * HTTP authorization encoding expected by a provider endpoint.
  */
-export type ProviderAuthScheme = 'bearer' | 'raw_authorization';
+export type ProviderAuthScheme = 'bearer' | 'raw_authorization' | 'anthropic_api_key' | 'google_api_key';
 
 /**
  * Whether and how an operator supplies a provider base URL.
@@ -3274,9 +3943,21 @@ export type ProviderCapabilities = {
      */
     chat: ProviderCapabilityState;
     /**
+     * Typed decision-model availability (`TypeSafe` System One). Defaults to
+     * `Unsupported` so a persisted row written before this capability
+     * existed deserializes as "this provider is not a decision provider"
+     * rather than failing to parse.
+     */
+    decision?: ProviderCapabilityState;
+    /**
      * Vector-embedding availability.
      */
     embeddings: ProviderCapabilityState;
+    /**
+     * Whether the endpoint accepts `service_tier: "flex"`, the half-price
+     * tier for latency-tolerant work. Defaults to `Unsupported`.
+     */
+    flexTier?: ProviderCapabilityState;
     /**
      * Remote model-discovery availability.
      */
@@ -3313,6 +3994,11 @@ export type ProviderCatalogEntryResponse = {
     lifecycleState: string;
     modelDiscovery: ProviderModelDiscovery;
     providerKind: string;
+    /**
+     * Purposes no seeded model of this provider covers, each with why. Empty
+     * means the seeded models cover all six.
+     */
+    purposeGaps: Array<ProviderPurposeGap>;
     runtime: ProviderRuntimeProfile;
     uiHints: unknown;
 };
@@ -3345,9 +4031,20 @@ export type ProviderCredentialPolicy = {
 export type ProviderCredentialValidationMode = 'chat_round_trip' | 'model_list' | 'none';
 
 /**
+ * Capability family a provider model-discovery endpoint returns.
+ */
+export type ProviderModelCapabilityKind = 'chat' | 'embedding' | 'decision';
+
+/**
  * Supported strategy and endpoints for enumerating provider models.
  */
 export type ProviderModelDiscovery = {
+    /**
+     * Currency the provider's listing quotes its rates in, when it is known.
+     * The listing itself carries a bare number, so a rouble-priced router and
+     * a dollar-priced one are indistinguishable without this.
+     */
+    listedPricingCurrency?: string | null;
     /**
      * Credential context required for discovery.
      */
@@ -3370,12 +4067,31 @@ export type ProviderModelDiscoveryPath = {
     /**
      * Capability family returned by this endpoint.
      */
-    capabilityKind: string;
+    capabilityKind: ProviderModelCapabilityKind;
     /**
      * Provider-relative path used for discovery.
      */
     path: string;
 };
+
+export type ProviderPurposeGap = {
+    /**
+     * Stable code a client localises. `reason` is the English fallback for
+     * callers with no catalogue of their own.
+     */
+    code?: string;
+    kind: ProviderPurposeGapKind;
+    purpose: AiBindingPurpose;
+    reason: string;
+};
+
+/**
+ * Why a purpose has no seeded model. The distinction is load-bearing: a
+ * provider that cannot embed is a dead end the operator must route around,
+ * while a router with no seeded chat model serves chat perfectly well as soon
+ * as a model is chosen from its live listing.
+ */
+export type ProviderPurposeGapKind = 'provider_cannot' | 'operator_supplies';
 
 /**
  * Protocol details needed to construct requests for a provider kind.
@@ -3421,6 +4137,45 @@ export type ProviderStructuredOutputMode = 'json_schema' | 'json_object' | 'prom
  */
 export type ProviderTokenLimitParameter = 'max_completion_tokens' | 'max_tokens';
 
+export type ProvisionedKeyIdentity = {
+    credentialPrefix: string;
+    expiresAt?: string | null;
+    label: string;
+    principalId: string;
+    status: string;
+    workspaceId?: string | null;
+};
+
+export type ProvisionedKeyResponse = {
+    credential: string;
+    replayed: boolean;
+    serviceIdentity: ProvisionedKeyIdentity;
+};
+
+export type ProvisionedLibraryResponse = {
+    adopted: boolean;
+    description?: string | null;
+    displayName: string;
+    id: string;
+    lifecycleState: string;
+    slug: string;
+    workspaceId: string;
+};
+
+export type ProvisionedWorkspaceResponse = {
+    adopted: boolean;
+    displayName: string;
+    id: string;
+    lifecycleState: string;
+    slug: string;
+};
+
+export type ProvisioningDeletionOperationResponse = {
+    failureCode?: string | null;
+    operationId: string;
+    status: OpsAsyncOperationStatus;
+};
+
 export type QuerySessionListResponse = {
     items: Array<AssistantSessionListItem>;
     nextCursor?: string | null;
@@ -3456,6 +4211,45 @@ export type RenameAssistantSessionRequest = {
     title: string;
 };
 
+/**
+ * Complete semantic descriptor of replacement bytes and request metadata.
+ * Storage paths and inherited document metadata are deliberately excluded.
+ */
+export type ReplacementIdentity = {
+    /**
+     * Exact nonnegative length of replacement bytes.
+     */
+    byteSize: number;
+    /**
+     * Lowercase SHA-256 prefixed with `sha256:`.
+     */
+    checksum: string;
+    /**
+     * Complete replacement extraction hint.
+     */
+    documentHint?: string | null;
+    /**
+     * Request filename, not a generated storage path.
+     */
+    fileName: string;
+    /**
+     * Complete replacement language declaration.
+     */
+    languageCode?: string | null;
+    /**
+     * Replacement media type, normalized independently of prior content.
+     */
+    mimeType: string;
+    /**
+     * Complete replacement source URI.
+     */
+    sourceUri?: string | null;
+    /**
+     * Complete replacement title; null does not inherit an older title.
+     */
+    title?: string | null;
+};
+
 export type ReprocessDocumentRequest = {
     idempotencyKey?: string | null;
 };
@@ -3489,9 +4283,9 @@ export type ResponseToolCallDebug = {
  */
 export type RetrievalConfig = {
     /**
-     * Lexical (full-text-search) lane configuration.
+     * Persisted configuration must supply every field explicitly.
      */
-    lexical?: RetrievalLexicalConfig;
+    lexical: RetrievalLexicalConfig;
 };
 
 /**
@@ -3502,10 +4296,9 @@ export type RetrievalLexicalConfig = {
     /**
      * Name of the Postgres text-search configuration (`regconfig`) used by the
      * `to_tsquery` / `websearch_to_tsquery` constructors in the lexical lane.
-     * Validated against the live `pg_ts_config` catalog at write time; defaults
-     * to [`DEFAULT_TEXT_SEARCH_CONFIG`].
+     * Validated against the live `pg_ts_config` catalog at write time.
      */
-    textSearchConfig?: string;
+    textSearchConfig: string;
 };
 
 /**
@@ -3569,8 +4362,8 @@ export type RuntimeExecutionTraceResponse = {
 };
 
 export type RuntimeKnowledgeEntityRow = {
-    aliases: Array<string>;
     canonicalLabel: string;
+    aliases: Array<string>;
     confidence?: number | null;
     createdAt: string;
     entityId: string;
@@ -3582,7 +4375,6 @@ export type RuntimeKnowledgeEntityRow = {
     summary?: string | null;
     supportCount: number;
     updatedAt: string;
-    workspaceId: string;
 };
 
 export type RuntimeKnowledgeEvidenceRow = {
@@ -3601,7 +4393,6 @@ export type RuntimeKnowledgeEvidenceRow = {
     spanStart?: number | null;
     supportKind: string;
     updatedAt: string;
-    workspaceId: string;
 };
 
 export type RuntimeKnowledgeRelationRow = {
@@ -3618,7 +4409,6 @@ export type RuntimeKnowledgeRelationRow = {
     subjectEntityId: string;
     supportCount: number;
     updatedAt: string;
-    workspaceId: string;
 };
 
 export type RuntimeLifecycleState = 'accepted' | 'running' | 'completed' | 'recovered' | 'failed' | 'canceled';
@@ -3648,6 +4438,14 @@ export type RuntimePolicySummary = {
     terminateCount: number;
 };
 
+export type RuntimeResources = {
+    availableParallelism: number;
+    cgroupCpuMax?: string | null;
+    cgroupCpusetCpusEffective?: string | null;
+    cgroupMemoryMax?: string | null;
+    hostMemoryTotalBytes?: number | null;
+};
+
 export type RuntimeStageKind = 'compile' | 'plan' | 'retrieve' | 'rerank' | 'assemble_context' | 'answer' | 'verify' | 'extract_graph' | 'structured_prepare' | 'technical_fact_extract' | 'recovery' | 'persist';
 
 export type RuntimeStageRecordResponse = {
@@ -3669,6 +4467,39 @@ export type RuntimeStageState = 'pending' | 'running' | 'completed' | 'recovered
 export type RuntimeSurfaceKind = 'ui' | 'rest' | 'mcp' | 'worker' | 'internal';
 
 export type RuntimeTaskKind = 'query_compile' | 'query_plan' | 'query_rerank' | 'query_answer' | 'query_verify' | 'graph_extract' | 'structured_prepare' | 'technical_fact_extract';
+
+export type ServiceIdentityCredentialResponse = {
+    credential: string;
+    replayed: boolean;
+    serviceIdentity: ServiceIdentityResponse;
+};
+
+export type ServiceIdentityMutationResponse = {
+    replayed: boolean;
+    serviceIdentity: ServiceIdentityResponse;
+};
+
+export type ServiceIdentityOperationRequest = {
+    idempotencyKey: string;
+};
+
+export type ServiceIdentityOwnerResponse = {
+    issuer: string;
+    subject: string;
+};
+
+export type ServiceIdentityResponse = {
+    credentialPrefix: string;
+    expiresAt?: string | null;
+    grants: Array<TokenGrantSummaryResponse>;
+    label: string;
+    lastUsedAt?: string | null;
+    owner: ServiceIdentityOwnerResponse;
+    principalId: string;
+    revokedAt?: string | null;
+    scope: TokenScopeResponse;
+    status: string;
+};
 
 /**
  * Authentication state returned while resolving a browser session.
@@ -3773,9 +4604,16 @@ export type ShellBootstrap = {
      */
     effectiveGrants: Array<TokenGrant>;
     /**
-     * Libraries visible within the active workspace.
+     * A bounded sample of the active workspace's libraries, with the pinned
+     * active library first. This is deliberately NOT the complete set — use
+     * `library_total_count` for the size and the catalog library search for
+     * anything beyond what the shell renders immediately.
      */
     libraries: Array<LibrarySummary>;
+    /**
+     * Total number of libraries visible within the active workspace.
+     */
+    libraryTotalCount: number;
     /**
      * Locale resolved for this session.
      */
@@ -3909,7 +4747,7 @@ export type SubscriptionResponse = {
 /**
  * System role assigned to a user principal (viewer < operator < admin).
  *
- * Canonical source for the UI shell's capability gating. Mirrors the
+ * Authoritative source for the UI shell's capability gating. Mirrors the
  * `public.iam_system_role` PG enum and the `ShellRole` shell-bootstrap field.
  */
 export type SystemRole = 'viewer' | 'operator' | 'admin';
@@ -4004,7 +4842,7 @@ export type TokenResponse = {
     tokenPrefix: string;
 };
 
-export type TokenScopeKind = 'system' | 'workspace' | 'library';
+export type TokenScopeKind = 'workspace' | 'library';
 
 export type TokenScopeResponse = {
     kind: TokenScopeKind;
@@ -4072,6 +4910,10 @@ export type UpdateAiAccountRequest = {
     apiKey?: string | null;
     baseUrl?: string | null;
     credentialState: string;
+    /**
+     * Optimistic-concurrency fence from the latest account detail response.
+     */
+    expectedUpdatedAt: string;
     label: string;
 };
 
@@ -4118,14 +4960,11 @@ export type UpdateLibraryWebIngestPolicyRequest = {
 
 export type UpdateModelCatalogRequest = {
     allowedBindingPurposes?: Array<AiBindingPurpose>;
-    capabilityKind: string;
     contextWindow?: number | null;
     lifecycleState: string;
     maxOutputTokens?: number | null;
     metadataJson?: unknown;
-    modalityKind: string;
-    modelName: string;
-    providerCatalogId: string;
+    pricing: ModelPricing;
 };
 
 export type UpdateProviderCatalogRequest = {
@@ -4144,15 +4983,6 @@ export type UpdateSubscriptionRequest = {
     eventTypes?: Array<string> | null;
     secret?: string | null;
     targetUrl?: string | null;
-};
-
-export type UpdateWorkspacePriceOverrideRequest = {
-    billingUnit: string;
-    currencyCode: string;
-    effectiveFrom: string;
-    effectiveTo?: string | null;
-    modelCatalogId: string;
-    unitPrice: string;
 };
 
 /**
@@ -4225,10 +5055,67 @@ export type UserWorkspaceAccessResponse = {
 };
 
 export type VersionResponse = {
+    binarySha256?: string | null;
+    contentVisibilityContract: string;
+    databaseTlsLeafSha256?: string | null;
+    deploymentId?: string | null;
     environment: string;
+    queryTurnMaxConcurrent: number;
+    redisEndpointSha256?: string | null;
+    redisServiceSha256?: string | null;
+    redisTlsLeafSha256?: string | null;
+    resolvedConfigSha256: string;
     role: string;
+    runtimeResources: RuntimeResources;
+    runtimeResourcesSha256: string;
     service: string;
     version: string;
+};
+
+/**
+ * Visibility acceptance receipt, not a revision/job receipt or a currentness promise.
+ */
+export type VisibilityIntentReceipt = {
+    /**
+     * Ready visibility operation; no ingest job is implied.
+     */
+    asyncOperationId: string;
+    /**
+     * Document bound by this obligation.
+     */
+    documentId: string;
+    /**
+     * Original opaque materialization token; equality only.
+     */
+    materializationToken?: string | null;
+    /**
+     * Independent accepted visibility mutation, not the payload owner.
+     */
+    mutationId: string;
+    /**
+     * Applied null-result visibility item.
+     */
+    mutationItemId: string;
+    /**
+     * Original normalized expected replacement.
+     */
+    replacement: ReplacementIdentity;
+    /**
+     * Backend digest of the immutable semantic request.
+     */
+    requestFingerprint: string;
+    /**
+     * Retained revision high-water value captured at acceptance.
+     */
+    revisionFloor: number;
+    /**
+     * Original opaque source identity.
+     */
+    sourceIdentity: string;
+    /**
+     * Visibility item identifier; equal to `mutation_item_id`.
+     */
+    visibilityIntentId: string;
 };
 
 export type WebBoundaryPolicy = 'same_host' | 'same_host_and_subdomains' | 'allow_external';
@@ -4236,9 +5123,9 @@ export type WebBoundaryPolicy = 'same_host' | 'same_host_and_subdomains' | 'allo
 export type WebClassificationReason = 'seed_accepted' | 'duplicate_canonical_url' | 'duplicate_content' | 'outside_boundary_policy' | 'exceeded_max_depth' | 'exceeded_max_pages' | 'url_filter' | 'unsupported_scheme' | 'invalid_url' | 'inaccessible' | 'unsupported_content' | 'cancel_requested';
 
 export type WebDiscoveredPage = {
+    canonicalUrl?: string | null;
     candidateId: string;
     candidateState: string;
-    canonicalUrl?: string | null;
     classificationDetail?: string | null;
     classificationReason?: null | WebClassificationReason;
     contentType?: string | null;
@@ -4391,8 +5278,8 @@ export type WebIngestUrlFilter = {
 };
 
 export type WebPageProvenance = {
-    candidateId?: string | null;
     canonicalUrl?: string | null;
+    candidateId?: string | null;
     runId?: string | null;
     sourceUri?: string | null;
 };
@@ -4414,7 +5301,7 @@ export type WebRunCounts = {
      */
     discovered: number;
     /**
-     * Candidates converged with an existing canonical page.
+     * Candidates converged with an existing preferred page.
      */
     duplicates: number;
     /**
@@ -4454,11 +5341,18 @@ export type WorkspaceAccessEntryRequest = {
 };
 
 export type WorkspaceCostSummary = {
-    currencyCode: string;
-    documentCount: number;
-    libraryCount: number;
-    providerCallCount: number;
-    totalCost: string;
+    costCoverage?: null | CostCoverageStatus;
+    /**
+     * Freshness of the owning workspace rollup: any one dirty library makes
+     * the workspace aggregate stale. See [`LibraryCostSummary`].
+     */
+    costRollupFreshness: CostRollupFreshness;
+    currencyCode?: string | null;
+    documentCount?: number | null;
+    libraryCount?: number | null;
+    providerCallCount?: number | null;
+    totalCost?: string | null;
+    unpricedProviderCallCount?: number | null;
 };
 
 /**
@@ -4524,28 +5418,120 @@ export type WorkspaceSummary = {
     slug: string;
 };
 
-export type GetAdminSurfaceData = {
+export type ListAdminLibrariesData = {
     body?: never;
     path?: never;
-    query?: never;
-    url: '/v1/admin/surface';
+    query?: {
+        search?: string;
+        /**
+         * An Intl-derived canonical spelling of `search`, OR'd over the same text
+         * columns; no server-side language dictionary is involved.
+         */
+        normalizedSearch?: string;
+        /**
+         * Typed generic search hints (`AdminLibrarySearchHints`) the client derived
+         * from the term: the numbers a formatted documents/queue/calls label
+         * spells, the exact decimals a cost label carries, and the readiness /
+         * lifecycle values whose localized label matches. Each is an OR
+         * alternative to the text search.
+         */
+        searchHints?: string;
+        /**
+         * JSON object of the grid's typed per-column filters, one nullable array
+         * per column id (`library`/`workspace`/`documents`/`queue`/`cost`/`calls`/
+         * `readiness`/`lifecycle`). Absent means no constraint.
+         */
+        filters?: string;
+        sortBy?: AdminLibrarySortKey;
+        sortOrder?: AdminLibrarySortOrder;
+        offset?: number;
+        limit?: number;
+    };
+    url: '/v1/admin/libraries';
 };
 
-export type GetAdminSurfaceErrors = {
+export type ListAdminLibrariesErrors = {
+    /**
+     * Invalid search, filter or page parameters
+     */
+    400: unknown;
     /**
      * Caller is not authenticated
      */
     401: unknown;
 };
 
-export type GetAdminSurfaceResponses = {
+export type ListAdminLibrariesResponses = {
     /**
-     * Admin surface for the authenticated principal
+     * Bounded library page for the administration console
      */
-    200: AdminSurface;
+    200: AdminLibraryPageResponse;
 };
 
-export type GetAdminSurfaceResponse = GetAdminSurfaceResponses[keyof GetAdminSurfaceResponses];
+export type ListAdminLibrariesResponse = ListAdminLibrariesResponses[keyof ListAdminLibrariesResponses];
+
+export type ListAdminLibraryFacetsData = {
+    body?: never;
+    path?: never;
+    query: {
+        /**
+         * The grid column whose distinct values are requested.
+         */
+        facetColumn: AdminLibraryFacetColumn;
+        /**
+         * The same typed per-column filters the list carries; the selected column's
+         * own filter is self-excluded before counting.
+         */
+        filters?: string;
+        /**
+         * The same whole-table search the list carries.
+         */
+        search?: string;
+        /**
+         * The same Intl-normalized spelling the list carries.
+         */
+        normalizedSearch?: string;
+        /**
+         * The same typed generic search hints the list carries.
+         */
+        searchHints?: string;
+        /**
+         * Substring the operator typed inside this column's menu.
+         */
+        facetSearch?: string;
+        /**
+         * Typed hints for the selected column's displayed labels, independent of
+         * the whole-table search. Hints belonging to other columns are rejected.
+         */
+        facetSearchHints?: string;
+        /**
+         * Opaque keyset cursor returned by the previous facet page.
+         */
+        facetCursor?: string;
+        facetLimit?: number;
+    };
+    url: '/v1/admin/libraries/facets';
+};
+
+export type ListAdminLibraryFacetsErrors = {
+    /**
+     * Invalid search, filter or facet parameters
+     */
+    400: unknown;
+    /**
+     * Caller is not authenticated
+     */
+    401: unknown;
+};
+
+export type ListAdminLibraryFacetsResponses = {
+    /**
+     * Bounded distinct values for one library grid column
+     */
+    200: AdminLibraryFacetsResponse;
+};
+
+export type ListAdminLibraryFacetsResponse = ListAdminLibraryFacetsResponses[keyof ListAdminLibraryFacetsResponses];
 
 export type ListAiAccountsData = {
     body?: never;
@@ -4706,6 +5692,10 @@ export type UpdateAiAccountErrors = {
      * Account not found
      */
     404: unknown;
+    /**
+     * Account changed after the editor loaded it
+     */
+    409: unknown;
 };
 
 export type UpdateAiAccountResponses = {
@@ -4716,6 +5706,46 @@ export type UpdateAiAccountResponses = {
 };
 
 export type UpdateAiAccountResponse = UpdateAiAccountResponses[keyof UpdateAiAccountResponses];
+
+export type ListAvailableProviderModelsData = {
+    body?: never;
+    path: {
+        /**
+         * Account whose credentials are used
+         */
+        account_id: string;
+    };
+    query?: never;
+    url: '/v1/ai/accounts/{account_id}/available-models';
+};
+
+export type ListAvailableProviderModelsErrors = {
+    /**
+     * Provider does not publish a model listing
+     */
+    400: unknown;
+    /**
+     * Caller is not authenticated
+     */
+    401: unknown;
+    /**
+     * Caller is not authorized for the account scope
+     */
+    403: unknown;
+    /**
+     * Account does not exist
+     */
+    404: unknown;
+};
+
+export type ListAvailableProviderModelsResponses = {
+    /**
+     * Models the provider reports for this account
+     */
+    200: Array<AvailableProviderModelResponse>;
+};
+
+export type ListAvailableProviderModelsResponse = ListAvailableProviderModelsResponses[keyof ListAvailableProviderModelsResponses];
 
 export type ListAiLibraryBindingsData = {
     body?: never;
@@ -5084,7 +6114,7 @@ export type DeleteAiModelErrors = {
      */
     404: unknown;
     /**
-     * Model is still referenced by a price override or binding
+     * Model is still referenced by a binding
      */
     409: unknown;
 };
@@ -5165,171 +6195,6 @@ export type UpdateAiModelResponses = {
 };
 
 export type UpdateAiModelResponse = UpdateAiModelResponses[keyof UpdateAiModelResponses];
-
-export type CreateAiPriceOverrideData = {
-    body: CreateWorkspacePriceOverrideRequest;
-    path?: never;
-    query?: never;
-    url: '/v1/ai/price-overrides';
-};
-
-export type CreateAiPriceOverrideErrors = {
-    /**
-     * Caller is not authenticated
-     */
-    401: unknown;
-    /**
-     * Caller cannot administer pricing for the workspace
-     */
-    403: unknown;
-};
-
-export type CreateAiPriceOverrideResponses = {
-    /**
-     * Newly created workspace price override
-     */
-    201: PriceCatalogEntryResponse;
-};
-
-export type CreateAiPriceOverrideResponse = CreateAiPriceOverrideResponses[keyof CreateAiPriceOverrideResponses];
-
-export type DeleteAiPriceOverrideData = {
-    body?: never;
-    path: {
-        /**
-         * Price catalog entry identifier
-         */
-        overrideId: string;
-    };
-    query?: never;
-    url: '/v1/ai/price-overrides/{overrideId}';
-};
-
-export type DeleteAiPriceOverrideErrors = {
-    /**
-     * System catalog prices are read-only
-     */
-    400: unknown;
-    /**
-     * Caller is not authenticated
-     */
-    401: unknown;
-    /**
-     * Caller cannot administer pricing for the workspace
-     */
-    403: unknown;
-    /**
-     * Price override not found
-     */
-    404: unknown;
-    /**
-     * Price override is still referenced
-     */
-    409: unknown;
-};
-
-export type DeleteAiPriceOverrideResponses = {
-    /**
-     * Price override deleted
-     */
-    204: void;
-};
-
-export type DeleteAiPriceOverrideResponse = DeleteAiPriceOverrideResponses[keyof DeleteAiPriceOverrideResponses];
-
-export type GetAiPriceOverrideData = {
-    body?: never;
-    path: {
-        /**
-         * Price catalog entry identifier
-         */
-        overrideId: string;
-    };
-    query?: never;
-    url: '/v1/ai/price-overrides/{overrideId}';
-};
-
-export type GetAiPriceOverrideErrors = {
-    /**
-     * Caller is not authenticated
-     */
-    401: unknown;
-    /**
-     * Price override not found
-     */
-    404: unknown;
-};
-
-export type GetAiPriceOverrideResponses = {
-    /**
-     * Price catalog entry
-     */
-    200: PriceCatalogEntryResponse;
-};
-
-export type GetAiPriceOverrideResponse = GetAiPriceOverrideResponses[keyof GetAiPriceOverrideResponses];
-
-export type UpdateAiPriceOverrideData = {
-    body: UpdateWorkspacePriceOverrideRequest;
-    path: {
-        /**
-         * Price catalog entry identifier
-         */
-        overrideId: string;
-    };
-    query?: never;
-    url: '/v1/ai/price-overrides/{overrideId}';
-};
-
-export type UpdateAiPriceOverrideErrors = {
-    /**
-     * Caller is not authenticated
-     */
-    401: unknown;
-    /**
-     * Caller cannot administer pricing for the workspace
-     */
-    403: unknown;
-    /**
-     * Price override not found
-     */
-    404: unknown;
-};
-
-export type UpdateAiPriceOverrideResponses = {
-    /**
-     * Updated workspace price override
-     */
-    200: PriceCatalogEntryResponse;
-};
-
-export type UpdateAiPriceOverrideResponse = UpdateAiPriceOverrideResponses[keyof UpdateAiPriceOverrideResponses];
-
-export type ListAiPricesData = {
-    body?: never;
-    path?: never;
-    query?: {
-        modelCatalogId?: string;
-        workspaceId?: string;
-    };
-    url: '/v1/ai/prices';
-};
-
-export type ListAiPricesErrors = {
-    /**
-     * Caller is not authenticated
-     */
-    401: unknown;
-};
-
-export type ListAiPricesResponses = {
-    /**
-     * Price catalog entries for the requested model/workspace
-     */
-    200: Array<PriceCatalogEntryResponse>;
-};
-
-export type ListAiPricesResponse = ListAiPricesResponses[keyof ListAiPricesResponses];
 
 export type ListAiProvidersData = {
     body?: never;
@@ -5493,7 +6358,14 @@ export type ListAuditEventsData = {
     body?: never;
     path?: never;
     query?: {
-        actorPrincipalId?: string;
+        /**
+         * Comma-separated actor principal ids (the actor column's own values).
+         */
+        actor?: string;
+        /**
+         * Include events whose actor principal is absent (the null facet bucket).
+         */
+        actorNull?: boolean;
         workspaceId?: string;
         libraryId?: string;
         knowledgeDocumentId?: string;
@@ -5503,9 +6375,37 @@ export type ListAuditEventsData = {
         queryExecutionId?: string;
         runtimeExecutionId?: string;
         asyncOperationId?: string;
+        /**
+         * Comma-separated action kinds.
+         */
+        actionKind?: string;
+        /**
+         * Comma-separated surface kinds.
+         */
         surfaceKind?: string;
+        /**
+         * Comma-separated result kinds.
+         */
         resultKind?: string;
+        /**
+         * Comma-separated exact `createdAt` renderings (the time column's own
+         * values, round-tripped verbatim).
+         */
+        createdAt?: string;
         search?: string;
+        /**
+         * JSON `AuditSearchHintsInput` derived from displayed labels, OR'd with
+         * the raw search over the whole authorized dataset.
+         */
+        searchHints?: string;
+        /**
+         * Column id: `created_at`, `actor`, `action`, `surface` or `result`.
+         */
+        sortBy?: string;
+        /**
+         * `asc` or `desc`.
+         */
+        sortOrder?: string;
         limit?: number;
         /**
          * Opaque keyset continuation token from a previous page's
@@ -5537,6 +6437,82 @@ export type ListAuditEventsResponses = {
 };
 
 export type ListAuditEventsResponse = ListAuditEventsResponses[keyof ListAuditEventsResponses];
+
+export type ListAuditEventFacetsData = {
+    body?: never;
+    path?: never;
+    query: {
+        /**
+         * Column id: `actor`, `action`, `surface` or `result`.
+         */
+        facetColumn: string;
+        /**
+         * Narrow the value list itself; does not affect the counts' scope.
+         */
+        facetSearch?: string;
+        facetLimit?: number;
+        facetOffset?: number;
+        /**
+         * Every other column filter, comma-separated where multi-valued.
+         */
+        actor?: string;
+        actorNull?: boolean;
+        workspaceId?: string;
+        libraryId?: string;
+        knowledgeDocumentId?: string;
+        knowledgeRevisionId?: string;
+        contextBundleId?: string;
+        querySessionId?: string;
+        queryExecutionId?: string;
+        runtimeExecutionId?: string;
+        asyncOperationId?: string;
+        actionKind?: string;
+        surfaceKind?: string;
+        resultKind?: string;
+        createdAt?: string;
+        search?: string;
+        /**
+         * JSON `AuditSearchHintsInput` for the whole-table term.
+         */
+        searchHints?: string;
+        /**
+         * JSON `AuditSearchHintsInput` for this column's value search only.
+         */
+        facetSearchHints?: string;
+        /**
+         * The selected values whose server label the caller must render, by
+         * column and value. Bounded and explicit; the pair lists are positional.
+         */
+        selectedValueColumn?: string;
+        selectedValue?: string;
+        internal?: boolean;
+    };
+    url: '/v1/audit/events/facets';
+};
+
+export type ListAuditEventFacetsErrors = {
+    /**
+     * Unknown facet column
+     */
+    400: unknown;
+    /**
+     * Caller is not authenticated
+     */
+    401: unknown;
+    /**
+     * Caller is not authorized for the requested scope
+     */
+    403: unknown;
+};
+
+export type ListAuditEventFacetsResponses = {
+    /**
+     * Facet values for one audit column
+     */
+    200: AuditEventFacetsResponse;
+};
+
+export type ListAuditEventFacetsResponse = ListAuditEventFacetsResponses[keyof ListAuditEventFacetsResponses];
 
 export type GetBillingExecutionCostData = {
     body?: never;
@@ -6148,7 +7124,11 @@ export type ListCatalogLibrariesData = {
          */
         workspaceId: string;
     };
-    query?: never;
+    query?: {
+        search?: string;
+        offset?: number;
+        limit?: number;
+    };
     url: '/v1/catalog/workspaces/{workspaceId}/libraries';
 };
 
@@ -6165,9 +7145,9 @@ export type ListCatalogLibrariesErrors = {
 
 export type ListCatalogLibrariesResponses = {
     /**
-     * Libraries visible to the caller in this workspace
+     * Bounded library page visible to the caller in this workspace
      */
-    200: Array<CatalogLibraryResponse>;
+    200: CatalogLibraryPageResponse;
 };
 
 export type ListCatalogLibrariesResponse = ListCatalogLibrariesResponses[keyof ListCatalogLibrariesResponses];
@@ -6322,7 +7302,7 @@ export type ImportCatalogWorkspaceSnapshotErrors = {
 
 export type ImportCatalogWorkspaceSnapshotResponses = {
     /**
-     * Workspace snapshot import accepted; poll /v1/ops/operations/{operationId}
+     * Workspace snapshot import accepted; poll /v1/ops/operations/{operationId} until it is terminal. A failed bundle deletes the libraries it created, and its `failureCode` names the reason (`snapshot_target_populated`, `snapshot_source_already_present`, `snapshot_unsupported_schema_version`, `snapshot_archive_invalid`, or `snapshot_import_failed`)
      */
     202: WorkspaceSnapshotImportAcceptedResponse;
 };
@@ -6441,6 +7421,12 @@ export type BatchReprocessContentDocumentsResponse = BatchReprocessContentDocume
 
 export type DeleteContentDocumentData = {
     body?: never;
+    headers?: {
+        /**
+         * Stable caller key for exact-target deletion replay
+         */
+        'Idempotency-Key'?: string | null;
+    };
     path: {
         /**
          * Document identifier
@@ -6464,6 +7450,10 @@ export type DeleteContentDocumentErrors = {
      * Document not found
      */
     404: unknown;
+    /**
+     * Idempotency key belongs to a different deletion request
+     */
+    409: unknown;
 };
 
 export type DeleteContentDocumentResponses = {
@@ -6540,6 +7530,10 @@ export type PatchContentDocumentMetadataErrors = {
      * Document not found
      */
     404: unknown;
+    /**
+     * Protected metadata requires an accepted replacement intent
+     */
+    409: unknown;
 };
 
 export type PatchContentDocumentMetadataResponses = {
@@ -6687,7 +7681,7 @@ export type ListContentRevisionsErrors = {
 
 export type ListContentRevisionsResponses = {
     /**
-     * Revisions for the document
+     * Currently published revision for the document; withdrawn history is not exposed
      */
     200: Array<ContentRevision>;
 };
@@ -6749,7 +7743,12 @@ export type GetContentDocumentSourceData = {
          */
         documentId: string;
     };
-    query?: never;
+    query?: {
+        /**
+         * Revision to download; defaults to the document's current revision
+         */
+        revisionId?: string;
+    };
     url: '/v1/content/documents/{documentId}/source';
 };
 
@@ -6816,6 +7815,54 @@ export type ListContentTechnicalFactsResponses = {
 
 export type ListContentTechnicalFactsResponse = ListContentTechnicalFactsResponses[keyof ListContentTechnicalFactsResponses];
 
+export type CreateContentVisibilityIntentData = {
+    body: CreateVisibilityIntentRequest;
+    path: {
+        /**
+         * Document identifier
+         */
+        documentId: string;
+    };
+    query?: never;
+    url: '/v1/content/documents/{documentId}/visibility-intents';
+};
+
+export type CreateContentVisibilityIntentErrors = {
+    /**
+     * Invalid descriptor or deleted document
+     */
+    400: unknown;
+    /**
+     * Caller is not authenticated
+     */
+    401: unknown;
+    /**
+     * Caller is not authorized for the document
+     */
+    403: unknown;
+    /**
+     * Document not found
+     */
+    404: unknown;
+    /**
+     * Complete identity conflicts with the existing key
+     */
+    409: unknown;
+};
+
+export type CreateContentVisibilityIntentResponses = {
+    /**
+     * Exact original receipt replayed without recapturing the floor
+     */
+    200: VisibilityIntentReceipt;
+    /**
+     * Independent visibility obligation accepted; no ingest job
+     */
+    201: VisibilityIntentReceipt;
+};
+
+export type CreateContentVisibilityIntentResponse = CreateContentVisibilityIntentResponses[keyof CreateContentVisibilityIntentResponses];
+
 export type ListContentDocumentsData = {
     body?: never;
     path: {
@@ -6835,17 +7882,53 @@ export type ListContentDocumentsData = {
         /**
          * Comma-separated list of status buckets to keep. Accepted values:
          * `canceled`, `failed`, `processing`, `queued`, `ready`. Empty or
-         * absent = no filter. Matches the canonical `derived_status` column
+         * absent = no filter. Matches the `derived_status` column
          * in the list CTE and the 5 status pills on the documents page.
          */
         status?: string;
         /**
-         * Comma-separated list of document ids to keep. Empty or absent = no
-         * filter. Lets a caller resolve specific documents (e.g. a deep link
-         * carrying `documentId`) through the same canonical list derivation
+         * Comma-separated list of document ids to keep. Absent = no filter;
+         * an explicit empty list is rejected. Resolves documents (e.g. a deep link
+         * carrying `documentId`) through the same shared list derivation
          * that powers the table, instead of a divergent per-id detail mapper.
          */
         ids?: string;
+        /**
+         * Restricts the page to documents an indexing invariant is broken for.
+         * Orthogonal to `status`: a document whose chunk vectors are missing is
+         * `ready` by every `derived_status` rule, so this cannot be a status
+         * value. Absent = no filter.
+         */
+        indexing?: DocumentIndexingFilter;
+        /**
+         * Strictly typed per-column grid filters as a JSON object of
+         * `DocumentColumnFilters`. Unknown keys, wrong types, malformed
+         * timestamps/decimals and oversized payloads are a 400.
+         */
+        filters?: string;
+        /**
+         * Finite comma-separated derived-status buckets a literal search matches,
+         * OR'd alongside the text search over every canonical field.
+         */
+        searchStatus?: string;
+        /**
+         * Intl-normalized variant of `search`, OR'd over the same canonical
+         * fields. The backend does not implement a language dictionary.
+         */
+        normalizedSearch?: string;
+        /**
+         * Snapshot instant captured once for the cursor chain. Optional on the
+         * first page; on a cursor page it must equal the cursor's snapshot
+         * exactly, so a facet count and the page it opens agree. A valid RFC3339
+         * UTC instant; a mismatch is a 400.
+         */
+        snapshotAt?: string;
+        /**
+         * Typed range hints as a JSON object of `DocumentSearchRanges`. OR
+         * alternatives to the text/status search; a malformed, reversed,
+         * negative, over-`i64` or oversized payload is a 400.
+         */
+        searchRanges?: string;
     };
     url: '/v1/content/libraries/{libraryId}/documents';
 };
@@ -6917,6 +8000,78 @@ export type CreateContentDocumentResponses = {
 
 export type CreateContentDocumentResponse = CreateContentDocumentResponses[keyof CreateContentDocumentResponses];
 
+export type ListContentDocumentFacetsData = {
+    body?: never;
+    path: {
+        /**
+         * Library that owns the document collection
+         */
+        libraryId: string;
+    };
+    query: {
+        facetColumn: DocumentFacetColumn;
+        includeDeleted?: boolean;
+        filters?: string;
+        search?: string;
+        searchStatus?: string;
+        normalizedSearch?: string;
+        /**
+         * The list page's status pill, forwarded verbatim so the facet keeps the
+         * same pill scope while still self-excluding the grid's own `status`
+         * column filter.
+         */
+        status?: string;
+        ids?: string;
+        indexing?: DocumentIndexingFilter;
+        /**
+         * Snapshot instant. Optional on the first page; on a cursor page it must
+         * equal the cursor's snapshot exactly.
+         */
+        snapshotAt?: string;
+        /**
+         * Typed range hints (same canonical `DocumentSearchRanges` as the list).
+         */
+        searchRanges?: string;
+        /**
+         * Typed hint that matches this facet column's OWN value (OR with
+         * `facetSearch`): Size/Duration/Uploaded/Finished ranges.
+         */
+        facetSearchRanges?: string;
+        /**
+         * Exact derived-status buckets a Status-facet value hint matches.
+         */
+        facetSearchStatus?: string;
+        facetSearch?: string;
+        facetCursor?: string;
+        facetLimit?: number;
+    };
+    url: '/v1/content/libraries/{libraryId}/documents/facets';
+};
+
+export type ListContentDocumentFacetsErrors = {
+    /**
+     * Invalid filters or facet cursor payload
+     */
+    400: unknown;
+    /**
+     * Caller is not authenticated
+     */
+    401: unknown;
+    /**
+     * Caller is not authorized for the library
+     */
+    403: unknown;
+};
+
+export type ListContentDocumentFacetsResponses = {
+    /**
+     * Distinct facet values for one grid column
+     */
+    200: DocumentFacetsResponse;
+};
+
+export type ListContentDocumentFacetsResponse = ListContentDocumentFacetsResponses[keyof ListContentDocumentFacetsResponses];
+
 export type ExportLibrarySnapshotData = {
     body?: never;
     path: {
@@ -6975,6 +8130,10 @@ export type ImportLibrarySnapshotData = {
 
 export type ImportLibrarySnapshotErrors = {
     /**
+     * Invalid overwrite mode
+     */
+    400: unknown;
+    /**
      * Caller is not authenticated
      */
     401: unknown;
@@ -6986,15 +8145,11 @@ export type ImportLibrarySnapshotErrors = {
      * Library not found
      */
     404: unknown;
-    /**
-     * Library already populated and overwrite=reject
-     */
-    409: unknown;
 };
 
 export type ImportLibrarySnapshotResponses = {
     /**
-     * Snapshot import accepted; poll /v1/ops/operations/{operationId}
+     * Snapshot import accepted; poll /v1/ops/operations/{operationId} until it is terminal. The restore runs after this response, so every refusal — a populated target under overwrite=reject (`snapshot_target_populated`), an archive whose identities already live here (`snapshot_source_already_present`), an unsupported archive version (`snapshot_unsupported_schema_version`), a malformed archive (`snapshot_archive_invalid`) — surfaces as that operation's `failureCode`, never as a status on this request
      */
     202: SnapshotImportAcceptedResponse;
 };
@@ -7010,7 +8165,7 @@ export type ListContentWebIngestRunsData = {
          * Upper bound on returned runs (newest first). Defaults to
          * `DEFAULT_WEB_RUNS_LIMIT`, clamped to `[1, MAX_WEB_RUNS_LIMIT]`.
          * The endpoint is surface-only; once a user needs deeper history
-         * the canonical move is cursor pagination rather than raising the
+         * the supported approach is cursor pagination rather than raising the
          * cap further.
          */
         limit?: number;
@@ -7189,44 +8344,63 @@ export type GetHealthResponses = {
 
 export type GetHealthResponse = GetHealthResponses[keyof GetHealthResponses];
 
-export type PostBootstrapSetupData = {
-    body: BootstrapSetupRequest;
-    path?: never;
-    query?: never;
-    url: '/v1/iam/bootstrap/setup';
-};
-
-export type PostBootstrapSetupErrors = {
-    /**
-     * Bootstrap already completed
-     */
-    409: unknown;
-};
-
-export type PostBootstrapSetupResponses = {
-    /**
-     * Bootstrap admin configured; sets the canonical UI session cookie
-     */
-    200: SessionResponse;
-};
-
-export type PostBootstrapSetupResponse = PostBootstrapSetupResponses[keyof PostBootstrapSetupResponses];
-
-export type GetBootstrapStatusData = {
+export type GetIamBootstrapData = {
     body?: never;
     path?: never;
     query?: never;
-    url: '/v1/iam/bootstrap/status';
+    url: '/v1/iam/bootstrap';
 };
 
-export type GetBootstrapStatusResponses = {
+export type GetIamBootstrapResponses = {
     /**
      * Bootstrap status indicating whether first-run admin setup is required
      */
     200: BootstrapStatus;
 };
 
-export type GetBootstrapStatusResponse = GetBootstrapStatusResponses[keyof GetBootstrapStatusResponses];
+export type GetIamBootstrapResponse = GetIamBootstrapResponses[keyof GetIamBootstrapResponses];
+
+export type CreateIamBootstrapData = {
+    body: BootstrapSetupRequest;
+    path?: never;
+    query?: never;
+    url: '/v1/iam/bootstrap';
+};
+
+export type CreateIamBootstrapErrors = {
+    /**
+     * Bootstrap already completed
+     */
+    409: unknown;
+};
+
+export type CreateIamBootstrapResponses = {
+    /**
+     * Bootstrap admin configured; sets the UI session cookie
+     */
+    201: SessionResponse;
+};
+
+export type CreateIamBootstrapResponse = CreateIamBootstrapResponses[keyof CreateIamBootstrapResponses];
+
+export type GetIamContextData = {
+    body?: never;
+    path?: never;
+    query?: {
+        activeWorkspaceId?: string;
+        activeLibraryId?: string;
+    };
+    url: '/v1/iam/context';
+};
+
+export type GetIamContextResponses = {
+    /**
+     * Composite session view (mode + session + me + shell bootstrap + bootstrap status). Always 200 — the UI shell calls this on every navigation.
+     */
+    200: SessionResolveResponse;
+};
+
+export type GetIamContextResponse = GetIamContextResponses[keyof GetIamContextResponses];
 
 export type GetIamMeData = {
     body?: never;
@@ -7255,6 +8429,321 @@ export type GetIamMeResponses = {
 
 export type GetIamMeResponse = GetIamMeResponses[keyof GetIamMeResponses];
 
+export type CompleteIamOidcLoginData = {
+    body?: never;
+    path?: never;
+    query?: {
+        state?: string;
+        code?: string;
+    };
+    url: '/v1/iam/oidc/callback';
+};
+
+export type StartIamOidcLoginData = {
+    body?: never;
+    path?: never;
+    query?: {
+        returnTo?: string;
+    };
+    url: '/v1/iam/oidc/login';
+};
+
+export type StartIamOidcLoginErrors = {
+    /**
+     * OIDC sign-in is not configured for this deployment
+     */
+    404: unknown;
+    /**
+     * OIDC login admission, provider discovery, or OIDC attempt storage is temporarily unavailable
+     */
+    503: unknown;
+};
+
+export type ListServiceIdentitiesData = {
+    body?: never;
+    path?: never;
+    query?: {
+        workspaceId?: string;
+    };
+    url: '/v1/iam/service-identities';
+};
+
+export type ListServiceIdentitiesErrors = {
+    /**
+     * Caller is not authenticated or not a system administrator
+     */
+    401: unknown;
+    /**
+     * System administrator is not backed by an OIDC subject
+     */
+    403: unknown;
+};
+
+export type ListServiceIdentitiesResponses = {
+    /**
+     * Service identities owned by the authenticated OIDC administrator
+     */
+    200: Array<ServiceIdentityResponse>;
+};
+
+export type ListServiceIdentitiesResponse = ListServiceIdentitiesResponses[keyof ListServiceIdentitiesResponses];
+
+export type CreateServiceIdentityData = {
+    body: CreateServiceIdentityRequest;
+    path?: never;
+    query?: never;
+    url: '/v1/iam/service-identities';
+};
+
+export type CreateServiceIdentityErrors = {
+    /**
+     * Invalid request payload
+     */
+    400: unknown;
+    /**
+     * Caller is not authenticated or not a system administrator
+     */
+    401: unknown;
+    /**
+     * System administrator is not backed by an OIDC subject
+     */
+    403: unknown;
+    /**
+     * Idempotency key conflicts with another request
+     */
+    409: unknown;
+};
+
+export type CreateServiceIdentityResponses = {
+    /**
+     * Created identity, or the identical idempotent replay
+     */
+    200: ServiceIdentityCredentialResponse;
+};
+
+export type CreateServiceIdentityResponse = CreateServiceIdentityResponses[keyof CreateServiceIdentityResponses];
+
+export type DeleteServiceIdentityData = {
+    body?: never;
+    path: {
+        /**
+         * Revoked service identity principal id
+         */
+        serviceIdentityId: string;
+    };
+    query?: never;
+    url: '/v1/iam/service-identities/{serviceIdentityId}';
+};
+
+export type DeleteServiceIdentityErrors = {
+    /**
+     * Caller is not authenticated or not a system administrator
+     */
+    401: unknown;
+    /**
+     * System administrator is not backed by an OIDC subject
+     */
+    403: unknown;
+    /**
+     * Identity is absent or owned by another subject
+     */
+    404: unknown;
+    /**
+     * Identity must be revoked first
+     */
+    409: unknown;
+};
+
+export type DeleteServiceIdentityResponses = {
+    /**
+     * Revoked identity tombstoned
+     */
+    204: void;
+};
+
+export type DeleteServiceIdentityResponse = DeleteServiceIdentityResponses[keyof DeleteServiceIdentityResponses];
+
+export type GetServiceIdentityData = {
+    body?: never;
+    path: {
+        /**
+         * Service identity principal id
+         */
+        serviceIdentityId: string;
+    };
+    query?: never;
+    url: '/v1/iam/service-identities/{serviceIdentityId}';
+};
+
+export type GetServiceIdentityErrors = {
+    /**
+     * Caller is not authenticated or not a system administrator
+     */
+    401: unknown;
+    /**
+     * System administrator is not backed by an OIDC subject
+     */
+    403: unknown;
+    /**
+     * Identity is absent or owned by another subject
+     */
+    404: unknown;
+};
+
+export type GetServiceIdentityResponses = {
+    /**
+     * Owner-visible service identity
+     */
+    200: ServiceIdentityResponse;
+};
+
+export type GetServiceIdentityResponse = GetServiceIdentityResponses[keyof GetServiceIdentityResponses];
+
+export type PatchServiceIdentityData = {
+    body: PatchServiceIdentityRequest;
+    path: {
+        /**
+         * Service identity principal id
+         */
+        serviceIdentityId: string;
+    };
+    query?: never;
+    url: '/v1/iam/service-identities/{serviceIdentityId}';
+};
+
+export type PatchServiceIdentityErrors = {
+    /**
+     * Invalid request payload
+     */
+    400: unknown;
+    /**
+     * Caller is not authenticated or not a system administrator
+     */
+    401: unknown;
+    /**
+     * System administrator is not backed by an OIDC subject
+     */
+    403: unknown;
+    /**
+     * Identity is absent or owned by another subject
+     */
+    404: unknown;
+    /**
+     * Identity is not active
+     */
+    409: unknown;
+};
+
+export type PatchServiceIdentityResponses = {
+    /**
+     * Identity metadata and exact direct library grants reconciled transactionally
+     */
+    200: ServiceIdentityResponse;
+};
+
+export type PatchServiceIdentityResponse = PatchServiceIdentityResponses[keyof PatchServiceIdentityResponses];
+
+export type RevokeServiceIdentityData = {
+    body: ServiceIdentityOperationRequest;
+    path: {
+        /**
+         * Service identity principal id
+         */
+        serviceIdentityId: string;
+    };
+    query?: never;
+    url: '/v1/iam/service-identities/{serviceIdentityId}/revoke';
+};
+
+export type RevokeServiceIdentityErrors = {
+    /**
+     * Caller is not authenticated or not a system administrator
+     */
+    401: unknown;
+    /**
+     * System administrator is not backed by an OIDC subject
+     */
+    403: unknown;
+    /**
+     * Identity is absent or owned by another subject
+     */
+    404: unknown;
+    /**
+     * Idempotency key conflicts
+     */
+    409: unknown;
+};
+
+export type RevokeServiceIdentityResponses = {
+    /**
+     * Revoked identity, or the identical idempotent replay
+     */
+    200: ServiceIdentityMutationResponse;
+};
+
+export type RevokeServiceIdentityResponse = RevokeServiceIdentityResponses[keyof RevokeServiceIdentityResponses];
+
+export type RotateServiceIdentityData = {
+    body: ServiceIdentityOperationRequest;
+    path: {
+        /**
+         * Service identity principal id
+         */
+        serviceIdentityId: string;
+    };
+    query?: never;
+    url: '/v1/iam/service-identities/{serviceIdentityId}/rotate';
+};
+
+export type RotateServiceIdentityErrors = {
+    /**
+     * Caller is not authenticated or not a system administrator
+     */
+    401: unknown;
+    /**
+     * System administrator is not backed by an OIDC subject
+     */
+    403: unknown;
+    /**
+     * Identity is absent or owned by another subject
+     */
+    404: unknown;
+    /**
+     * Identity is inactive or idempotency key conflicts
+     */
+    409: unknown;
+};
+
+export type RotateServiceIdentityResponses = {
+    /**
+     * Rotated credential, or the identical active idempotent receipt
+     */
+    200: ServiceIdentityCredentialResponse;
+};
+
+export type RotateServiceIdentityResponse = RotateServiceIdentityResponses[keyof RotateServiceIdentityResponses];
+
+export type DeleteIamSessionData = {
+    body?: never;
+    path?: never;
+    query?: never;
+    url: '/v1/iam/session';
+};
+
+export type DeleteIamSessionErrors = {
+    /**
+     * Caller is not authenticated
+     */
+    401: unknown;
+};
+
+export type DeleteIamSessionResponses = {
+    /**
+     * Session revoked; clears the session cookie
+     */
+    200: unknown;
+};
+
 export type GetIamSessionData = {
     body?: never;
     path?: never;
@@ -7278,65 +8767,32 @@ export type GetIamSessionResponses = {
 
 export type GetIamSessionResponse = GetIamSessionResponses[keyof GetIamSessionResponses];
 
-export type LoginIamSessionData = {
+export type CreateIamSessionData = {
     body: LoginSessionRequest;
     path?: never;
     query?: never;
-    url: '/v1/iam/session/login';
+    url: '/v1/iam/sessions';
 };
 
-export type LoginIamSessionErrors = {
+export type CreateIamSessionErrors = {
     /**
      * Invalid credentials
      */
     401: unknown;
+    /**
+     * Rate limited by login, by source, or by concurrent verification admission; retry after the given `Retry-After` interval
+     */
+    429: unknown;
 };
 
-export type LoginIamSessionResponses = {
+export type CreateIamSessionResponses = {
     /**
-     * Login succeeded; sets the canonical UI session cookie
+     * Login succeeded; sets the UI session cookie
      */
     200: SessionResponse;
 };
 
-export type LoginIamSessionResponse = LoginIamSessionResponses[keyof LoginIamSessionResponses];
-
-export type LogoutIamSessionData = {
-    body?: never;
-    path?: never;
-    query?: never;
-    url: '/v1/iam/session/logout';
-};
-
-export type LogoutIamSessionErrors = {
-    /**
-     * Caller is not authenticated
-     */
-    401: unknown;
-};
-
-export type LogoutIamSessionResponses = {
-    /**
-     * Session revoked; clears the session cookie
-     */
-    200: unknown;
-};
-
-export type ResolveIamSessionData = {
-    body?: never;
-    path?: never;
-    query?: never;
-    url: '/v1/iam/session/resolve';
-};
-
-export type ResolveIamSessionResponses = {
-    /**
-     * Composite session view (mode + session + me + shell bootstrap + bootstrap status). Always 200 — the canonical UI shell calls this on every navigation.
-     */
-    200: SessionResolveResponse;
-};
-
-export type ResolveIamSessionResponse = ResolveIamSessionResponses[keyof ResolveIamSessionResponses];
+export type CreateIamSessionResponse = CreateIamSessionResponses[keyof CreateIamSessionResponses];
 
 export type ListIamTokensData = {
     body?: never;
@@ -7402,7 +8858,7 @@ export type DeleteIamTokenData = {
     body?: never;
     path: {
         /**
-         * Revoked API token principal id to delete
+         * API token principal id to revoke and delete
          */
         tokenId: string;
     };
@@ -7423,15 +8879,11 @@ export type DeleteIamTokenErrors = {
      * Token principal not found
      */
     404: unknown;
-    /**
-     * Token must be revoked before deletion
-     */
-    409: unknown;
 };
 
 export type DeleteIamTokenResponses = {
     /**
-     * Revoked token deleted
+     * Token revoked and deleted
      */
     204: void;
 };
@@ -7513,42 +8965,6 @@ export type PatchIamTokenResponses = {
 };
 
 export type PatchIamTokenResponse = PatchIamTokenResponses[keyof PatchIamTokenResponses];
-
-export type RevokeIamTokenData = {
-    body?: never;
-    path: {
-        /**
-         * Principal id whose tokens are revoked
-         */
-        tokenId: string;
-    };
-    query?: never;
-    url: '/v1/iam/tokens/{tokenId}/revoke';
-};
-
-export type RevokeIamTokenErrors = {
-    /**
-     * Caller is not authenticated
-     */
-    401: unknown;
-    /**
-     * Caller is not an IAM administrator
-     */
-    403: unknown;
-    /**
-     * Token principal not found
-     */
-    404: unknown;
-};
-
-export type RevokeIamTokenResponses = {
-    /**
-     * Token revoked
-     */
-    204: void;
-};
-
-export type RevokeIamTokenResponse = RevokeIamTokenResponses[keyof RevokeIamTokenResponses];
 
 export type ListIamUsersData = {
     body?: never;
@@ -7652,6 +9068,46 @@ export type DeleteIamUserResponses = {
 
 export type DeleteIamUserResponse = DeleteIamUserResponses[keyof DeleteIamUserResponses];
 
+export type PatchIamUserData = {
+    body: SetUserRoleRequest;
+    path: {
+        /**
+         * User principal id whose role changes
+         */
+        userId: string;
+    };
+    query?: never;
+    url: '/v1/iam/users/{userId}';
+};
+
+export type PatchIamUserErrors = {
+    /**
+     * Caller is not authenticated
+     */
+    401: unknown;
+    /**
+     * Caller is not a system administrator
+     */
+    403: unknown;
+    /**
+     * User not found
+     */
+    404: unknown;
+    /**
+     * Would demote the last remaining administrator
+     */
+    409: unknown;
+};
+
+export type PatchIamUserResponses = {
+    /**
+     * Updated user
+     */
+    200: UserResponse;
+};
+
+export type PatchIamUserResponse = PatchIamUserResponses[keyof PatchIamUserResponses];
+
 export type GetIamUserAccessData = {
     body?: never;
     path: {
@@ -7731,46 +9187,6 @@ export type SetIamUserAccessResponses = {
 };
 
 export type SetIamUserAccessResponse = SetIamUserAccessResponses[keyof SetIamUserAccessResponses];
-
-export type SetIamUserRoleData = {
-    body: SetUserRoleRequest;
-    path: {
-        /**
-         * User principal id whose role changes
-         */
-        userId: string;
-    };
-    query?: never;
-    url: '/v1/iam/users/{userId}/role';
-};
-
-export type SetIamUserRoleErrors = {
-    /**
-     * Caller is not authenticated
-     */
-    401: unknown;
-    /**
-     * Caller is not a system administrator
-     */
-    403: unknown;
-    /**
-     * User not found
-     */
-    404: unknown;
-    /**
-     * Would demote the last remaining administrator
-     */
-    409: unknown;
-};
-
-export type SetIamUserRoleResponses = {
-    /**
-     * Updated user
-     */
-    200: UserResponse;
-};
-
-export type SetIamUserRoleResponse = SetIamUserRoleResponses[keyof SetIamUserRoleResponses];
 
 export type GetIngestAttemptData = {
     body?: never;
@@ -8180,6 +9596,82 @@ export type GetKnowledgeGraphWorkbenchResponses = {
 };
 
 export type GetKnowledgeGraphWorkbenchResponse = GetKnowledgeGraphWorkbenchResponses[keyof GetKnowledgeGraphWorkbenchResponses];
+
+export type GetKnowledgeGraphReextractProgressData = {
+    body?: never;
+    path: {
+        /**
+         * Library identifier
+         */
+        libraryId: string;
+    };
+    query?: never;
+    url: '/v1/knowledge/libraries/{libraryId}/graph/reextract';
+};
+
+export type GetKnowledgeGraphReextractProgressErrors = {
+    /**
+     * Caller is not authenticated
+     */
+    401: unknown;
+    /**
+     * Caller is not authorized for the library
+     */
+    403: unknown;
+    /**
+     * Library not found
+     */
+    404: unknown;
+};
+
+export type GetKnowledgeGraphReextractProgressResponses = {
+    /**
+     * Current graph extraction coverage and recovery queue depth
+     */
+    200: GraphReextractProgressResponse;
+};
+
+export type GetKnowledgeGraphReextractProgressResponse = GetKnowledgeGraphReextractProgressResponses[keyof GetKnowledgeGraphReextractProgressResponses];
+
+export type EnqueueKnowledgeGraphReextractBatchData = {
+    body: GraphReextractBatchRequest;
+    path: {
+        /**
+         * Library identifier
+         */
+        libraryId: string;
+    };
+    query?: never;
+    url: '/v1/knowledge/libraries/{libraryId}/graph/reextract';
+};
+
+export type EnqueueKnowledgeGraphReextractBatchErrors = {
+    /**
+     * batchSize is outside the supported range
+     */
+    400: unknown;
+    /**
+     * Caller is not authenticated
+     */
+    401: unknown;
+    /**
+     * Caller is not authorized for the library
+     */
+    403: unknown;
+    /**
+     * Library not found
+     */
+    404: unknown;
+};
+
+export type EnqueueKnowledgeGraphReextractBatchResponses = {
+    /**
+     * Bounded graph_refresh batch enqueued
+     */
+    200: GraphReextractBatchResponse;
+};
+
+export type EnqueueKnowledgeGraphReextractBatchResponse = EnqueueKnowledgeGraphReextractBatchResponses[keyof EnqueueKnowledgeGraphReextractBatchResponses];
 
 export type ListKnowledgeRelationsData = {
     body?: never;
@@ -8738,7 +10230,7 @@ export type GetLibraryDashboardErrors = {
 
 export type GetLibraryDashboardResponses = {
     /**
-     * Library dashboard surface (canonical document metrics, attention items, recent documents, graph, web run summaries)
+     * Library dashboard surface (aggregated document metrics, attention items, recent documents, graph, web run summaries)
      */
     200: DashboardSurface;
 };
@@ -8780,6 +10272,257 @@ export type GetAsyncOperationResponses = {
 };
 
 export type GetAsyncOperationResponse = GetAsyncOperationResponses[keyof GetAsyncOperationResponses];
+
+export type ListProvisionedKeysData = {
+    body?: never;
+    path?: never;
+    query?: {
+        /**
+         * Owned workspace filter
+         */
+        workspaceId?: string;
+    };
+    url: '/v1/provisioning/keys';
+};
+
+export type ListProvisionedKeysResponses = {
+    /**
+     * Child service identities
+     */
+    200: Array<ProvisionedKeyIdentity>;
+};
+
+export type ListProvisionedKeysResponse = ListProvisionedKeysResponses[keyof ListProvisionedKeysResponses];
+
+export type CreateProvisionedKeyData = {
+    body: CreateKeyRequest;
+    path?: never;
+    query?: never;
+    url: '/v1/provisioning/keys';
+};
+
+export type CreateProvisionedKeyErrors = {
+    /**
+     * Invalid scope or expiry
+     */
+    400: unknown;
+    /**
+     * Owned workspace or library not found
+     */
+    404: unknown;
+    /**
+     * Idempotency conflict or provisioning limit reached
+     */
+    409: unknown;
+};
+
+export type CreateProvisionedKeyResponses = {
+    /**
+     * Library-scoped child credential created or replayed
+     */
+    200: ProvisionedKeyResponse;
+};
+
+export type CreateProvisionedKeyResponse = CreateProvisionedKeyResponses[keyof CreateProvisionedKeyResponses];
+
+export type RevokeProvisionedKeyData = {
+    body: KeyOperationRequest;
+    path: {
+        /**
+         * Child principal identifier
+         */
+        key_principal_id: string;
+    };
+    query?: never;
+    url: '/v1/provisioning/keys/{key_principal_id}/revoke';
+};
+
+export type RevokeProvisionedKeyErrors = {
+    /**
+     * Owned child credential not found
+     */
+    404: unknown;
+    /**
+     * Idempotency conflict
+     */
+    409: unknown;
+};
+
+export type RevokeProvisionedKeyResponses = {
+    /**
+     * Child credential revoked
+     */
+    204: void;
+};
+
+export type RevokeProvisionedKeyResponse = RevokeProvisionedKeyResponses[keyof RevokeProvisionedKeyResponses];
+
+export type GetProvisioningDeletionOperationData = {
+    body?: never;
+    path: {
+        /**
+         * Deletion operation identifier
+         */
+        operation_id: string;
+    };
+    query?: never;
+    url: '/v1/provisioning/operations/{operation_id}';
+};
+
+export type GetProvisioningDeletionOperationErrors = {
+    /**
+     * Caller is not authenticated
+     */
+    401: unknown;
+    /**
+     * Integration provisioning authority required
+     */
+    403: unknown;
+    /**
+     * Owned deletion operation not found
+     */
+    404: unknown;
+};
+
+export type GetProvisioningDeletionOperationResponses = {
+    /**
+     * Deletion operation status
+     */
+    200: ProvisioningDeletionOperationResponse;
+};
+
+export type GetProvisioningDeletionOperationResponse = GetProvisioningDeletionOperationResponses[keyof GetProvisioningDeletionOperationResponses];
+
+export type CreateProvisionedWorkspaceData = {
+    body: CreateWorkspaceRequest;
+    path?: never;
+    query?: never;
+    url: '/v1/provisioning/workspaces';
+};
+
+export type CreateProvisionedWorkspaceErrors = {
+    /**
+     * Invalid provisioning request
+     */
+    400: unknown;
+    /**
+     * Integration provisioning authority required
+     */
+    403: unknown;
+    /**
+     * Slug conflict or provisioning limit reached
+     */
+    409: unknown;
+};
+
+export type CreateProvisionedWorkspaceResponses = {
+    /**
+     * Equivalent owned workspace adopted
+     */
+    200: ProvisionedWorkspaceResponse;
+    /**
+     * Workspace created
+     */
+    201: ProvisionedWorkspaceResponse;
+};
+
+export type CreateProvisionedWorkspaceResponse = CreateProvisionedWorkspaceResponses[keyof CreateProvisionedWorkspaceResponses];
+
+export type DeleteProvisionedWorkspaceData = {
+    body?: never;
+    path: {
+        /**
+         * Owned workspace identifier
+         */
+        workspace_id: string;
+    };
+    query?: never;
+    url: '/v1/provisioning/workspaces/{workspace_id}';
+};
+
+export type DeleteProvisionedWorkspaceErrors = {
+    /**
+     * Owned workspace not found
+     */
+    404: unknown;
+};
+
+export type DeleteProvisionedWorkspaceResponses = {
+    /**
+     * Workspace deletion admitted
+     */
+    202: CatalogDeletionAcceptedResponse;
+};
+
+export type DeleteProvisionedWorkspaceResponse = DeleteProvisionedWorkspaceResponses[keyof DeleteProvisionedWorkspaceResponses];
+
+export type CreateProvisionedLibraryData = {
+    body: CreateLibraryRequest;
+    path: {
+        /**
+         * Owned workspace identifier
+         */
+        workspace_id: string;
+    };
+    query?: never;
+    url: '/v1/provisioning/workspaces/{workspace_id}/libraries';
+};
+
+export type CreateProvisionedLibraryErrors = {
+    /**
+     * Owned workspace not found
+     */
+    404: unknown;
+    /**
+     * Slug conflict or provisioning limit reached
+     */
+    409: unknown;
+};
+
+export type CreateProvisionedLibraryResponses = {
+    /**
+     * Equivalent library adopted
+     */
+    200: ProvisionedLibraryResponse;
+    /**
+     * Library created
+     */
+    201: ProvisionedLibraryResponse;
+};
+
+export type CreateProvisionedLibraryResponse = CreateProvisionedLibraryResponses[keyof CreateProvisionedLibraryResponses];
+
+export type DeleteProvisionedLibraryData = {
+    body?: never;
+    path: {
+        /**
+         * Owned workspace identifier
+         */
+        workspace_id: string;
+        /**
+         * Library identifier
+         */
+        library_id: string;
+    };
+    query?: never;
+    url: '/v1/provisioning/workspaces/{workspace_id}/libraries/{library_id}';
+};
+
+export type DeleteProvisionedLibraryErrors = {
+    /**
+     * Owned library not found
+     */
+    404: unknown;
+};
+
+export type DeleteProvisionedLibraryResponses = {
+    /**
+     * Library deletion admitted
+     */
+    202: CatalogDeletionAcceptedResponse;
+};
+
+export type DeleteProvisionedLibraryResponse = DeleteProvisionedLibraryResponses[keyof DeleteProvisionedLibraryResponses];
 
 export type GetQueryExecutionData = {
     body?: never;
@@ -9308,21 +11051,21 @@ export type GetVersionResponses = {
 
 export type GetVersionResponse = GetVersionResponses[keyof GetVersionResponses];
 
-export type GetReleaseUpdateData = {
+export type GetLatestVersionData = {
     body?: never;
     path?: never;
     query?: never;
-    url: '/v1/version/update';
+    url: '/v1/version/latest';
 };
 
-export type GetReleaseUpdateResponses = {
+export type GetLatestVersionResponses = {
     /**
      * Latest published release the service is aware of
      */
     200: ReleaseUpdateResponse;
 };
 
-export type GetReleaseUpdateResponse = GetReleaseUpdateResponses[keyof GetReleaseUpdateResponses];
+export type GetLatestVersionResponse = GetLatestVersionResponses[keyof GetLatestVersionResponses];
 
 export type DeleteWebhookSubscriptionData = {
     body?: never;

@@ -1,23 +1,8 @@
-use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
-use sqlx::{Executor, FromRow, PgPool, Postgres};
+use sqlx::{Executor, FromRow, Postgres};
 use uuid::Uuid;
 
-#[derive(Debug, Clone, FromRow)]
-pub struct AiPriceCatalogRow {
-    pub id: Uuid,
-    pub model_catalog_id: Uuid,
-    pub billing_unit: String,
-    pub price_variant_key: String,
-    pub request_input_tokens_min: Option<i32>,
-    pub request_input_tokens_max: Option<i32>,
-    pub unit_price: Decimal,
-    pub currency_code: String,
-    pub effective_from: DateTime<Utc>,
-    pub effective_to: Option<DateTime<Utc>>,
-    pub catalog_scope: String,
-    pub workspace_id: Option<Uuid>,
-}
+use crate::domains::ai::{ModelLongContextPricing, ModelPricing};
 
 /// Minimal typed catalog policy needed to interpret usage counters before
 /// pricing them. Provider and model identities are deliberately excluded:
@@ -25,6 +10,7 @@ pub struct AiPriceCatalogRow {
 #[derive(Debug, Clone, FromRow)]
 pub struct ProviderBillingUsageProfileRow {
     pub usage_policy_json: Option<serde_json::Value>,
+    pub service_tier_multipliers_json: Option<serde_json::Value>,
 }
 
 pub async fn get_provider_billing_usage_profile<'e>(
@@ -33,7 +19,8 @@ pub async fn get_provider_billing_usage_profile<'e>(
 ) -> Result<Option<ProviderBillingUsageProfileRow>, sqlx::Error> {
     sqlx::query_as::<_, ProviderBillingUsageProfileRow>(
         "select
-            capability_flags_json -> 'usagePolicy' as usage_policy_json
+            capability_flags_json -> 'usagePolicy' as usage_policy_json,
+            capability_flags_json -> 'serviceTierMultipliers' as service_tier_multipliers_json
          from ai_provider_catalog
          where id = $1",
     )
@@ -42,383 +29,65 @@ pub async fn get_provider_billing_usage_profile<'e>(
     .await
 }
 
-pub async fn list_price_catalog(
-    postgres: &PgPool,
-    model_catalog_id: Option<Uuid>,
-    workspace_id: Option<Uuid>,
-) -> Result<Vec<AiPriceCatalogRow>, sqlx::Error> {
-    match (model_catalog_id, workspace_id) {
-        (Some(model_catalog_id), Some(workspace_id)) => {
-            sqlx::query_as::<_, AiPriceCatalogRow>(
-                "select
-                    id,
-                    model_catalog_id,
-                    billing_unit::text as billing_unit,
-                    price_variant_key,
-                    request_input_tokens_min,
-                    request_input_tokens_max,
-                    unit_price,
-                    currency_code,
-                    effective_from,
-                    effective_to,
-                    catalog_scope::text as catalog_scope,
-                    workspace_id
-                 from ai_price_catalog
-                 where model_catalog_id = $1
-                   and (
-                        (catalog_scope = 'workspace_override' and workspace_id = $2)
-                        or (catalog_scope = 'system' and workspace_id is null)
-                   )
-                 order by catalog_scope asc, effective_from desc, id desc",
-            )
-            .bind(model_catalog_id)
-            .bind(workspace_id)
-            .fetch_all(postgres)
-            .await
-        }
-        (Some(model_catalog_id), None) => {
-            sqlx::query_as::<_, AiPriceCatalogRow>(
-                "select
-                    id,
-                    model_catalog_id,
-                    billing_unit::text as billing_unit,
-                    price_variant_key,
-                    request_input_tokens_min,
-                    request_input_tokens_max,
-                    unit_price,
-                    currency_code,
-                    effective_from,
-                    effective_to,
-                    catalog_scope::text as catalog_scope,
-                    workspace_id
-                 from ai_price_catalog
-                 where model_catalog_id = $1
-                 order by
-                    case catalog_scope
-                        when 'workspace_override' then 0
-                        else 1
-                    end,
-                    effective_from desc,
-                    id desc",
-            )
-            .bind(model_catalog_id)
-            .fetch_all(postgres)
-            .await
-        }
-        (None, Some(workspace_id)) => {
-            sqlx::query_as::<_, AiPriceCatalogRow>(
-                "select
-                    id,
-                    model_catalog_id,
-                    billing_unit::text as billing_unit,
-                    price_variant_key,
-                    request_input_tokens_min,
-                    request_input_tokens_max,
-                    unit_price,
-                    currency_code,
-                    effective_from,
-                    effective_to,
-                    catalog_scope::text as catalog_scope,
-                    workspace_id
-                 from ai_price_catalog
-                 where workspace_id = $1 or workspace_id is null
-                 order by
-                    case catalog_scope
-                        when 'workspace_override' then 0
-                        else 1
-                    end,
-                    effective_from desc,
-                    id desc",
-            )
-            .bind(workspace_id)
-            .fetch_all(postgres)
-            .await
-        }
-        (None, None) => {
-            sqlx::query_as::<_, AiPriceCatalogRow>(
-                "select
-                    id,
-                    model_catalog_id,
-                    billing_unit::text as billing_unit,
-                    price_variant_key,
-                    request_input_tokens_min,
-                    request_input_tokens_max,
-                    unit_price,
-                    currency_code,
-                    effective_from,
-                    effective_to,
-                    catalog_scope::text as catalog_scope,
-                    workspace_id
-                 from ai_price_catalog
-                 order by
-                    case catalog_scope
-                        when 'workspace_override' then 0
-                        else 1
-                    end,
-                    effective_from desc,
-                    id desc",
-            )
-            .fetch_all(postgres)
-            .await
-        }
-    }
+#[derive(Debug, Clone, FromRow)]
+struct ModelPricingRow {
+    currency_code: String,
+    input_price_per_1m: Decimal,
+    cached_input_price_per_1m: Decimal,
+    cache_write_input_price_per_1m: Decimal,
+    output_price_per_1m: Decimal,
+    long_context_threshold_tokens: Option<i32>,
+    long_context_input_price_per_1m: Option<Decimal>,
+    long_context_cached_input_price_per_1m: Option<Decimal>,
+    long_context_output_price_per_1m: Option<Decimal>,
 }
 
-pub async fn get_price_catalog_by_id(
-    postgres: &PgPool,
-    price_id: Uuid,
-) -> Result<Option<AiPriceCatalogRow>, sqlx::Error> {
-    sqlx::query_as::<_, AiPriceCatalogRow>(
-        "select
-            id,
-            model_catalog_id,
-            billing_unit::text as billing_unit,
-            price_variant_key,
-            request_input_tokens_min,
-            request_input_tokens_max,
-            unit_price,
-            currency_code,
-            effective_from,
-            effective_to,
-            catalog_scope::text as catalog_scope,
-            workspace_id
-         from ai_price_catalog
-         where id = $1",
-    )
-    .bind(price_id)
-    .fetch_optional(postgres)
-    .await
-}
-
-pub async fn get_effective_price_catalog_entry<'e>(
+/// Vendor rates of one model row, typed for charge computation.
+pub async fn get_model_pricing<'e>(
     executor: impl Executor<'e, Database = Postgres>,
     model_catalog_id: Uuid,
-    billing_unit: &str,
-    workspace_id: Option<Uuid>,
-    effective_at: DateTime<Utc>,
-    price_variant_key: &str,
-    request_input_tokens: Option<i32>,
-) -> Result<Option<AiPriceCatalogRow>, sqlx::Error> {
-    let rows = match workspace_id {
-        Some(workspace_id) => {
-            sqlx::query_as::<_, AiPriceCatalogRow>(
-                "select
-                    id,
-                    model_catalog_id,
-                    billing_unit::text as billing_unit,
-                    price_variant_key,
-                    request_input_tokens_min,
-                    request_input_tokens_max,
-                    unit_price,
-                    currency_code,
-                    effective_from,
-                    effective_to,
-                    catalog_scope::text as catalog_scope,
-                    workspace_id
-                 from ai_price_catalog
-                 where model_catalog_id = $1
-                   and billing_unit = $2::billing_unit
-                   and effective_from <= $3
-                   and (effective_to is null or effective_to > $3)
-                   and (
-                        (catalog_scope = 'workspace_override' and workspace_id = $4)
-                        or (catalog_scope = 'system' and workspace_id is null)
-                   )",
-            )
-            .bind(model_catalog_id)
-            .bind(billing_unit)
-            .bind(effective_at)
-            .bind(workspace_id)
-            .fetch_all(executor)
-            .await?
-        }
-        None => {
-            sqlx::query_as::<_, AiPriceCatalogRow>(
-                "select
-                    id,
-                    model_catalog_id,
-                    billing_unit::text as billing_unit,
-                    price_variant_key,
-                    request_input_tokens_min,
-                    request_input_tokens_max,
-                    unit_price,
-                    currency_code,
-                    effective_from,
-                    effective_to,
-                    catalog_scope::text as catalog_scope,
-                    workspace_id
-                 from ai_price_catalog
-                 where model_catalog_id = $1
-                   and billing_unit = $2::billing_unit
-                   and effective_from <= $3
-                   and (effective_to is null or effective_to > $3)",
-            )
-            .bind(model_catalog_id)
-            .bind(billing_unit)
-            .bind(effective_at)
-            .fetch_all(executor)
-            .await?
-        }
-    };
-
-    Ok(select_effective_price_catalog_entry(rows, price_variant_key, request_input_tokens))
-}
-
-fn select_effective_price_catalog_entry(
-    rows: Vec<AiPriceCatalogRow>,
-    price_variant_key: &str,
-    request_input_tokens: Option<i32>,
-) -> Option<AiPriceCatalogRow> {
-    rows.into_iter()
-        .filter(|row| {
-            if price_variant_key == "default" {
-                row.price_variant_key == "default"
-            } else {
-                row.price_variant_key == price_variant_key || row.price_variant_key == "default"
-            }
-        })
-        .filter(|row| match request_input_tokens {
-            Some(tokens) => {
-                row.request_input_tokens_min.is_none_or(|min| min <= tokens)
-                    && row.request_input_tokens_max.is_none_or(|max| max >= tokens)
-            }
-            None => {
-                row.request_input_tokens_min.is_none() && row.request_input_tokens_max.is_none()
-            }
-        })
-        .max_by(|left, right| {
-            effective_price_sort_key(left, price_variant_key)
-                .cmp(&effective_price_sort_key(right, price_variant_key))
-        })
-}
-
-fn effective_price_sort_key(
-    row: &AiPriceCatalogRow,
-    price_variant_key: &str,
-) -> (i32, i32, i32, i32, DateTime<Utc>, Uuid) {
-    let catalog_scope_rank = if row.catalog_scope == "workspace_override" { 2 } else { 1 };
-    let variant_rank = if row.price_variant_key == price_variant_key {
-        2
-    } else {
-        i32::from(row.price_variant_key == "default")
-    };
-    let tier_rank =
-        i32::from(row.request_input_tokens_min.is_some() || row.request_input_tokens_max.is_some());
-    let tier_floor = row.request_input_tokens_min.unwrap_or(-1);
-    (catalog_scope_rank, variant_rank, tier_rank, tier_floor, row.effective_from, row.id)
-}
-
-pub async fn create_workspace_price_override(
-    postgres: &PgPool,
-    workspace_id: Uuid,
-    model_catalog_id: Uuid,
-    billing_unit: &str,
-    unit_price: Decimal,
-    currency_code: &str,
-    effective_from: DateTime<Utc>,
-    effective_to: Option<DateTime<Utc>>,
-) -> Result<AiPriceCatalogRow, sqlx::Error> {
-    sqlx::query_as::<_, AiPriceCatalogRow>(
-        "insert into ai_price_catalog (
-            id,
-            model_catalog_id,
-            billing_unit,
-            price_variant_key,
-            request_input_tokens_min,
-            request_input_tokens_max,
-            unit_price,
+) -> Result<Option<ModelPricing>, sqlx::Error> {
+    let row = sqlx::query_as::<_, ModelPricingRow>(
+        "select
             currency_code,
-            effective_from,
-            effective_to,
-            catalog_scope,
-            workspace_id
-        )
-        values ($1, $2, $3::billing_unit, 'default', null, null, $4, $5, $6, $7, 'workspace_override', $8)
-        returning
-            id,
-            model_catalog_id,
-            billing_unit::text as billing_unit,
-            price_variant_key,
-            request_input_tokens_min,
-            request_input_tokens_max,
-            unit_price,
-            currency_code,
-            effective_from,
-            effective_to,
-            catalog_scope::text as catalog_scope,
-            workspace_id",
+            input_price_per_1m,
+            cached_input_price_per_1m,
+            cache_write_input_price_per_1m,
+            output_price_per_1m,
+            long_context_threshold_tokens,
+            long_context_input_price_per_1m,
+            long_context_cached_input_price_per_1m,
+            long_context_output_price_per_1m
+         from ai_model_catalog
+         where id = $1",
     )
-    .bind(Uuid::now_v7())
     .bind(model_catalog_id)
-    .bind(billing_unit)
-    .bind(unit_price)
-    .bind(currency_code)
-    .bind(effective_from)
-    .bind(effective_to)
-    .bind(workspace_id)
-    .fetch_one(postgres)
-    .await
-}
-
-pub async fn update_workspace_price_override(
-    postgres: &PgPool,
-    price_id: Uuid,
-    model_catalog_id: Uuid,
-    billing_unit: &str,
-    unit_price: Decimal,
-    currency_code: &str,
-    effective_from: DateTime<Utc>,
-    effective_to: Option<DateTime<Utc>>,
-) -> Result<Option<AiPriceCatalogRow>, sqlx::Error> {
-    sqlx::query_as::<_, AiPriceCatalogRow>(
-        "update ai_price_catalog
-         set model_catalog_id = $2,
-             billing_unit = $3::billing_unit,
-             price_variant_key = 'default',
-             request_input_tokens_min = null,
-             request_input_tokens_max = null,
-             unit_price = $4,
-             currency_code = $5,
-             effective_from = $6,
-             effective_to = $7
-         where id = $1
-           and catalog_scope = 'workspace_override'
-         returning
-            id,
-            model_catalog_id,
-            billing_unit::text as billing_unit,
-            price_variant_key,
-            request_input_tokens_min,
-            request_input_tokens_max,
-            unit_price,
-            currency_code,
-            effective_from,
-            effective_to,
-            catalog_scope::text as catalog_scope,
-            workspace_id",
-    )
-    .bind(price_id)
-    .bind(model_catalog_id)
-    .bind(billing_unit)
-    .bind(unit_price)
-    .bind(currency_code)
-    .bind(effective_from)
-    .bind(effective_to)
-    .fetch_optional(postgres)
-    .await
-}
-
-pub async fn delete_workspace_price_override(
-    postgres: &PgPool,
-    price_id: Uuid,
-) -> Result<u64, sqlx::Error> {
-    let result = sqlx::query(
-        "delete from ai_price_catalog
-         where id = $1
-           and catalog_scope = 'workspace_override'",
-    )
-    .bind(price_id)
-    .execute(postgres)
+    .fetch_optional(executor)
     .await?;
-    Ok(result.rows_affected())
+    Ok(row.map(|row| {
+        let long_context = match (
+            row.long_context_threshold_tokens,
+            row.long_context_input_price_per_1m,
+            row.long_context_cached_input_price_per_1m,
+            row.long_context_output_price_per_1m,
+        ) {
+            (Some(threshold_tokens), Some(input), Some(cached_input), Some(output)) => {
+                Some(ModelLongContextPricing {
+                    threshold_tokens,
+                    input_price_per_1m: input,
+                    cached_input_price_per_1m: cached_input,
+                    output_price_per_1m: output,
+                })
+            }
+            _ => None,
+        };
+        ModelPricing {
+            currency_code: row.currency_code,
+            input_price_per_1m: row.input_price_per_1m,
+            cached_input_price_per_1m: row.cached_input_price_per_1m,
+            cache_write_input_price_per_1m: row.cache_write_input_price_per_1m,
+            output_price_per_1m: row.output_price_per_1m,
+            long_context,
+        }
+    }))
 }

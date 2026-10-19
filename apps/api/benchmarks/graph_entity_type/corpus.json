@@ -1,0 +1,670 @@
+{
+  "version": "2026-09-27.1",
+  "ontology": "apps/api/src/services/graph/extract/prompt.rs entity_types (extract_graph type reference)",
+  "batch_size": 12,
+  "note": "Public-knowledge entities only; gold follows the extract_graph type reference; accept lists the other types that reference also admits.",
+  "entities": [
+    {
+      "label": "Grace Hopper",
+      "summary": "US Navy rear admiral who developed the first compiler for a programming language.",
+      "gold": "person",
+      "accept": []
+    },
+    {
+      "label": "Mozilla Foundation",
+      "summary": "Non-profit that stewards the Firefox browser.",
+      "gold": "organization",
+      "accept": []
+    },
+    {
+      "label": "Lake Baikal",
+      "summary": "Rift lake in Siberia, the deepest lake in the world.",
+      "gold": "location",
+      "accept": []
+    },
+    {
+      "label": "Fukushima nuclear disaster",
+      "summary": "2011 nuclear accident following the Tōhoku earthquake and tsunami.",
+      "gold": "event",
+      "accept": []
+    },
+    {
+      "label": "Kubernetes",
+      "summary": "Open-source container orchestration system.",
+      "gold": "artifact",
+      "accept": []
+    },
+    {
+      "label": "Escherichia coli",
+      "summary": "Gut bacterium widely used as a model organism.",
+      "gold": "natural",
+      "accept": []
+    },
+    {
+      "label": "blue-green deployment",
+      "summary": "Release method that switches traffic between two identical environments.",
+      "gold": "process",
+      "accept": []
+    },
+    {
+      "label": "eventual consistency",
+      "summary": "Consistency model in which replicas converge over time.",
+      "gold": "concept",
+      "accept": []
+    },
+    {
+      "label": "p95 request latency",
+      "summary": "Latency below which 95 percent of requests complete.",
+      "gold": "attribute",
+      "accept": []
+    },
+    {
+      "label": "Tim Berners-Lee",
+      "summary": "Computer scientist who proposed the World Wide Web at CERN in 1989.",
+      "gold": "person",
+      "accept": []
+    },
+    {
+      "label": "European Central Bank",
+      "summary": "Central bank responsible for monetary policy in the euro area.",
+      "gold": "organization",
+      "accept": []
+    },
+    {
+      "label": "Shenzhen",
+      "summary": "City in southern China known as a hardware manufacturing hub.",
+      "gold": "location",
+      "accept": []
+    },
+    {
+      "label": "Heartbleed",
+      "summary": "2014 disclosure of a buffer over-read in OpenSSL that leaked server memory.",
+      "gold": "event",
+      "accept": [
+        "artifact"
+      ]
+    },
+    {
+      "label": "SQLite",
+      "summary": "Embedded relational database engine.",
+      "gold": "artifact",
+      "accept": []
+    },
+    {
+      "label": "tuberculosis",
+      "summary": "Infectious disease caused by Mycobacterium tuberculosis.",
+      "gold": "natural",
+      "accept": []
+    },
+    {
+      "label": "TLS handshake",
+      "summary": "Sequence of messages that negotiates keys before encrypted traffic starts.",
+      "gold": "process",
+      "accept": []
+    },
+    {
+      "label": "technical debt",
+      "summary": "Idea that shortcuts in software create future rework.",
+      "gold": "concept",
+      "accept": []
+    },
+    {
+      "label": "error budget",
+      "summary": "Allowed amount of unreliability derived from the service level objective.",
+      "gold": "attribute",
+      "accept": [
+        "concept"
+      ]
+    },
+    {
+      "label": "Ada Yonath",
+      "summary": "Crystallographer awarded the 2009 Nobel Prize in Chemistry for ribosome structure work.",
+      "gold": "person",
+      "accept": []
+    },
+    {
+      "label": "Cloud Native Computing Foundation",
+      "summary": "Foundation hosting Kubernetes and other cloud-native projects.",
+      "gold": "organization",
+      "accept": []
+    },
+    {
+      "label": "Suez Canal",
+      "summary": "Waterway in Egypt connecting the Mediterranean Sea to the Red Sea.",
+      "gold": "location",
+      "accept": [
+        "artifact"
+      ]
+    },
+    {
+      "label": "Dot-com crash",
+      "summary": "Collapse of internet company valuations between 2000 and 2002.",
+      "gold": "event",
+      "accept": []
+    },
+    {
+      "label": "ibuprofen",
+      "summary": "Nonsteroidal anti-inflammatory drug used to treat pain and fever.",
+      "gold": "artifact",
+      "accept": []
+    },
+    {
+      "label": "hemoglobin",
+      "summary": "Protein in red blood cells that carries oxygen.",
+      "gold": "natural",
+      "accept": []
+    },
+    {
+      "label": "Dijkstra's algorithm",
+      "summary": "Algorithm that finds shortest paths in a weighted graph.",
+      "gold": "process",
+      "accept": []
+    },
+    {
+      "label": "zero trust",
+      "summary": "Security model in which no network location is trusted by default.",
+      "gold": "concept",
+      "accept": []
+    },
+    {
+      "label": "MAX_CONNECTIONS",
+      "summary": "Configuration value limiting concurrent database connections.",
+      "gold": "attribute",
+      "accept": []
+    },
+    {
+      "label": "Satya Nadella",
+      "summary": "Chief executive officer of Microsoft since 2014.",
+      "gold": "person",
+      "accept": []
+    },
+    {
+      "label": "Médecins Sans Frontières",
+      "summary": "International humanitarian medical organisation.",
+      "gold": "organization",
+      "accept": []
+    },
+    {
+      "label": "Mount Kilimanjaro",
+      "summary": "Dormant volcano in Tanzania and the highest mountain in Africa.",
+      "gold": "location",
+      "accept": []
+    },
+    {
+      "label": "Brexit referendum",
+      "summary": "2016 vote in which the United Kingdom chose to leave the European Union.",
+      "gold": "event",
+      "accept": []
+    },
+    {
+      "label": "USB-C",
+      "summary": "Connector standard for power and data.",
+      "gold": "artifact",
+      "accept": []
+    },
+    {
+      "label": "TP53 gene",
+      "summary": "Tumour suppressor gene mutated in many cancers.",
+      "gold": "natural",
+      "accept": []
+    },
+    {
+      "label": "code review",
+      "summary": "Step in which another engineer examines a change before it is merged.",
+      "gold": "process",
+      "accept": []
+    },
+    {
+      "label": "opportunity cost",
+      "summary": "Value of the best alternative forgone when making a choice.",
+      "gold": "concept",
+      "accept": []
+    },
+    {
+      "label": "HbA1c level",
+      "summary": "Blood measurement reflecting average glucose over three months.",
+      "gold": "attribute",
+      "accept": []
+    },
+    {
+      "label": "Frida Kahlo",
+      "summary": "Mexican painter known for her self-portraits.",
+      "gold": "person",
+      "accept": []
+    },
+    {
+      "label": "Toyota",
+      "summary": "Japanese automobile manufacturer.",
+      "gold": "organization",
+      "accept": []
+    },
+    {
+      "label": "Sahara Desert",
+      "summary": "Largest hot desert, covering much of North Africa.",
+      "gold": "location",
+      "accept": []
+    },
+    {
+      "label": "2003 Northeast blackout",
+      "summary": "Power outage affecting about 55 million people in North America.",
+      "gold": "event",
+      "accept": []
+    },
+    {
+      "label": "HTTP/3",
+      "summary": "Version of the HTTP protocol running over QUIC.",
+      "gold": "artifact",
+      "accept": []
+    },
+    {
+      "label": "lithium",
+      "summary": "Alkali metal used in rechargeable batteries.",
+      "gold": "natural",
+      "accept": []
+    },
+    {
+      "label": "Kaizen",
+      "summary": "Practice of continuous incremental improvement of work processes.",
+      "gold": "process",
+      "accept": []
+    },
+    {
+      "label": "game theory",
+      "summary": "Study of strategic decision-making between rational agents.",
+      "gold": "concept",
+      "accept": []
+    },
+    {
+      "label": "net promoter score",
+      "summary": "Metric of customer willingness to recommend a product.",
+      "gold": "attribute",
+      "accept": []
+    },
+    {
+      "label": "Yuri Gagarin",
+      "summary": "Soviet cosmonaut who became the first human in outer space in 1961.",
+      "gold": "person",
+      "accept": []
+    },
+    {
+      "label": "NASA",
+      "summary": "United States civil space agency.",
+      "gold": "organization",
+      "accept": []
+    },
+    {
+      "label": "Bavaria",
+      "summary": "Federal state in the south-east of Germany.",
+      "gold": "location",
+      "accept": []
+    },
+    {
+      "label": "Fall of the Berlin Wall",
+      "summary": "Opening of the border between East and West Berlin in November 1989.",
+      "gold": "event",
+      "accept": []
+    },
+    {
+      "label": "ISO 27001",
+      "summary": "International standard for information security management systems.",
+      "gold": "artifact",
+      "accept": []
+    },
+    {
+      "label": "quartz",
+      "summary": "Mineral composed of silicon and oxygen.",
+      "gold": "natural",
+      "accept": []
+    },
+    {
+      "label": "A/B testing",
+      "summary": "Method comparing two variants on live traffic.",
+      "gold": "process",
+      "accept": []
+    },
+    {
+      "label": "CAP theorem",
+      "summary": "Result stating a distributed store cannot guarantee consistency, availability and partition tolerance at once.",
+      "gold": "concept",
+      "accept": []
+    },
+    {
+      "label": "unemployment rate",
+      "summary": "Share of the labour force without a job.",
+      "gold": "attribute",
+      "accept": []
+    },
+    {
+      "label": "Dennis Ritchie",
+      "summary": "Created the C programming language and co-developed Unix.",
+      "gold": "person",
+      "accept": []
+    },
+    {
+      "label": "W3C",
+      "summary": "Consortium that develops web standards such as HTML and CSS.",
+      "gold": "organization",
+      "accept": []
+    },
+    {
+      "label": "Rotterdam",
+      "summary": "Dutch city with the largest seaport in Europe.",
+      "gold": "location",
+      "accept": []
+    },
+    {
+      "label": "CrowdStrike outage of July 2024",
+      "summary": "Faulty sensor update that crashed millions of Windows machines.",
+      "gold": "event",
+      "accept": []
+    },
+    {
+      "label": "Apache License 2.0",
+      "summary": "Permissive open-source software license.",
+      "gold": "artifact",
+      "accept": []
+    },
+    {
+      "label": "aurora borealis",
+      "summary": "Light display in the northern sky caused by solar wind.",
+      "gold": "natural",
+      "accept": []
+    },
+    {
+      "label": "k-means clustering",
+      "summary": "Algorithm that partitions observations into k clusters.",
+      "gold": "process",
+      "accept": []
+    },
+    {
+      "label": "cognitive dissonance",
+      "summary": "Mental discomfort from holding conflicting beliefs.",
+      "gold": "concept",
+      "accept": []
+    },
+    {
+      "label": "TTL of 300 seconds",
+      "summary": "Time-to-live set on the DNS record.",
+      "gold": "attribute",
+      "accept": []
+    },
+    {
+      "label": "Margaret Hamilton",
+      "summary": "Led the team that wrote the on-board flight software for the Apollo program.",
+      "gold": "person",
+      "accept": []
+    },
+    {
+      "label": "Bundestag",
+      "summary": "The federal parliament of Germany.",
+      "gold": "organization",
+      "accept": []
+    },
+    {
+      "label": "Antarctica",
+      "summary": "Southernmost continent, almost entirely covered by ice.",
+      "gold": "location",
+      "accept": []
+    },
+    {
+      "label": "SolarWinds breach",
+      "summary": "Supply-chain compromise of the Orion software discovered in 2020.",
+      "gold": "event",
+      "accept": []
+    },
+    {
+      "label": "Sarbanes-Oxley Act",
+      "summary": "2002 United States law on corporate financial reporting.",
+      "gold": "artifact",
+      "accept": []
+    },
+    {
+      "label": "monsoon",
+      "summary": "Seasonal reversal of winds bringing heavy rain to South Asia.",
+      "gold": "natural",
+      "accept": []
+    },
+    {
+      "label": "due diligence",
+      "summary": "Investigation of a company carried out before an acquisition.",
+      "gold": "process",
+      "accept": []
+    },
+    {
+      "label": "separation of concerns",
+      "summary": "Design principle of dividing a program into distinct sections.",
+      "gold": "concept",
+      "accept": []
+    },
+    {
+      "label": "CPU utilization",
+      "summary": "Share of processor capacity in use.",
+      "gold": "attribute",
+      "accept": []
+    },
+    {
+      "label": "Nelson Mandela",
+      "summary": "First president of South Africa elected in a fully representative election.",
+      "gold": "person",
+      "accept": []
+    },
+    {
+      "label": "Interpol",
+      "summary": "International organisation facilitating police cooperation.",
+      "gold": "organization",
+      "accept": []
+    },
+    {
+      "label": "Svalbard Global Seed Vault",
+      "summary": "Secure facility on Spitsbergen storing duplicate seed samples.",
+      "gold": "location",
+      "accept": [
+        "artifact"
+      ]
+    },
+    {
+      "label": "Black Monday 1987",
+      "summary": "Stock market crash on 19 October 1987.",
+      "gold": "event",
+      "accept": []
+    },
+    {
+      "label": "pacemaker",
+      "summary": "Implanted medical device that regulates heart rhythm.",
+      "gold": "artifact",
+      "accept": []
+    },
+    {
+      "label": "honeybee",
+      "summary": "Social insect that produces honey and pollinates crops.",
+      "gold": "natural",
+      "accept": []
+    },
+    {
+      "label": "canary release",
+      "summary": "Rollout that first sends a small share of traffic to the new version.",
+      "gold": "process",
+      "accept": []
+    },
+    {
+      "label": "epidemiology",
+      "summary": "Field studying the distribution and determinants of disease in populations.",
+      "gold": "concept",
+      "accept": []
+    },
+    {
+      "label": "boiling point",
+      "summary": "Temperature at which a liquid turns into vapour.",
+      "gold": "attribute",
+      "accept": []
+    },
+    {
+      "label": "Katalin Karikó",
+      "summary": "Biochemist whose mRNA research enabled several COVID-19 vaccines.",
+      "gold": "person",
+      "accept": []
+    },
+    {
+      "label": "Apache Software Foundation",
+      "summary": "Non-profit that supports the Apache open-source projects.",
+      "gold": "organization",
+      "accept": []
+    },
+    {
+      "label": "Falkenstein data center",
+      "summary": "Hosting provider site in Saxony where the cluster nodes are racked.",
+      "gold": "location",
+      "accept": [
+        "artifact"
+      ]
+    },
+    {
+      "label": "KubeCon Europe 2024",
+      "summary": "Cloud-native conference held in Paris in March 2024.",
+      "gold": "event",
+      "accept": []
+    },
+    {
+      "label": "Terraform",
+      "summary": "Infrastructure-as-code tool that provisions cloud resources.",
+      "gold": "artifact",
+      "accept": []
+    },
+    {
+      "label": "mitochondria",
+      "summary": "Organelles that produce most of the cell's chemical energy.",
+      "gold": "natural",
+      "accept": []
+    },
+    {
+      "label": "backpropagation",
+      "summary": "Method for computing gradients when training neural networks.",
+      "gold": "process",
+      "accept": []
+    },
+    {
+      "label": "idempotency",
+      "summary": "Property that repeating an operation has the same effect as doing it once.",
+      "gold": "concept",
+      "accept": [
+        "attribute"
+      ]
+    },
+    {
+      "label": "HTTP 404",
+      "summary": "Status code returned when the requested resource is not found.",
+      "gold": "attribute",
+      "accept": []
+    },
+    {
+      "label": "Guido van Rossum",
+      "summary": "Author of the Python programming language.",
+      "gold": "person",
+      "accept": []
+    },
+    {
+      "label": "Platform SRE team",
+      "summary": "The internal team on call for the production Kubernetes clusters.",
+      "gold": "organization",
+      "accept": []
+    },
+    {
+      "label": "Mariana Trench",
+      "summary": "Deepest oceanic trench, in the western Pacific Ocean.",
+      "gold": "location",
+      "accept": []
+    },
+    {
+      "label": "Hurricane Katrina",
+      "summary": "2005 hurricane that flooded New Orleans.",
+      "gold": "event",
+      "accept": [
+        "natural"
+      ]
+    },
+    {
+      "label": "parse_config()",
+      "summary": "Function that reads the service configuration file at start-up.",
+      "gold": "artifact",
+      "accept": []
+    },
+    {
+      "label": "lightning",
+      "summary": "Electrostatic discharge during a thunderstorm.",
+      "gold": "natural",
+      "accept": []
+    },
+    {
+      "label": "incident postmortem",
+      "summary": "Review written after an outage to record causes and follow-up actions.",
+      "gold": "process",
+      "accept": []
+    },
+    {
+      "label": "principle of least privilege",
+      "summary": "Principle that every component gets only the access it needs.",
+      "gold": "concept",
+      "accept": []
+    },
+    {
+      "label": "disk IOPS",
+      "summary": "Input/output operations per second the volume sustains.",
+      "gold": "attribute",
+      "accept": []
+    },
+    {
+      "label": "Serena Williams",
+      "summary": "Tennis player with 23 Grand Slam singles titles.",
+      "gold": "person",
+      "accept": []
+    },
+    {
+      "label": "Bank for International Settlements",
+      "summary": "Institution owned by central banks that publishes banking standards.",
+      "gold": "organization",
+      "accept": []
+    },
+    {
+      "label": "Kyoto",
+      "summary": "Former imperial capital of Japan.",
+      "gold": "location",
+      "accept": []
+    },
+    {
+      "label": "GitLab database incident of 2017",
+      "summary": "Outage in which production data was accidentally deleted and restored from backups.",
+      "gold": "event",
+      "accept": []
+    },
+    {
+      "label": "POST /v1/orders",
+      "summary": "API endpoint that creates a new order.",
+      "gold": "artifact",
+      "accept": []
+    },
+    {
+      "label": "Plasmodium falciparum",
+      "summary": "Parasite that causes the most severe form of malaria.",
+      "gold": "natural",
+      "accept": []
+    },
+    {
+      "label": "sprint planning",
+      "summary": "Meeting at the start of a sprint where the team selects work.",
+      "gold": "process",
+      "accept": []
+    },
+    {
+      "label": "microservices architecture",
+      "summary": "Architectural style structuring an application as small independent services.",
+      "gold": "concept",
+      "accept": []
+    },
+    {
+      "label": "retry_backoff_ms",
+      "summary": "Parameter setting the delay between retries in milliseconds.",
+      "gold": "attribute",
+      "accept": []
+    }
+  ]
+}

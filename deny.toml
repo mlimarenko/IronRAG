@@ -13,7 +13,23 @@ yanked = "deny"
 # selectors; enabling all scopes emits warnings for informational advisories.
 unmaintained = "all"
 unsound = "all"
-ignore = []
+# RUSTSEC-2026-0253 requires LruCache::pop(), a panic from the stored key's Drop,
+# catching that panic, and then another cache operation. aws-sdk-s3 1.137.0 only
+# calls get_or_insert_mut on LruCache<CacheKey(String), _>; CacheKey has no custom
+# Drop. The SDK requires lru ^0.16.3, so the patched lru >=0.18.2 is not semver
+# compatible; current upstream aws-sdk-s3 1.141.0 retains the same constraint.
+# Review and remove by 2026-09-13, or earlier when aws-sdk-s3 permits lru 0.18.2.
+#
+# RUSTSEC-2023-0071 (rsa 0.9.10, Marvin Attack) has no patched release:
+# `patched = []`. IronRAG never runs an RSA private-key operation. Production
+# reaches rsa only through openidconnect's ID-token signature verification
+# against the IdP's public JWKS, and the direct dependency is the optional
+# `test-support` mock IdP. Review and remove by 2027-03-19, or earlier when a
+# release with constant-time padding ships.
+ignore = [
+    { id = "RUSTSEC-2026-0253", reason = "aws-sdk-s3 does not call vulnerable LruCache::pop and its String-backed key cannot panic in Drop; review by 2026-09-13 or when upstream permits lru >=0.18.2" },
+    { id = "RUSTSEC-2023-0071", reason = "rsa performs only public-key ID-token verification via openidconnect, and the direct dependency drives the test-support mock IdP; no RSA private-key operation runs in production and upstream has no patched release; review by 2027-03-19 or when rsa ships constant-time padding" },
+]
 unused-ignored-advisory = "deny"
 
 [bans]
@@ -25,12 +41,12 @@ workspace-default-features = "allow"
 external-default-features = "allow"
 allow-workspace = true
 deny = [
-    { crate = "native-tls", reason = "Backend TLS must stay on the canonical rustls stack." },
-    { crate = "openssl", reason = "Backend TLS must stay on the canonical rustls stack." },
-    { crate = "openssl-sys", reason = "Backend TLS must stay on the canonical rustls stack." },
-    { crate = "openssl-src", reason = "Backend TLS must stay on the canonical rustls stack." },
+    { crate = "native-tls", reason = "Backend TLS must stay on the required rustls stack." },
+    { crate = "openssl", reason = "Backend TLS must stay on the required rustls stack." },
+    { crate = "openssl-sys", reason = "Backend TLS must stay on the required rustls stack." },
+    { crate = "openssl-src", reason = "Backend TLS must stay on the required rustls stack." },
     { crate = "serde_yml", reason = "YAML support must not use the unsound serde_yml crate." },
-    { crate = "yaml-rust", reason = "YAML support must stay on the maintained canonical YAML stack." },
+    { crate = "yaml-rust", reason = "YAML support must stay on the maintained YAML stack." },
 ]
 skip = []
 skip-tree = []

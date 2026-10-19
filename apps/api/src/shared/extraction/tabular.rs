@@ -3,11 +3,49 @@ use std::{ffi::OsStr, io::Cursor, path::Path};
 use anyhow::{Context, Result};
 use calamine::{Data, Range, Reader, Sheets, Table, open_workbook_auto_from_rs};
 use csv::{ReaderBuilder, StringRecord};
+use zip::ZipArchive;
 
 use crate::shared::extraction::{
     ExtractionOutput, ExtractionSourceMetadata, RawExtractionPage, build_text_layout,
-    table_markdown::render_markdown_table,
+    file_extract::ExtractionFailureClass, table_markdown::render_markdown_table,
 };
+
+/// ZIP local-file-header magic (`PK\x03\x04`): OOXML (`xlsx`, `xlsb`) and ODF
+/// (`ods`) workbooks are ZIP containers.
+const ZIP_CONTAINER_MAGIC: [u8; 4] = [b'P', b'K', 0x03, 0x04];
+/// OLE2 compound-file magic: legacy `.xls` workbooks are OLE containers.
+const OLE_CONTAINER_MAGIC: [u8; 8] = [0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1];
+/// The most a workbook container may declare in uncompressed member bytes
+/// before the bytes are refused unopened. A ZIP bomb stays small in transfer
+/// form, so the bound is on the declared expansion: uploads are already
+/// capped in megabytes by `upload_max_size_mb`, and a workbook that expands
+/// beyond a gibibyte is not something this path will decompress. The refusal
+/// is operational — a bigger bound or a different attempt could still read
+/// it — and never a content verdict.
+const MAX_WORKBOOK_UNCOMPRESSED_BYTES: u64 = 1 << 30;
+
+#[derive(Debug, thiserror::Error)]
+pub enum TabularExtractError {
+    #[error("{0}")]
+    Decode(anyhow::Error),
+    #[error("{0}")]
+    Parse(anyhow::Error),
+    #[error("{0}")]
+    Workbook(anyhow::Error),
+}
+
+impl TabularExtractError {
+    /// The verdict the extraction producer hands to the upload gate. Only a
+    /// delimited-text byte verdict (undecodable bytes or a parser failure on
+    /// proven text) can prove the payload unsupported; a workbook backend
+    /// failure says nothing conclusive about the bytes and is operational.
+    pub const fn failure_class(&self) -> ExtractionFailureClass {
+        match self {
+            Self::Decode(_) | Self::Parse(_) => ExtractionFailureClass::ContentInvalid,
+            Self::Workbook(_) => ExtractionFailureClass::OperationalTerminal,
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TabularFormat {
@@ -69,13 +107,14 @@ pub fn extract_tabular(
     file_name: Option<&str>,
     mime_type: Option<&str>,
     file_bytes: &[u8],
-) -> Result<ExtractionOutput> {
-    let format = detect_tabular_format(file_name, mime_type, file_bytes)?;
+) -> std::result::Result<ExtractionOutput, TabularExtractError> {
+    let format = select_tabular_format(file_name, mime_type, file_bytes);
     let mut warnings = Vec::new();
     let tables = if format.is_delimited() {
         extract_delimited_tables(format, file_name, file_bytes)?
     } else {
-        extract_workbook_tables(format, file_bytes, &mut warnings)?
+        extract_workbook_tables(format, file_bytes, &mut warnings)
+            .map_err(TabularExtractError::Workbook)?
     };
 
     let mut paragraph_lines = Vec::new();
@@ -137,63 +176,227 @@ pub fn extract_tabular(
     })
 }
 
-fn detect_tabular_format(
+/// Selects the tabular parser from the payload, not from a declared name alone.
+///
+/// A workbook container signature is authoritative: bytes that are provably a
+/// ZIP or OLE2 archive are opened by the workbook backend even when the
+/// extension or MIME claims CSV/TSV. Otherwise a real `table.csv` (as web
+/// ingest synthesizes from `Content-Type: text/csv`) carrying workbook bytes
+/// would be decoded as UTF-8 text and wrongly reported as invalid content.
+/// Without a container, a declared extension, then a declared MIME decide.
+///
+/// The trailing UTF-8 sniff / unknown-binary workbook attempt is the total
+/// fallback for a direct [`extract_tabular`] call whose bytes carry neither a
+/// container signature nor any declared tabular metadata. Upload admission
+/// never produces that combination: it routes to the tabular parser only for a
+/// declared tabular name/MIME or for a recognised container, so this branch is
+/// reached only through the public entry point. A UTF-8 payload is delimited
+/// text; anything else is attempted as a workbook, where the backend's refusal
+/// is an operational fault, never [`TabularExtractError::Decode`] or
+/// [`TabularExtractError::Parse`].
+fn select_tabular_format(
     file_name: Option<&str>,
     mime_type: Option<&str>,
     file_bytes: &[u8],
-) -> Result<TabularFormat> {
-    if let Some(extension) = file_name
+) -> TabularFormat {
+    if let Some(container) = workbook_container_format(file_bytes) {
+        return declared_extension_format(file_name)
+            .filter(|format| !format.is_delimited())
+            .unwrap_or(container);
+    }
+    if let Some(format) = declared_extension_format(file_name) {
+        return format;
+    }
+    if let Some(format) = declared_mime_format(mime_type) {
+        // Browsers label CSV exports as `application/vnd.ms-excel`; when the
+        // bytes are plain UTF-8 text that is a CSV, not an OLE workbook.
+        if format == TabularFormat::Xls && std::str::from_utf8(file_bytes).is_ok() {
+            return TabularFormat::Csv;
+        }
+        return format;
+    }
+    if std::str::from_utf8(file_bytes).is_ok() {
+        return TabularFormat::Csv;
+    }
+    TabularFormat::Xlsx
+}
+
+/// Whether the declared file name carries a tabular extension. This is the
+/// canonical membership test: `file_extract::kind` derives its spreadsheet
+/// classification from it instead of keeping a second extension list.
+pub(crate) fn is_tabular_extension(file_name: Option<&str>) -> bool {
+    declared_extension_format(file_name).is_some()
+}
+
+/// Whether the declared MIME type is a tabular one. Canonical sibling of
+/// [`is_tabular_extension`], used by `file_extract::kind` membership.
+pub(crate) fn is_tabular_mime_type(mime_type: Option<&str>) -> bool {
+    declared_mime_format(mime_type).is_some()
+}
+
+/// Whether the bytes carry a workbook container signature (ZIP or OLE2). The
+/// signature is shared by every ZIP-based OOXML/ODF archive, so a caller must
+/// keep an explicitly declared non-text document kind (PDF, image, DOCX, PPTX,
+/// spreadsheet) on its own route and consult this only when the declared kind
+/// is text-like, generic binary, or absent.
+pub(crate) fn has_workbook_container_signature(file_bytes: &[u8]) -> bool {
+    workbook_container_format(file_bytes).is_some()
+}
+
+/// The workbook container the bytes are, if any. ZIP is the default for the
+/// OOXML/ODF families; OLE2 is the legacy `.xls` compound file.
+fn workbook_container_format(file_bytes: &[u8]) -> Option<TabularFormat> {
+    if file_bytes.starts_with(&ZIP_CONTAINER_MAGIC) {
+        return Some(TabularFormat::Xlsx);
+    }
+    if file_bytes.starts_with(&OLE_CONTAINER_MAGIC) {
+        return Some(TabularFormat::Xls);
+    }
+    None
+}
+
+/// Member names that mark a ZIP container as a workbook rather than the other
+/// OOXML/ODF documents sharing the signature (`xl/workbook.xml` for xlsx,
+/// `xl/workbook.bin` for xlsb, `content.xml` for ods).
+fn is_workbook_part(name: &str) -> bool {
+    matches!(name, "xl/workbook.xml" | "xl/workbook.bin" | "content.xml")
+}
+
+/// Refuses a workbook container that must not reach the decompressing backend:
+/// a ZIP whose central directory declares more uncompressed member bytes than
+/// [`MAX_WORKBOOK_UNCOMPRESSED_BYTES`], or one carrying no workbook part at all
+/// (DOCX, PPTX and ODT share the ZIP signature). OLE2 compound files store
+/// their members uncompressed, so the transfer limit is already their expansion
+/// bound. Every refusal here is operational: the bytes may be a valid document
+/// of another kind, or a workbook a later attempt with a bigger bound could
+/// read.
+fn guard_workbook_container(file_bytes: &[u8]) -> Result<()> {
+    if !file_bytes.starts_with(&ZIP_CONTAINER_MAGIC) {
+        return Ok(());
+    }
+    let mut archive = ZipArchive::new(Cursor::new(file_bytes))
+        .context("spreadsheet container is not a readable ZIP archive")?;
+    let mut declared_uncompressed_bytes: u64 = 0;
+    let mut has_workbook_part = false;
+    for index in 0..archive.len() {
+        let entry = archive
+            .by_index_raw(index)
+            .context("spreadsheet container is not a readable ZIP archive")?;
+        declared_uncompressed_bytes = declared_uncompressed_bytes.saturating_add(entry.size());
+        has_workbook_part |= is_workbook_part(entry.name());
+        if declared_uncompressed_bytes > MAX_WORKBOOK_UNCOMPRESSED_BYTES {
+            break;
+        }
+    }
+    if declared_uncompressed_bytes > MAX_WORKBOOK_UNCOMPRESSED_BYTES {
+        anyhow::bail!(
+            "spreadsheet container declares {declared_uncompressed_bytes} uncompressed bytes, above the {MAX_WORKBOOK_UNCOMPRESSED_BYTES}-byte workbook limit"
+        );
+    }
+    if !has_workbook_part {
+        anyhow::bail!("spreadsheet container carries no workbook part");
+    }
+    Ok(())
+}
+
+/// Test fixture: a hand-built ZIP whose single member `xl/workbook.xml`
+/// declares `u32::MAX` uncompressed bytes while the archive itself stays tiny,
+/// so the guard is exercised from central-directory metadata alone without a
+/// real bomb. Shared with the `file_extract` tests that pin the failure class.
+#[cfg(test)]
+pub(crate) fn declared_oversized_workbook_zip_bytes() -> Vec<u8> {
+    const NAME: &[u8] = b"xl/workbook.xml";
+    const DECLARED_UNCOMPRESSED_BYTES: u32 = u32::MAX;
+    let mut bytes = Vec::new();
+    let local_header_offset = 0u32;
+    // Local file header.
+    bytes.extend_from_slice(&0x0403_4b50u32.to_le_bytes());
+    bytes.extend_from_slice(&20u16.to_le_bytes());
+    bytes.extend_from_slice(&0u16.to_le_bytes());
+    bytes.extend_from_slice(&0u16.to_le_bytes());
+    bytes.extend_from_slice(&0u16.to_le_bytes());
+    bytes.extend_from_slice(&0u16.to_le_bytes());
+    bytes.extend_from_slice(&0u32.to_le_bytes());
+    bytes.extend_from_slice(&0u32.to_le_bytes());
+    bytes.extend_from_slice(&DECLARED_UNCOMPRESSED_BYTES.to_le_bytes());
+    bytes.extend_from_slice(&(NAME.len() as u16).to_le_bytes());
+    bytes.extend_from_slice(&0u16.to_le_bytes());
+    bytes.extend_from_slice(NAME);
+    let central_directory_offset = bytes.len() as u32;
+    // Central directory entry.
+    bytes.extend_from_slice(&0x0201_4b50u32.to_le_bytes());
+    bytes.extend_from_slice(&20u16.to_le_bytes());
+    bytes.extend_from_slice(&20u16.to_le_bytes());
+    bytes.extend_from_slice(&0u16.to_le_bytes());
+    bytes.extend_from_slice(&0u16.to_le_bytes());
+    bytes.extend_from_slice(&0u16.to_le_bytes());
+    bytes.extend_from_slice(&0u16.to_le_bytes());
+    bytes.extend_from_slice(&0u32.to_le_bytes());
+    bytes.extend_from_slice(&0u32.to_le_bytes());
+    bytes.extend_from_slice(&DECLARED_UNCOMPRESSED_BYTES.to_le_bytes());
+    bytes.extend_from_slice(&(NAME.len() as u16).to_le_bytes());
+    bytes.extend_from_slice(&0u16.to_le_bytes());
+    bytes.extend_from_slice(&0u16.to_le_bytes());
+    bytes.extend_from_slice(&0u16.to_le_bytes());
+    bytes.extend_from_slice(&0u16.to_le_bytes());
+    bytes.extend_from_slice(&0u32.to_le_bytes());
+    bytes.extend_from_slice(&local_header_offset.to_le_bytes());
+    bytes.extend_from_slice(NAME);
+    let central_directory_size = bytes.len() as u32 - central_directory_offset;
+    // End of central directory.
+    bytes.extend_from_slice(&0x0605_4b50u32.to_le_bytes());
+    bytes.extend_from_slice(&0u16.to_le_bytes());
+    bytes.extend_from_slice(&0u16.to_le_bytes());
+    bytes.extend_from_slice(&1u16.to_le_bytes());
+    bytes.extend_from_slice(&1u16.to_le_bytes());
+    bytes.extend_from_slice(&central_directory_size.to_le_bytes());
+    bytes.extend_from_slice(&central_directory_offset.to_le_bytes());
+    bytes.extend_from_slice(&0u16.to_le_bytes());
+    bytes
+}
+
+fn declared_extension_format(file_name: Option<&str>) -> Option<TabularFormat> {
+    let extension = file_name
         .and_then(|value| Path::new(value).extension())
         .and_then(OsStr::to_str)
         .map(str::trim)
         .filter(|value| !value.is_empty())
-        .map(str::to_ascii_lowercase)
-    {
-        return match extension.as_str() {
-            "csv" => Ok(TabularFormat::Csv),
-            "tsv" => Ok(TabularFormat::Tsv),
-            "xls" => Ok(TabularFormat::Xls),
-            "xlsx" => Ok(TabularFormat::Xlsx),
-            "xlsb" => Ok(TabularFormat::Xlsb),
-            "ods" => Ok(TabularFormat::Ods),
-            _ => Err(anyhow::anyhow!("unsupported tabular extension: {extension}")),
-        };
+        .map(str::to_ascii_lowercase)?;
+    match extension.as_str() {
+        "csv" => Some(TabularFormat::Csv),
+        "tsv" => Some(TabularFormat::Tsv),
+        "xls" => Some(TabularFormat::Xls),
+        "xlsx" => Some(TabularFormat::Xlsx),
+        "xlsb" => Some(TabularFormat::Xlsb),
+        "ods" => Some(TabularFormat::Ods),
+        _ => None,
     }
+}
 
-    if let Some(mime_type) = mime_type.map(str::trim).filter(|value| !value.is_empty()) {
-        let essence = mime_type.split(';').next().map_or(mime_type, str::trim).to_ascii_lowercase();
-        return match essence.as_str() {
-            "text/csv" | "application/csv" | "application/vnd.ms-excel" => {
-                if std::str::from_utf8(file_bytes).is_ok() {
-                    Ok(TabularFormat::Csv)
-                } else {
-                    Ok(TabularFormat::Xls)
-                }
-            }
-            "text/tab-separated-values" => Ok(TabularFormat::Tsv),
-            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" => {
-                Ok(TabularFormat::Xlsx)
-            }
-            "application/vnd.ms-excel.sheet.binary.macroenabled.12" => Ok(TabularFormat::Xlsb),
-            "application/vnd.oasis.opendocument.spreadsheet" => Ok(TabularFormat::Ods),
-            other => Err(anyhow::anyhow!("unsupported tabular mime type: {other}")),
-        };
+fn declared_mime_format(mime_type: Option<&str>) -> Option<TabularFormat> {
+    let mime_type = mime_type.map(str::trim).filter(|value| !value.is_empty())?;
+    let essence = mime_type.split(';').next().map_or(mime_type, str::trim).to_ascii_lowercase();
+    match essence.as_str() {
+        "text/csv" | "application/csv" => Some(TabularFormat::Csv),
+        "text/tab-separated-values" => Some(TabularFormat::Tsv),
+        "application/vnd.ms-excel" => Some(TabularFormat::Xls),
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" => {
+            Some(TabularFormat::Xlsx)
+        }
+        "application/vnd.ms-excel.sheet.binary.macroenabled.12" => Some(TabularFormat::Xlsb),
+        "application/vnd.oasis.opendocument.spreadsheet" => Some(TabularFormat::Ods),
+        _ => None,
     }
-
-    if std::str::from_utf8(file_bytes).is_ok() {
-        return Ok(TabularFormat::Csv);
-    }
-
-    Ok(TabularFormat::Xlsx)
 }
 
 fn extract_delimited_tables(
     format: TabularFormat,
     file_name: Option<&str>,
     file_bytes: &[u8],
-) -> Result<Vec<ExtractedTable>> {
-    let decoded =
-        std::str::from_utf8(file_bytes).context("failed to decode tabular text as UTF-8")?;
+) -> std::result::Result<Vec<ExtractedTable>, TabularExtractError> {
+    let decoded = std::str::from_utf8(file_bytes)
+        .context("failed to decode tabular text as UTF-8")
+        .map_err(TabularExtractError::Decode)?;
     let stripped = decoded.strip_prefix('\u{feff}').unwrap_or(decoded);
     let delimiter = if format == TabularFormat::Tsv { b'\t' } else { detect_delimiter(stripped) };
     let mut reader = ReaderBuilder::new()
@@ -204,7 +407,8 @@ fn extract_delimited_tables(
     let rows = reader
         .records()
         .collect::<std::result::Result<Vec<StringRecord>, csv::Error>>()
-        .context("failed to parse delimited table")?
+        .context("failed to parse delimited table")
+        .map_err(TabularExtractError::Parse)?
         .into_iter()
         .map(|record| record.iter().map(std::string::ToString::to_string).collect::<Vec<_>>())
         .filter(|row| row.iter().any(|cell| !cell.trim().is_empty()))
@@ -270,6 +474,7 @@ fn extract_workbook_tables(
     file_bytes: &[u8],
     warnings: &mut Vec<String>,
 ) -> Result<Vec<ExtractedTable>> {
+    guard_workbook_container(file_bytes)?;
     let mut workbook = open_workbook_auto_from_rs(Cursor::new(file_bytes))
         .context("failed to open spreadsheet workbook")?;
     if let Sheets::Xlsx(xlsx) = &mut workbook
@@ -281,6 +486,14 @@ fn extract_workbook_tables(
     }
 
     let sheet_names = workbook.sheet_names();
+    if sheet_names.is_empty() {
+        // The ZIP signature is shared by DOCX, PPTX, ODT, EPUB and JAR. calamine
+        // opens some non-workbook archives as a workbook with zero sheets; a
+        // container with no worksheet part carries no extractable units, but
+        // that is not proof the bytes are unextractable, so it is an
+        // operational fault and never a content rejection.
+        anyhow::bail!("spreadsheet container has no workbook worksheets");
+    }
     let mut tables = Vec::new();
     for sheet_name in &sheet_names {
         let explicit_tables = extract_explicit_sheet_tables(&mut workbook, sheet_name, warnings);
@@ -543,7 +756,43 @@ mod tests {
 
     use zip::write::SimpleFileOptions;
 
-    use super::{detect_delimiter, extract_tabular};
+    use super::{declared_oversized_workbook_zip_bytes, detect_delimiter, extract_tabular};
+
+    #[test]
+    fn refuses_a_container_declaring_more_than_the_workbook_limit() {
+        let bytes = declared_oversized_workbook_zip_bytes();
+        let error = extract_tabular(
+            Some("ledger.xlsx"),
+            Some("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"),
+            &bytes,
+        )
+        .expect_err("an oversized declared expansion is refused before the backend");
+        assert!(matches!(error, super::TabularExtractError::Workbook(_)));
+        assert!(error.to_string().contains("uncompressed bytes"), "{error}");
+        assert!(error.to_string().contains("workbook limit"), "{error}");
+    }
+
+    #[test]
+    fn refuses_a_zip_container_without_a_workbook_part() {
+        let mut cursor = Cursor::new(Vec::<u8>::new());
+        let mut writer = zip::ZipWriter::new(&mut cursor);
+        let options = SimpleFileOptions::default();
+        writer.start_file("word/document.xml", options).expect("document part");
+        writer.write_all(b"<w:document/>").expect("write document");
+        writer.start_file("[Content_Types].xml", options).expect("content types");
+        writer.write_all(b"<Types/>").expect("write content types");
+        writer.finish().expect("finish archive");
+        let bytes = cursor.into_inner();
+
+        let error = extract_tabular(
+            Some("notes.docx"),
+            Some("application/vnd.openxmlformats-officedocument.wordprocessingml.document"),
+            &bytes,
+        )
+        .expect_err("a non-workbook ZIP is refused before the backend");
+        assert!(matches!(error, super::TabularExtractError::Workbook(_)));
+        assert!(error.to_string().contains("no workbook part"), "{error}");
+    }
 
     #[test]
     fn extracts_csv_as_markdown_table() {
@@ -685,6 +934,26 @@ mod tests {
     fn detects_pipe_and_tab_delimiters() {
         assert_eq!(detect_delimiter("name|value\nacme|42\n"), b'|');
         assert_eq!(detect_delimiter("name\tvalue\nacme\t42\n"), b'\t');
+    }
+
+    #[test]
+    fn select_falls_back_to_delimited_text_for_utf8_without_declared_metadata() {
+        // The public entry point is total: bytes with no container signature and
+        // no declared tabular metadata are decoded as delimited text when UTF-8.
+        let output = extract_tabular(Some("data"), None, b"name,value\nacme,42\n")
+            .expect("UTF-8 fallback selects delimited text");
+        assert_eq!(output.source_metadata.source_format, "csv");
+        assert!(output.content_text.contains("| acme | 42 |"));
+    }
+
+    #[test]
+    fn select_falls_back_to_workbook_attempt_for_unknown_binary() {
+        // Non-UTF-8 bytes with no container signature and no declared metadata
+        // are attempted as a workbook; the backend refusal is operational, not a
+        // delimited-text decode/parse rejection.
+        let error = extract_tabular(Some("data"), None, &[0x00, 0x01, 0xff])
+            .expect_err("unknown binary cannot yield a table");
+        assert!(matches!(error, super::TabularExtractError::Workbook(_)));
     }
 
     fn build_minimal_xlsx_bytes(include_table: bool) -> Vec<u8> {

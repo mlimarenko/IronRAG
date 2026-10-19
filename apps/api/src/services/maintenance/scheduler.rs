@@ -4,7 +4,7 @@
 //! `Settings::runs_maintenance_scheduler`). Each tick:
 //!
 //! 1. Reaps `leased` rows whose heartbeat has gone stale.
-//! 2. Cancels query executions that outlived the canonical turn deadline.
+//! 2. Cancels query executions that outlived the configured turn deadline.
 //! 3. Deletes a statement- and row-bounded sweep of expired `PostgreSQL`
 //!    query-result winners.
 //! 4. Cancels abandoned provider-call reservations and repairs the bounded set
@@ -13,17 +13,36 @@
 //! 6. Bootstraps any missing `maintenance_job_run` rows for known
 //!    (class, scope) pairs, so a freshly-added library shows up in
 //!    the next tick without operator intervention.
-//! 7. For every class enabled in this build, atomically picks the
-//!    oldest pending row whose `next_due_at` has passed and runs the
-//!    matching sweeper under a tokio task that refreshes the lease
-//!    heartbeat every 30 s.
+//! 7. For every class enabled in this build, atomically leases up to the
+//!    class's per-tick batch of due rows and runs the matching sweeper for
+//!    each under a tokio task that refreshes the lease heartbeat every 30 s.
 //!
-//! Rolling-budget cadence: each tick takes **at most one** (class,
-//! scope) pair per class. With the default 30 s tick interval and one
-//! class enabled (`gc.stale-chunks`) the scheduler walks the full
-//! library set in `library_count * 30 s` wall time. That keeps load
-//! predictable instead of stampeding every library at the same wall
-//! clock.
+//! Rolling-budget cadence: each tick takes a batch of (class, scope) pairs per
+//! class, sized so every active row is visited within `class_interval`. The
+//! batch is split by cursor population — rows mid-sweep (`cursor_json <> '{}'`)
+//! and rows that have not started (`cursor_json = '{}'`) each get
+//! `ceil(population / floor(class_interval / tick_interval))` picks per tick
+//! (see `walk_quotas`), reduced together to
+//! `MAX_MAINTENANCE_ROWS_PER_CLASS_PER_TICK`. Sizing each population from whole
+//! ticks keeps the walk guarantee for both: an unconditional in-flight-first
+//! ordering let a large mid-sweep set starve the never-started rows. Above the
+//! ceiling the walk is best-effort. Vector, runtime-graph and
+//! historical-projection classes have independent leases and each receives its
+//! own batch; no backlog consumes another's budget.
+//!
+//! Changed-only walk: a (class, library) row is re-armed by whichever comes
+//! first — its own `next_due_at`, which a finished sweep pushes out by the
+//! safety `full_pass_interval`, or the library's
+//! `catalog_library.source_truth_version` advancing after that row's own
+//! `last_started_at`, throttled by the `class_interval` cooldown since its
+//! `last_completed_at`. `next_due_at` is therefore the single time-based
+//! schedule the acquire gate, the CLI and the backlog metric all read, and it
+//! never reports a row as overdue while the fence withholds it. Idle libraries
+//! — 99.5 % of the runtime-graph rows on the live instance never removed a row
+//! in their lifetime — dominated the old unconditional hourly walk, so the walk
+//! now follows the source fence while every row still gets a full pass every
+//! `full_pass_interval`. Fencing on the start, not the completion, means a
+//! generation bump landing while the row is leased re-arms it on the next tick.
 //!
 //! `ActiveIngest` is treated as a soft retry signal — the (class,
 //! scope) pair is re-queued with a short backoff and `attempts` is NOT
@@ -31,13 +50,26 @@
 //! drifts into dead-letter just because the sweeper could not get the
 //! advisory lock.
 
-use std::{sync::OnceLock, time::Duration};
+mod billing;
+mod nonterminal_records;
+mod query_executions;
+mod query_result_cache;
+mod vector_lifecycle_inventory;
 
-use chrono::{DateTime, Duration as ChronoDuration, Utc};
-use opentelemetry::{
-    KeyValue, global,
-    metrics::{Counter, Gauge},
+#[cfg(test)]
+mod tests;
+
+#[cfg(test)]
+mod observation_tests;
+
+pub use billing::{
+    BillingExecutionCostRepairReport, BillingProviderCallReaperReport,
+    reap_stale_billing_provider_calls_once, repair_dirty_billing_execution_costs_once,
 };
+pub use query_result_cache::gc_expired_query_result_cache_once;
+
+use std::time::Duration;
+
 use sqlx::PgPool;
 use tokio::{sync::broadcast, task::JoinHandle, time::sleep};
 use tracing::{info, warn};
@@ -46,12 +78,33 @@ use uuid::Uuid;
 use crate::{
     app::state::AppState,
     infra::repositories::{
-        billing_repository, catalog_repository, query_repository, query_result_cache_repository,
+        catalog_repository, content_mutation_repository, ingest_repository,
+        runtime_graph_repository,
     },
     services::maintenance::{
-        gc::{self, GcStaleChunksError, GcStaleChunksOptions, LibraryGcReport},
+        gc::{
+            self, GcError, GcSupersededVectorsOptions, HistoricalProjectionRetentionGcReport,
+            RuntimeGraphGcSchedulerReport, SupersededVectorGcReport,
+        },
         lease::{self, MaintenanceClass, MaintenanceJobRun, Scope},
+        orphan_runtime_reconcile::{self, ORPHAN_RUNTIME_BATCH_LIMIT, ORPHAN_RUNTIME_STALE_AFTER},
+        vector_lifecycle_metrics::{
+            GcDispatchError, GcErrorCode, GcRunObservation, GcRunOutcome, GcSkipReason,
+            VectorLifecycleInstruments, classify_gc_error,
+        },
     },
+    shared::cancellation::AbortOnDrop,
+};
+
+use billing::{
+    STALE_BILLING_PROVIDER_CALL_AFTER, STALE_BILLING_PROVIDER_CALL_BATCH_LIMIT,
+    reap_stale_billing_provider_calls, repair_dirty_billing_execution_costs,
+};
+use query_executions::{reap_stale_query_executions, reconcile_orphan_query_operations};
+use query_result_cache::{
+    QUERY_RESULT_CACHE_GC_BACKLOG_PROBE_LIMIT, QUERY_RESULT_CACHE_GC_BATCH_LIMIT,
+    QUERY_RESULT_CACHE_GC_MAX_BATCHES_PER_TICK, gc_expired_query_result_cache,
+    query_result_cache_gc_max_rows_per_tick,
 };
 
 /// Default heartbeat refresh cadence while a sweeper is running.
@@ -62,155 +115,86 @@ pub const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(30);
 /// minutes can pick the work up once ingest quiesces.
 pub const ACTIVE_INGEST_RETRY: Duration = Duration::from_mins(5);
 
-const STALE_QUERY_EXECUTION_BATCH_LIMIT: i64 = 100;
-const QUERY_RESULT_CACHE_GC_BATCH_LIMIT: i64 =
-    query_result_cache_repository::MAX_QUERY_RESULT_CACHE_GC_BATCH_LIMIT;
-const QUERY_RESULT_CACHE_GC_BACKLOG_PROBE_LIMIT: i64 =
-    query_result_cache_repository::MAX_QUERY_RESULT_CACHE_GC_BACKLOG_PROBE_LIMIT;
-/// Hard per-tick work budget: at the canonical 30-second cadence this drains
-/// up to 5,000 expired keys (~166/s) while every statement remains a small
-/// `SKIP LOCKED` batch.
-const QUERY_RESULT_CACHE_GC_MAX_BATCHES_PER_TICK: u64 = 10;
+/// Hard ceiling on how many rows one class drains per tick.
+///
+/// The batch is sized to keep every active row inside its `class_interval`
+/// (see [`walk_quotas`]), but a single tick must not become an unbounded unit of
+/// work: the ceiling caps a class's per-tick latency and the number of sweeper
+/// dispatches a single tick can fire.
+pub(crate) const MAX_MAINTENANCE_ROWS_PER_CLASS_PER_TICK: u32 = 64;
 
-/// A provider-backed rerank has a three-second hard deadline. Five minutes
-/// leaves a 100x safety margin for reservation persistence, scheduling delays,
-/// and future bounded provider stages while still recovering process crashes.
-const STALE_BILLING_PROVIDER_CALL_AFTER: Duration = Duration::from_mins(5);
-const STALE_BILLING_PROVIDER_CALL_BATCH_LIMIT: i64 =
-    billing_repository::MAX_STALE_PROVIDER_CALL_REAP_BATCH_LIMIT;
-const DIRTY_EXECUTION_COST_REPAIR_BATCH_LIMIT: i64 =
-    billing_repository::MAX_DIRTY_EXECUTION_COST_REPAIR_BATCH_LIMIT;
-const DIRTY_EXECUTION_COST_CLAIM_LEASE: Duration = Duration::from_mins(1);
-const DIRTY_EXECUTION_COST_MAX_BACKOFF: Duration = Duration::from_mins(5);
-
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct BillingProviderCallReaperReport {
-    pub reaped_provider_calls: u64,
-    pub affected_executions: u64,
-    pub rollups_refreshed: u64,
-    pub rollup_failures: u64,
+/// Per-tick pick targets for a class, split by cursor population.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct WalkQuotas {
+    in_flight: u32,
+    fresh: u32,
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct BillingExecutionCostRepairReport {
-    pub examined: u64,
-    pub repaired: u64,
-    pub failed: u64,
-    pub superseded: u64,
-}
-
-struct BillingProviderCallReaperMetrics {
-    runs: Counter<u64>,
-    canceled_calls: Counter<u64>,
-    execution_rollups: Counter<u64>,
-}
-
-struct QueryResultCacheGcMetrics {
-    runs: Counter<u64>,
-    batches: Counter<u64>,
-    rows_deleted: Counter<u64>,
-    budget_exhausted: Counter<u64>,
-    backlog_probe_failures: Counter<u64>,
-    backlog_sample_rows: Gauge<u64>,
-    oldest_expired_age_seconds: Gauge<f64>,
-}
-
-fn query_result_cache_gc_metrics() -> &'static QueryResultCacheGcMetrics {
-    static METRICS: OnceLock<QueryResultCacheGcMetrics> = OnceLock::new();
-    METRICS.get_or_init(|| {
-        let meter = global::meter("ironrag.maintenance");
-        QueryResultCacheGcMetrics {
-            runs: meter
-                .u64_counter("ironrag.maintenance.query_result_cache_gc.runs")
-                .with_description("Completed PostgreSQL query-result cache GC sweeps")
-                .with_unit("{run}")
-                .build(),
-            batches: meter
-                .u64_counter("ironrag.maintenance.query_result_cache_gc.batches")
-                .with_description("Bounded PostgreSQL query-result cache GC statements")
-                .with_unit("{batch}")
-                .build(),
-            rows_deleted: meter
-                .u64_counter("ironrag.maintenance.query_result_cache_gc.rows_deleted")
-                .with_description("Expired PostgreSQL query-result cache rows deleted")
-                .with_unit("{row}")
-                .build(),
-            budget_exhausted: meter
-                .u64_counter("ironrag.maintenance.query_result_cache_gc.budget_exhausted")
-                .with_description("GC sweeps that consumed the complete per-tick batch budget")
-                .with_unit("{run}")
-                .build(),
-            backlog_probe_failures: meter
-                .u64_counter("ironrag.maintenance.query_result_cache_gc.backlog_probe_failures")
-                .with_description("Failed bounded post-sweep backlog probes")
-                .with_unit("{probe}")
-                .build(),
-            backlog_sample_rows: meter
-                .u64_gauge("ironrag.maintenance.query_result_cache_gc.backlog_sample_rows")
-                .with_description(
-                    "Expired rows remaining in the bounded post-sweep sample; capped at 501",
-                )
-                .with_unit("{row}")
-                .build(),
-            oldest_expired_age_seconds: meter
-                .f64_gauge("ironrag.maintenance.query_result_cache_gc.oldest_expired_age_seconds")
-                .with_description("Seconds the oldest sampled cache winner is past its TTL")
-                .with_unit("s")
-                .build(),
-        }
-    })
-}
-
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-struct QueryResultCacheGcSweepProgress {
-    rows_deleted: u64,
-    batches: u64,
-    last_batch_was_full: bool,
-}
-
-impl QueryResultCacheGcSweepProgress {
-    fn record_batch(&mut self, rows_deleted: u64) {
-        self.rows_deleted = self.rows_deleted.saturating_add(rows_deleted);
-        self.batches = self.batches.saturating_add(1);
-        self.last_batch_was_full =
-            rows_deleted == u64::try_from(QUERY_RESULT_CACHE_GC_BATCH_LIMIT).unwrap_or(u64::MAX);
-    }
-
-    #[must_use]
-    const fn budget_exhausted(self) -> bool {
-        self.batches == QUERY_RESULT_CACHE_GC_MAX_BATCHES_PER_TICK && self.last_batch_was_full
+impl WalkQuotas {
+    const fn total(self) -> u32 {
+        self.in_flight.saturating_add(self.fresh)
     }
 }
 
-fn query_result_cache_gc_max_rows_per_tick() -> u64 {
-    u64::try_from(QUERY_RESULT_CACHE_GC_BATCH_LIMIT)
-        .unwrap_or(0)
-        .saturating_mul(QUERY_RESULT_CACHE_GC_MAX_BATCHES_PER_TICK)
+/// Picks each cursor population needs per tick so every row in it is visited
+/// within `class_interval`.
+///
+/// A class holds `count` rows due on a `class_interval` cadence, but the
+/// scheduler only ticks every `tick_interval`, so a full walk gets
+/// `floor(class_interval / tick_interval)` whole ticks and must drain
+/// `ceil(count / ticks_per_walk)` rows per tick. Sizing from whole ticks —
+/// rather than the raw ratio — keeps the guarantee when the class interval is
+/// not an exact multiple of the tick.
+///
+/// The two populations are sized independently and then reduced together to the
+/// hard ceiling: an unconditional in-flight-first ordering let a large mid-sweep
+/// set consume every slot and starve the never-started rows, while a plain
+/// half-and-half split would leave the dominant population at twice its
+/// interval. An empty population asks for no picks, so a class with only one
+/// population walks exactly as before. A zero interval degrades to one pick.
+fn walk_quotas(
+    in_flight: i64,
+    fresh: i64,
+    tick_interval: Duration,
+    class_interval: Duration,
+) -> WalkQuotas {
+    let tick_nanos = tick_interval.as_nanos().max(1);
+    let ticks_per_walk = (class_interval.as_nanos().max(1) / tick_nanos).max(1);
+    let picks = |count: i64| -> u32 {
+        if count <= 0 {
+            return 0;
+        }
+        u32::try_from((count as u128).div_ceil(ticks_per_walk)).unwrap_or(u32::MAX)
+    };
+    let mut quotas = WalkQuotas { in_flight: picks(in_flight), fresh: picks(fresh) };
+    while quotas.total() > MAX_MAINTENANCE_ROWS_PER_CLASS_PER_TICK {
+        if quotas.in_flight >= quotas.fresh && quotas.in_flight > 1 {
+            quotas.in_flight -= 1;
+        } else if quotas.fresh > 1 {
+            quotas.fresh -= 1;
+        } else {
+            break;
+        }
+    }
+    quotas
 }
 
-fn billing_provider_call_reaper_metrics() -> &'static BillingProviderCallReaperMetrics {
-    static METRICS: OnceLock<BillingProviderCallReaperMetrics> = OnceLock::new();
-    METRICS.get_or_init(|| {
-        let meter = global::meter("ironrag.maintenance");
-        BillingProviderCallReaperMetrics {
-            runs: meter
-                .u64_counter("ironrag.maintenance.billing_provider_call_reaper.runs")
-                .with_description("Completed stale provider-call reservation sweeps")
-                .with_unit("{run}")
-                .build(),
-            canceled_calls: meter
-                .u64_counter("ironrag.maintenance.billing_provider_call_reaper.canceled_calls")
-                .with_description("Stale started provider-call reservations canceled")
-                .with_unit("{call}")
-                .build(),
-            execution_rollups: meter
-                .u64_counter("ironrag.maintenance.billing_provider_call_reaper.execution_rollups")
-                .with_description("Affected execution-cost rollup repair outcomes")
-                .with_unit("{execution}")
-                .build(),
-        }
-    })
-}
+/// Every durable class the scheduler boots rows for and walks each tick, in
+/// dispatch order. One list keeps [`bootstrap_rows`] and [`run_tick`] from
+/// drifting from [`MaintenanceClass`] and from [`dispatch_kind`]: a class that
+/// is not here is never scheduled, and a class here without a dispatch arm is
+/// caught by `scheduled_classes_are_all_dispatched`.
+///
+/// [`MaintenanceClass::GraphReextractAdmission`] is intentionally absent. It is
+/// not a per-library sweeper: it owns one instance-scope row used as a
+/// cluster-wide admission/rotation lock, and is driven by
+/// `run_graph_backfill_loop` in the ingest worker instead of this scheduler.
+/// Adding it here would route it to the `Unsupported` dispatch arm.
+const SCHEDULED_CLASSES: [MaintenanceClass; 3] = [
+    MaintenanceClass::GcSupersededVectors,
+    MaintenanceClass::GcRuntimeGraph,
+    MaintenanceClass::GcHistoricalProjection,
+];
 
 /// Build a scheduler-task handle for the lifetime of the process.
 /// Returns `None` when the role / kill-switch combination means the
@@ -228,6 +212,7 @@ pub fn spawn_maintenance_scheduler(
     info!(
         tick_interval_secs = config.tick_interval.as_secs(),
         class_interval_secs = config.class_interval.as_secs(),
+        full_pass_interval_secs = config.full_pass_interval.as_secs(),
         stale_lease_after_secs = config.stale_lease_after.as_secs(),
         stale_provider_call_after_secs = STALE_BILLING_PROVIDER_CALL_AFTER.as_secs(),
         stale_provider_call_batch_limit = STALE_BILLING_PROVIDER_CALL_BATCH_LIMIT,
@@ -241,14 +226,23 @@ pub fn spawn_maintenance_scheduler(
         "maintenance scheduler starting",
     );
     Some(tokio::spawn(async move {
+        let _inventory_sampler =
+            vector_lifecycle_inventory::spawn(state.clone(), shutdown.resubscribe());
+        let mut historical_preparations_reconciled = false;
+        reconcile_historical_preparations_once(&state, &mut historical_preparations_reconciled)
+            .await;
         // Bootstrap is best-effort — if it fails the next tick will retry.
         if let Err(error) = bootstrap_rows(&state).await {
             warn!(?error, "maintenance scheduler bootstrap failed; will retry on next tick");
         }
         reap_stale_query_executions(&state, config.stale_lease_after).await;
+        reconcile_orphan_query_operations(&state, config.stale_lease_after).await;
         gc_expired_query_result_cache(&state).await;
         reap_stale_billing_provider_calls(&state).await;
         repair_dirty_billing_execution_costs(&state).await;
+        reconcile_orphan_content_mutations(&state).await;
+        let mut next_nonterminal_sample =
+            std::time::Instant::now() + nonterminal_records::NONTERMINAL_RECORD_SAMPLE_INTERVAL;
         loop {
             tokio::select! {
                 _ = shutdown.recv() => {
@@ -257,11 +251,124 @@ pub fn spawn_maintenance_scheduler(
                 }
                 () = sleep(config.tick_interval) => {}
             }
+            if !historical_preparations_reconciled {
+                reconcile_historical_preparations_once(
+                    &state,
+                    &mut historical_preparations_reconciled,
+                )
+                .await;
+            }
+            if std::time::Instant::now() >= next_nonterminal_sample {
+                nonterminal_records::sample_and_publish(&state, config.class_interval).await;
+                next_nonterminal_sample = std::time::Instant::now()
+                    + nonterminal_records::NONTERMINAL_RECORD_SAMPLE_INTERVAL;
+            }
             if let Err(error) = run_tick(&state, &config, &owner_node).await {
                 warn!(?error, "maintenance scheduler tick failed; continuing");
             }
         }
     }))
+}
+
+async fn reconcile_historical_preparations_once(state: &AppState, complete: &mut bool) {
+    match ingest_repository::reconcile_terminal_failed_preparations(&state.persistence.postgres)
+        .await
+    {
+        Ok(settled) => {
+            if settled > 0 {
+                log_reconciled_terminal_failed_preparations(settled);
+            }
+            *complete =
+                settled < u64::from(ingest_repository::TERMINAL_PREPARATION_RECONCILE_BATCH);
+        }
+        Err(error) => log_terminal_preparation_reconcile_failed(&error),
+    }
+}
+
+fn log_reconciled_terminal_failed_preparations(settled: u64) {
+    info!(settled, "reconciled terminal failed revision preparations");
+}
+
+fn log_terminal_preparation_reconcile_failed<E: std::fmt::Debug>(error: &E) {
+    warn!(?error, "terminal preparation reconciliation failed; retrying next tick");
+}
+
+/// Closes the runtime rows an ingest attempt left `accepted`/`running` or
+/// `processing` when the attempt itself already reached a terminal state (or
+/// vanished). Bounded and idempotent, so a tick that overlaps a still-running
+/// attempt only skips it until the next tick.
+async fn reconcile_orphan_runtime_rows(state: &AppState) {
+    match orphan_runtime_reconcile::reconcile_orphan_runtime_rows_once(
+        &state.persistence.postgres,
+        ORPHAN_RUNTIME_STALE_AFTER,
+        ORPHAN_RUNTIME_BATCH_LIMIT,
+    )
+    .await
+    {
+        Ok(counts) if counts.extractions_terminalized > 0 || counts.executions_terminalized > 0 => {
+            log_reconciled_orphan_runtime_rows(&counts);
+        }
+        Ok(_) => {}
+        Err(error) => log_orphan_runtime_reconcile_failed(&error),
+    }
+}
+
+fn log_reconciled_orphan_runtime_rows(counts: &runtime_graph_repository::OrphanRuntimeCounts) {
+    info!(
+        extractions = counts.extractions_terminalized,
+        executions = counts.executions_terminalized,
+        "maintenance scheduler reconciled orphaned runtime rows",
+    );
+}
+
+fn log_orphan_runtime_reconcile_failed<E: std::fmt::Debug>(error: &E) {
+    warn!(?error, "orphan runtime reconcile failed; continuing");
+}
+
+/// Look-back before an accepted/running `content_mutation` with no live ingest
+/// job is treated as stranded. Wider than the runtime reconciler because a
+/// delete admission deletes the document before it finalizes the mutation, its
+/// items and its async operation as separate statements.
+const ORPHAN_CONTENT_MUTATION_STALE_AFTER: Duration = Duration::from_secs(3600);
+
+/// Maximum `content_mutation` rows settled by one sweep; bounds the transaction.
+const ORPHAN_CONTENT_MUTATION_BATCH_LIMIT: i64 = 100;
+
+/// Settles accepted/running `content_mutation` rows stranded after their
+/// document was deleted, mirroring passes 3 and 4 of
+/// `scripts/ops/reconcile-nonterminal-owners.sql`.
+async fn reconcile_orphan_content_mutations(state: &AppState) {
+    let stale_before = chrono::Utc::now()
+        - chrono::Duration::from_std(ORPHAN_CONTENT_MUTATION_STALE_AFTER)
+            .unwrap_or(chrono::Duration::MAX);
+    match content_mutation_repository::reconcile_orphan_content_mutations_once(
+        &state.persistence.postgres,
+        stale_before,
+        ORPHAN_CONTENT_MUTATION_BATCH_LIMIT,
+    )
+    .await
+    {
+        Ok(counts) if counts.mutations > 0 || counts.items > 0 || counts.operations > 0 => {
+            log_reconciled_orphan_content_mutations(&counts);
+        }
+        Ok(_) => {}
+        Err(error) => log_orphan_content_mutation_reconcile_failed(&error),
+    }
+}
+
+fn log_reconciled_orphan_content_mutations(
+    counts: &content_mutation_repository::ContentMutationReconcileCounts,
+) {
+    info!(
+        mutations = counts.mutations,
+        items = counts.items,
+        operations = counts.operations,
+        "maintenance scheduler reconciled orphaned content mutations",
+    );
+}
+
+fn log_orphan_content_mutation_reconcile_failed<E: std::fmt::Debug>(error: &E) {
+    warn!(?error, "orphan content mutation reconcile failed; continuing");
 }
 
 /// Configuration captured at scheduler startup; immutable while running.
@@ -270,6 +377,7 @@ struct SchedulerConfig {
     tick_interval: Duration,
     class_interval: Duration,
     stale_lease_after: Duration,
+    full_pass_interval: Duration,
 }
 
 impl SchedulerConfig {
@@ -282,6 +390,9 @@ impl SchedulerConfig {
             stale_lease_after: Duration::from_secs(
                 settings.maintenance_stale_lease_seconds.max(60),
             ),
+            full_pass_interval: Duration::from_secs(
+                settings.maintenance_full_pass_interval_seconds.max(60),
+            ),
         }
     }
 }
@@ -293,26 +404,25 @@ fn node_owner_identity() -> String {
 }
 
 async fn bootstrap_rows(state: &AppState) -> anyhow::Result<()> {
-    let pool = &state.persistence.postgres;
-    let libraries = catalog_repository::list_libraries(pool, None).await?;
-    for library in &libraries {
-        if let Err(error) = lease::ensure_row(
-            pool,
-            MaintenanceClass::GcStaleChunks,
-            Scope::Library(library.id),
-            None,
-        )
-        .await
-        {
-            warn!(
-                library_id = %library.id,
-                class = MaintenanceClass::GcStaleChunks.as_str(),
-                ?error,
-                "failed to ensure maintenance_job_run row at bootstrap",
-            );
+    let retired = lease::retire_obsolete_rows(&state.persistence.postgres).await?;
+    if retired > 0 {
+        log_retired_obsolete_maintenance_rows(retired);
+    }
+    for class in SCHEDULED_CLASSES {
+        let seeded = lease::ensure_library_rows(&state.persistence.postgres, class).await?;
+        if seeded > 0 {
+            log_seeded_maintenance_rows(seeded, class);
         }
     }
     Ok(())
+}
+
+fn log_retired_obsolete_maintenance_rows(retired: u64) {
+    info!(retired, class = "gc.stale-chunks", "retired obsolete maintenance rows");
+}
+
+fn log_seeded_maintenance_rows(seeded: u64, class: MaintenanceClass) {
+    info!(seeded, class = class.as_str(), "seeded maintenance_job_run rows for new libraries",);
 }
 
 async fn run_tick(
@@ -321,363 +431,99 @@ async fn run_tick(
     owner_node: &str,
 ) -> anyhow::Result<()> {
     let pool = &state.persistence.postgres;
-    match lease::reap_stale_leases(pool, config.stale_lease_after).await {
-        Ok(reaped) if reaped > 0 => {
-            info!(reaped, "maintenance scheduler reaped stale leases");
-        }
-        Ok(_) => {}
-        Err(error) => warn!(?error, "stale-lease reaper failed; continuing"),
-    }
+    reap_stale_leases_for_tick(pool, config.stale_lease_after).await;
     reap_stale_query_executions(state, config.stale_lease_after).await;
+    reconcile_orphan_query_operations(state, config.stale_lease_after).await;
     gc_expired_query_result_cache(state).await;
     reap_stale_billing_provider_calls(state).await;
     repair_dirty_billing_execution_costs(state).await;
+    reconcile_orphan_runtime_rows(state).await;
+    reconcile_orphan_content_mutations(state).await;
     // New libraries show up between bootstrap and this tick — ensure
     // their rows now so they are eligible for acquisition immediately.
     if let Err(error) = bootstrap_rows(state).await {
-        warn!(?error, "scheduler tick bootstrap refresh failed");
+        log_scheduler_bootstrap_refresh_failed(&error);
     }
-    process_class(state, config, owner_node, MaintenanceClass::GcStaleChunks).await;
+    for class in SCHEDULED_CLASSES {
+        let quotas = class_walk_quotas(pool, class, config).await;
+        process_class(state, config, owner_node, class, quotas).await;
+    }
     Ok(())
 }
 
-/// Runs one bounded `PostgreSQL` result-cache GC batch.
-///
-/// The repository applies both the hard batch ceiling and the database-clock
-/// TTL predicate. Exposing this one-shot surface keeps integration tests and
-/// future operator tooling on the exact scheduler path.
-pub async fn gc_expired_query_result_cache_once(
-    state: &AppState,
-    ttl: Duration,
-    batch_limit: i64,
-) -> anyhow::Result<u64> {
-    Ok(query_result_cache_repository::delete_expired_query_result_cache_batch(
-        &state.persistence.postgres,
-        ttl.as_secs(),
-        batch_limit,
-    )
-    .await?)
-}
-
-async fn gc_expired_query_result_cache(state: &AppState) {
-    let metrics = query_result_cache_gc_metrics();
-    let ttl =
-        Duration::from_secs(crate::services::query::result_cache::QUERY_RESULT_CACHE_TTL_SECONDS);
-    let mut progress = QueryResultCacheGcSweepProgress::default();
-    let mut status = "success";
-    for _ in 0..QUERY_RESULT_CACHE_GC_MAX_BATCHES_PER_TICK {
-        match gc_expired_query_result_cache_once(state, ttl, QUERY_RESULT_CACHE_GC_BATCH_LIMIT)
-            .await
-        {
-            Ok(batch_rows) => {
-                progress.record_batch(batch_rows);
-                if !progress.last_batch_was_full {
-                    break;
-                }
-            }
-            Err(error) => {
-                status = if progress.batches == 0 { "failed" } else { "partial_failure" };
-                warn!(
-                    ?error,
-                    completed_batches = progress.batches,
-                    rows_deleted = progress.rows_deleted,
-                    ttl_seconds = ttl.as_secs(),
-                    batch_limit = QUERY_RESULT_CACHE_GC_BATCH_LIMIT,
-                    "PostgreSQL query-result cache GC batch failed; ending this bounded sweep",
-                );
-                break;
+async fn reap_stale_leases_for_tick(pool: &PgPool, stale_lease_after: Duration) {
+    match lease::reap_stale_leases(pool, stale_lease_after).await {
+        Ok(reaped) => {
+            crate::observability::metrics::record_reap_stale_leases(reaped);
+            if reaped > 0 {
+                log_scheduler_reaped_stale_leases(reaped);
             }
         }
+        Err(error) => log_stale_lease_reaper_failed(&error),
     }
-    let budget_exhausted = progress.budget_exhausted();
-    let backlog_probe = query_result_cache_repository::probe_expired_query_result_cache_backlog(
-        &state.persistence.postgres,
-        ttl.as_secs(),
-        QUERY_RESULT_CACHE_GC_BACKLOG_PROBE_LIMIT,
-    )
-    .await;
-    match &backlog_probe {
-        Ok(probe) => {
-            let attributes = [
-                KeyValue::new("has_backlog", probe.sampled_expired_rows > 0),
-                KeyValue::new("sample_at_capacity", probe.sample_at_capacity()),
-                KeyValue::new("budget_exhausted", budget_exhausted),
-            ];
-            metrics.backlog_sample_rows.record(probe.sampled_expired_rows, &attributes);
-            metrics
-                .oldest_expired_age_seconds
-                .record(probe.oldest_expired_age_seconds.unwrap_or(0.0), &attributes);
+}
+
+fn log_scheduler_reaped_stale_leases(reaped: u64) {
+    info!(reaped, "maintenance scheduler reaped stale leases");
+}
+
+fn log_stale_lease_reaper_failed<E: std::fmt::Debug>(error: &E) {
+    warn!(?error, "stale-lease reaper failed; continuing");
+}
+
+fn log_scheduler_bootstrap_refresh_failed<E: std::fmt::Debug>(error: &E) {
+    warn!(?error, "scheduler tick bootstrap refresh failed");
+}
+
+/// Per-tick pick quotas for one class. A cursor-split read failure degrades to
+/// one in-flight pick rather than skipping the class, matching the pre-split
+/// behaviour.
+async fn class_walk_quotas(
+    pool: &PgPool,
+    class: MaintenanceClass,
+    config: &SchedulerConfig,
+) -> WalkQuotas {
+    match lease::count_active_by_cursor(pool, class).await {
+        Ok((in_flight, fresh)) => {
+            walk_quotas(in_flight, fresh, config.tick_interval, config.class_interval)
         }
         Err(error) => {
-            metrics.backlog_probe_failures.add(1, &[]);
-            warn!(
-                ?error,
-                ttl_seconds = ttl.as_secs(),
-                sample_limit = QUERY_RESULT_CACHE_GC_BACKLOG_PROBE_LIMIT,
-                "bounded PostgreSQL query-result cache backlog probe failed",
-            );
+            log_maintenance_class_cursor_split_failed(class, &error);
+            WalkQuotas { in_flight: 1, fresh: 0 }
         }
-    }
-    metrics.runs.add(1, &[KeyValue::new("status", status)]);
-    metrics.batches.add(progress.batches, &[]);
-    metrics.rows_deleted.add(progress.rows_deleted, &[]);
-    if budget_exhausted {
-        metrics.budget_exhausted.add(1, &[]);
-    }
-    let backlog_observed = backlog_probe.as_ref().is_ok_and(|probe| probe.sampled_expired_rows > 0);
-    if progress.rows_deleted > 0 || budget_exhausted || backlog_observed {
-        let (backlog_sample_rows, backlog_sample_at_capacity, oldest_expired_age_seconds) =
-            backlog_probe.as_ref().map_or((None, None, None), |probe| {
-                (
-                    Some(probe.sampled_expired_rows),
-                    Some(probe.sample_at_capacity()),
-                    probe.oldest_expired_age_seconds,
-                )
-            });
-        info!(
-            rows_deleted = progress.rows_deleted,
-            batches = progress.batches,
-            budget_exhausted,
-            ?backlog_sample_rows,
-            ?backlog_sample_at_capacity,
-            ?oldest_expired_age_seconds,
-            ttl_seconds = ttl.as_secs(),
-            batch_limit = QUERY_RESULT_CACHE_GC_BATCH_LIMIT,
-            "maintenance scheduler completed PostgreSQL query-result cache GC sweep",
-        );
     }
 }
 
-/// Runs one bounded stale provider-call reservation sweep and repairs each
-/// unique affected execution rollup once. The repository hard-caps the batch,
-/// so this loop can never become an unbounded database fanout.
+fn log_maintenance_class_cursor_split_failed<E: std::fmt::Debug>(
+    class: MaintenanceClass,
+    error: &E,
+) {
+    warn!(
+        class = class.as_str(),
+        ?error,
+        "maintenance class cursor split failed; assuming one in-flight row",
+    );
+}
+
+/// Choose the next cursor population to acquire from, consuming one unit of its
+/// remaining quota. Returns `None` when both quotas are spent, which ends the
+/// tick's walk.
 ///
-/// The explicit age and batch size keep the operation deterministic for the
-/// operator/integration-test surface. Eligibility is evaluated against
-/// `PostgreSQL` `now()`, not the scheduler node clock.
-pub async fn reap_stale_billing_provider_calls_once(
-    state: &AppState,
-    stale_after: Duration,
-    batch_limit: i64,
-) -> anyhow::Result<BillingProviderCallReaperReport> {
-    let affected_executions = billing_repository::reap_stale_started_provider_calls(
-        &state.persistence.postgres,
-        stale_after,
-        batch_limit,
-    )
-    .await?;
-    let mut report = BillingProviderCallReaperReport {
-        reaped_provider_calls: affected_executions
-            .iter()
-            .map(|affected| u64::try_from(affected.reaped_provider_calls).unwrap_or(0))
-            .sum(),
-        affected_executions: u64::try_from(affected_executions.len()).unwrap_or(u64::MAX),
-        ..BillingProviderCallReaperReport::default()
-    };
-
-    for affected in affected_executions {
-        match state
-            .canonical_services
-            .billing
-            .get_execution_cost(
-                state,
-                &affected.owning_execution_kind,
-                affected.owning_execution_id,
-            )
-            .await
-        {
-            Ok(_) => report.rollups_refreshed += 1,
-            Err(error) => {
-                report.rollup_failures += 1;
-                warn!(
-                    owning_execution_kind = %affected.owning_execution_kind,
-                    owning_execution_id = %affected.owning_execution_id,
-                    reaped_provider_calls = affected.reaped_provider_calls,
-                    %error,
-                    "stale provider-call reservations were canceled but execution-cost rollup repair failed",
-                );
-            }
-        }
+/// The larger remaining quota is served first, so the two populations are
+/// interleaved as their budgets shrink and neither is left until last.
+fn next_preference(
+    in_flight_left: &mut u32,
+    fresh_left: &mut u32,
+) -> Option<lease::AcquirePreference> {
+    if *in_flight_left == 0 && *fresh_left == 0 {
+        return None;
     }
-
-    Ok(report)
-}
-
-async fn reap_stale_billing_provider_calls(state: &AppState) {
-    let metrics = billing_provider_call_reaper_metrics();
-    match reap_stale_billing_provider_calls_once(
-        state,
-        STALE_BILLING_PROVIDER_CALL_AFTER,
-        STALE_BILLING_PROVIDER_CALL_BATCH_LIMIT,
-    )
-    .await
-    {
-        Ok(report) => {
-            metrics.runs.add(1, &[KeyValue::new("status", "success")]);
-            metrics.canceled_calls.add(report.reaped_provider_calls, &[]);
-            metrics
-                .execution_rollups
-                .add(report.rollups_refreshed, &[KeyValue::new("status", "refreshed")]);
-            metrics
-                .execution_rollups
-                .add(report.rollup_failures, &[KeyValue::new("status", "failed")]);
-            if report.reaped_provider_calls > 0 {
-                if report.rollup_failures == 0 {
-                    info!(
-                        reaped_provider_calls = report.reaped_provider_calls,
-                        affected_executions = report.affected_executions,
-                        rollups_refreshed = report.rollups_refreshed,
-                        batch_limit = STALE_BILLING_PROVIDER_CALL_BATCH_LIMIT,
-                        "maintenance scheduler canceled stale provider-call reservations",
-                    );
-                } else {
-                    warn!(
-                        reaped_provider_calls = report.reaped_provider_calls,
-                        affected_executions = report.affected_executions,
-                        rollups_refreshed = report.rollups_refreshed,
-                        rollup_failures = report.rollup_failures,
-                        batch_limit = STALE_BILLING_PROVIDER_CALL_BATCH_LIMIT,
-                        "maintenance scheduler canceled stale provider-call reservations with rollup repair failures",
-                    );
-                }
-            }
-        }
-        Err(error) => {
-            metrics.runs.add(1, &[KeyValue::new("status", "failed")]);
-            warn!(
-                ?error,
-                stale_after_secs = STALE_BILLING_PROVIDER_CALL_AFTER.as_secs(),
-                batch_limit = STALE_BILLING_PROVIDER_CALL_BATCH_LIMIT,
-                "stale provider-call reservation reaper failed; continuing",
-            );
-        }
-    }
-}
-
-/// Repairs one bounded batch of derived execution-cost generations.
-///
-/// The durable state row is dirtied in the same transaction as every
-/// canonical provider-call mutation. `get_execution_cost` performs a
-/// generation-fenced rebuild, so replaying this sweep or running it on
-/// multiple worker nodes is safe. Failures use a bounded exponential backoff
-/// and remain durable across process restarts.
-pub async fn repair_dirty_billing_execution_costs_once(
-    state: &AppState,
-    batch_limit: i64,
-) -> anyhow::Result<BillingExecutionCostRepairReport> {
-    let repairs = billing_repository::claim_due_execution_cost_rollup_repairs(
-        &state.persistence.postgres,
-        batch_limit,
-        DIRTY_EXECUTION_COST_CLAIM_LEASE,
-    )
-    .await?;
-    let mut report = BillingExecutionCostRepairReport {
-        examined: u64::try_from(repairs.len()).unwrap_or(u64::MAX),
-        ..BillingExecutionCostRepairReport::default()
-    };
-
-    for repair in repairs {
-        if billing_repository::delete_orphaned_execution_cost_rollup_state(
-            &state.persistence.postgres,
-            &repair.owning_execution_kind,
-            repair.owning_execution_id,
-            repair.dirty_generation,
-        )
-        .await?
-        {
-            report.repaired += 1;
-            continue;
-        }
-        match state
-            .canonical_services
-            .billing
-            .get_execution_cost(state, &repair.owning_execution_kind, repair.owning_execution_id)
-            .await
-        {
-            Ok(_) => report.repaired += 1,
-            Err(error) => {
-                let backoff = dirty_execution_cost_retry_backoff(repair.repair_attempts);
-                let recorded = billing_repository::record_execution_cost_rollup_failure(
-                    &state.persistence.postgres,
-                    &repair.owning_execution_kind,
-                    repair.owning_execution_id,
-                    repair.dirty_generation,
-                    backoff,
-                    "rollup_failed",
-                )
-                .await?;
-                if recorded {
-                    report.failed += 1;
-                    warn!(
-                        owning_execution_kind = %repair.owning_execution_kind,
-                        owning_execution_id = %repair.owning_execution_id,
-                        dirty_generation = repair.dirty_generation,
-                        retry_after_secs = backoff.as_secs(),
-                        %error,
-                        "durable execution-cost rollup repair failed",
-                    );
-                } else {
-                    // Another canonical write or repair advanced the
-                    // generation while this attempt was running. Its current
-                    // state owns the next decision; never back off that newer
-                    // work using a stale failure.
-                    report.superseded += 1;
-                }
-            }
-        }
-    }
-
-    Ok(report)
-}
-
-fn dirty_execution_cost_retry_backoff(repair_attempts: i32) -> Duration {
-    let exponent = u32::try_from(repair_attempts.clamp(0, 8)).unwrap_or(8);
-    let seconds = 1_u64.checked_shl(exponent).unwrap_or(u64::MAX);
-    Duration::from_secs(seconds.min(DIRTY_EXECUTION_COST_MAX_BACKOFF.as_secs()))
-}
-
-async fn repair_dirty_billing_execution_costs(state: &AppState) {
-    match repair_dirty_billing_execution_costs_once(state, DIRTY_EXECUTION_COST_REPAIR_BATCH_LIMIT)
-        .await
-    {
-        Ok(report) if report.examined > 0 && report.failed == 0 => info!(
-            examined = report.examined,
-            repaired = report.repaired,
-            superseded = report.superseded,
-            "maintenance scheduler repaired durable execution-cost rollups",
-        ),
-        Ok(report) if report.examined > 0 => warn!(
-            examined = report.examined,
-            repaired = report.repaired,
-            failed = report.failed,
-            superseded = report.superseded,
-            "maintenance scheduler completed execution-cost repair sweep with failures",
-        ),
-        Ok(_) => {}
-        Err(error) => warn!(
-            ?error,
-            batch_limit = DIRTY_EXECUTION_COST_REPAIR_BATCH_LIMIT,
-            "durable execution-cost repair sweep failed; continuing",
-        ),
-    }
-}
-
-async fn reap_stale_query_executions(state: &AppState, stale_after: Duration) {
-    let stale_after = ChronoDuration::from_std(stale_after).unwrap_or(ChronoDuration::MAX);
-    let stale_before =
-        Utc::now().checked_sub_signed(stale_after).unwrap_or(DateTime::<Utc>::MIN_UTC);
-    match query_repository::reap_stale_query_executions(
-        &state.persistence.postgres,
-        stale_before,
-        STALE_QUERY_EXECUTION_BATCH_LIMIT,
-    )
-    .await
-    {
-        Ok(reaped) if reaped > 0 => {
-            info!(reaped, "maintenance scheduler canceled stale query executions");
-        }
-        Ok(_) => {}
-        Err(error) => warn!(?error, "stale query execution reaper failed; continuing"),
+    if *in_flight_left >= *fresh_left {
+        *in_flight_left -= 1;
+        Some(lease::AcquirePreference::InFlight)
+    } else {
+        *fresh_left -= 1;
+        Some(lease::AcquirePreference::Fresh)
     }
 }
 
@@ -686,67 +532,319 @@ async fn process_class(
     config: &SchedulerConfig,
     owner_node: &str,
     class: MaintenanceClass,
+    quotas: WalkQuotas,
 ) {
     let pool = &state.persistence.postgres;
-    let run = match lease::acquire_next_due(pool, class, owner_node).await {
-        Ok(Some(run)) => run,
-        Ok(None) => return,
-        Err(error) => {
-            warn!(class = class.as_str(), ?error, "lease acquire failed");
+    // Sequential, one row at a time: leasing the whole batch up front would
+    // starve the heartbeat of rows waiting behind a slow sweeper. A row
+    // completed this tick is requeued in the future (`tick_interval` or
+    // `class_interval`), so the loop walks distinct rows and terminates.
+    //
+    // The preference alternates toward whichever population still has quota to
+    // spare, so a mid-sweep row and a never-started row each get their share of
+    // the tick instead of one order starving the other.
+    let (mut in_flight_left, mut fresh_left) = (quotas.in_flight, quotas.fresh);
+    for _ in 0..quotas.total() {
+        let Some(preference) = next_preference(&mut in_flight_left, &mut fresh_left) else {
             return;
-        }
-    };
-    let heartbeat_handle = spawn_heartbeat(pool.clone(), run.id);
-    let dispatch = dispatch(state, class, &run).await;
-    heartbeat_handle.abort();
-    handle_outcome(state, config, class, run, dispatch).await;
-}
-
-fn spawn_heartbeat(pool: PgPool, run_id: Uuid) -> JoinHandle<()> {
-    tokio::spawn(async move {
-        loop {
-            sleep(HEARTBEAT_INTERVAL).await;
-            if lease::heartbeat(&pool, run_id).await.is_err() {
-                // Heartbeat failure is non-fatal; the reaper will return
-                // the lease to pending if the sweeper actually crashes.
+        };
+        let run = match lease::acquire_next_due(
+            pool,
+            class,
+            owner_node,
+            preference,
+            config.class_interval,
+        )
+        .await
+        {
+            Ok(Some(run)) => run,
+            Ok(None) => return,
+            Err(error) => {
+                warn!(class = class.as_str(), ?error, "lease acquire failed");
                 return;
             }
-        }
-    })
+        };
+        let _heartbeat = spawn_heartbeat(pool.clone(), run.id, owner_node.to_owned());
+        let dispatch_started = std::time::Instant::now();
+        let dispatch = dispatch(state, class, &run, owner_node).await;
+        let dispatch_duration = dispatch_started.elapsed();
+        handle_outcome(
+            state,
+            config,
+            class,
+            owner_node,
+            run,
+            CompletedDispatch { outcome: dispatch, duration: dispatch_duration },
+        )
+        .await;
+    }
 }
 
-/// One concrete sweep outcome for the scheduler. Either the canonical
-/// success counts (`rows_removed`, `bytes_reclaimed`), a soft retry
-/// signal that should not consume an attempt, or a real failure.
+/// Run the production lease/dispatch/completion path for one due runtime-graph
+/// row. Integration tests use this seam to prove scheduler state transitions;
+/// it deliberately does not expose the private dispatch outcome.
+#[cfg(feature = "test-support")]
+pub async fn process_runtime_graph_class_once_for_test(state: &AppState, owner_node: &str) {
+    let config = SchedulerConfig::from_settings(&state.settings);
+    let quotas = WalkQuotas { in_flight: 1, fresh: 0 };
+    process_class(state, &config, owner_node, MaintenanceClass::GcRuntimeGraph, quotas).await;
+}
+
+/// Run one full scheduler tick with the production batch sizing. Integration
+/// tests use this seam to prove a single tick drains more than one due row.
+#[cfg(feature = "test-support")]
+pub async fn run_tick_for_test(state: &AppState, owner_node: &str) {
+    let config = SchedulerConfig::from_settings(&state.settings);
+    if let Err(error) = run_tick(state, &config, owner_node).await {
+        warn!(?error, "maintenance scheduler test tick failed");
+    }
+}
+
+/// Consecutive heartbeat failures tolerated before the task gives up.
+/// A single transient pool/connection hiccup must not permanently stop
+/// heartbeating while the sweeper is still running.
+const HEARTBEAT_MAX_CONSECUTIVE_FAILURES: u32 = 3;
+
+// The lease-heartbeat task is owned by a shared [`AbortOnDrop`] guard, not a
+// bespoke type: it must never outlive the dispatch it renews the lease for, and
+// a `JoinHandle` dropped on its own only detaches the task — so a dropped or
+// panicked `process_class` future would otherwise keep renewing the lease
+// forever. See `crates/shared/cancellation.rs` for the class.
+
+fn spawn_heartbeat(pool: PgPool, run_id: Uuid, owner_node: String) -> AbortOnDrop<()> {
+    AbortOnDrop::new(tokio::spawn(async move {
+        let mut consecutive_failures = 0u32;
+        loop {
+            sleep(HEARTBEAT_INTERVAL).await;
+            match lease::heartbeat(&pool, run_id, &owner_node).await {
+                Ok(()) => consecutive_failures = 0,
+                Err(_) => {
+                    consecutive_failures += 1;
+                    if consecutive_failures >= HEARTBEAT_MAX_CONSECUTIVE_FAILURES {
+                        return;
+                    }
+                }
+            }
+        }
+    }))
+}
+
+/// Counts and soft-skip detail carried by one concrete sweep outcome.
+#[derive(Debug, Clone, Copy)]
+struct GcSweepDetail {
+    rows_removed: i64,
+    bytes_reclaimed: i64,
+    work_remaining: bool,
+    candidate_documents: u64,
+    deleted_superseded_vectors: u64,
+    deleted_null_head_vectors: u64,
+}
+
+impl GcSweepDetail {
+    const fn no_work() -> Self {
+        Self {
+            rows_removed: 0,
+            bytes_reclaimed: 0,
+            work_remaining: false,
+            candidate_documents: 0,
+            deleted_superseded_vectors: 0,
+            deleted_null_head_vectors: 0,
+        }
+    }
+}
+
+/// One concrete sweep outcome for the scheduler. Either the current persisted
+/// row success counts, a soft retry signal carrying its real reason, or a real
+/// failure with a code from the contract's bounded `error.code` domain — never
+/// a raw error string.
 enum DispatchOutcome {
-    Ok { rows_removed: i64, bytes_reclaimed: i64 },
-    ActiveIngest,
-    Failed { error_code: &'static str, error_text: String },
+    Ok(GcSweepDetail),
+    Skipped { reason: GcSkipReason },
+    Failed { wire_error_code: &'static str, error_code: GcErrorCode, error_text: String },
+}
+
+/// Concrete sweeper a scheduled `(class, scope)` pair routes to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DispatchKind {
+    SupersededVectors,
+    RuntimeGraph,
+    HistoricalProjection,
+    Unsupported,
+}
+
+/// Pure routing for one durable class. Kept separate from [`dispatch`] so a
+/// unit test can prove every scheduled class reaches a real sweeper instead of
+/// the `Unsupported` fallback without a database.
+fn dispatch_kind(class: MaintenanceClass, scope: Scope) -> DispatchKind {
+    match (class, scope) {
+        (MaintenanceClass::GcSupersededVectors, Scope::Library(_)) => {
+            DispatchKind::SupersededVectors
+        }
+        (MaintenanceClass::GcRuntimeGraph, Scope::Library(_)) => DispatchKind::RuntimeGraph,
+        (MaintenanceClass::GcHistoricalProjection, Scope::Library(_)) => {
+            DispatchKind::HistoricalProjection
+        }
+        _ => DispatchKind::Unsupported,
+    }
 }
 
 async fn dispatch(
     state: &AppState,
     class: MaintenanceClass,
     run: &MaintenanceJobRun,
+    owner_node: &str,
 ) -> DispatchOutcome {
-    match (class, run.scope()) {
-        (MaintenanceClass::GcStaleChunks, Scope::Library(library_id)) => {
-            dispatch_gc_stale_chunks(state, library_id).await
+    let scope = run.scope();
+    let Scope::Library(library_id) = scope else {
+        return unsupported_class_scope(class, scope);
+    };
+    match dispatch_kind(class, scope) {
+        DispatchKind::SupersededVectors => {
+            dispatch_gc_superseded_vectors(state, run, owner_node, library_id).await
         }
-        (class, scope) => DispatchOutcome::Failed {
-            error_code: "unsupported_class_scope",
-            error_text: format!(
-                "scheduler dispatch has no implementation for class={} scope={:?}",
-                class.as_str(),
-                scope,
-            ),
-        },
+        DispatchKind::RuntimeGraph => {
+            dispatch_gc_runtime_graph(state, run, owner_node, library_id).await
+        }
+        DispatchKind::HistoricalProjection => {
+            dispatch_gc_historical_projection(state, run, owner_node, library_id).await
+        }
+        DispatchKind::Unsupported => unsupported_class_scope(class, scope),
     }
 }
 
-async fn dispatch_gc_stale_chunks(state: &AppState, library_id: Uuid) -> DispatchOutcome {
+/// The `unsupported_class_scope` failure shared by the scope and class guards.
+fn unsupported_class_scope(class: MaintenanceClass, scope: Scope) -> DispatchOutcome {
+    DispatchOutcome::Failed {
+        wire_error_code: GcErrorCode::UnsupportedClassScope.label(),
+        error_code: GcErrorCode::UnsupportedClassScope,
+        error_text: format!(
+            "scheduler dispatch has no implementation for class={} scope={:?}",
+            class.as_str(),
+            scope,
+        ),
+    }
+}
+
+/// Preserve the sweeper's existing retry policy and durable error code while
+/// normalizing only its telemetry. Superseded-vector busy errors remain fatal;
+/// runtime-graph and historical-projection busy errors remain soft requeues.
+fn skipped_or_failed(
+    error: &GcError,
+    library_id: Uuid,
+    class: MaintenanceClass,
+) -> DispatchOutcome {
+    if matches!(error, GcError::LibraryBusy { .. })
+        && class != MaintenanceClass::GcSupersededVectors
+    {
+        info!(
+            library_id = %library_id,
+            class = class.as_str(),
+            "maintenance gc deferred: library catalog row is busy",
+        );
+        return DispatchOutcome::Skipped { reason: GcSkipReason::LibraryBusy };
+    }
+    let error_code = match classify_gc_error(error) {
+        GcDispatchError::Failed(code) => code,
+        GcDispatchError::Skipped(_) => match error {
+            GcError::Graph(_) => GcErrorCode::RuntimeGraph,
+            _ => GcErrorCode::VectorPlane,
+        },
+    };
+    DispatchOutcome::Failed {
+        wire_error_code: error.code(),
+        error_code,
+        error_text: error.to_string(),
+    }
+}
+
+async fn dispatch_gc_runtime_graph(
+    state: &AppState,
+    run: &MaintenanceJobRun,
+    owner_node: &str,
+    library_id: Uuid,
+) -> DispatchOutcome {
+    let exists = match sqlx::query_scalar::<_, bool>(
+        "select exists (select 1 from catalog_library where id = $1)",
+    )
+    .bind(library_id)
+    .fetch_one(&state.persistence.postgres)
+    .await
+    {
+        Ok(exists) => exists,
+        Err(error) => {
+            return DispatchOutcome::Failed {
+                wire_error_code: GcErrorCode::CatalogLookup.label(),
+                error_code: GcErrorCode::CatalogLookup,
+                error_text: error.to_string(),
+            };
+        }
+    };
+    if !exists {
+        return DispatchOutcome::Ok(GcSweepDetail::no_work());
+    }
+
+    match gc::run_runtime_graph_scheduler_batch(state, library_id, Some(&run.cursor_json)).await {
+        Ok(report) => {
+            log_runtime_graph_batch_committed(library_id, &report);
+            let next_cursor =
+                report.next_cursor_json.clone().unwrap_or_else(|| serde_json::json!({}));
+            if let Err(error) =
+                lease::update_cursor(&state.persistence.postgres, run.id, owner_node, next_cursor)
+                    .await
+            {
+                return DispatchOutcome::Failed {
+                    wire_error_code: GcErrorCode::LeaseCursor.label(),
+                    error_code: GcErrorCode::LeaseCursor,
+                    error_text: error.to_string(),
+                };
+            }
+            DispatchOutcome::Ok(GcSweepDetail {
+                rows_removed: report.total_rows_removed(),
+                bytes_reclaimed: 0,
+                work_remaining: report.work_remaining,
+                candidate_documents: 0,
+                deleted_superseded_vectors: 0,
+                deleted_null_head_vectors: 0,
+            })
+        }
+        Err(GcError::ActiveIngest { active_jobs, .. }) => {
+            log_runtime_graph_deferred_active_ingest(library_id, active_jobs);
+            DispatchOutcome::Skipped { reason: GcSkipReason::ActiveIngest }
+        }
+        Err(error) => skipped_or_failed(&error, library_id, MaintenanceClass::GcRuntimeGraph),
+    }
+}
+
+fn log_runtime_graph_batch_committed(library_id: Uuid, report: &RuntimeGraphGcSchedulerReport) {
+    info!(
+        library_id = %library_id,
+        candidate_roots = report.candidate_roots,
+        nodes_removed = report.nodes_removed,
+        edges_removed = report.edges_removed,
+        evidence_removed = report.evidence_removed,
+        dependent_rows_removed = report.dependent_rows_removed,
+        physical_rows_removed = report.physical_rows_removed,
+        work_remaining = report.work_remaining,
+        "gc.runtime-graph committed bounded phase",
+    );
+}
+
+fn log_runtime_graph_deferred_active_ingest(library_id: Uuid, active_jobs: i64) {
+    info!(
+        library_id = %library_id,
+        active_jobs,
+        "gc.runtime-graph deferred: library has active ingest",
+    );
+}
+
+async fn dispatch_gc_superseded_vectors(
+    state: &AppState,
+    run: &MaintenanceJobRun,
+    owner_node: &str,
+    library_id: Uuid,
+) -> DispatchOutcome {
     let pool = &state.persistence.postgres;
-    // Resolve the workspace_id from the canonical catalog row. A
+    // Resolve the workspace_id from the current catalog row. A
     // library that vanished between scheduler bootstrap and dispatch
     // (e.g. operator deleted it) shows up here as missing; that is a
     // benign "no work" signal, not a failure.
@@ -754,198 +852,421 @@ async fn dispatch_gc_stale_chunks(state: &AppState, library_id: Uuid) -> Dispatc
         Ok(libraries) => libraries,
         Err(error) => {
             return DispatchOutcome::Failed {
-                error_code: "catalog_lookup",
+                wire_error_code: GcErrorCode::CatalogLookup.label(),
+                error_code: GcErrorCode::CatalogLookup,
                 error_text: error.to_string(),
             };
         }
     };
     let Some(library) = libraries.into_iter().find(|library| library.id == library_id) else {
-        return DispatchOutcome::Ok { rows_removed: 0, bytes_reclaimed: 0 };
+        return DispatchOutcome::Ok(GcSweepDetail::no_work());
     };
 
-    match gc::run_for_library(
+    match gc::run_superseded_vectors_for_library_with_cursor(
         state,
         library.workspace_id,
         library.id,
-        GcStaleChunksOptions::default(),
+        GcSupersededVectorsOptions {
+            max_batches: Some(1),
+            ..GcSupersededVectorsOptions::default()
+        },
+        Some(&run.cursor_json),
     )
     .await
     {
-        Ok(report) => DispatchOutcome::Ok { rows_removed: total_rows(&report), bytes_reclaimed: 0 },
-        Err(GcStaleChunksError::ActiveIngest { active_jobs, .. }) => {
+        Ok(report) => {
+            let next_cursor =
+                report.next_cursor_json.clone().unwrap_or_else(|| serde_json::json!({}));
+            if let Err(error) = lease::update_cursor(pool, run.id, owner_node, next_cursor).await {
+                return DispatchOutcome::Failed {
+                    wire_error_code: GcErrorCode::LeaseCursor.label(),
+                    error_code: GcErrorCode::LeaseCursor,
+                    error_text: error.to_string(),
+                };
+            }
+            DispatchOutcome::Ok(GcSweepDetail {
+                rows_removed: total_rows(&report),
+                bytes_reclaimed: 0,
+                work_remaining: report.work_remaining,
+                candidate_documents: count_non_negative(report.documents_with_superseded_vectors),
+                deleted_superseded_vectors: count_non_negative(report.superseded_vectors_removed),
+                deleted_null_head_vectors: count_non_negative(report.null_head_vectors_removed),
+            })
+        }
+        Err(GcError::ActiveIngest { active_jobs, .. }) => {
             info!(
                 library_id = %library_id,
                 active_jobs,
-                "gc.stale-chunks deferred: library has active ingest",
+                "gc.superseded-vectors deferred: library has active ingest",
             );
-            DispatchOutcome::ActiveIngest
+            DispatchOutcome::Skipped { reason: GcSkipReason::ActiveIngest }
+        }
+        Err(error) => skipped_or_failed(&error, library_id, MaintenanceClass::GcSupersededVectors),
+    }
+}
+
+async fn dispatch_gc_historical_projection(
+    state: &AppState,
+    _run: &MaintenanceJobRun,
+    _owner_node: &str,
+    library_id: Uuid,
+) -> DispatchOutcome {
+    // Resolve the workspace from the current catalog row, exactly as the
+    // superseded-vector sweeper does: a library that vanished between
+    // scheduler bootstrap and dispatch is a benign "no work" signal.
+    let libraries =
+        match catalog_repository::list_libraries(&state.persistence.postgres, None).await {
+            Ok(libraries) => libraries,
+            Err(error) => {
+                return DispatchOutcome::Failed {
+                    wire_error_code: GcErrorCode::CatalogLookup.label(),
+                    error_code: GcErrorCode::CatalogLookup,
+                    error_text: error.to_string(),
+                };
+            }
+        };
+    let Some(library) = libraries.into_iter().find(|library| library.id == library_id) else {
+        return DispatchOutcome::Ok(GcSweepDetail::no_work());
+    };
+
+    match gc::run_historical_projection_window_for_library(
+        state,
+        library.workspace_id,
+        library.id,
+        false,
+    )
+    .await
+    {
+        Ok(report) => {
+            log_historical_projection_completed(library_id, &report);
+            DispatchOutcome::Ok(GcSweepDetail {
+                rows_removed: i64::try_from(report.total_rows_removed()).unwrap_or(i64::MAX),
+                bytes_reclaimed: 0,
+                work_remaining: false,
+                candidate_documents: 0,
+                deleted_superseded_vectors: 0,
+                deleted_null_head_vectors: 0,
+            })
+        }
+        Err(GcError::ActiveIngest { active_jobs, .. }) => {
+            log_historical_projection_deferred_active_ingest(library_id, active_jobs);
+            DispatchOutcome::Skipped { reason: GcSkipReason::ActiveIngest }
         }
         Err(error) => {
-            DispatchOutcome::Failed { error_code: error.code(), error_text: error.to_string() }
+            skipped_or_failed(&error, library_id, MaintenanceClass::GcHistoricalProjection)
         }
     }
 }
 
-fn total_rows(report: &LibraryGcReport) -> i64 {
+fn log_historical_projection_completed(
+    library_id: Uuid,
+    report: &HistoricalProjectionRetentionGcReport,
+) {
+    info!(
+        library_id = %library_id,
+        documents_visited = report.documents_visited,
+        documents_purged = report.documents_purged,
+        knowledge_revisions_removed = report.knowledge_revisions_removed,
+        "gc.historical-projection completed",
+    );
+}
+
+fn log_historical_projection_deferred_active_ingest(library_id: Uuid, active_jobs: i64) {
+    info!(
+        library_id = %library_id,
+        active_jobs,
+        "gc.historical-projection deferred: library has active ingest",
+    );
+}
+
+fn total_rows(report: &SupersededVectorGcReport) -> i64 {
     report.total_rows_removed()
+}
+
+/// Shared identity of the leased row a dispatch outcome applies to.
+struct SweepContext<'a> {
+    pool: &'a PgPool,
+    class: MaintenanceClass,
+    owner_node: &'a str,
+    run: &'a MaintenanceJobRun,
+}
+
+/// A dispatch result plus the wall time it took, carried together so the
+/// completion seam does not grow another argument.
+struct CompletedDispatch {
+    outcome: DispatchOutcome,
+    duration: Duration,
 }
 
 async fn handle_outcome(
     state: &AppState,
     config: &SchedulerConfig,
     class: MaintenanceClass,
+    owner_node: &str,
     run: MaintenanceJobRun,
-    outcome: DispatchOutcome,
+    completed: CompletedDispatch,
 ) {
-    let pool = &state.persistence.postgres;
-    match outcome {
-        DispatchOutcome::Ok { rows_removed, bytes_reclaimed } => {
-            if let Err(error) =
-                lease::complete(pool, run.id, rows_removed, bytes_reclaimed, config.class_interval)
-                    .await
-            {
-                warn!(class = class.as_str(), run_id = %run.id, ?error, "lease complete failed");
-            } else if rows_removed > 0 {
-                info!(
-                    class = class.as_str(),
-                    scope = ?run.scope(),
-                    rows_removed,
-                    bytes_reclaimed,
-                    "maintenance sweep completed",
-                );
+    let library_id = match run.scope() {
+        Scope::Library(library_id) => library_id,
+        Scope::Instance => Uuid::nil(),
+    };
+    let context = SweepContext { pool: &state.persistence.postgres, class, owner_node, run: &run };
+    let mut observation = GcRunObservation {
+        maintenance_class: class.as_str(),
+        outcome: GcRunOutcome::Failed,
+        skip_reason: None,
+        error_code: None,
+        candidate_documents: 0,
+        deleted_superseded_vectors: 0,
+        deleted_null_head_vectors: 0,
+        duration: completed.duration,
+    };
+    match completed.outcome {
+        DispatchOutcome::Ok(detail) => {
+            if complete_sweep(&context, config, &detail, completed.duration).await {
+                observation.outcome = GcRunOutcome::Success;
+                observation.candidate_documents = detail.candidate_documents;
+                observation.deleted_superseded_vectors = detail.deleted_superseded_vectors;
+                observation.deleted_null_head_vectors = detail.deleted_null_head_vectors;
+            } else {
+                observation.error_code = Some(GcErrorCode::LeaseComplete);
             }
         }
-        DispatchOutcome::ActiveIngest => {
-            // Re-queue WITHOUT touching attempts — this is not a real
-            // failure. `complete` resets attempts and pushes
-            // `next_due_at` out by `class_interval`; pass a short
-            // backoff so the busy library is checked again soon.
-            if let Err(error) = lease::complete(pool, run.id, 0, 0, ACTIVE_INGEST_RETRY).await {
-                warn!(class = class.as_str(), run_id = %run.id, ?error, "active-ingest re-queue failed");
+        DispatchOutcome::Skipped { reason } => {
+            if requeue_active_ingest(&context, reason).await {
+                observation.outcome = GcRunOutcome::from_skip_reason(reason);
+                observation.skip_reason = Some(reason);
+            } else {
+                observation.error_code = Some(GcErrorCode::LeaseRequeue);
             }
         }
-        DispatchOutcome::Failed { error_code, error_text } => {
-            match lease::fail(pool, run.id, error_code, &error_text, lease::DEFAULT_MAX_ATTEMPTS)
-                .await
-            {
-                Ok(lease::FailOutcome::Retry { attempts, backoff }) => warn!(
-                    class = class.as_str(),
-                    scope = ?run.scope(),
-                    attempts,
-                    backoff_secs = backoff.as_secs(),
-                    error_code,
-                    error_text,
-                    "maintenance sweep failed; re-queued",
-                ),
-                Ok(lease::FailOutcome::DeadLetter { attempts }) => warn!(
-                    class = class.as_str(),
-                    scope = ?run.scope(),
-                    attempts,
-                    error_code,
-                    error_text,
-                    "maintenance sweep dead-lettered after exhausting attempts",
-                ),
-                Err(error) => warn!(
-                    class = class.as_str(),
-                    run_id = %run.id,
-                    ?error,
-                    "lease fail update failed",
-                ),
-            }
+        DispatchOutcome::Failed { wire_error_code, error_code, error_text } => {
+            let lease_failed = !fail_sweep(&context, wire_error_code, &error_text).await;
+            observation.error_code =
+                Some(if lease_failed { GcErrorCode::LeaseFail } else { error_code });
+        }
+    }
+    // The metric is aggregate and low-card, so the library scope and the bounded
+    // error code are logged as the per-library drill-down the removed metric
+    // label used to provide.
+    log_dispatch_failure(library_id, class, observation.error_code);
+    VectorLifecycleInstruments::global().record_gc_run(&observation);
+}
+
+/// Emit the structured failure log for one dispatch, keyed by library and the
+/// bounded error code.
+fn log_dispatch_failure(
+    library_id: Uuid,
+    class: MaintenanceClass,
+    error_code: Option<GcErrorCode>,
+) {
+    if let Some(error_code) = error_code {
+        warn!(
+            library_id = %library_id,
+            class = class.as_str(),
+            error_code = error_code.label(),
+            "vector-lifecycle gc dispatch failed",
+        );
+    }
+}
+
+/// Returns `true` when the durable lease completion succeeded.
+async fn complete_sweep(
+    context: &SweepContext<'_>,
+    config: &SchedulerConfig,
+    detail: &GcSweepDetail,
+    duration: Duration,
+) -> bool {
+    // A finished sweep carries the full-pass deadline in `next_due_at`
+    // — the gate's time-based re-arm — so the changed-library arm is
+    // the only path that runs a row sooner. A sweep that still has work
+    // continues on the next tick.
+    let next_interval =
+        if detail.work_remaining { config.tick_interval } else { config.full_pass_interval };
+    match lease::complete(
+        context.pool,
+        context.run.id,
+        context.owner_node,
+        detail.rows_removed,
+        detail.bytes_reclaimed,
+        next_interval,
+    )
+    .await
+    {
+        Ok(()) => {
+            log_maintenance_sweep_completed(context.class, context.run, detail, duration);
+            true
+        }
+        Err(error) => {
+            log_lease_complete_failed(context.class, context.run.id, &error);
+            false
         }
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn test_settings() -> crate::app::config::Settings {
-        crate::app::config::Settings::from_env().expect("settings defaults should load")
-    }
-
-    #[test]
-    fn config_clamps_durations_to_safe_minimums() {
-        let mut settings = test_settings();
-        settings.maintenance_tick_interval_seconds = 0;
-        settings.maintenance_class_interval_seconds = 0;
-        settings.maintenance_stale_lease_seconds = 0;
-        let config = SchedulerConfig::from_settings(&settings);
-        assert!(config.tick_interval >= Duration::from_secs(1));
-        assert!(config.class_interval >= Duration::from_secs(60));
-        assert!(config.stale_lease_after >= Duration::from_secs(60));
-    }
-
-    #[test]
-    fn config_passes_through_when_above_minimum() {
-        let mut settings = test_settings();
-        settings.maintenance_tick_interval_seconds = 45;
-        settings.maintenance_class_interval_seconds = 7200;
-        settings.maintenance_stale_lease_seconds = 600;
-        let config = SchedulerConfig::from_settings(&settings);
-        assert_eq!(config.tick_interval, Duration::from_secs(45));
-        assert_eq!(config.class_interval, Duration::from_secs(7200));
-        assert_eq!(config.stale_lease_after, Duration::from_secs(600));
-    }
-
-    #[test]
-    fn billing_provider_call_reaper_keeps_a_hundred_x_provider_timeout_margin() {
-        let hard_provider_timeout_ms = crate::app::state::SEMANTIC_RERANK_HARD_MAX_TIMEOUT_MS;
-        assert!(
-            STALE_BILLING_PROVIDER_CALL_AFTER.as_millis()
-                >= u128::from(hard_provider_timeout_ms) * 100,
-        );
-        assert_eq!(
-            STALE_BILLING_PROVIDER_CALL_BATCH_LIMIT,
-            billing_repository::MAX_STALE_PROVIDER_CALL_REAP_BATCH_LIMIT,
-        );
-    }
-
-    #[test]
-    fn query_result_cache_gc_drains_a_stream_faster_than_seventeen_keys_per_second() {
-        const TICK_SECONDS: u64 = 30;
-        const ARRIVAL_RATE_PER_SECOND: u64 = 18;
-        let capacity = query_result_cache_gc_max_rows_per_tick();
-        let arrivals_per_tick = ARRIVAL_RATE_PER_SECOND * TICK_SECONDS;
-        assert_eq!(capacity, 5_000);
-        assert!(
-            capacity > arrivals_per_tick,
-            "the bounded sweep must sustain more than the old one-batch 16.7 keys/s ceiling",
-        );
-
-        // A pre-existing tail drains rather than growing while the stream
-        // continues at 18 keys/s. Each step models one canonical 30 s tick.
-        let mut backlog = 10_000_u64;
-        for _ in 0..3 {
-            backlog = backlog.saturating_add(arrivals_per_tick).saturating_sub(capacity);
+/// Soft re-queue. Returns `true` when the durable lease completion succeeded.
+async fn requeue_active_ingest(context: &SweepContext<'_>, reason: GcSkipReason) -> bool {
+    // Re-queue WITHOUT touching attempts — this is not a real
+    // failure. `complete` resets attempts; pass a short backoff as the
+    // row's `next_due_at` so the busy library is checked again soon.
+    match lease::complete(
+        context.pool,
+        context.run.id,
+        context.owner_node,
+        0,
+        0,
+        ACTIVE_INGEST_RETRY,
+    )
+    .await
+    {
+        Ok(()) => true,
+        Err(error) => {
+            match reason {
+                GcSkipReason::ActiveIngest => {
+                    log_active_ingest_requeue_failed(context.class, context.run.id, &error);
+                }
+                GcSkipReason::LibraryBusy => {
+                    log_library_busy_requeue_failed(context.class, context.run.id, &error);
+                }
+            }
+            false
         }
-        assert_eq!(backlog, 0);
     }
+}
 
-    #[test]
-    fn query_result_cache_gc_reports_when_the_complete_tick_budget_is_consumed() {
-        let batch_limit = u64::try_from(QUERY_RESULT_CACHE_GC_BATCH_LIMIT).unwrap_or(0);
-        assert_eq!(batch_limit, 500);
-        let mut exhausted = QueryResultCacheGcSweepProgress::default();
-        for _ in 0..QUERY_RESULT_CACHE_GC_MAX_BATCHES_PER_TICK {
-            exhausted.record_batch(batch_limit);
+async fn fail_sweep(context: &SweepContext<'_>, error_code_label: &str, error_text: &str) -> bool {
+    match lease::fail(
+        context.pool,
+        context.run.id,
+        context.owner_node,
+        error_code_label,
+        error_text,
+        lease::DEFAULT_MAX_ATTEMPTS,
+    )
+    .await
+    {
+        Ok(lease::FailOutcome::Retry { attempts, backoff }) => {
+            log_maintenance_sweep_requeued(
+                context.class,
+                context.run,
+                attempts,
+                backoff,
+                error_code_label,
+                error_text,
+            );
+            true
         }
-        assert_eq!(exhausted.rows_deleted, query_result_cache_gc_max_rows_per_tick());
-        assert!(exhausted.budget_exhausted());
-
-        let mut completed_early = QueryResultCacheGcSweepProgress::default();
-        for _ in 0..(QUERY_RESULT_CACHE_GC_MAX_BATCHES_PER_TICK - 1) {
-            completed_early.record_batch(batch_limit);
+        Ok(lease::FailOutcome::DeadLetter { attempts }) => {
+            log_maintenance_sweep_dead_lettered(
+                context.class,
+                context.run,
+                attempts,
+                error_code_label,
+                error_text,
+            );
+            true
         }
-        completed_early.record_batch(batch_limit.saturating_sub(1));
-        assert!(!completed_early.budget_exhausted());
+        Err(error) => {
+            log_lease_fail_update_failed(context.class, context.run.id, &error);
+            false
+        }
     }
+}
 
-    #[test]
-    fn dirty_execution_cost_repair_backoff_is_bounded() {
-        assert_eq!(dirty_execution_cost_retry_backoff(0), Duration::from_secs(1));
-        assert_eq!(dirty_execution_cost_retry_backoff(4), Duration::from_secs(16));
-        assert_eq!(dirty_execution_cost_retry_backoff(i32::MAX), Duration::from_secs(256),);
-        assert!(dirty_execution_cost_retry_backoff(i32::MAX) <= DIRTY_EXECUTION_COST_MAX_BACKOFF);
-    }
+/// Convert a report count to the unsigned counter type; a negative count is
+/// clamped to zero rather than wrapping.
+fn count_non_negative(value: i64) -> u64 {
+    u64::try_from(value).unwrap_or(0)
+}
+
+fn log_lease_complete_failed<E: std::fmt::Debug>(class: MaintenanceClass, run_id: Uuid, error: &E) {
+    warn!(class = class.as_str(), run_id = %run_id, ?error, "lease complete failed");
+}
+
+/// Observe every durably completed dispatch, including zero-deletion work.
+/// A cursor continuation is not a whole sweep; the two cursor fields keep
+/// a zero-deletion batch distinct from a fresh, finished dispatch. Zero
+/// deletions alone do not prove that the dispatch did no useful work.
+fn log_maintenance_sweep_completed(
+    class: MaintenanceClass,
+    run: &MaintenanceJobRun,
+    detail: &GcSweepDetail,
+    duration: Duration,
+) {
+    info!(
+        class = class.as_str(),
+        run_id = %run.id,
+        scope = ?run.scope(),
+        rows_removed = detail.rows_removed,
+        bytes_reclaimed = detail.bytes_reclaimed,
+        continuing_sweep = run.cursor_json != serde_json::json!({}),
+        work_remaining = detail.work_remaining,
+        duration_seconds = duration.as_secs_f64(),
+        "maintenance sweep completed",
+    );
+}
+
+fn log_active_ingest_requeue_failed<E: std::fmt::Debug>(
+    class: MaintenanceClass,
+    run_id: Uuid,
+    error: &E,
+) {
+    warn!(class = class.as_str(), run_id = %run_id, ?error, "active-ingest re-queue failed");
+}
+
+fn log_library_busy_requeue_failed<E: std::fmt::Debug>(
+    class: MaintenanceClass,
+    run_id: Uuid,
+    error: &E,
+) {
+    warn!(class = class.as_str(), run_id = %run_id, ?error, "library-busy re-queue failed");
+}
+
+fn log_maintenance_sweep_requeued(
+    class: MaintenanceClass,
+    run: &MaintenanceJobRun,
+    attempts: i32,
+    backoff: Duration,
+    error_code: &str,
+    error_text: &str,
+) {
+    warn!(
+        class = class.as_str(),
+        scope = ?run.scope(),
+        attempts,
+        backoff_secs = backoff.as_secs(),
+        error_code,
+        error_text,
+        "maintenance sweep failed; re-queued",
+    );
+}
+
+fn log_maintenance_sweep_dead_lettered(
+    class: MaintenanceClass,
+    run: &MaintenanceJobRun,
+    attempts: i32,
+    error_code: &str,
+    error_text: &str,
+) {
+    warn!(
+        class = class.as_str(),
+        scope = ?run.scope(),
+        attempts,
+        error_code,
+        error_text,
+        "maintenance sweep dead-lettered after exhausting attempts",
+    );
+}
+
+fn log_lease_fail_update_failed<E: std::fmt::Debug>(
+    class: MaintenanceClass,
+    run_id: Uuid,
+    error: &E,
+) {
+    warn!(
+        class = class.as_str(),
+        run_id = %run_id,
+        ?error,
+        "lease fail update failed",
+    );
 }

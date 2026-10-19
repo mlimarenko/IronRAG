@@ -4,7 +4,7 @@
 
 ### Connect Codex, Cursor, VS Code, Claude Code, or any HTTP MCP client to the same knowledge base used by IronRAG
 
-[Overview](./README.md) | [MCP (RU)](../ru/MCP.md) | [IAM](./IAM.md) | [CLI](./CLI.md) | [Benchmarks](./BENCHMARKS.md)
+[Overview](./README.md) | [MCP (RU)](../ru/MCP.md) | [IAM](./IAM.md) | [CLI](./CLI.md)
 
 </div>
 
@@ -18,8 +18,8 @@
     - Notification-only requests (no `id`) are acknowledged with a bare `202 Accepted`.
   - `GET` — reserved for server-push streams. IronRAG emits no background notifications today, so it returns `200 OK` + `Content-Type: text/event-stream` with a single `: ready` SSE comment and no further events. Spec 2025-11-25 permits either 405 or an empty SSE stream; we pick the latter because some bundled MCP clients treat any non-200 handshake as fatal and drop the whole MCP server for that agent context.
   - `DELETE` — owned session termination signal. It writes a bounded distributed tombstone, rejects later calls for that session, and cancels in-flight work owned by any API replica. Repeating cleanup for the same owner remains idempotent while the tombstone is active.
-- The `initialize` response carries an `Mcp-Session-Id` header (UUIDv7). Every later `POST`, `GET`, and `DELETE` must echo that exact value and send `Mcp-Protocol-Version: 2025-11-25`. Missing, malformed, expired, terminated, or foreign sessions fail closed; unsupported or duplicate protocol headers are rejected. A valid initialize request for another protocol version receives the one canonical server version in the result; clients that do not support it should disconnect.
-- Native clients may omit `Origin`. If `Origin` is present, exactly one canonical HTTP origin must match `IRONRAG_FRONTEND_ORIGIN` or the optional `IRONRAG_OPENAPI_PUBLIC_ORIGIN`; duplicate, malformed, noncanonical, and untrusted values receive HTTP `403` before authentication, session lookup, or JSON parsing.
+- The `initialize` response carries an `Mcp-Session-Id` header (UUIDv7). Every later `POST`, `GET`, and `DELETE` must echo that exact value and send `Mcp-Protocol-Version: 2025-11-25`. Missing, malformed, expired, terminated, or foreign sessions fail closed; unsupported or duplicate protocol headers are rejected. A valid initialize request for another protocol version receives the server's single supported version in the result; clients that do not support it should disconnect.
+- Native clients may omit `Origin`. If `Origin` is present, it must contain exactly one HTTP origin in normalized ASCII form and exactly match `IRONRAG_FRONTEND_ORIGIN` or the optional `IRONRAG_OPENAPI_PUBLIC_ORIGIN`; duplicate, malformed, differently serialized, and untrusted values receive HTTP `403` before authentication, session lookup, or JSON parsing.
 - Capabilities (for monitoring and UI): `GET http://127.0.0.1:19000/v1/mcp/capabilities` — this is not part of the MCP protocol, just a sidecar probe.
 - Auth: `Authorization: Bearer <token>` on every request (including `GET` / `DELETE`).
 - Protocol server name: `ironrag-mcp-memory`.
@@ -28,7 +28,7 @@
 Quick probe (plain JSON):
 
 ```bash
-export IRONRAG_MCP_TOKEN='irt_...'
+export IRONRAG_MCP_TOKEN='inrg_...'
 
 curl -sS -X POST http://127.0.0.1:19000/v1/mcp \
   -H "Authorization: Bearer $IRONRAG_MCP_TOKEN" \
@@ -62,6 +62,8 @@ Tool arguments use camelCase fields only.
 Catalog targets use stable refs instead of opaque UUIDs: `workspace` is `<workspace>`, and `library` is `<workspace>/<library>`. Discovery responses expose these values as `ref`.
 
 ## Tools
+
+Tool text is self-sufficient: `content[].text` carries the full result payload (JSON), and `structuredContent` mirrors it in machine-readable form for clients that consume it directly. Clients that surface only text to the model (opencode, Claude Code, Codex) get the data without reading `structuredContent`.
 
 ### Grounded Q&A (prefer this for knowledge questions)
 
@@ -106,10 +108,17 @@ On unambiguous answers `clarification.required` is `false`, `clarification.quest
 | `read_document` | Read one document in full or as an excerpt. | `documentId` |
 | `view_document_image` | Fetch the original image bytes (PNG/JPEG/etc.) backing an image-attachment document so a vision-capable model can inspect it directly. Only advertised when the active Agent binding points at a multimodal model. | `documentId` |
 | `list_documents` | List documents in a library, optionally filtered by processing status. | `library` (optional) |
-| `upload_documents` | Create one or more new documents in a library. | `library`, `documents` |
-| `update_document` | Append to or replace an existing document. | `library`, `documentId`, `operationKind` |
+
+### Diagnostics-only mutations
+
+These tools are advertised only by the diagnostics MCP mount at `/v1/mcp/diagnostics`. They never appear on the answer surface at `/v1/mcp`.
+
+| Tool | Description | Required parameters |
+|------|-------------|---------------------|
+| `create_documents` | Create one or more new documents in a library. | `library`, `documents` |
+| `create_document_revision` | Append to or replace an existing document while preserving its identity. | `library`, `documentId`, `mode` |
 | `delete_document` | Delete a document and its revisions, chunks, and graph contributions. | `documentId` |
-| `get_mutation_status` | Check the lifecycle of a mutation receipt from upload/update/delete. | `receiptId` |
+| `get_operation` | Check a create or revision operation until it reaches a terminal state. | `operationId` |
 
 ### Knowledge Graph
 
@@ -124,10 +133,10 @@ On unambiguous answers `clarification.required` is `false`, `clarification.quest
 
 | Tool | Description | Required parameters |
 |------|-------------|---------------------|
-| `submit_web_ingest_run` | Submit a web ingest run for a seed URL. | `library`, `seedUrl`, `mode` |
-| `get_web_ingest_run` | Load one web ingest run and its current state. | `runId` |
-| `list_web_ingest_run_pages` | List candidate pages and outcomes for a web ingest run. | `runId` |
-| `cancel_web_ingest_run` | Request cancellation for an active web ingest run. | `runId` |
+| `submit_web_run` | Submit a web ingest run for a seed URL. | `library`, `seedUrl`, `mode` |
+| `get_web_run` | Load one web ingest run and its current state. | `runId` |
+| `list_web_run_pages` | List candidate pages and outcomes for a web ingest run. | `runId` |
+| `cancel_web_run` | Request cancellation for an active web ingest run. | `runId` |
 
 ### Runtime
 
@@ -164,7 +173,7 @@ Under the hood, MCP calls the same services as the web app: PostgreSQL for contr
 ## OpenAI Codex CLI
 
 ```bash
-export IRONRAG_MCP_TOKEN='irt_...'
+export IRONRAG_MCP_TOKEN='inrg_...'
 
 codex mcp add ironragMemory \
   --url http://127.0.0.1:19000/v1/mcp \
@@ -252,7 +261,7 @@ claude mcp add ironrag http://127.0.0.1:19000/v1/mcp \
       "ironrag": {
         "url": "http://127.0.0.1:19000/v1/mcp",
         "headers": {
-          "Authorization": "Bearer irt_..."
+          "Authorization": "Bearer inrg_..."
         }
       }
     }
@@ -263,7 +272,7 @@ claude mcp add ironrag http://127.0.0.1:19000/v1/mcp \
 Or via the CLI:
 
 ```bash
-openclaw mcp set ironrag '{"url":"http://127.0.0.1:19000/v1/mcp","headers":{"Authorization":"Bearer irt_..."}}'
+openclaw mcp set ironrag '{"url":"http://127.0.0.1:19000/v1/mcp","headers":{"Authorization":"Bearer inrg_..."}}'
 ```
 
 ## Hermes

@@ -16,5 +16,9 @@ pub mod search;
 pub mod service;
 pub(crate) mod support;
 pub(crate) mod text_match;
+pub(crate) mod turn_admission;
 pub(crate) mod turn_spans;
 pub(crate) mod vector_dimensions;
+
+#[cfg(test)]
+mod revision_hydration_tests;

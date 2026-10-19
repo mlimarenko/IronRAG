@@ -1,6 +1,6 @@
 {
   "suiteId": "agent_surface_release",
-  "description": "Release-grade MCP graph and assistant surface coverage for the canonical technical contract library.",
+  "description": "Release-grade MCP graph and assistant surface coverage for the authoritative technical contract library.",
   "cases": [
     {
       "id": "inventory_wsdl",

@@ -128,6 +128,79 @@ enum McpDistributedCancelWaitOutcome {
     CoordinationUnavailable,
 }
 
+/// The result of one distributed cancellation poll. Unlike the wait outcome it
+/// keeps a distinct `Pending` state, so [`McpDistributedToolCallLease::poll_cancel_markers`]
+/// reports "no marker yet" separately from "Redis unusable".
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+enum McpDistributedCancelPollOutcome {
+    Cancelled,
+    Pending,
+    CoordinationUnavailable,
+}
+
+/// The execution half of one `tools/call`: the pending response the caller
+/// waits on, the relative deadline that bounds it, and whether the tool writes
+/// durable state (IRG-203 SITE-5). Carrying these together keeps the
+/// registration, distributed-lease and spawn wiring from repeating the same
+/// argument tuple, and gives the mutating/non-mutating split a single type.
+pub(super) struct McpToolCallDispatch<F> {
+    pub(super) response_id: Value,
+    pub(super) response_future: F,
+    pub(super) deadline: Duration,
+    pub(super) mutating: bool,
+}
+
+/// A `tools/call` that must take the deployment-wide Redis lease before it may
+/// execute: the process registry, the Redis client, the per-request
+/// coordination key and the execution payload. This is the caller-facing input
+/// of [`start_distributed_bounded_mcp_tool_call`].
+pub(super) struct McpDistributedToolCallAdmission<F> {
+    pub(super) registry: Arc<McpInFlightToolCallRegistry>,
+    pub(super) redis: redis::Client,
+    pub(super) key: McpInFlightRequestKey,
+    pub(super) dispatch: McpToolCallDispatch<F>,
+}
+
+/// One registered `tools/call` ready to run: its in-process registration (held
+/// for the call's whole life), the optional distributed lease that owns the
+/// request id deployment-wide, and the payload the terminal response is built
+/// from. [`Self::spawn`] detaches the execution from the caller's response body.
+struct McpRegisteredToolCall<F> {
+    registration: McpInFlightToolCallRegistration,
+    distributed_lease: Option<McpDistributedToolCallLease>,
+    response_id: Value,
+    response_future: F,
+    deadline_at: tokio::time::Instant,
+    sender: oneshot::Sender<McpJsonRpcResponse>,
+    mutating: bool,
+}
+
+impl<F> McpRegisteredToolCall<F>
+where
+    F: Future<Output = McpJsonRpcResponse> + Send + 'static,
+{
+    /// Builds the registration-free half from a dispatch plus the already
+    /// fixed absolute `deadline_at` (computed by the admission path before the
+    /// lease is taken, so Redis latency cannot extend the bound).
+    fn from_dispatch(
+        registration: McpInFlightToolCallRegistration,
+        distributed_lease: Option<McpDistributedToolCallLease>,
+        dispatch: McpToolCallDispatch<F>,
+        deadline_at: tokio::time::Instant,
+        sender: oneshot::Sender<McpJsonRpcResponse>,
+    ) -> Self {
+        Self {
+            registration,
+            distributed_lease,
+            response_id: dispatch.response_id,
+            response_future: dispatch.response_future,
+            deadline_at,
+            sender,
+            mutating: dispatch.mutating,
+        }
+    }
+}
+
 struct McpDistributedToolCallLease {
     redis: redis::Client,
     keys: McpDistributedCoordinationKeys,
@@ -354,6 +427,48 @@ pub(super) const fn mcp_distributed_admission_outcome(code: i64) -> McpDistribut
     }
 }
 
+/// The whole distributed admission attempt: the coordination round-trip may
+/// fail (Redis error), time out (`Elapsed`), or succeed with a coded outcome.
+type McpDistributedAdmissionAttempt =
+    Result<Result<McpDistributedAdmissionOutcome, redis::RedisError>, tokio::time::error::Elapsed>;
+
+/// How the caller of [`start_distributed_bounded_mcp_tool_call`] must react to
+/// an admission attempt. Pure, so the branch table is testable without Redis.
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub(super) enum McpDistributedAdmissionResolution {
+    /// This process owns the call: spawn the registered execution.
+    Owned,
+    /// The request id is already owned elsewhere: answer duplicate, run nothing.
+    Duplicate,
+    /// A cancellation or session tombstone arrived before ownership: no answer.
+    CancelledBeforeOwnership,
+    /// Redis was unusable (error, invalid reply, or timeout): release whatever
+    /// might have been acquired and answer with a coordination error.
+    CoordinationUnavailable,
+}
+
+/// Classifies an admission attempt into the caller's reaction. Every unusable
+/// coordination result collapses to [`McpDistributedAdmissionResolution::CoordinationUnavailable`];
+/// the distinct log line is chosen separately by [`log_mcp_distributed_admission_unavailable`].
+pub(super) fn mcp_distributed_admission_resolution(
+    admission: &McpDistributedAdmissionAttempt,
+) -> McpDistributedAdmissionResolution {
+    match admission {
+        Ok(Ok(McpDistributedAdmissionOutcome::Acquired)) => {
+            McpDistributedAdmissionResolution::Owned
+        }
+        Ok(Ok(McpDistributedAdmissionOutcome::DuplicateRequestId)) => {
+            McpDistributedAdmissionResolution::Duplicate
+        }
+        Ok(Ok(McpDistributedAdmissionOutcome::CancelledBeforeAdmission)) => {
+            McpDistributedAdmissionResolution::CancelledBeforeOwnership
+        }
+        Ok(Ok(McpDistributedAdmissionOutcome::InvalidResponse)) | Ok(Err(_)) | Err(_) => {
+            McpDistributedAdmissionResolution::CoordinationUnavailable
+        }
+    }
+}
+
 pub(super) fn mcp_cancel_marker_matches_generation(marker: &str, generation: Uuid) -> bool {
     marker == generation.to_string()
 }
@@ -393,53 +508,73 @@ impl McpDistributedToolCallLease {
     }
 
     async fn wait_for_cancel(&self) -> McpDistributedCancelWaitOutcome {
-        let connection = tokio::time::timeout(
-            MCP_TOOL_CALL_COORDINATION_TIMEOUT,
-            self.redis.get_multiplexed_async_connection(),
-        )
-        .await;
-        let mut connection = match connection {
-            Ok(Ok(connection)) => connection,
-            Ok(Err(error)) => {
-                tracing::warn!(%error, "MCP distributed cancellation connection failed");
-                return McpDistributedCancelWaitOutcome::CoordinationUnavailable;
-            }
-            Err(_) => {
-                tracing::warn!("MCP distributed cancellation connection timed out");
-                return McpDistributedCancelWaitOutcome::CoordinationUnavailable;
-            }
+        let Some(mut connection) = self.acquire_cancel_poll_connection().await else {
+            return McpDistributedCancelWaitOutcome::CoordinationUnavailable;
         };
-
         loop {
-            let markers = tokio::time::timeout(
-                MCP_TOOL_CALL_COORDINATION_TIMEOUT,
-                redis::cmd("MGET")
-                    .arg(&self.keys.cancel)
-                    .arg(&self.keys.session_terminated)
-                    .query_async::<(Option<String>, Option<String>)>(&mut connection),
-            )
-            .await;
-            match markers {
-                Ok(Ok((call_marker, session_marker)))
-                    if mcp_distributed_cancel_markers_cancel_call(
-                        call_marker.as_deref(),
-                        session_marker.is_some(),
-                        self.generation,
-                    ) =>
-                {
+            match self.poll_cancel_markers(&mut connection).await {
+                McpDistributedCancelPollOutcome::Cancelled => {
                     return McpDistributedCancelWaitOutcome::Cancelled;
                 }
-                Ok(Ok(_)) => {}
-                Ok(Err(error)) => {
-                    tracing::warn!(%error, "MCP distributed cancellation poll failed");
-                    return McpDistributedCancelWaitOutcome::CoordinationUnavailable;
-                }
-                Err(_) => {
-                    tracing::warn!("MCP distributed cancellation poll timed out");
+                McpDistributedCancelPollOutcome::Pending => {}
+                McpDistributedCancelPollOutcome::CoordinationUnavailable => {
                     return McpDistributedCancelWaitOutcome::CoordinationUnavailable;
                 }
             }
             tokio::time::sleep(MCP_TOOL_CALL_CANCEL_POLL_INTERVAL).await;
+        }
+    }
+
+    async fn acquire_cancel_poll_connection(&self) -> Option<redis::aio::MultiplexedConnection> {
+        match tokio::time::timeout(
+            MCP_TOOL_CALL_COORDINATION_TIMEOUT,
+            self.redis.get_multiplexed_async_connection(),
+        )
+        .await
+        {
+            Ok(Ok(connection)) => Some(connection),
+            Ok(Err(error)) => {
+                log_cancel_poll_connection_failed(&error);
+                None
+            }
+            Err(_) => {
+                log_cancel_poll_connection_timed_out();
+                None
+            }
+        }
+    }
+
+    async fn poll_cancel_markers(
+        &self,
+        connection: &mut redis::aio::MultiplexedConnection,
+    ) -> McpDistributedCancelPollOutcome {
+        let markers = tokio::time::timeout(
+            MCP_TOOL_CALL_COORDINATION_TIMEOUT,
+            redis::cmd("MGET")
+                .arg(&self.keys.cancel)
+                .arg(&self.keys.session_terminated)
+                .query_async::<(Option<String>, Option<String>)>(connection),
+        )
+        .await;
+        match markers {
+            Ok(Ok((call_marker, session_marker)))
+                if mcp_distributed_cancel_markers_cancel_call(
+                    call_marker.as_deref(),
+                    session_marker.is_some(),
+                    self.generation,
+                ) =>
+            {
+                McpDistributedCancelPollOutcome::Cancelled
+            }
+            Ok(Ok(_)) => McpDistributedCancelPollOutcome::Pending,
+            Ok(Err(error)) => {
+                log_cancel_poll_failed(&error);
+                McpDistributedCancelPollOutcome::CoordinationUnavailable
+            }
+            Err(_) => {
+                log_cancel_poll_timed_out();
+                McpDistributedCancelPollOutcome::CoordinationUnavailable
+            }
         }
     }
 
@@ -455,6 +590,29 @@ impl McpDistributedToolCallLease {
             .await?;
         Ok(released > 0)
     }
+}
+
+/// The cancellation-poll `tracing` calls live in their own functions so their
+/// expanded formatting machinery does not sit inside the branching bodies of
+/// [`McpDistributedToolCallLease::acquire_cancel_poll_connection`] and
+/// [`McpDistributedToolCallLease::poll_cancel_markers`].
+fn log_cancel_poll_connection_failed(error: &redis::RedisError) {
+    tracing::warn!(%error, "MCP distributed cancellation connection failed");
+}
+
+/// See [`log_cancel_poll_connection_failed`].
+fn log_cancel_poll_connection_timed_out() {
+    tracing::warn!("MCP distributed cancellation connection timed out");
+}
+
+/// See [`log_cancel_poll_connection_failed`].
+fn log_cancel_poll_failed(error: &redis::RedisError) {
+    tracing::warn!(%error, "MCP distributed cancellation poll failed");
+}
+
+/// See [`log_cancel_poll_connection_failed`].
+fn log_cancel_poll_timed_out() {
+    tracing::warn!("MCP distributed cancellation poll timed out");
 }
 
 pub(super) async fn mark_distributed_mcp_tool_call_cancelled(
@@ -533,6 +691,32 @@ pub(super) fn start_bounded_mcp_tool_call<F>(
 where
     F: Future<Output = McpJsonRpcResponse> + Send + 'static,
 {
+    start_bounded_mcp_tool_call_with_mutation(
+        registry,
+        key,
+        response_id,
+        response_future,
+        deadline,
+        false,
+    )
+}
+
+/// Test seam for the mutating half of the IRG-203 SITE-5 invariant. Routes a
+/// call through the same [`McpRegisteredToolCall::spawn`] used by
+/// [`start_distributed_bounded_mcp_tool_call`], so a test exercises the real
+/// detach-and-hold-admission wiring rather than re-deriving it.
+#[cfg(test)]
+pub(super) fn start_bounded_mcp_tool_call_with_mutation<F>(
+    registry: Arc<McpInFlightToolCallRegistry>,
+    key: McpInFlightRequestKey,
+    response_id: Value,
+    response_future: F,
+    deadline: Duration,
+    mutating: bool,
+) -> oneshot::Receiver<McpJsonRpcResponse>
+where
+    F: Future<Output = McpJsonRpcResponse> + Send + 'static,
+{
     let (sender, receiver) = oneshot::channel();
     let registration = match registry.try_register(key) {
         Ok(registration) => registration,
@@ -542,82 +726,66 @@ where
         }
     };
     let deadline_at = tokio::time::Instant::now() + deadline;
-    spawn_registered_mcp_tool_call(
+    McpRegisteredToolCall::from_dispatch(
         registration,
         None,
-        response_id,
-        response_future,
+        McpToolCallDispatch { response_id, response_future, deadline, mutating },
         deadline_at,
         sender,
-    );
+    )
+    .spawn();
     receiver
 }
 
 pub(super) async fn start_distributed_bounded_mcp_tool_call<F>(
-    registry: Arc<McpInFlightToolCallRegistry>,
-    redis: redis::Client,
-    key: McpInFlightRequestKey,
-    response_id: Value,
-    response_future: F,
-    deadline: Duration,
+    admission: McpDistributedToolCallAdmission<F>,
 ) -> oneshot::Receiver<McpJsonRpcResponse>
 where
     F: Future<Output = McpJsonRpcResponse> + Send + 'static,
 {
+    let McpDistributedToolCallAdmission { registry, redis, key, dispatch } = admission;
     let (sender, receiver) = oneshot::channel();
     let registration = match registry.try_register(key.clone()) {
         Ok(registration) => registration,
         Err(error) => {
-            let _ = sender.send(tool_call_admission_error_response(response_id, error));
+            let _ = sender.send(tool_call_admission_error_response(dispatch.response_id, error));
             return receiver;
         }
     };
-    let deadline_at = tokio::time::Instant::now() + deadline;
+    let deadline_at = tokio::time::Instant::now() + dispatch.deadline;
     let lease = McpDistributedToolCallLease::new(redis, &key, registration.generation);
     let admission = tokio::time::timeout(
-        MCP_TOOL_CALL_COORDINATION_TIMEOUT.min(deadline),
-        lease.try_acquire(deadline),
+        MCP_TOOL_CALL_COORDINATION_TIMEOUT.min(dispatch.deadline),
+        lease.try_acquire(dispatch.deadline),
     )
     .await;
-    match admission {
-        Ok(Ok(McpDistributedAdmissionOutcome::Acquired)) => {
-            spawn_registered_mcp_tool_call(
+    match mcp_distributed_admission_resolution(&admission) {
+        McpDistributedAdmissionResolution::Owned => {
+            McpRegisteredToolCall::from_dispatch(
                 registration,
                 Some(lease),
-                response_id,
-                response_future,
+                dispatch,
                 deadline_at,
                 sender,
-            );
+            )
+            .spawn();
         }
-        Ok(Ok(McpDistributedAdmissionOutcome::DuplicateRequestId)) => {
+        McpDistributedAdmissionResolution::Duplicate => {
             drop(registration);
             let _ = sender.send(tool_call_admission_error_response(
-                response_id,
+                dispatch.response_id,
                 McpToolCallAdmissionError::DuplicateRequestId,
             ));
         }
-        Ok(Ok(McpDistributedAdmissionOutcome::CancelledBeforeAdmission)) => {
+        McpDistributedAdmissionResolution::CancelledBeforeOwnership => {
             drop(registration);
             drop(sender);
         }
-        Ok(Ok(McpDistributedAdmissionOutcome::InvalidResponse)) => {
+        McpDistributedAdmissionResolution::CoordinationUnavailable => {
             release_uncertain_mcp_tool_call_admission(&lease).await;
             drop(registration);
-            tracing::error!("invalid Redis response for MCP distributed tool-call admission");
-            let _ = sender.send(tool_call_coordination_error_response(response_id));
-        }
-        Ok(Err(error)) => {
-            release_uncertain_mcp_tool_call_admission(&lease).await;
-            drop(registration);
-            tracing::warn!(%error, "MCP distributed tool-call admission failed");
-            let _ = sender.send(tool_call_coordination_error_response(response_id));
-        }
-        Err(_) => {
-            release_uncertain_mcp_tool_call_admission(&lease).await;
-            drop(registration);
-            tracing::warn!("MCP distributed tool-call admission timed out");
-            let _ = sender.send(tool_call_coordination_error_response(response_id));
+            log_mcp_distributed_admission_unavailable(&admission);
+            let _ = sender.send(tool_call_coordination_error_response(dispatch.response_id));
         }
     }
     receiver
@@ -637,81 +805,196 @@ pub(super) async fn handle_owned_mcp_tool_call(
 async fn release_uncertain_mcp_tool_call_admission(lease: &McpDistributedToolCallLease) {
     match tokio::time::timeout(MCP_TOOL_CALL_COORDINATION_TIMEOUT, lease.release()).await {
         Ok(Ok(_)) => {}
-        Ok(Err(error)) => {
-            tracing::warn!(
-                %error,
-                "uncertain MCP distributed admission cleanup failed; TTL recovery remains active"
-            );
+        Ok(Err(error)) => log_uncertain_mcp_tool_call_admission_cleanup_failed(&error),
+        Err(_) => log_uncertain_mcp_tool_call_admission_cleanup_timed_out(),
+    }
+}
+
+/// The `tracing` call lives in its own function so the warning's expanded
+/// formatting machinery does not sit inside the branching body of
+/// [`release_uncertain_mcp_tool_call_admission`].
+fn log_uncertain_mcp_tool_call_admission_cleanup_failed(error: &redis::RedisError) {
+    tracing::warn!(
+        %error,
+        "uncertain MCP distributed admission cleanup failed; TTL recovery remains active"
+    );
+}
+
+/// See [`log_uncertain_mcp_tool_call_admission_cleanup_failed`].
+fn log_uncertain_mcp_tool_call_admission_cleanup_timed_out() {
+    tracing::warn!(
+        "uncertain MCP distributed admission cleanup timed out; TTL recovery remains active"
+    );
+}
+
+/// Logs the unusable-coordination branch of
+/// [`mcp_distributed_admission_resolution`], keeping its distinct `tracing`
+/// calls out of the admission match body.
+fn log_mcp_distributed_admission_unavailable(admission: &McpDistributedAdmissionAttempt) {
+    match admission {
+        Ok(Ok(McpDistributedAdmissionOutcome::InvalidResponse)) => {
+            log_mcp_distributed_admission_invalid_response();
         }
-        Err(_) => {
-            tracing::warn!(
-                "uncertain MCP distributed admission cleanup timed out; TTL recovery remains active"
-            );
+        Ok(Err(error)) => log_mcp_distributed_admission_failed(error),
+        Err(_) => log_mcp_distributed_admission_timed_out(),
+        Ok(Ok(_)) => {}
+    }
+}
+
+/// See [`log_mcp_distributed_admission_unavailable`].
+fn log_mcp_distributed_admission_invalid_response() {
+    tracing::error!("invalid Redis response for MCP distributed tool-call admission");
+}
+
+/// See [`log_mcp_distributed_admission_unavailable`].
+fn log_mcp_distributed_admission_failed(error: &redis::RedisError) {
+    tracing::warn!(%error, "MCP distributed tool-call admission failed");
+}
+
+/// See [`log_mcp_distributed_admission_unavailable`].
+fn log_mcp_distributed_admission_timed_out() {
+    tracing::warn!("MCP distributed tool-call admission timed out");
+}
+
+/// Waits for a distributed cancellation of this call, or pends forever when
+/// the call has no distributed lease (in-process only).
+async fn wait_for_distributed_cancel(
+    distributed_lease: Option<&McpDistributedToolCallLease>,
+) -> McpDistributedCancelWaitOutcome {
+    match distributed_lease {
+        Some(lease) => lease.wait_for_cancel().await,
+        None => std::future::pending::<McpDistributedCancelWaitOutcome>().await,
+    }
+}
+
+/// Maps a distributed-cancel outcome to the response that ends the call, if
+/// any. `Cancelled` ends it with no response (the cancellation notification or
+/// session teardown already answered).
+fn distributed_cancel_terminal_response(
+    outcome: McpDistributedCancelWaitOutcome,
+    response_id: Value,
+) -> Option<McpJsonRpcResponse> {
+    match outcome {
+        McpDistributedCancelWaitOutcome::Cancelled => None,
+        McpDistributedCancelWaitOutcome::CoordinationUnavailable => {
+            Some(tool_call_coordination_error_response(response_id))
         }
     }
 }
 
-fn spawn_registered_mcp_tool_call<F>(
-    registration: McpInFlightToolCallRegistration,
-    distributed_lease: Option<McpDistributedToolCallLease>,
-    response_id: Value,
-    response_future: F,
-    deadline_at: tokio::time::Instant,
-    sender: oneshot::Sender<McpJsonRpcResponse>,
-) where
+impl<F> McpRegisteredToolCall<F>
+where
     F: Future<Output = McpJsonRpcResponse> + Send + 'static,
 {
-    let cancellation = registration.cancellation.clone();
-    tokio::spawn(async move {
-        let guarded_future = AssertUnwindSafe(response_future).catch_unwind();
-        let panic_response_id = response_id.clone();
-        let deadline_response_id = response_id.clone();
-        let coordination_response_id = response_id;
-        let terminal_response = {
-            let distributed_cancel = async {
-                match distributed_lease.as_ref() {
-                    Some(lease) => lease.wait_for_cancel().await,
-                    None => std::future::pending::<McpDistributedCancelWaitOutcome>().await,
+    /// Detaches the call from the caller's response body. A non-mutating
+    /// dispatch is bounded inline; a mutating one is spawned detached so the
+    /// deadline only cancels the wait, never the durable write, and its
+    /// admission is held until that write reaches a terminal state
+    /// (IRG-203 SITE-5).
+    fn spawn(self) {
+        let Self {
+            registration,
+            distributed_lease,
+            response_id,
+            response_future,
+            deadline_at,
+            sender,
+            mutating,
+        } = self;
+        let cancellation = registration.cancellation.clone();
+        tokio::spawn(async move {
+            let guarded_future = AssertUnwindSafe(response_future).catch_unwind();
+            let panic_response_id = response_id.clone();
+            let deadline_response_id = response_id.clone();
+            let coordination_response_id = response_id;
+            let (terminal_response, detached_dispatch) = {
+                let distributed_cancel = wait_for_distributed_cancel(distributed_lease.as_ref());
+                tokio::pin!(distributed_cancel);
+                if mutating {
+                    // IRG-203 SITE-5: a mutating dispatch writes durable rows and
+                    // must not be cancelled by the bounded `tools/call` deadline.
+                    // Spawn it detached and keep its join handle in this outer
+                    // scope, so the deadline only cancels the *wait*, never the
+                    // task.
+                    let mut dispatch = tokio::spawn(guarded_future);
+                    let terminal_response = tokio::select! {
+                        biased;
+                        () = cancellation.cancelled() => None,
+                        outcome = &mut distributed_cancel => {
+                            distributed_cancel_terminal_response(outcome, coordination_response_id)
+                        }
+                        joined = &mut dispatch => {
+                            match joined {
+                                Ok(Ok(response)) => Some(response),
+                                Ok(Err(_)) => {
+                                    tracing::error!("MCP mutating tool call panicked");
+                                    Some(tool_call_panic_error_response(panic_response_id))
+                                }
+                                Err(join_error) => {
+                                    tracing::error!(
+                                        error = %join_error,
+                                        "MCP mutating tool call task join failed"
+                                    );
+                                    Some(tool_call_panic_error_response(panic_response_id))
+                                }
+                            }
+                        }
+                        _ = tokio::time::sleep_until(deadline_at) => {
+                            Some(tool_call_deadline_error_response(deadline_response_id))
+                        }
+                    };
+                    (terminal_response, Some(dispatch))
+                } else {
+                    let terminal_response = tokio::select! {
+                        biased;
+                        () = cancellation.cancelled() => None,
+                        outcome = &mut distributed_cancel => {
+                            distributed_cancel_terminal_response(outcome, coordination_response_id)
+                        }
+                        result = tokio::time::timeout_at(deadline_at, guarded_future) => {
+                            match result {
+                                Ok(Ok(response)) => Some(response),
+                                Ok(Err(_)) => {
+                                    tracing::error!("MCP tool call panicked");
+                                    Some(tool_call_panic_error_response(panic_response_id))
+                                }
+                                Err(_) => Some(tool_call_deadline_error_response(deadline_response_id)),
+                            }
+                        }
+                    };
+                    (terminal_response, None)
                 }
             };
-            tokio::pin!(distributed_cancel);
-            tokio::select! {
-                biased;
-                () = cancellation.cancelled() => None,
-                outcome = &mut distributed_cancel => {
-                    match outcome {
-                        McpDistributedCancelWaitOutcome::Cancelled => None,
-                        McpDistributedCancelWaitOutcome::CoordinationUnavailable => {
-                            Some(tool_call_coordination_error_response(coordination_response_id))
-                        }
+            if let Some(response) = terminal_response {
+                let _ = sender.send(response);
+            }
+            if let Some(dispatch) = detached_dispatch
+                && !dispatch.is_finished()
+            {
+                // IRG-203 SITE-5 residual-free path: the terminal response has
+                // been sent, but the detached mutation still owns this
+                // request id. Hold the distributed lease and the in-process
+                // registration until it reaches a terminal state, so a
+                // same-request-id retry after `tool_call_deadline_exceeded`
+                // cannot be admitted concurrently and apply the mutation
+                // twice. The lease's Redis TTL remains the outer bound if the
+                // mutation itself never returns.
+                let _ = dispatch.await;
+            }
+            if let Some(lease) = distributed_lease {
+                match tokio::time::timeout(MCP_TOOL_CALL_COORDINATION_TIMEOUT, lease.release())
+                    .await
+                {
+                    Ok(Ok(_)) => {}
+                    Ok(Err(error)) => {
+                        tracing::warn!(%error, "MCP distributed tool-call owner release failed");
                     }
-                }
-                result = tokio::time::timeout_at(deadline_at, guarded_future) => {
-                    match result {
-                        Ok(Ok(response)) => Some(response),
-                        Ok(Err(_)) => {
-                            tracing::error!("MCP tool call panicked");
-                            Some(tool_call_panic_error_response(panic_response_id))
-                        }
-                        Err(_) => Some(tool_call_deadline_error_response(deadline_response_id)),
+                    Err(_) => {
+                        tracing::warn!("MCP distributed tool-call owner release timed out");
                     }
                 }
             }
-        };
-        if let Some(response) = terminal_response {
-            let _ = sender.send(response);
-        }
-        if let Some(lease) = distributed_lease {
-            match tokio::time::timeout(MCP_TOOL_CALL_COORDINATION_TIMEOUT, lease.release()).await {
-                Ok(Ok(_)) => {}
-                Ok(Err(error)) => {
-                    tracing::warn!(%error, "MCP distributed tool-call owner release failed");
-                }
-                Err(_) => {
-                    tracing::warn!("MCP distributed tool-call owner release timed out");
-                }
-            }
-        }
-        drop(registration);
-    });
+            drop(registration);
+        });
+    }
 }

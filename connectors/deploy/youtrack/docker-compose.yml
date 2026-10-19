@@ -1,0 +1,19 @@
+services:
+  youtrack-connector:
+    image: pipingspace/ironrag.youtrack:${IRONRAG_VERSION:?set IRONRAG_VERSION to the IronRAG release you are running}
+    container_name: ironrag-youtrack-connector
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      - ./routing.yaml:/app/routing.yaml:ro
+      - youtrack-connector-state:/var/lib/ironrag-connector
+    ports:
+      - "127.0.0.1:8088:8088"
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+
+volumes:
+  youtrack-connector-state:

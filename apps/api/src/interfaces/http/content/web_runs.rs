@@ -26,7 +26,7 @@ pub struct ListWebIngestRunsQuery {
     /// Upper bound on returned runs (newest first). Defaults to
     /// `DEFAULT_WEB_RUNS_LIMIT`, clamped to `[1, MAX_WEB_RUNS_LIMIT]`.
     /// The endpoint is surface-only; once a user needs deeper history
-    /// the canonical move is cursor pagination rather than raising the
+    /// the supported approach is cursor pagination rather than raising the
     /// cap further.
     pub limit: Option<i64>,
 }
@@ -74,7 +74,7 @@ pub async fn create_web_ingest_run(
     let library =
         load_library_and_authorize(&auth, &state, request.library_id, POLICY_LIBRARY_WRITE).await?;
     let run = state
-        .canonical_services
+        .application_services
         .web_ingest
         .create_run(
             &state,
@@ -141,7 +141,7 @@ pub async fn list_web_ingest_runs(
     let library =
         load_library_and_authorize(&auth, &state, library_id, POLICY_LIBRARY_READ).await?;
     let limit = query.limit.unwrap_or(DEFAULT_WEB_RUNS_LIMIT).clamp(1, MAX_WEB_RUNS_LIMIT);
-    let runs = state.canonical_services.web_ingest.list_runs(&state, library.id, limit).await?;
+    let runs = state.application_services.web_ingest.list_runs(&state, library.id, limit).await?;
     span.record("item_count", runs.len());
     Ok(Json(runs))
 }
@@ -170,7 +170,7 @@ pub async fn get_web_ingest_run(
     State(state): State<AppState>,
     Path(run_id): Path<Uuid>,
 ) -> Result<Json<WebIngestRun>, ApiError> {
-    let run = state.canonical_services.web_ingest.get_run(&state, run_id).await?;
+    let run = state.application_services.web_ingest.get_run(&state, run_id).await?;
     let _library =
         load_library_and_authorize(&auth, &state, run.library_id, POLICY_LIBRARY_READ).await?;
     Ok(Json(run))
@@ -201,10 +201,10 @@ pub async fn list_web_ingest_run_pages(
     Path(run_id): Path<Uuid>,
 ) -> Result<Json<Vec<WebDiscoveredPage>>, ApiError> {
     let span = tracing::Span::current();
-    let run = state.canonical_services.web_ingest.get_run(&state, run_id).await?;
+    let run = state.application_services.web_ingest.get_run(&state, run_id).await?;
     let _library =
         load_library_and_authorize(&auth, &state, run.library_id, POLICY_LIBRARY_READ).await?;
-    let pages = state.canonical_services.web_ingest.list_pages(&state, run_id).await?;
+    let pages = state.application_services.web_ingest.list_pages(&state, run_id).await?;
     span.record("item_count", pages.len());
     Ok(Json(pages))
 }
@@ -233,9 +233,9 @@ pub async fn cancel_web_ingest_run(
     State(state): State<AppState>,
     Path(run_id): Path<Uuid>,
 ) -> Result<(StatusCode, Json<WebIngestRunReceipt>), ApiError> {
-    let run = state.canonical_services.web_ingest.get_run(&state, run_id).await?;
+    let run = state.application_services.web_ingest.get_run(&state, run_id).await?;
     let _library =
         load_library_and_authorize(&auth, &state, run.library_id, POLICY_LIBRARY_WRITE).await?;
-    let receipt = state.canonical_services.web_ingest.cancel_run(&state, run_id).await?;
+    let receipt = state.application_services.web_ingest.cancel_run(&state, run_id).await?;
     Ok((StatusCode::ACCEPTED, Json(receipt)))
 }

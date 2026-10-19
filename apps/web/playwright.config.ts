@@ -1,46 +1,55 @@
 import { defineConfig, devices } from '@playwright/test'
 
-const storybookVisualPathPattern = /(^|[\\/])tests[\\/]visual([\\/]|$)/
-const hasStorybookVisualArg = process.argv
-  .slice(2)
-  .some((arg) => storybookVisualPathPattern.test(arg))
-if (hasStorybookVisualArg) {
-  process.env.PLAYWRIGHT_STORYBOOK_VISUAL = '1'
+const port = Number(process.env.PLAYWRIGHT_PORT ?? 4174)
+if (!Number.isInteger(port) || port < 1 || port > 65535) {
+  throw new Error('PLAYWRIGHT_PORT must be an integer from 1 to 65535')
 }
-
-const isStorybookVisualRun = process.env.PLAYWRIGHT_STORYBOOK_VISUAL === '1'
+const baseURL = `http://127.0.0.1:${port}`
+const isCi = Boolean(process.env.CI)
 
 export default defineConfig({
-  testDir: isStorybookVisualRun ? 'tests/visual' : 'tests/e2e',
-  workers: 1,
-  reporter: [['list'], ['html', { outputFolder: 'playwright-report' }]],
-  ...(isStorybookVisualRun ? { snapshotPathTemplate: '{testDir}/__screenshots__/{arg}{ext}' } : {}),
+  testDir: './tests/e2e',
+  testMatch: '**/*.spec.ts',
+  testIgnore: ['**/*.test.ts', '**/*.test.tsx'],
+  fullyParallel: false,
+  forbidOnly: isCi,
+  retries: isCi ? 2 : 0,
+  workers: 2,
+  // The JSON report is what the spec gate reads: a run that collected nothing
+  // still exits 0, so the report, not the exit code, proves the suite ran.
+  reporter: [isCi ? ['line'] : ['list'], ['json', { outputFile: 'test-results/e2e-report.json' }]],
+  outputDir: 'test-results/e2e',
+  timeout: 30_000,
+  expect: {
+    timeout: 5_000,
+  },
   use: {
-    baseURL: isStorybookVisualRun ? 'http://localhost:6006' : 'http://127.0.0.1:3000',
+    ...devices['Desktop Chrome'],
+    baseURL,
     trace: 'retain-on-failure',
+    screenshot: 'only-on-failure',
+    video: 'off',
+    launchOptions: {
+      args: ['--no-sandbox', '--disable-dev-shm-usage'],
+    },
   },
   projects: [
     {
       name: 'chromium',
       use: {
         ...devices['Desktop Chrome'],
-        ...(isStorybookVisualRun ? { viewport: { width: 1280, height: 800 } } : {}),
       },
     },
   ],
-  webServer: isStorybookVisualRun
-    ? {
-        command:
-          'npx vite preview --host localhost --port 6006 --strictPort --outDir storybook-static',
-        port: 6006,
-        reuseExistingServer: !process.env.CI,
-      }
-    : {
-        command: 'npm run dev',
-        port: 3000,
-        reuseExistingServer: !process.env.CI,
-        env: {
-          VITE_ENABLE_MOCKS: 'true',
-        },
-      },
+  webServer: {
+    command: `npm run dev -- --host 127.0.0.1 --port ${port} --strictPort`,
+    url: baseURL,
+    env: {
+      VITE_ENABLE_MOCKS: 'true',
+    },
+    reuseExistingServer: !isCi,
+    timeout: 120_000,
+    stdout: 'ignore',
+    stderr: 'pipe',
+  },
 })

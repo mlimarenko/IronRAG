@@ -116,7 +116,7 @@ async function measure(page, label, interaction, settleMilliseconds = 400) {
 
 async function logIn() {
   console.log(`login ${LOGIN} @ ${API_URL} ...`)
-  const response = await fetch(`${API_URL}/v1/iam/session/login`, {
+  const response = await fetch(`${API_URL}/v1/iam/sessions`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ login: LOGIN, password: PASSWORD }),

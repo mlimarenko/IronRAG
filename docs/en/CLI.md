@@ -34,91 +34,12 @@ ironrag-cli list-users
 
 Displays a table of all users with login, display name, status, and creation date.
 
-### Create user
+### IAM administration
 
-```bash
-ironrag-cli create-user <LOGIN> <PASSWORD> [--name "Display Name"]
-```
-
-Creates a new user with admin privileges (`iam_admin` grant). The user is automatically added to the default workspace if one exists. Password must be at least 8 characters.
-
-Options:
-- `-n, --name` -- display name (defaults to login if omitted)
-
-### Reset password
-
-```bash
-ironrag-cli reset-password <LOGIN> <PASSWORD>
-```
-
-Updates the password for an existing user and revokes all active sessions, forcing re-authentication. Password must be at least 8 characters.
-
-### Delete user
-
-```bash
-ironrag-cli delete-user <LOGIN>
-```
-
-Permanently deletes a user and all associated records (sessions, grants, workspace memberships, principal).
-
-### Create API token
-
-```bash
-ironrag-cli create-token <LOGIN> [--label "my-token"] [--workspace "my-workspace"] [--permission <PERM>...] [--scope <SCOPE>]
-```
-
-Creates an API token owned by the specified user. The plaintext token is displayed once and cannot be retrieved later. Tokens are prefixed with `irt_`.
-
-Options:
-- `-l, --label` -- token label (defaults to `api-token`)
-- `-w, --workspace` -- limit the token to a specific workspace (by slug or UUID)
-- `-p, --permission` -- permission to grant (repeatable). If omitted, defaults to `iam_admin`
-- `--scope` -- explicit grant scope: `system`, `workspace:<slug>`, or `library:<slug>`
-
-Available permissions:
-- `iam_admin` -- full system administration
-- `workspace_admin`, `workspace_read` -- workspace management
-- `library_read`, `library_write` -- library and document access
-- `document_read`, `document_write` -- document-level access
-- `query_run` -- execute queries (ask)
-- `ops_read`, `audit_read` -- operational and audit data
-- `credential_admin`, `binding_admin` -- integration management
-
-Scope resolution (when `--scope` is not specified):
-- System permissions (`iam_admin`, `ops_read`, `audit_read`) → `system` scope
-- Other permissions with `--workspace` → `workspace` scope on that workspace
-- Other permissions without `--workspace` → `system` scope (access to all workspaces)
-
-Examples:
-```bash
-# Full admin token
-ironrag-cli create-token admin
-
-# Read-only token for all workspaces
-ironrag-cli create-token admin -p library_read -p query_run -l "reader"
-
-# Write token scoped to a specific workspace
-ironrag-cli create-token admin -p library_read -p library_write -w default -l "writer"
-
-# Ops monitoring token
-ironrag-cli create-token admin -p ops_read -p audit_read -l "monitoring"
-```
-
-### List API tokens
-
-```bash
-ironrag-cli list-tokens
-```
-
-Displays all API tokens with principal ID, label, prefix, status, issue date, and owner.
-
-### Revoke API token
-
-```bash
-ironrag-cli revoke-token <TOKEN_PRINCIPAL_ID>
-```
-
-Revokes an API token by its principal UUID. Sets the token and principal status to `revoked`.
+User lifecycle, password reset, grants, and token lifecycle mutations are intentionally not
+available in the direct-database CLI. Use the authenticated `/v1/iam` service endpoints so the
+human administrator role, resource scope validation, and audit trail are enforced. API tokens
+use the documented `inrg_` format.
 
 ### List workspaces
 
@@ -163,19 +84,13 @@ Options:
 
 ```bash
 docker exec <container> ironrag-cli list-users
-docker exec <container> ironrag-cli create-user admin2 secretpass --name "Second Admin"
-docker exec <container> ironrag-cli reset-password admin newpassword123
-docker exec <container> ironrag-cli delete-user old-admin
-
-docker exec <container> ironrag-cli create-token admin --label "ci-token" --workspace default
 docker exec <container> ironrag-cli list-tokens
-docker exec <container> ironrag-cli revoke-token <TOKEN_PRINCIPAL_ID>
-
 docker exec <container> ironrag-cli list-workspaces
 docker exec <container> ironrag-cli create-workspace staging --name "Staging"
-
 docker exec <container> ironrag-cli list-libraries default
 docker exec <container> ironrag-cli create-library default docs --name "Documentation" --description "Public docs"
+docker exec <container> ironrag-cli backfill-acronym-aliases docs
+docker exec <container> ironrag-cli backfill-document-parents docs
 ```
 
 # IronRAG maintenance CLI
@@ -188,10 +103,9 @@ sweepers automatically in the worker role.
 
 Two things to keep in mind throughout:
 
-* Every destructive command refuses to run by default. Either it is
-  opt-in (`--dry-run` is off and a flag like `--yes` is required), or
-  it acquires a per-library advisory lock and refuses to run while
-  ingest is in flight.
+* The destructive commands documented below do not expose a common `--yes`
+  confirmation switch. Run the documented `--dry-run` preview where available,
+  then invoke the scoped command deliberately.
 * The worker container runs a scheduler that walks the same sweepers
   on a rolling cadence. Manual CLI invocation never conflicts with
   it: both go through the same lease table and would block each other
@@ -200,22 +114,19 @@ Two things to keep in mind throughout:
 ## When do I run what?
 
 A short decision guide before diving into the per-subcommand pages
-below. Each row links to the canonical command.
+below. Each row links to the command to run.
 
 | Symptom | Start here |
 |---|---|
 | "Disk is filling up, what is eating it?" | [`audit storage-summary`](#audit-storage-summary) |
 | "Retrieval looks slow; suspect bad indexes" | [`audit index-bloat`](#audit-index-bloat) |
 | "A document never shows up in answers even though ingest reported success" | [`audit null-head-docs`](#audit-null-head-docs), then [`repair null-heads`](#repair-null-heads) |
-| "I deleted libraries last week, were their knowledge-plane rows removed?" | [`audit orphan-libraries`](#audit-orphan-libraries) |
 | "A lifecycle webhook is dead-lettered and blocks catalog deletion" | [`audit webhook-outbox`](#audit-webhook-outbox), then requeue it with [`repair webhook-outbox-dead-letter`](#repair-webhook-outbox-dead-letter) or explicitly discard it with [`repair webhook-outbox-dead-letter-resolve`](#repair-webhook-outbox-dead-letter-resolve) |
-| "Old chunks pile up after we replace document revisions" | [`gc stale-chunks`](#gc-stale-chunks) |
+| "Superseded vectors make the hot ANN too large" | [`gc superseded-vectors`](#gc-superseded-vectors) |
 | "`runtime_graph_evidence` is bigger than the rest of the DB" | [`gc stale-evidence`](#gc-stale-evidence) |
-| "Confirmed orphan knowledge-plane footprint, want to purge" | [`gc orphan-libraries --yes`](#gc-orphan-libraries) |
 | "Failed ingest left lots of `null-head` documents" | [`repair null-heads-auto`](#repair-null-heads-auto) |
 | "ingest_stage_event is months old, queries are slow" | [`retention stage-events`](#retention-stage-events) |
 | "Changed the embedding model for a library; vectors need rebuilding" | [`rebuild vector-plane`](#rebuild-vector-plane) |
-| "JSONL chunks have no temporal bounds yet" | [`migrate chunk-temporal-bounds`](#migrate-chunk-temporal-bounds) |
 | "Want to re-embed an entire library" | [`rebuild vector-plane`](#rebuild-vector-plane) |
 | "Graph went out of sync with documents" | [`rebuild runtime-graph`](#rebuild-runtime-graph) |
 | "Want to see what the background scheduler is doing right now" | [`lease summary`](#lease-summary) |
@@ -234,22 +145,82 @@ Ships in the Docker image at `/usr/local/bin/ironrag-maintenance`.
 Reads the same environment variables as the backend server. The required
 database setting is `DATABASE_URL`.
 
-## Replacement for legacy maintenance binaries
+## Schema rollout
 
-`ironrag-maintenance` consolidates the per-task maintenance binaries
-that used to ship alongside `ironrag-backend`. The old binary names
-are gone — invoke the new subcommand instead.
+IronRAG starts a fresh database from one baseline,
+`apps/api/migrations/0001_init.sql`. A 0.5.x database cannot be upgraded in
+place to 0.6.0; recreate it and re-ingest sources. SQLx checks the checksum of
+an already applied baseline at startup, so editing that file does not migrate a
+live database. `make migration-check` checks the source file against
+`scripts/ops/baseline-checksum.txt`; it does not change a database.
 
-| Removed binary | Replacement subcommand |
-|---|---|
-| `ironrag-gc-stale-chunks` | `ironrag-maintenance gc stale-chunks` |
-| `ironrag-audit-orphan-data` | `ironrag-maintenance audit orphan-libraries` (read-only) + `ironrag-maintenance gc orphan-libraries --yes` (destructive) |
-| `ironrag-promote-null-heads` | `ironrag-maintenance repair null-heads` |
-| `ironrag-vector-rebuild` | `ironrag-maintenance rebuild vector-plane --source-library <uuid>` |
-| `ironrag-backfill-chunk-temporal-bounds` | `ironrag-maintenance migrate chunk-temporal-bounds` |
-| `rebuild_runtime_graph` | `ironrag-maintenance rebuild runtime-graph` |
+For a later baseline change on an existing database, first establish its
+recorded schema revision and the exact predecessor required by the intended
+operator transition. Recreate the database when no reviewed transition covers
+it. The supported `ironrag-maintenance migrate <transition>` commands preview
+their own guarded hop without `--apply`; add `--apply` only after reviewing the
+preconditions, backups, new binary and release gates. Each command checks its
+predecessor objects, applies its own DDL and compare-and-sets the SQLx checksum
+for migration 1. Do not apply its SQL body directly or stamp the checksum by
+hand. Historical index steps that require `psql`, including
+`scripts/ops/apply-knowledge-structured-block-fk-indexes.sql`, are separate
+operator actions; the maintenance CLI does not execute them. Follow the
+predecessor and target instructions in the transition's SQL or implementation
+before running a later hop. For the manual FK-index step, verify all three
+index definitions, then use the SQL file's compare-and-set template with the
+independently verified predecessor and target SHA-384 values; require exactly
+one updated migration row.
 
----
+The revision-admission transition requires a reviewed import-admission
+certificate for every predecessor readable revision. Its dry run accepts the
+manifest, its independently reviewed raw SHA-256, the accepted recovery
+snapshot ID, source baseline SHA-384 and operator identity; only the same
+command with `--apply` changes the schema. Do not infer filenames or source
+identities from mutable document labels, and do not run this transition while
+old lifecycle writers are active. The JSON manifest contains
+`recoverySnapshotId`, `sourceBaselineSha384`, `admittedBy` and `revisions`.
+Each revision supplies its `revisionId`, `documentId`, `workspaceId`,
+`libraryId`, `storageKey` and a `replacement` with exact `checksum`,
+`byteSize`, `mimeType`, `fileName`, and explicit nullable `title`,
+`languageCode`, `sourceUri`, `documentHint`. `storageKey` is required but may
+be null. Every row also requires `sourceEvidence`:
+
+- `{"kind":"source_blob"}` requires the retained revision storage key and
+  verifies the actual source size and SHA-256.
+- `{"kind":"snapshot_revision","knowledgeRevisionPresent":true,
+  "normalizedTextSha256":"<lowercase SHA-256>","textChecksum":"<retained checksum>",
+  "textState":"text_readable","textReadableAt":"<retained RFC3339 timestamp>"}` binds the captured
+  knowledge row and actual normalized-text UTF-8 digest when original storage
+  is absent. These fields are explicit nullable values where retained metadata
+  is absent. With no knowledge row, use `knowledgeRevisionPresent:false` and
+  null for the other four fields. This preserves historical head metadata;
+  it does not invent a projection or verify unavailable original bytes.
+
+Both variants require the exact scope and replacement descriptor, explicit
+import filename, independently pinned snapshot and raw certificate hash.
+Missing or extra readable revisions are rejected. With no readable revisions,
+the certificate may be omitted.
+
+```bash
+ironrag-maintenance migrate content-visibility-intent-schema \
+  --import-admission-manifest /path/to/reviewed-admission.json \
+  --import-admission-sha256 '<reviewed raw certificate SHA-256>' \
+  --accepted-recovery-snapshot-id '<accepted snapshot ID>' \
+  --source-baseline-sha384 '<reviewed source baseline SHA-384>' \
+  --admitted-by '<reviewed operator identity>' --json
+```
+
+Review the dry-run result, then repeat the same command with `--apply` only
+after authorizing the coordinated rollout.
+
+`apps/api/ops/schema-rollout.pending` fences release, promotion and GitOps
+deployment while an operator transition is outstanding. It records the issue
+and target baseline SHA-384. Keep it until the intended live transition and
+API/worker readiness have been verified; removing it is not proof that a
+database was migrated. Back up the schema and migration history before the
+window. A checksum change makes an old binary unready, so coordinate the
+transition with deployment rather than changing it while image builds are
+pending.
 
 ## `audit` — read-only inspection
 
@@ -319,26 +290,6 @@ already been exhausted — see
 [`repair clear-recovery-dead-letter`](#repair-clear-recovery-dead-letter)
 before retrying.
 
-### `audit orphan-libraries`
-
-**What it tells you.** PostgreSQL knowledge-plane rows whose
-`library_id` does not match a live `catalog_library` row. Such rows
-are left behind by older deletion paths and pre-cascade-fix code; the
-report counts orphan rows per library and per knowledge table.
-
-**When to run.** Periodic hygiene, especially after library deletions
-on older deployments. Always read-only — the destructive purge is a
-separate command.
-
-**Example.**
-
-```bash
-ironrag-maintenance audit orphan-libraries --json
-```
-
-A non-empty report is the canonical pre-flight check for
-[`gc orphan-libraries --yes`](#gc-orphan-libraries).
-
 ### `audit webhook-outbox`
 
 **What it tells you.** A bounded, redacted lifecycle-outbox inventory. It defaults to
@@ -363,51 +314,71 @@ for the full safety contract.
 
 ## `gc` — garbage collection
 
-The gc family removes content that the canonical heads no longer
-reach. Every gc subcommand acquires the per-library graph advisory
-lock and refuses to run while any ingest job for the library is in
+The gc family removes derived data that is no longer reachable from a
+readable or authoritatively leased active document revision. Every gc subcommand acquires the
+per-library graph advisory lock and refuses to run while any ingest job
+for the library is in
 the `queued` / `leased` / `paused` queue state — so concurrent ingest
 cannot lose data to the sweeper.
 
-### `gc stale-chunks`
+### `gc superseded-vectors`
 
-**What it does.** Deletes chunks from PostgreSQL knowledge-plane
-tables, including vector material, whose revision is no longer the
-readable or active head of their document. The default is conservative:
-documents whose head is null on both pointers (failed ingest) are
-skipped so a recoverable doc is not erased outright.
+**What it does.** Deletes chunk vectors from every physical PostgreSQL
+dimension shard when their revision is neither readable nor the active
+revision owned by the exact leased content-mutation job and its latest leased
+unfinished attempt. A stale active pointer alone does not keep a vector hot.
+It preserves source revisions, content chunks, knowledge chunks,
+and stored query references. Content and knowledge head projections
+must agree or the operation fails closed. Documents whose head is null
+on both pointers are skipped by default.
+
+Each delete transaction is capped at 10,000 rows. The background scheduler
+commits at most one such batch per class run and re-queues remaining work for
+the next scheduler tick. A durable keyset cursor follows the existing logical
+vector B-tree and is stored in the maintenance lease. It is reset whenever the
+library `source_truth_version` changes outside the sweep, so a concurrent head
+or vector mutation cannot leave newly stale rows behind the cursor.
+Graph/evidence reclamation continues under the separate scheduler-only
+`gc.runtime-graph` class; its lease, retries, and failures are independent from
+vector reclamation. That class also commits at most 10,000 physical delete
+mutations per tick, counting graph/evidence roots together with dependent
+context-bundle reference rows. Its durable cursor stores only the current
+cleanup phase; every tick re-evaluates roots against current evidence before
+locking and deleting a complete closure. A single indivisible closure above
+the limit fails explicitly instead of overrunning the budget or partially
+removing citations. The limit bounds committed delete mutations, not query
+planning, index reads, or lock waits. Delete commit and lease-cursor update are
+at-least-once: ownership loss between them replays the same idempotent phase.
 
 **When to run.** Disk pressure on PostgreSQL storage, especially after
-many revision replacements. Suspect "we kept old chunks around"
-behavior.
+many revision replacements. Use the preview to measure the reclaimable
+logical rows; physical HNSW/table shrink requires a separate rebuild.
 
 **Example.**
 
 ```bash
 # Safe preview: count what would be removed without issuing destructive deletes.
-ironrag-maintenance gc stale-chunks --dry-run --json
+ironrag-maintenance gc superseded-vectors --dry-run --json
 
 # Real run, single library.
-ironrag-maintenance gc stale-chunks --library <uuid>
+ironrag-maintenance gc superseded-vectors --library <uuid>
 
-# Aggressive mode: also wipe failed-ingest docs (chunks/vectors only;
-# the document row stays). Only use when you have decided the doc
-# is unrecoverable.
-ironrag-maintenance gc stale-chunks --library <uuid> --include-null-head
+# Aggressive mode: also remove vectors for null-head documents. Source and
+# chunk history still remain available for repair.
+ironrag-maintenance gc superseded-vectors --library <uuid> --include-null-head
 ```
 
 ### `gc stale-evidence`
 
 **What it does.** Deletes `runtime_graph_evidence` rows whose
 revision is no longer the readable/active head of the source
-document, plus rows whose `chunk_id` points at a chunk that has
-already been swept by `gc stale-chunks`. Both lanes skip rows whose
+document, plus rows whose `chunk_id` points at a chunk that no longer
+exists. Both lanes skip rows whose
 document has an active ingest job in flight.
 
 **When to run.** When `audit storage-summary` flags
-`runtime_graph_evidence` as the largest table. Usually after a
-revision-heavy period or after running `gc stale-chunks`, since the
-two sweepers complement each other.
+`runtime_graph_evidence` as the largest table, especially after a
+revision-heavy period.
 
 **Example.**
 
@@ -420,32 +391,12 @@ Sample output: `stale_revision_rows: 157645` means 157k rows in
 companion `phantom_chunk_rows` counter shows how many were tied to
 already-deleted chunks.
 
-### `gc orphan-libraries`
-
-**What it does.** Destructive companion to `audit orphan-libraries`.
-Wipes every PostgreSQL knowledge-plane row whose `library_id` no
-longer matches a live `catalog_library` row. Refuses to run without
-`--yes`.
-
-**When to run.** Only after `audit orphan-libraries` has been
-reviewed and you accept the list it reports.
-
-**Example.**
-
-```bash
-# Preview first
-ironrag-maintenance audit orphan-libraries --json
-
-# Then purge
-ironrag-maintenance gc orphan-libraries --yes --json
-```
-
 ---
 
-## `repair` — bring broken state back to canonical
+## `repair` — bring broken state back to the successful-ingest shape
 
 The repair family is for *recovery*, not removal. It writes new rows
-to bring objects whose state diverged back into the canonical shape
+to bring objects whose state diverged back into the shape
 the ingest pipeline produces on success.
 
 ### `repair null-heads`
@@ -470,7 +421,7 @@ ironrag-maintenance repair null-heads --library <uuid> --json
 ### `repair null-heads-auto`
 
 **What it does.** Same recovery action as `repair null-heads`, but
-the per-document outcome is now recorded on `content_document_head`
+the per-document outcome is recorded on `content_document_head`
 so a flaky upstream cannot burn the recovery budget on a single
 document:
 
@@ -545,19 +496,44 @@ ironrag-maintenance repair webhook-outbox-dead-letter-resolve \
 
 ---
 
+### `repair knowledge-projection-metadata`
+
+**What it does.** Copies drifted metadata from authoritative content to existing
+knowledge projections in the same workspace and library, only for active content
+with `deleted_at IS NULL`. Document fields: `external_key`, `parent_document_id`,
+`document_role`, `document_state`, `deleted_at`. Revision fields: `revision_number`,
+`revision_kind`, `source_uri`, `document_hint`, `mime_type`, `checksum`, `title`,
+`byte_size`. A knowledge-side tombstone does not delete active content: this repair
+restores the projection to `active` with a NULL `deleted_at`.
+
+**Limits.** Does not change content, heads, readiness or chunks; does not insert
+missing projections or purge orphans. No provider calls or scheduled backfill.
+Apply holds the existing library lifecycle lock and advances source-truth
+generation only when rows change. `--dry-run` counts eligible drift without writing;
+an unchanged rerun reports zero updated rows.
+
+```bash
+ironrag-maintenance repair knowledge-projection-metadata --library <uuid> --dry-run --json
+ironrag-maintenance repair knowledge-projection-metadata --library <uuid> --json
+ironrag-maintenance repair knowledge-projection-metadata --library <uuid> --dry-run --json
+```
+
+Omit `--library` to reconcile every library.
+
+---
+
 ## `retention` — TTL-based history sweepers
 
 The retention family deletes rows from INSERT-only history tables
-that have aged past their canonical retention window. Every sweep is
+that have aged past their configured retention window. Every sweep is
 batched (10 000 rows per DELETE, 100 ms pause between batches) so
 concurrent ingest writers stay responsive.
 
 ### `retention stage-events`
 
 **What it does.** Deletes `ingest_stage_event` rows older than
-`--older-than-days`. The supporting index
-`idx_ingest_stage_event_recorded_at` shipped in migration 0017 so
-the predicate is an index range scan, not a sequential scan under
+`--older-than-days`. The supporting index `idx_ingest_stage_event_recorded_at` is part of the
+baseline, so the predicate is an index range scan, not a sequential scan under
 `AccessExclusiveLock`.
 
 **When to run.** When `audit storage-summary` flags
@@ -575,33 +551,6 @@ ironrag-maintenance retention stage-events --older-than-days 30 --json
 ```
 
 ---
-
-## `migrate` — one-shot data migrations
-
-The migrate family is idempotent: a second run after success is a
-no-op. These are NOT recurring — they exist for the canonical
-"convert old shape to new" path and are removed from the operator
-catalog once a deployment is fully migrated.
-
-### `migrate chunk-temporal-bounds`
-
-**What it does.** Backfills `occurred_at` / `occurred_until` on
-chunks whose `normalized_text` carries the canonical JSONL temporal
-header but whose columns are still NULL. Cursor-paginated by chunk
-id so re-runs after a crash naturally continue.
-
-**When to run.** Once per cluster, after upgrading to the schema
-that introduced the temporal columns.
-
-**Example.**
-
-```bash
-# Preview without writing
-ironrag-maintenance migrate chunk-temporal-bounds --dry-run --json
-
-# Real run, single library
-ironrag-maintenance migrate chunk-temporal-bounds --library <uuid> --json
-```
 
 ## `rebuild` — heavy operator-only passes
 
@@ -628,7 +577,7 @@ ironrag-maintenance rebuild vector-plane --source-library <uuid>
 
 ### `rebuild runtime-graph`
 
-**What it does.** Re-runs the canonical runtime-graph projection for
+**What it does.** Re-runs the runtime-graph projection for
 one library or for every library. Batch mode tolerates per-library
 `StateConflict` errors and surfaces a non-zero exit at the end so
 operator scripts can detect partial completion.
@@ -668,15 +617,14 @@ a class. After a dead-letter alert.
 **Example.**
 
 ```bash
-ironrag-maintenance lease show --class gc.stale-chunks --json
+ironrag-maintenance lease show --class gc.superseded-vectors --json
 ironrag-maintenance lease show --state dead_letter --json
 ```
 
 ### `lease summary`
 
 **What it tells you.** Per-class summary of pending / leased /
-completed / failed / dead-letter counts. Compact overview of the
-scheduler state.
+dead-letter counts. Compact overview of the scheduler state.
 
 **When to run.** Healthy-state quick check; suitable for cron-style
 monitoring.
@@ -697,7 +645,7 @@ root cause has been fixed.
 
 ```bash
 # Per-library class
-ironrag-maintenance lease clear-failure --class gc.stale-chunks --library <uuid>
+ironrag-maintenance lease clear-failure --class gc.superseded-vectors --library <uuid>
 
 # Instance-scope class (no --library flag)
 ironrag-maintenance lease clear-failure --class retention.stage-events
@@ -722,6 +670,6 @@ ironrag-maintenance lease reap-stale --stale-after-secs 300
 
 ```bash
 docker exec <container> ironrag-maintenance audit storage-summary --json
-docker exec <container> ironrag-maintenance gc stale-chunks --dry-run
+docker exec <container> ironrag-maintenance gc superseded-vectors --dry-run
 docker exec <container> ironrag-maintenance lease summary --json
 ```

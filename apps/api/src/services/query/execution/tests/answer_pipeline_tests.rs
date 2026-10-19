@@ -223,6 +223,12 @@ fn build_answer_prompt_prioritizes_library_context() {
         None,
         None,
     );
+    assert_prompt_library_priority_and_boundaries(&prompt);
+    assert_prompt_literal_and_coverage_rules(&prompt);
+    assert_prompt_interpolates_question_and_library_summary(&prompt);
+}
+
+fn assert_prompt_library_priority_and_boundaries(prompt: &str) {
     assert!(prompt.contains("Treat the active library as the primary source of truth"));
     assert!(prompt.contains("exhaust the provided library context"));
     assert!(prompt.contains("Hard output boundary"));
@@ -232,6 +238,9 @@ fn build_answer_prompt_prioritizes_library_context() {
     assert!(prompt.contains("Do not narrate the retrieval process"));
     assert!(prompt.contains("Do not add follow-up offers"));
     assert!(prompt.contains("state the coverage limit directly"));
+}
+
+fn assert_prompt_literal_and_coverage_rules(prompt: &str) {
     assert!(prompt.contains("Do not ask the user to upload"));
     assert!(prompt.contains("Exact technical literals section"));
     assert!(prompt.contains("copy those literals verbatim from Context"));
@@ -242,6 +251,9 @@ fn build_answer_prompt_prioritizes_library_context() {
     assert!(prompt.contains("grouped by document"));
     assert!(prompt.contains("matched excerpt"));
     assert!(prompt.contains("Do not combine parts from different snippets"));
+}
+
+fn assert_prompt_interpolates_question_and_library_summary(prompt: &str) {
     assert!(prompt.contains("prefer the next distinct item after the excluded one"));
     assert!(prompt.contains("preserve visible coverage of that list"));
     assert!(prompt.contains("without a grounded description"));
@@ -343,7 +355,7 @@ fn assemble_answer_context_excludes_volatile_ingest_metadata_for_mcp_ui_parity()
         "queue/attempt churn must not alter the deterministic answer prompt",
     );
     // Anti-regression: the answer prompt must NOT inject the live
-    // recent-uploads block, which is the canonical MCP-UI parity
+    // recent-uploads block, which is the primary MCP-UI parity
     // violator under active ingestion.
     assert!(!context.contains("Recent documents"));
     assert!(!context.contains("Preview:"));

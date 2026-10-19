@@ -6,6 +6,7 @@
 Cargo.lock
 !/Cargo.lock
 .cargo-*/
+/.cache/
 
 # Codex CLI scratch
 .codex
@@ -52,3 +53,20 @@ __pycache__/
 .omc/
 .omx/
 .playwright*
+
+# Python (connectors)
+.venv/
+/connectors/.venv/
+*.egg-info/
+.ruff_cache/
+.mypy_cache/
+.pytest_cache/
+/connectors/dist/
+/connectors/.coverage
+/connectors/coverage.xml
+/connectors/deploy/*/routing.yaml
+/connectors/deploy/*/repos.yaml
+/connectors/deploy/*/.env.local
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal

@@ -1,6 +1,28 @@
-use super::provider_validation::sync_provider_model_catalog;
 use super::*;
 use std::collections::{BTreeSet, HashMap};
+
+use crate::integrations::typesafe::{MAX_SCORE_LEVELS, MIN_SCORE_LEVELS};
+
+struct NormalizedModelCatalogSpec {
+    model_name: String,
+    lifecycle_state: String,
+    allowed_binding_purposes: Vec<String>,
+}
+
+fn normalize_model_catalog_spec(
+    model_name: &str,
+    lifecycle_state: &str,
+    allowed_binding_purposes: &[AiBindingPurpose],
+) -> Result<NormalizedModelCatalogSpec, ApiError> {
+    let model_name = normalize_non_empty(model_name, "modelName")?;
+    let lifecycle_state = normalize_lifecycle_state(lifecycle_state, "lifecycleState")?;
+    validate_model_catalog_binding_contract(allowed_binding_purposes)?;
+    Ok(NormalizedModelCatalogSpec {
+        model_name,
+        lifecycle_state,
+        allowed_binding_purposes: binding_purpose_values(allowed_binding_purposes),
+    })
+}
 
 impl AiCatalogService {
     pub async fn list_provider_catalog(
@@ -68,12 +90,14 @@ impl AiCatalogService {
         parse_provider_profile(&provider_kind, &command.capability_flags_json)?;
         let row = ai_repository::create_provider_catalog(
             &state.persistence.postgres,
-            &provider_kind,
-            &display_name,
-            &api_style,
-            &lifecycle_state,
-            default_base_url.as_deref(),
-            command.capability_flags_json,
+            ai_repository::NewProviderCatalog {
+                provider_kind: &provider_kind,
+                display_name: &display_name,
+                api_style: &api_style,
+                lifecycle_state: &lifecycle_state,
+                default_base_url: default_base_url.as_deref(),
+                capability_flags_json: command.capability_flags_json,
+            },
         )
         .await
         .map_err(map_ai_write_error)?;
@@ -97,13 +121,15 @@ impl AiCatalogService {
         }
         let row = ai_repository::update_provider_catalog(
             &state.persistence.postgres,
-            command.provider_id,
-            &provider_kind,
-            &display_name,
-            &api_style,
-            &lifecycle_state,
-            default_base_url.as_deref(),
-            command.capability_flags_json,
+            ai_repository::UpdateProviderCatalog {
+                provider_id: command.provider_id,
+                provider_kind: &provider_kind,
+                display_name: &display_name,
+                api_style: &api_style,
+                lifecycle_state: &lifecycle_state,
+                default_base_url: default_base_url.as_deref(),
+                capability_flags_json: command.capability_flags_json,
+            },
         )
         .await
         .map_err(map_ai_write_error)?
@@ -138,41 +164,27 @@ impl AiCatalogService {
         state: &AppState,
         command: CreateModelCatalogCommand,
     ) -> Result<ModelCatalogEntry, ApiError> {
-        let model_name = normalize_non_empty(&command.model_name, "modelName")?;
-        let capability_kind = normalize_allowed_value(
-            &command.capability_kind,
-            "capabilityKind",
-            &["chat", "embedding"],
-        )?;
-        let modality_kind = normalize_allowed_value(
-            &command.modality_kind,
-            "modalityKind",
-            &["text", "multimodal"],
-        )?;
-        let lifecycle_state =
-            normalize_lifecycle_state(&command.lifecycle_state, "lifecycleState")?;
         let provider = self.get_provider_catalog(state, command.provider_catalog_id).await?;
-        validate_model_catalog_binding_contract(
-            &provider,
-            &model_name,
-            &capability_kind,
-            &modality_kind,
+        validate_model_purposes_for_provider(&provider, &command.allowed_binding_purposes)?;
+        let normalized = normalize_model_catalog_spec(
+            &command.model_name,
+            &command.lifecycle_state,
             &command.allowed_binding_purposes,
         )?;
-        let metadata_json = metadata_with_binding_purposes(
-            command.metadata_json,
-            &command.allowed_binding_purposes,
-        )?;
+        let metadata_json = validate_model_metadata(command.metadata_json)?;
+        command.pricing.validate().map_err(ApiError::BadRequest)?;
         let row = ai_repository::create_model_catalog(
             &state.persistence.postgres,
-            command.provider_catalog_id,
-            &model_name,
-            &capability_kind,
-            &modality_kind,
-            command.context_window,
-            command.max_output_tokens,
-            &lifecycle_state,
-            metadata_json,
+            ai_repository::NewModelCatalog {
+                provider_catalog_id: command.provider_catalog_id,
+                model_name: &normalized.model_name,
+                context_window: command.context_window,
+                max_output_tokens: command.max_output_tokens,
+                lifecycle_state: &normalized.lifecycle_state,
+                metadata_json,
+                pricing: &model_pricing_binds(&command.pricing),
+                allowed_binding_purposes: &normalized.allowed_binding_purposes,
+            },
         )
         .await
         .map_err(map_ai_write_error)?;
@@ -184,47 +196,32 @@ impl AiCatalogService {
         state: &AppState,
         command: UpdateModelCatalogCommand,
     ) -> Result<ModelCatalogEntry, ApiError> {
-        let model_name = normalize_non_empty(&command.model_name, "modelName")?;
-        let capability_kind = normalize_allowed_value(
-            &command.capability_kind,
-            "capabilityKind",
-            &["chat", "embedding"],
-        )?;
-        let modality_kind = normalize_allowed_value(
-            &command.modality_kind,
-            "modalityKind",
-            &["text", "multimodal"],
-        )?;
-        let lifecycle_state =
-            normalize_lifecycle_state(&command.lifecycle_state, "lifecycleState")?;
-        let provider = self.get_provider_catalog(state, command.provider_catalog_id).await?;
-        validate_model_catalog_binding_contract(
-            &provider,
-            &model_name,
-            &capability_kind,
-            &modality_kind,
-            &command.allowed_binding_purposes,
-        )?;
         let existing =
             ai_repository::get_model_catalog_by_id(&state.persistence.postgres, command.model_id)
                 .await
                 .map_err(map_ai_write_error)?
                 .ok_or_else(|| ApiError::resource_not_found("model_catalog", command.model_id))?;
-        let metadata_json = metadata_with_binding_purposes(
-            command.metadata_json.unwrap_or(existing.metadata_json),
+        let provider = self.get_provider_catalog(state, existing.provider_catalog_id).await?;
+        validate_model_purposes_for_provider(&provider, &command.allowed_binding_purposes)?;
+        let normalized = normalize_model_catalog_spec(
+            &existing.model_name,
+            &command.lifecycle_state,
             &command.allowed_binding_purposes,
         )?;
+        let metadata_json =
+            validate_model_metadata(command.metadata_json.unwrap_or(existing.metadata_json))?;
+        command.pricing.validate().map_err(ApiError::BadRequest)?;
         let row = ai_repository::update_model_catalog(
             &state.persistence.postgres,
-            command.model_id,
-            command.provider_catalog_id,
-            &model_name,
-            &capability_kind,
-            &modality_kind,
-            command.context_window,
-            command.max_output_tokens,
-            &lifecycle_state,
-            metadata_json,
+            ai_repository::UpdateModelCatalog {
+                model_id: command.model_id,
+                context_window: command.context_window,
+                max_output_tokens: command.max_output_tokens,
+                lifecycle_state: &normalized.lifecycle_state,
+                metadata_json,
+                pricing: &model_pricing_binds(&command.pricing),
+                allowed_binding_purposes: &normalized.allowed_binding_purposes,
+            },
         )
         .await
         .map_err(map_ai_write_error)?
@@ -232,8 +229,8 @@ impl AiCatalogService {
         map_model_row(row)
     }
 
-    /// Real hard delete; 409 (via `map_ai_delete_error`) when a price
-    /// override or binding still references this model.
+    /// Real hard delete; 409 (via `map_ai_delete_error`) when a binding
+    /// still references this model.
     /// `update_model_catalog` with `lifecycleState: "disabled"` remains the
     /// reversible pause — the two are distinct operations, not two paths to
     /// the same result (same reasoning as `delete_provider_catalog` above).
@@ -284,18 +281,10 @@ impl AiCatalogService {
         let providers = self.list_provider_catalog(state).await?;
         let provider_by_id =
             providers.iter().map(|provider| (provider.id, provider)).collect::<HashMap<_, _>>();
-        let (scoped_accounts, explicit_account) =
+        let scoped_accounts =
             self.resolved_catalog_accounts(state, workspace_id, library_id, account_id).await?;
         let available_account_ids_by_provider =
             available_account_ids_by_provider(&scoped_accounts, provider_catalog_id);
-        let (explicitly_available_account_ids, explicitly_checked_providers) = self
-            .refresh_explicitly_requested_provider_models(
-                state,
-                provider_catalog_id,
-                explicit_account.as_ref(),
-                &provider_by_id,
-            )
-            .await;
 
         let models = self.list_model_catalog(state, provider_catalog_id).await?;
         Ok(models
@@ -305,99 +294,9 @@ impl AiCatalogService {
                     model,
                     &provider_by_id,
                     &available_account_ids_by_provider,
-                    &explicitly_available_account_ids,
-                    &explicitly_checked_providers,
                 )
             })
             .collect())
-    }
-
-    pub async fn list_price_catalog(
-        &self,
-        state: &AppState,
-        model_catalog_id: Option<Uuid>,
-        workspace_id: Option<Uuid>,
-    ) -> Result<Vec<PriceCatalogEntry>, ApiError> {
-        let rows = ai_repository::list_price_catalog(
-            &state.persistence.postgres,
-            model_catalog_id,
-            workspace_id,
-        )
-        .await
-        .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
-        Ok(rows.into_iter().map(map_price_row).collect())
-    }
-
-    pub async fn get_price_catalog_entry(
-        &self,
-        state: &AppState,
-        price_id: Uuid,
-    ) -> Result<PriceCatalogEntry, ApiError> {
-        let row = ai_repository::get_price_catalog_by_id(&state.persistence.postgres, price_id)
-            .await
-            .map_err(|e| ApiError::internal_with_log(e, "internal"))?
-            .ok_or_else(|| ApiError::resource_not_found("price_catalog_entry", price_id))?;
-        Ok(map_price_row(row))
-    }
-
-    pub async fn create_workspace_price_override(
-        &self,
-        state: &AppState,
-        command: CreateWorkspacePriceOverrideCommand,
-    ) -> Result<PriceCatalogEntry, ApiError> {
-        let billing_unit = normalize_non_empty(&command.billing_unit, "billingUnit")?;
-        let currency_code = normalize_currency_code(&command.currency_code)?;
-        let row = ai_repository::create_workspace_price_override(
-            &state.persistence.postgres,
-            command.workspace_id,
-            command.model_catalog_id,
-            &billing_unit,
-            command.unit_price,
-            &currency_code,
-            command.effective_from,
-            command.effective_to,
-        )
-        .await
-        .map_err(map_ai_write_error)?;
-        Ok(map_price_row(row))
-    }
-
-    pub async fn update_workspace_price_override(
-        &self,
-        state: &AppState,
-        command: UpdateWorkspacePriceOverrideCommand,
-    ) -> Result<PriceCatalogEntry, ApiError> {
-        let billing_unit = normalize_non_empty(&command.billing_unit, "billingUnit")?;
-        let currency_code = normalize_currency_code(&command.currency_code)?;
-        let row = ai_repository::update_workspace_price_override(
-            &state.persistence.postgres,
-            command.price_id,
-            command.model_catalog_id,
-            &billing_unit,
-            command.unit_price,
-            &currency_code,
-            command.effective_from,
-            command.effective_to,
-        )
-        .await
-        .map_err(map_ai_write_error)?
-        .ok_or_else(|| ApiError::resource_not_found("price_catalog_entry", command.price_id))?;
-        Ok(map_price_row(row))
-    }
-
-    pub async fn delete_workspace_price_override(
-        &self,
-        state: &AppState,
-        price_id: Uuid,
-    ) -> Result<(), ApiError> {
-        let affected =
-            ai_repository::delete_workspace_price_override(&state.persistence.postgres, price_id)
-                .await
-                .map_err(map_ai_delete_error)?;
-        if affected == 0 {
-            return Err(ApiError::resource_not_found("price_catalog_entry", price_id));
-        }
-        Ok(())
     }
 
     async fn resolved_catalog_accounts(
@@ -406,61 +305,17 @@ impl AiCatalogService {
         workspace_id: Option<Uuid>,
         library_id: Option<Uuid>,
         account_id: Option<Uuid>,
-    ) -> Result<(Vec<AiAccountSummary>, Option<AiAccount>), ApiError> {
+    ) -> Result<Vec<AiAccountSummary>, ApiError> {
         let summaries =
             self.list_visible_account_summaries(state, workspace_id, library_id).await?;
         let Some(target_account_id) = account_id else {
-            return Ok((summaries, None));
+            return Ok(summaries);
         };
         let summary =
             summaries.into_iter().find(|account| account.id == target_account_id).ok_or_else(
                 || ApiError::resource_not_found("provider_credential", target_account_id),
             )?;
-        // Visibility is established using a secret-free projection. Only the
-        // explicitly requested account is decrypted for model discovery.
-        let account = self.get_account(state, target_account_id).await?;
-        Ok((vec![summary], Some(account)))
-    }
-
-    async fn refresh_explicitly_requested_provider_models(
-        &self,
-        state: &AppState,
-        provider_catalog_id: Option<Uuid>,
-        account: Option<&AiAccount>,
-        provider_by_id: &HashMap<Uuid, &ProviderCatalogEntry>,
-    ) -> (HashMap<(Uuid, String), BTreeSet<Uuid>>, BTreeSet<Uuid>) {
-        let Some(account) = account.filter(|account| account.credential_state == "active") else {
-            return (HashMap::new(), BTreeSet::new());
-        };
-        let Some(provider) = provider_by_id.get(&account.provider_catalog_id) else {
-            return (HashMap::new(), BTreeSet::new());
-        };
-        if !should_refresh_provider_models(provider, provider_catalog_id) {
-            return (HashMap::new(), BTreeSet::new());
-        }
-
-        match sync_provider_model_catalog(
-            state,
-            provider,
-            account.api_key.as_deref(),
-            account.base_url.as_deref(),
-        )
-        .await
-        {
-            Ok(model_names) => (
-                explicitly_available_accounts_by_model(provider.id, account.id, model_names),
-                BTreeSet::from([provider.id]),
-            ),
-            Err(error) => {
-                tracing::warn!(
-                    provider_kind = %provider.provider_kind,
-                    account_id = %account.id,
-                    error = %error,
-                    "failed to refresh provider models for account-specific request"
-                );
-                (HashMap::new(), BTreeSet::new())
-            }
-        }
+        Ok(vec![summary])
     }
 }
 
@@ -483,66 +338,34 @@ fn available_account_ids_by_provider(
         })
 }
 
-fn should_refresh_provider_models(
-    provider: &ProviderCatalogEntry,
-    provider_catalog_id: Option<Uuid>,
-) -> bool {
-    provider_catalog_id.is_none_or(|value| value == provider.id)
-        && provider_credential_policy(provider).validation_mode
-            == ProviderCredentialValidationMode::ModelList
-}
-
-fn explicitly_available_accounts_by_model(
-    provider_id: Uuid,
-    account_id: Uuid,
-    model_names: Vec<String>,
-) -> HashMap<(Uuid, String), BTreeSet<Uuid>> {
-    model_names.into_iter().fold(HashMap::new(), |mut account_ids_by_model, model_name| {
-        account_ids_by_model.entry((provider_id, model_name)).or_default().insert(account_id);
-        account_ids_by_model
-    })
-}
-
 fn resolve_model_catalog_entry(
     model: ModelCatalogEntry,
     provider_by_id: &HashMap<Uuid, &ProviderCatalogEntry>,
     available_account_ids_by_provider: &HashMap<Uuid, BTreeSet<Uuid>>,
-    explicitly_available_account_ids: &HashMap<(Uuid, String), BTreeSet<Uuid>>,
-    explicitly_checked_providers: &BTreeSet<Uuid>,
 ) -> ResolvedModelCatalogEntry {
-    let available_account_ids = model_available_account_ids(
-        &model,
-        available_account_ids_by_provider,
-        explicitly_available_account_ids,
-        explicitly_checked_providers,
-    );
+    let available_account_ids =
+        model_available_account_ids(&model, available_account_ids_by_provider);
     let availability_state = model_availability_state(
         &model,
         provider_by_id.get(&model.provider_catalog_id).copied(),
-        explicitly_checked_providers,
         &available_account_ids,
     );
     ResolvedModelCatalogEntry { model, availability_state, available_account_ids }
 }
 
-fn model_available_account_ids(
+pub(super) fn model_available_account_ids(
     model: &ModelCatalogEntry,
     available_account_ids_by_provider: &HashMap<Uuid, BTreeSet<Uuid>>,
-    explicitly_available_account_ids: &HashMap<(Uuid, String), BTreeSet<Uuid>>,
-    explicitly_checked_providers: &BTreeSet<Uuid>,
 ) -> Vec<Uuid> {
-    let account_ids = if explicitly_checked_providers.contains(&model.provider_catalog_id) {
-        explicitly_available_account_ids.get(&(model.provider_catalog_id, model.model_name.clone()))
-    } else {
-        available_account_ids_by_provider.get(&model.provider_catalog_id)
-    };
-    account_ids.map(|ids| ids.iter().copied().collect()).unwrap_or_default()
+    available_account_ids_by_provider
+        .get(&model.provider_catalog_id)
+        .map(|ids| ids.iter().copied().collect())
+        .unwrap_or_default()
 }
 
 fn model_availability_state(
     model: &ModelCatalogEntry,
     provider: Option<&ProviderCatalogEntry>,
-    explicitly_checked_providers: &BTreeSet<Uuid>,
     available_account_ids: &[Uuid],
 ) -> ModelAvailabilityState {
     if model.lifecycle_state == "disabled"
@@ -552,23 +375,15 @@ fn model_availability_state(
     }
 
     match provider.map(|entry| entry.model_discovery.mode) {
-        Some(ProviderModelDiscoveryMode::Credential)
-            if explicitly_checked_providers.contains(&model.provider_catalog_id) =>
-        {
+        Some(ProviderModelDiscoveryMode::Credential) | None => ModelAvailabilityState::Unknown,
+        Some(_) => {
             if available_account_ids.is_empty() {
                 ModelAvailabilityState::Unavailable
             } else {
                 ModelAvailabilityState::Available
             }
         }
-        Some(ProviderModelDiscoveryMode::Credential) | None => ModelAvailabilityState::Unknown,
-        Some(_) => ModelAvailabilityState::Available,
     }
-}
-
-fn normalize_currency_code(value: &str) -> Result<String, ApiError> {
-    let normalized = normalize_non_empty(value, "currencyCode")?;
-    Ok(normalized.to_ascii_uppercase())
 }
 
 fn normalize_allowed_value(
@@ -587,14 +402,10 @@ fn normalize_lifecycle_state(value: &str, field_name: &'static str) -> Result<St
     normalize_allowed_value(value, field_name, &["active", "preview", "deprecated", "disabled"])
 }
 
-pub(super) fn metadata_with_binding_purposes(
+pub(super) fn validate_model_metadata(
     metadata_json: serde_json::Value,
-    purposes: &[AiBindingPurpose],
 ) -> Result<serde_json::Value, ApiError> {
-    if purposes.is_empty() {
-        return Err(ApiError::BadRequest("allowedBindingPurposes must not be empty".to_string()));
-    }
-    let mut object = match metadata_json {
+    let object = match metadata_json {
         serde_json::Value::Null => serde_json::Map::new(),
         serde_json::Value::Object(object) => object,
         _ => {
@@ -604,16 +415,26 @@ pub(super) fn metadata_with_binding_purposes(
     if let Some(value) = object.get("requestPolicy") {
         parse_request_policy(value, "metadataJson.requestPolicy")?;
     }
-    object.insert(
-        "defaultRoles".to_string(),
-        serde_json::Value::Array(
-            purposes
-                .iter()
-                .map(|purpose| serde_json::Value::String(binding_purpose_key(*purpose).to_string()))
-                .collect(),
-        ),
-    );
+    // The pair reasoning capability is owned by this exact model row. Validate
+    // it here so an unattributed or malformed confirmation never persists; a
+    // provider profile cannot carry it.
+    crate::domains::provider_profiles::model_reasoning_capability(&serde_json::Value::Object(
+        object.clone(),
+    ))
+    .map_err(ApiError::BadRequest)?;
+    if object.contains_key("defaultRoles") {
+        return Err(ApiError::BadRequest(
+            "metadataJson.defaultRoles is reserved; use allowedBindingPurposes".to_string(),
+        ));
+    }
     Ok(serde_json::Value::Object(object))
+}
+
+fn binding_purpose_values(purposes: &[AiBindingPurpose]) -> Vec<String> {
+    deduplicate_binding_purposes(purposes)
+        .into_iter()
+        .map(|purpose| binding_purpose_key(purpose).to_string())
+        .collect()
 }
 
 pub(super) fn map_provider_row(
@@ -637,6 +458,7 @@ pub(super) fn map_provider_row(
         capabilities: profile.capabilities.clone(),
         runtime: profile.runtime.clone(),
         ui_hints: profile.ui_hints.clone(),
+        purpose_gaps: profile.purpose_gaps.clone(),
         profile,
     })
 }
@@ -656,78 +478,144 @@ pub(super) fn parse_provider_profile(
         &profile.request_policy,
         &format!("provider {provider_kind} capabilityFlagsJson.requestPolicy"),
     )?;
+    validate_decision_capability_invariant(provider_kind, &profile)?;
     Ok(profile)
+}
+
+/// The canonical decision-capability invariant (IRG-182): `decision` is
+/// supported if and only if the runtime kind is the TypeSafe System One
+/// decision endpoint, and a decision provider declares no generative
+/// capability and only `decision` discovery paths. Enforced on every parse —
+/// create, update and read — so a hand-edited or drifted row fails closed
+/// instead of silently letting a decision provider serve a generative purpose
+/// or a generative provider claim the decision capability.
+fn validate_decision_capability_invariant(
+    provider_kind: &str,
+    profile: &ProviderProfile,
+) -> Result<(), ApiError> {
+    let is_decision_runtime = profile.runtime.kind == TYPESAFE_SYSTEM_ONE_RUNTIME_KIND;
+    let declares_decision = profile.capabilities.decision == ProviderCapabilityState::Supported;
+    if is_decision_runtime != declares_decision {
+        return Err(ApiError::BadRequest(format!(
+            "provider {provider_kind} must declare capabilities.decision supported if and only if runtime.kind is {TYPESAFE_SYSTEM_ONE_RUNTIME_KIND}"
+        )));
+    }
+    if !is_decision_runtime {
+        return Ok(());
+    }
+    let levels = &profile.runtime.score_criteria;
+    if !(MIN_SCORE_LEVELS..=MAX_SCORE_LEVELS).contains(&levels.len())
+        || levels.iter().any(|level| level.trim().is_empty())
+    {
+        return Err(ApiError::BadRequest(format!(
+            "provider {provider_kind} is a decision provider ({TYPESAFE_SYSTEM_ONE_RUNTIME_KIND}) and must declare {MIN_SCORE_LEVELS}..={MAX_SCORE_LEVELS} non-empty runtime.scoreCriteria levels"
+        )));
+    }
+    let caps = &profile.capabilities;
+    let generative_capability_declared =
+        [caps.chat, caps.embeddings, caps.vision, caps.tools, caps.streaming]
+            .into_iter()
+            .any(|state| state != ProviderCapabilityState::Unsupported);
+    if generative_capability_declared {
+        return Err(ApiError::BadRequest(format!(
+            "provider {provider_kind} is a decision provider ({TYPESAFE_SYSTEM_ONE_RUNTIME_KIND}) and must mark chat, embeddings, vision, tools and streaming unsupported"
+        )));
+    }
+    let non_decision_discovery_path = profile
+        .model_discovery
+        .paths
+        .iter()
+        .any(|path| path.capability_kind != ProviderModelCapabilityKind::Decision);
+    if non_decision_discovery_path {
+        return Err(ApiError::BadRequest(format!(
+            "provider {provider_kind} is a decision provider ({TYPESAFE_SYSTEM_ONE_RUNTIME_KIND}) and every modelDiscovery path must declare capabilityKind decision"
+        )));
+    }
+    Ok(())
+}
+
+fn model_pricing_binds(pricing: &ModelPricing) -> ai_repository::ModelPricingBinds {
+    ai_repository::ModelPricingBinds {
+        currency_code: pricing.currency_code.trim().to_string(),
+        input_price_per_1m: pricing.input_price_per_1m,
+        cached_input_price_per_1m: pricing.cached_input_price_per_1m,
+        cache_write_input_price_per_1m: pricing.cache_write_input_price_per_1m,
+        output_price_per_1m: pricing.output_price_per_1m,
+        long_context_threshold_tokens: pricing
+            .long_context
+            .as_ref()
+            .map(|tier| tier.threshold_tokens),
+        long_context_input_price_per_1m: pricing
+            .long_context
+            .as_ref()
+            .map(|tier| tier.input_price_per_1m),
+        long_context_cached_input_price_per_1m: pricing
+            .long_context
+            .as_ref()
+            .map(|tier| tier.cached_input_price_per_1m),
+        long_context_output_price_per_1m: pricing
+            .long_context
+            .as_ref()
+            .map(|tier| tier.output_price_per_1m),
+    }
 }
 
 pub(super) fn map_model_row(
     row: ai_repository::AiModelCatalogRow,
 ) -> Result<ModelCatalogEntry, ApiError> {
-    let role_context = format!("model {:?} metadataJson.defaultRoles", row.model_name);
-    let allowed_binding_purposes =
-        parse_allowed_binding_purposes(&row.metadata_json, &role_context)?;
-    if allowed_binding_purposes.is_empty() && row.lifecycle_state != "disabled" {
-        return Err(ApiError::BadRequest(format!(
-            "{role_context} must not be empty unless the model lifecycleState is disabled"
-        )));
-    }
+    let allowed_binding_purposes = row
+        .allowed_binding_purposes
+        .iter()
+        .map(|purpose| {
+            parse_binding_purpose(purpose).map_err(|_| {
+                ApiError::BadRequest(format!(
+                    "model {:?} has unsupported binding purpose {purpose:?}",
+                    row.model_name
+                ))
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
 
+    let long_context = match (
+        row.long_context_threshold_tokens,
+        row.long_context_input_price_per_1m,
+        row.long_context_cached_input_price_per_1m,
+        row.long_context_output_price_per_1m,
+    ) {
+        (Some(threshold_tokens), Some(input), Some(cached_input), Some(output)) => {
+            Some(crate::domains::ai::ModelLongContextPricing {
+                threshold_tokens,
+                input_price_per_1m: input,
+                cached_input_price_per_1m: cached_input,
+                output_price_per_1m: output,
+            })
+        }
+        (None, None, None, None) => None,
+        _ => {
+            return Err(ApiError::internal_with_log(
+                anyhow::anyhow!("model {} carries a partial long-context tier", row.id),
+                "internal",
+            ));
+        }
+    };
     Ok(ModelCatalogEntry {
         id: row.id,
         provider_catalog_id: row.provider_catalog_id,
         model_name: row.model_name,
-        capability_kind: row.capability_kind,
-        modality_kind: row.modality_kind,
         lifecycle_state: row.lifecycle_state,
-        metadata_json: row.metadata_json.clone(),
+        pricing: ModelPricing {
+            currency_code: row.currency_code,
+            input_price_per_1m: row.input_price_per_1m,
+            cached_input_price_per_1m: row.cached_input_price_per_1m,
+            cache_write_input_price_per_1m: row.cache_write_input_price_per_1m,
+            output_price_per_1m: row.output_price_per_1m,
+            long_context,
+        },
+        metadata_json: validate_model_metadata(row.metadata_json)?,
         allowed_binding_purposes,
         context_window: row.context_window,
         max_output_tokens: row.max_output_tokens,
     })
-}
-
-fn map_price_row(row: ai_repository::AiPriceCatalogRow) -> PriceCatalogEntry {
-    PriceCatalogEntry {
-        id: row.id,
-        model_catalog_id: row.model_catalog_id,
-        billing_unit: row.billing_unit,
-        price_variant_key: row.price_variant_key,
-        request_input_tokens_min: row.request_input_tokens_min,
-        request_input_tokens_max: row.request_input_tokens_max,
-        unit_price: row.unit_price,
-        currency_code: row.currency_code,
-        effective_from: row.effective_from,
-        effective_to: row.effective_to,
-        catalog_scope: row.catalog_scope,
-        workspace_id: row.workspace_id,
-    }
-}
-
-pub(super) fn parse_allowed_binding_purposes(
-    metadata_json: &serde_json::Value,
-    role_context: &str,
-) -> Result<Vec<AiBindingPurpose>, ApiError> {
-    let Some(raw_roles) = metadata_json.get("defaultRoles") else {
-        return Ok(Vec::new());
-    };
-    let roles = raw_roles
-        .as_array()
-        .ok_or_else(|| ApiError::BadRequest(format!("{role_context} must be an array")))?;
-
-    let mut allowed = Vec::with_capacity(roles.len());
-    for (index, role) in roles.iter().enumerate() {
-        let role_str = role.as_str().ok_or_else(|| {
-            ApiError::BadRequest(format!("{role_context}[{index}] must be a string"))
-        })?;
-        let purpose = parse_binding_purpose(role_str).map_err(|_| {
-            ApiError::BadRequest(format!(
-                "{role_context}[{index}] contains unsupported binding purpose {role_str:?}"
-            ))
-        })?;
-        if !allowed.contains(&purpose) {
-            allowed.push(purpose);
-        }
-    }
-    Ok(allowed)
 }
 
 pub(super) fn validate_model_binding_purpose(
@@ -749,52 +637,191 @@ pub(super) fn validate_model_binding_purpose(
         )));
     }
 
-    let required_capability_kind =
-        if binding_purpose == AiBindingPurpose::EmbedChunk { "embedding" } else { "chat" };
-    if model.capability_kind != required_capability_kind {
-        return Err(ApiError::BadRequest(format!(
-            "binding purpose {} requires a {} model; model {} declares capability {}",
-            binding_purpose_key(binding_purpose),
-            required_capability_kind,
-            model.model_name,
-            model.capability_kind,
-        )));
-    }
-
-    if binding_purpose == AiBindingPurpose::ExtractText && model.modality_kind != "multimodal" {
-        return Err(ApiError::BadRequest(format!(
-            "binding purpose {} requires a multimodal model; model {} declares modality {}",
-            binding_purpose_key(binding_purpose),
-            model.model_name,
-            model.modality_kind,
-        )));
-    }
-
     Ok(())
 }
 
 fn validate_model_catalog_binding_contract(
-    provider: &ProviderCatalogEntry,
-    model_name: &str,
-    capability_kind: &str,
-    modality_kind: &str,
     allowed_binding_purposes: &[AiBindingPurpose],
 ) -> Result<(), ApiError> {
-    let model = ModelCatalogEntry {
-        id: Uuid::nil(),
-        provider_catalog_id: provider.id,
-        model_name: model_name.to_string(),
-        capability_kind: capability_kind.to_string(),
-        modality_kind: modality_kind.to_string(),
-        lifecycle_state: "active".to_string(),
-        metadata_json: serde_json::Value::Null,
-        allowed_binding_purposes: allowed_binding_purposes.to_vec(),
-        context_window: None,
-        max_output_tokens: None,
-    };
-    for binding_purpose in allowed_binding_purposes {
-        validate_model_binding_purpose(*binding_purpose, &model)?;
-        validate_provider_capability_for_binding(provider, *binding_purpose)?;
+    if allowed_binding_purposes.is_empty() {
+        return Err(ApiError::BadRequest("allowedBindingPurposes must not be empty".to_string()));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn normalizes_model_catalog_spec_and_deduplicates_allowed_purposes() {
+        let normalized = normalize_model_catalog_spec(
+            "  synthetic-model  ",
+            "active",
+            &[
+                AiBindingPurpose::QueryAnswer,
+                AiBindingPurpose::Agent,
+                AiBindingPurpose::QueryAnswer,
+            ],
+        )
+        .expect("a complete catalog model specification must be accepted");
+
+        assert_eq!(normalized.model_name, "synthetic-model");
+        assert_eq!(normalized.lifecycle_state, "active");
+        assert_eq!(normalized.allowed_binding_purposes, ["query_answer", "agent"]);
+    }
+
+    #[test]
+    fn rejects_invalid_model_catalog_invariants_before_repository_write() {
+        let no_purposes = normalize_model_catalog_spec("synthetic-model", "active", &[]);
+        let unsupported_lifecycle = normalize_model_catalog_spec(
+            "synthetic-model",
+            "retired",
+            &[AiBindingPurpose::QueryAnswer],
+        );
+        let blank_name =
+            normalize_model_catalog_spec(" \t ", "active", &[AiBindingPurpose::QueryAnswer]);
+
+        for result in [no_purposes, unsupported_lifecycle, blank_name] {
+            assert!(matches!(result, Err(ApiError::BadRequest(_))));
+        }
+    }
+
+    #[test]
+    fn model_metadata_normalizes_null_and_rejects_non_object_or_legacy_authority() {
+        assert_eq!(
+            validate_model_metadata(serde_json::Value::Null)
+                .expect("null metadata must normalize to an empty object"),
+            serde_json::json!({})
+        );
+
+        for metadata in [
+            serde_json::json!(["not-an-object"]),
+            serde_json::json!({"defaultRoles": ["query_answer"]}),
+        ] {
+            assert!(matches!(validate_model_metadata(metadata), Err(ApiError::BadRequest(_))));
+        }
+    }
+
+    /// The TypeSafe System One decision provider shape the seed publishes:
+    /// every generative capability unsupported, `decision` the only supported
+    /// one, and a single decision discovery path.
+    fn decision_provider_profile() -> serde_json::Value {
+        serde_json::json!({
+            "runtime": {
+                "kind": "typesafe_system_one",
+                "authScheme": "bearer",
+                "tokenLimitParameter": "max_tokens",
+                "structuredOutput": "unsupported",
+                "chatPath": "/v1/systemone",
+                "embeddingsPath": null,
+                "modelsPath": "/v1/models",
+                "scoreCriteria": [
+                    "not relevant to the query",
+                    "weakly relevant to the query",
+                    "moderately relevant to the query",
+                    "strongly relevant to the query",
+                    "directly and completely answers the query"
+                ]
+            },
+            "credentials": {
+                "apiKeyRequired": true,
+                "baseUrlRequired": false,
+                "baseUrlMode": "fixed",
+                "validationMode": "model_list"
+            },
+            "baseUrl": {
+                "allowOverride": false,
+                "requireHttps": true,
+                "allowPrivateNetwork": false,
+                "trimSuffixes": []
+            },
+            "modelDiscovery": {
+                "mode": "credential",
+                "paths": [{"capabilityKind": "decision", "path": "/v1/models"}],
+                "listedPricingCurrency": null
+            },
+            "capabilities": {
+                "chat": "unsupported",
+                "embeddings": "unsupported",
+                "vision": "unsupported",
+                "streaming": "unsupported",
+                "tools": "unsupported",
+                "modelDiscovery": "supported",
+                "decision": "supported"
+            }
+        })
+    }
+
+    #[test]
+    fn decision_capability_is_supported_exactly_for_the_decision_runtime() {
+        let valid = decision_provider_profile();
+        let parsed = parse_provider_profile("typesafe", &valid)
+            .expect("the decision provider shape must parse");
+        assert_eq!(parsed.capabilities.decision, ProviderCapabilityState::Supported);
+
+        let mut generative_runtime = decision_provider_profile();
+        generative_runtime["runtime"]["kind"] = serde_json::json!("openai_compatible");
+        assert!(
+            matches!(
+                parse_provider_profile("typesafe", &generative_runtime),
+                Err(ApiError::BadRequest(_))
+            ),
+            "a generative runtime must not declare the decision capability"
+        );
+
+        let mut undeclared = decision_provider_profile();
+        undeclared["capabilities"]["decision"] = serde_json::json!("unsupported");
+        assert!(
+            matches!(parse_provider_profile("typesafe", &undeclared), Err(ApiError::BadRequest(_))),
+            "the decision runtime must declare the decision capability"
+        );
+    }
+
+    #[test]
+    fn a_decision_provider_without_a_score_rubric_is_refused() {
+        let mut missing = decision_provider_profile();
+        missing["runtime"].as_object_mut().expect("runtime is an object").remove("scoreCriteria");
+        assert!(
+            matches!(parse_provider_profile("typesafe", &missing), Err(ApiError::BadRequest(_))),
+            "a decision runtime must declare its score rubric"
+        );
+
+        let mut too_short = decision_provider_profile();
+        too_short["runtime"]["scoreCriteria"] = serde_json::json!(["only one level"]);
+        assert!(
+            matches!(parse_provider_profile("typesafe", &too_short), Err(ApiError::BadRequest(_))),
+            "a rubric outside 2..=10 levels must be refused"
+        );
+
+        let mut blank_level = decision_provider_profile();
+        blank_level["runtime"]["scoreCriteria"] = serde_json::json!(["one", " ", "three"]);
+        assert!(
+            matches!(
+                parse_provider_profile("typesafe", &blank_level),
+                Err(ApiError::BadRequest(_))
+            ),
+            "a blank level must be refused"
+        );
+    }
+
+    #[test]
+    fn a_decision_provider_declares_only_decision_discovery_paths() {
+        let mut chat_path = decision_provider_profile();
+        chat_path["modelDiscovery"]["paths"][0]["capabilityKind"] = serde_json::json!("chat");
+        assert!(matches!(
+            parse_provider_profile("typesafe", &chat_path),
+            Err(ApiError::BadRequest(_))
+        ));
+    }
+
+    #[test]
+    fn a_decision_provider_marks_generative_capabilities_unsupported() {
+        let mut chat_capable = decision_provider_profile();
+        chat_capable["capabilities"]["chat"] = serde_json::json!("supported");
+        assert!(matches!(
+            parse_provider_profile("typesafe", &chat_capable),
+            Err(ApiError::BadRequest(_))
+        ));
+    }
 }
