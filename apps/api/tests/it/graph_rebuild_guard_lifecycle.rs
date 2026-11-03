@@ -120,12 +120,138 @@ impl RebuildGuardFixture {
     }
 }
 
+#[tokio::test]
+#[ignore = "requires local postgres service"]
+async fn fenced_deadline_releases_backend_during_blocked_statement() -> Result<()> {
+    let fixture = RebuildGuardFixture::create().await?;
+    let result = async {
+        let mut holder = fixture.observer_pool.begin().await?;
+        sqlx::query("select pg_advisory_xact_lock(918237)").execute(&mut *holder).await?;
+        let pool = fixture.pool().await?;
+        let deadline = chrono::Utc::now() + chrono::Duration::milliseconds(800);
+        let client_deadline = tokio::time::Instant::now() + Duration::from_millis(800);
+        let mut guard = match runtime_graph_repository::acquire_runtime_library_graph_rebuild_guard(
+            &pool,
+            fixture.library_id,
+            runtime_graph_repository::RuntimeGraphRebuildCoordination::FenceWriters { deadline },
+        )
+        .await?
+        {
+            runtime_graph_repository::RuntimeGraphRebuildGuardAcquireOutcome::Acquired(guard) => {
+                guard
+            }
+            _ => bail!("fenced guard unavailable"),
+        };
+        let pid = sqlx::query_scalar::<_, i32>("select pg_backend_pid()")
+            .fetch_one(guard.connection())
+            .await?;
+        let task = tokio::spawn(async move {
+            tokio::time::timeout_at(client_deadline, async move {
+                sqlx::query("select pg_advisory_xact_lock(918237)")
+                    .execute(guard.connection())
+                    .await
+            })
+            .await
+        });
+        wait_for_backend_lock(&fixture.observer_pool, pid, "pg_advisory_xact_lock(918237)").await?;
+        assert!(matches!(task.await?, Err(_) | Ok(Err(_))));
+        let gone = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let present = sqlx::query_scalar::<_, bool>(
+                    "select exists(select 1 from pg_stat_activity where pid=$1)",
+                )
+                .bind(pid)
+                .fetch_one(&fixture.observer_pool)
+                .await?;
+                if !present {
+                    return Ok::<_, sqlx::Error>(());
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await;
+        holder.rollback().await?;
+        pool.close().await;
+        ensure!(matches!(gone, Ok(Ok(()))), "backend remained active after cancellation");
+        Ok::<_, anyhow::Error>(())
+    }
+    .await;
+    let cleanup = fixture.cleanup().await;
+    result?;
+    cleanup
+}
+
+#[tokio::test]
+#[ignore = "requires local postgres service"]
+async fn fenced_deadline_releases_backend_waiting_for_raw_graph_lock() -> Result<()> {
+    let fixture = RebuildGuardFixture::create().await?;
+    let result = async {
+        let mut holder = fixture.observer_pool.begin().await?;
+        sqlx::query("select pg_advisory_xact_lock(hashtextextended($1::text, 0))")
+            .bind(fixture.library_id.to_string())
+            .execute(&mut *holder)
+            .await?;
+        let pool = fixture.pool().await?;
+        let pid = sqlx::query_scalar::<_, i32>("select pg_backend_pid()").fetch_one(&pool).await?;
+        let task_pool = pool.clone();
+        let library_id = fixture.library_id;
+        let deadline = chrono::Utc::now() + chrono::Duration::milliseconds(800);
+        let client_deadline = tokio::time::Instant::now() + Duration::from_millis(800);
+        let task = tokio::spawn(async move {
+            tokio::time::timeout_at(
+                client_deadline,
+                runtime_graph_repository::acquire_runtime_library_graph_rebuild_guard(
+                    &task_pool,
+                    library_id,
+                    runtime_graph_repository::RuntimeGraphRebuildCoordination::FenceWriters {
+                        deadline,
+                    },
+                ),
+            )
+            .await
+        });
+        wait_for_backend_lock(&fixture.observer_pool, pid, "pg_advisory_lock(hashtextextended")
+            .await?;
+        assert!(matches!(task.await?, Err(_) | Ok(Err(_))));
+        let gone = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let present = sqlx::query_scalar::<_, bool>(
+                    "select exists(select 1 from pg_stat_activity where pid=$1)",
+                )
+                .bind(pid)
+                .fetch_one(&fixture.observer_pool)
+                .await?;
+                if !present {
+                    return Ok::<_, sqlx::Error>(());
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await;
+        holder.rollback().await?;
+        pool.close().await;
+        ensure!(
+            matches!(gone, Ok(Ok(()))),
+            "backend remained active waiting for graph lock after cancellation"
+        );
+        Ok::<_, anyhow::Error>(())
+    }
+    .await;
+    let cleanup = fixture.cleanup().await;
+    result?;
+    cleanup
+}
+
 async fn acquire_rebuild_guard(
     pool: &PgPool,
     library_id: Uuid,
 ) -> Result<runtime_graph_repository::RuntimeGraphRebuildGuard> {
-    match runtime_graph_repository::acquire_runtime_library_graph_rebuild_guard(pool, library_id)
-        .await?
+    match runtime_graph_repository::acquire_runtime_library_graph_rebuild_guard(
+        pool,
+        library_id,
+        runtime_graph_repository::RuntimeGraphRebuildCoordination::Optimistic,
+    )
+    .await?
     {
         runtime_graph_repository::RuntimeGraphRebuildGuardAcquireOutcome::Acquired(guard) => {
             Ok(guard)
@@ -635,6 +761,7 @@ async fn assert_contender_busy_preserves_owner(
         runtime_graph_repository::acquire_runtime_library_graph_rebuild_guard(
             contender_pool,
             fixture.library_id,
+            runtime_graph_repository::RuntimeGraphRebuildCoordination::Optimistic,
         ),
     )
     .await

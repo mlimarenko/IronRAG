@@ -350,7 +350,7 @@
   font-size: 0.75rem;
 }
 .code-input {
-  font-family: ui-monospace, monospace;
+  font-family: var(--font-medeo-mono);
 }
 .wizard-steps {
   list-style: none;
@@ -690,7 +690,7 @@
   border: 1px solid var(--border);
   border-radius: 5px;
   color: var(--muted);
-  font-family: ui-monospace;
+  font-family: var(--font-medeo-mono);
   font-size: 0.75rem;
 }
 .mcp-endpoints {

@@ -208,6 +208,10 @@ async fn run_grounded_generate_stage(
     runtime_session: &mut RuntimeExecutionSession,
     prepared: crate::services::query::execution::PreparedAnswerQueryResult,
 ) -> Result<RuntimeAnswerQueryResult, QueryAnswerTaskFailure> {
+    // Answer owns draft selection and its one semantic suboperation before
+    // visibility/persistence. Do not emit a separate successful Verify stage
+    // around the already-completed call; exact paid work is attributed by
+    // QueryAnswerSemanticVerification and the retained debug iteration.
     if let Err(failure) = begin_query_runtime_stage(
         input.state.agent_runtime.executor(),
         runtime_session,

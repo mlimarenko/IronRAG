@@ -34,6 +34,92 @@ use ironrag_backend::{
 
 use content_lifecycle_support::ContentLifecycleFixture;
 
+#[tokio::test]
+#[ignore = "requires isolated postgres and redis services"]
+async fn exact_external_key_http_uses_active_collection_and_authorization() -> Result<()> {
+    use axum::{
+        body::Body,
+        http::{Request, StatusCode},
+    };
+    use tower::ServiceExt;
+
+    let fixture = ContentLifecycleFixture::create().await?;
+    let result = async {
+        let pool = &fixture.state.persistence.postgres;
+        let key = "Case /?#&=+";
+        let content = &fixture.state.application_services.content;
+        let document = content.create_document(&fixture.state, create_command(&fixture, key, "exact.txt")).await?;
+        // A newer tombstone with the same key must not hide the active row.
+        sqlx::query("insert into content_document (workspace_id, library_id, external_key, document_state, deleted_at, created_at) values ($1, $2, $3, 'deleted', now(), now() + interval '1 second')")
+            .bind(fixture.workspace_id).bind(fixture.library_id).bind(key).execute(pool).await?;
+        let token = crate::iam_token_support::mint_api_token(pool, Some(fixture.workspace_id), "workspace", "exact-read", &["documents:read"]).await?;
+        let foreign_workspace = ironrag_backend::infra::repositories::catalog_repository::create_workspace(pool, "exact-foreign", "Foreign", None).await?;
+        let foreign = crate::iam_token_support::mint_api_token(pool, Some(foreign_workspace.id), "workspace", "exact-foreign", &["documents:read"]).await?;
+        let denied = crate::iam_token_support::mint_api_token(pool, Some(fixture.workspace_id), "workspace", "exact-denied", &["workspace:read"]).await?;
+        let secondary_library: Uuid = sqlx::query_scalar("insert into catalog_library (id, workspace_id, slug, display_name, lifecycle_state, created_at, updated_at) values ($1, $2, 'exact-secondary', 'Exact secondary', 'active', now(), now()) returning id")
+            .bind(Uuid::now_v7()).bind(fixture.workspace_id).fetch_one(pool).await?;
+        let mut secondary_command = create_command(&fixture, key, "secondary.txt");
+        secondary_command.library_id = secondary_library;
+        let secondary = content.create_document(&fixture.state, secondary_command).await?;
+        let failed = admit_content_with_failpoint(pool, &admission_request(&fixture, "failed-key", "failed-exact"), None).await?.into_bundle();
+        sqlx::query("update content_mutation set mutation_state='failed', completed_at=now(), failure_code='fixture_failure' where id=$1")
+            .bind(failed.mutation.id).execute(pool).await?;
+        let router = ironrag_backend::interfaces::http::content::router().with_state(fixture.state.clone());
+        let base = format!("/content/libraries/{}/documents/by-external-key", fixture.library_id);
+        let request = |query: &str, bearer: Option<&str>| {
+            let mut builder = Request::get(format!("{base}?externalKey={query}"));
+            if let Some(bearer) = bearer { builder = builder.header("authorization", format!("Bearer {bearer}")); }
+            builder.body(Body::empty()).expect("request")
+        };
+        let response = router.clone().oneshot(request("Case%20%2F%3F%23%26%3D%2B", Some(&token.plaintext))).await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let item: serde_json::Value = serde_json::from_slice(&axum::body::to_bytes(response.into_body(), 65536).await?)?;
+        assert_eq!(item["id"], document.id.to_string());
+        assert_eq!(item["externalKey"], key);
+        assert!(item["status"].is_string());
+        let collection = router.clone().oneshot(
+            Request::get(format!("/content/libraries/{}/documents?ids={}", fixture.library_id, document.id))
+                .header("authorization", format!("Bearer {}", token.plaintext)).body(Body::empty())?
+        ).await?;
+        assert_eq!(collection.status(), StatusCode::OK);
+        let page: serde_json::Value = serde_json::from_slice(&axum::body::to_bytes(collection.into_body(), 65536).await?)?;
+        assert_eq!(item, page["items"][0]);
+        assert_eq!(item["status"], "empty");
+        let secondary_response = router.clone().oneshot(
+            Request::get(format!("/content/libraries/{secondary_library}/documents/by-external-key?externalKey=Case%20%2F%3F%23%26%3D%2B"))
+                .header("authorization", format!("Bearer {}", token.plaintext)).body(Body::empty())?
+        ).await?;
+        assert_eq!(secondary_response.status(), StatusCode::OK);
+        let secondary_item: serde_json::Value = serde_json::from_slice(&axum::body::to_bytes(secondary_response.into_body(), 65536).await?)?;
+        assert_eq!(secondary_item["id"], secondary.id.to_string());
+        let failed_response = router.clone().oneshot(request("failed-key", Some(&token.plaintext))).await?;
+        assert_eq!(failed_response.status(), StatusCode::OK);
+        let failed_item: serde_json::Value = serde_json::from_slice(&axum::body::to_bytes(failed_response.into_body(), 65536).await?)?;
+        assert_eq!(failed_item["id"], failed.document.id.to_string());
+        assert_eq!(failed_item["status"], "failed");
+        assert_eq!(failed_item["failureCode"], "fixture_failure");
+        for query in ["Case", "case%20%2F%3F%23%26%3D%2B", "missing"] {
+            assert_eq!(router.clone().oneshot(request(query, Some(&token.plaintext))).await?.status(), StatusCode::NOT_FOUND);
+        }
+        assert_eq!(router.clone().oneshot(request("", Some(&token.plaintext))).await?.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(router.clone().oneshot(request("%00", Some(&token.plaintext))).await?.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(router.clone().oneshot(request("missing", None)).await?.status(), StatusCode::UNAUTHORIZED);
+        let denied_existing = router.clone().oneshot(request("Case%20%2F%3F%23%26%3D%2B", Some(&foreign.plaintext))).await?.status();
+        let denied_missing = router.clone().oneshot(request("missing", Some(&foreign.plaintext))).await?.status();
+        assert_eq!(denied_existing, StatusCode::UNAUTHORIZED);
+        assert_eq!(denied_existing, denied_missing);
+        let denied_existing = router.clone().oneshot(request("Case%20%2F%3F%23%26%3D%2B", Some(&denied.plaintext))).await?.status();
+        let denied_missing = router.clone().oneshot(request("missing", Some(&denied.plaintext))).await?.status();
+        assert_eq!(denied_existing, StatusCode::UNAUTHORIZED);
+        assert_eq!(denied_existing, denied_missing);
+        content.delete_document(&fixture.state, document.id).await?;
+        assert_eq!(router.oneshot(request("Case%20%2F%3F%23%26%3D%2B", Some(&token.plaintext))).await?.status(), StatusCode::NOT_FOUND);
+        Ok(())
+    }.await;
+    fixture.cleanup().await?;
+    result
+}
+
 /// Every projection row holding `external_key` in this library, so a test can
 /// assert both that the key moved and that it is held exactly once.
 async fn projection_holders(

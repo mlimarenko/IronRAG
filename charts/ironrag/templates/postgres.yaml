@@ -87,22 +87,35 @@ spec:
           ports:
             - containerPort: 5432
               name: tcp
+          # Recovery and load must not look like a dead postmaster. Keep
+          # pg_isready's own deadline below the kubelet exec deadline.
+          startupProbe:
+            exec:
+              command:
+                - sh
+                - -c
+                - pg_isready -t 5 -U "$POSTGRES_USER" -d "$POSTGRES_DB"
+            timeoutSeconds: 10
+            periodSeconds: 10
+            failureThreshold: 30
           readinessProbe:
             exec:
               command:
                 - sh
                 - -c
-                - pg_isready -U "$POSTGRES_USER" -d "$POSTGRES_DB"
-            initialDelaySeconds: 5
+                - pg_isready -t 3 -U "$POSTGRES_USER" -d "$POSTGRES_DB"
+            timeoutSeconds: 5
             periodSeconds: 10
+            failureThreshold: 3
           livenessProbe:
             exec:
               command:
                 - sh
                 - -c
-                - pg_isready -U "$POSTGRES_USER" -d "$POSTGRES_DB"
-            initialDelaySeconds: 15
+                - pg_isready -t 5 -U "$POSTGRES_USER" -d "$POSTGRES_DB"
+            timeoutSeconds: 10
             periodSeconds: 20
+            failureThreshold: 6
           volumeMounts:
             - name: data
               mountPath: /var/lib/postgresql

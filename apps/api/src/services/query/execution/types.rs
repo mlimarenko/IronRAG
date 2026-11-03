@@ -278,6 +278,8 @@ pub(crate) struct AnswerVerificationStage {
 
 #[derive(Debug, Clone)]
 pub(crate) struct RuntimeAnswerVerification {
+    pub(crate) semantic_verification:
+        Option<ironrag_contracts::assistant::semantic_verification::SemanticVerificationReport>,
     pub(crate) state: QueryVerificationState,
     pub(crate) warnings: Vec<QueryVerificationWarning>,
     pub(crate) unsupported_literals: Vec<String>,

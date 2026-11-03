@@ -2,7 +2,7 @@ mod errors;
 mod kind;
 mod mime_detection;
 mod normalization;
-mod picture_ocr;
+mod visual_recognition;
 
 use hex;
 use sha2::{Digest, Sha256};
@@ -15,7 +15,7 @@ use crate::{
             RecognitionStructureTier,
         },
     },
-    integrations::{docling, llm::LlmGateway},
+    integrations::{llm::LlmGateway, xberg},
     shared::extraction::{
         self, ExtractionOutput, ExtractionSourceMetadata, ExtractionStructureHints,
     },
@@ -23,8 +23,10 @@ use crate::{
 
 use self::kind::lower_file_extension;
 use self::normalization::{normalize_extracted_content, with_extraction_quality_markers};
-pub(crate) use self::picture_ocr::aggregate_vision_picture_usage_json;
-use self::picture_ocr::{augment_with_vision_picture_ocr, extract_image_with_vision_provider};
+pub(crate) use self::visual_recognition::aggregate_vision_usage_json;
+pub use self::visual_recognition::{
+    VisualRecognitionInput, VisualRecognitionReceipt, recognize_native_visuals,
+};
 pub use self::{
     errors::{
         ExtractionFailureClass, FileExtractError, MultipartFileBodyErrorKind, UploadAdmissionError,
@@ -33,11 +35,6 @@ pub use self::{
     kind::UploadFileKind,
     mime_detection::{
         detect_declared_upload_file_kind, detect_upload_file_kind, validate_upload_file_admission,
-    },
-    picture_ocr::{
-        VisionOcrInput, append_docling_picture_ocr_fallback,
-        augment_docling_output_with_vision_picture_ocr, docling_embedded_picture_vision_enabled,
-        raster_image_vision_enabled,
     },
 };
 
@@ -105,6 +102,7 @@ pub struct FileExtractionPlan {
 }
 
 pub struct FileExtractionRequest<'a> {
+    pub cancellation_token: Option<&'a tokio_util::sync::CancellationToken>,
     pub gateway: &'a dyn LlmGateway,
     pub vision_provider: Option<&'a ProviderModelSelection>,
     pub vision_api_key: Option<&'a str>,
@@ -116,9 +114,7 @@ pub struct FileExtractionRequest<'a> {
     pub recognition_policy: &'a LibraryRecognitionPolicy,
 }
 
-pub(crate) fn docling_failure_class(
-    error: &docling::DoclingExtractionError,
-) -> ExtractionFailureClass {
+pub(crate) fn xberg_failure_class(error: &xberg::XbergExtractionError) -> ExtractionFailureClass {
     if error.memory_failure_code().is_some() {
         return ExtractionFailureClass::OperationalTerminal;
     }
@@ -126,13 +122,16 @@ pub(crate) fn docling_failure_class(
         // Invalid extractor output says nothing conclusive about the input
         // bytes. Retrying unchanged output is wasteful, but permanently
         // rejecting the content would discard a recoverable document.
-        docling::DoclingExtractionError::InvalidUtf8(_)
-        | docling::DoclingExtractionError::InvalidJson(_)
-        | docling::DoclingExtractionError::EmptyOutput => {
+        xberg::XbergExtractionError::InvalidUtf8(_)
+        | xberg::XbergExtractionError::InvalidJson(_)
+        | xberg::XbergExtractionError::EmptyOutput
+        | xberg::XbergExtractionError::ProducerRejected { .. }
+        | xberg::XbergExtractionError::Contract(_)
+        | xberg::XbergExtractionError::Configuration(_) => {
             ExtractionFailureClass::OperationalTerminal
         }
-        docling::DoclingExtractionError::PageExtractionFailed { source, .. } => {
-            docling_failure_class(source)
+        xberg::XbergExtractionError::PageExtractionFailed { source, .. } => {
+            xberg_failure_class(source)
         }
         _ => ExtractionFailureClass::OperationalRetryable,
     }
@@ -175,6 +174,10 @@ pub fn extraction_quality_from_source_map(
         .map(str::to_string)
         .or_else(|| {
             quality
+                .filter(|item| {
+                    item.get("recognition_capability").and_then(serde_json::Value::as_str)
+                        == Some("image_ocr")
+                })
                 .and_then(|item| item.get("recognition_engine"))
                 .and_then(serde_json::Value::as_str)
                 .map(recognition_engine_ocr_source)
@@ -233,18 +236,8 @@ pub fn build_local_file_extraction_plan(
                 // through the same record renderer as JSONL. Non-record-shaped
                 // payloads return None above and fall through to the text path.
                 record_output
-            } else if mime_detection::declared_payload_is_html(file_name, mime_type)
-                || mime_detection::payload_looks_like_html(file_bytes)
-            {
-                extraction::html_main_content::extract_html_main_content(file_bytes, mime_type)
-                    .map_err(|error| FileExtractError::ExtractionFailed {
-                        file_kind,
-                        class: ExtractionFailureClass::ContentInvalid,
-                        message: error.to_string(),
-                    })?
             } else {
-                extraction::text_like::extract_text_like(file_bytes)
-                    .map_err(|_| FileExtractError::InvalidUtf8)?
+                return Err(runtime_xberg_required_error(file_kind));
             };
             Ok(build_plan_from_extraction(
                 file_kind,
@@ -253,33 +246,168 @@ pub fn build_local_file_extraction_plan(
             ))
         }
         UploadFileKind::Pdf | UploadFileKind::Docx | UploadFileKind::Pptx => {
-            Err(runtime_docling_required_error(file_kind))
+            Err(runtime_xberg_required_error(file_kind))
         }
-        UploadFileKind::Image
-            if docling_source_format(file_kind, file_name, mime_type).is_some() =>
-        {
-            Err(runtime_docling_required_error(file_kind))
+        UploadFileKind::Image if xberg_source_format(file_kind, file_name, mime_type).is_some() => {
+            Err(runtime_xberg_required_error(file_kind))
         }
         UploadFileKind::Image => Err(FileExtractError::ExtractionFailed {
             file_kind,
             class: ExtractionFailureClass::OperationalTerminal,
             message: "image extraction requires a runtime provider context".to_string(),
         }),
-        UploadFileKind::Spreadsheet => Ok(build_plan_from_extraction(
-            file_kind,
-            extraction::tabular::extract_tabular(file_name, mime_type, file_bytes).map_err(
-                |error| FileExtractError::ExtractionFailed {
-                    file_kind,
-                    // The typed tabular error carries its own verdict, so the
-                    // class is never inferred from a message or a fallback.
-                    class: error.failure_class(),
-                    message: error.to_string(),
-                },
-            )?,
-            deterministic_recognition_profile(file_kind),
-        )),
+        UploadFileKind::Spreadsheet
+            if extraction::tabular::native_tabular_mime(file_name, mime_type, file_bytes)
+                .is_none() =>
+        {
+            Ok(build_plan_from_extraction(
+                file_kind,
+                extraction::tabular::extract_tabular(file_name, mime_type, file_bytes, None)
+                    .map_err(|error| FileExtractError::ExtractionFailed {
+                        file_kind,
+                        // The typed tabular error carries its own verdict, so the
+                        // class is never inferred from a message or a fallback.
+                        class: error.failure_class(),
+                        message: error.to_string(),
+                    })?,
+                deterministic_recognition_profile(file_kind),
+            ))
+        }
+        UploadFileKind::Spreadsheet => Err(runtime_xberg_required_error(file_kind)),
         UploadFileKind::Binary => Err(FileExtractError::UnsupportedBinary),
     }
+}
+
+/// Runs general formats through the native child, then applies only product
+/// projections. Record semantics and declared XLSX Tables remain local owners.
+pub async fn build_model_free_file_extraction_plan(
+    file_name: Option<&str>,
+    mime_type: Option<&str>,
+    bytes: Vec<u8>,
+) -> Result<FileExtractionPlan, FileExtractError> {
+    let file_kind = detect_upload_file_kind(file_name, mime_type, &bytes);
+    if let Some(source_format) = xberg_source_format(file_kind, file_name, mime_type) {
+        let source = xberg::XbergSource { file_name, mime_type, source_format };
+        let native = xberg::extract_native(source, bytes).await.map_err(|error| {
+            FileExtractError::ExtractionFailed {
+                file_kind,
+                class: xberg_failure_class(&error),
+                message: error.to_string(),
+            }
+        })?;
+        let output = xberg::project_native(native, source).map_err(|error| {
+            FileExtractError::ExtractionFailed {
+                file_kind,
+                class: xberg_failure_class(&error),
+                message: error.to_string(),
+            }
+        })?;
+        return Ok(build_plan_from_extraction(
+            file_kind,
+            output,
+            xberg_owned_recognition_profile(file_kind, source_format)?,
+        ));
+    }
+    let tabular_mime = (file_kind == UploadFileKind::Spreadsheet)
+        .then(|| extraction::tabular::native_tabular_mime(file_name, mime_type, &bytes))
+        .flatten();
+    let local = build_local_file_extraction_plan(file_name, mime_type, &bytes);
+    if local.is_ok()
+        || !matches!(file_kind, UploadFileKind::TextLike | UploadFileKind::Spreadsheet)
+        || declared_payload_is_record_jsonl(file_name, mime_type)
+        || (file_kind == UploadFileKind::Spreadsheet && tabular_mime.is_none())
+    {
+        return local;
+    }
+    let html = file_kind == UploadFileKind::TextLike
+        && (mime_detection::declared_payload_is_html(file_name, mime_type)
+            || mime_detection::payload_looks_like_html(&bytes));
+    if !html
+        && (file_kind == UploadFileKind::TextLike
+            || matches!(tabular_mime, Some("text/csv" | "text/tab-separated-values")))
+        && std::str::from_utf8(&bytes).is_err()
+    {
+        if file_kind == UploadFileKind::Spreadsheet {
+            return Err(FileExtractError::ExtractionFailed {
+                file_kind,
+                class: ExtractionFailureClass::ContentInvalid,
+                message: "delimited table input is not valid UTF-8".into(),
+            });
+        }
+        return Err(FileExtractError::InvalidUtf8);
+    }
+    let extension = lower_file_extension(file_name).unwrap_or_else(|| "txt".into());
+    let source_format = if html {
+        "html"
+    } else {
+        match extension.as_str() {
+            "md" | "markdown" => "md",
+            "rst" => "rst",
+            "xml" => "xml",
+            "svg" => "svg",
+            "csv" => "csv",
+            "tsv" => "tsv",
+            "xls" => "xls",
+            "xlsb" => "xlsb",
+            "ods" => "ods",
+            _ => "txt",
+        }
+    };
+    let html_mime = mime_type.and_then(|mime| mime.split_once(';')).map_or_else(
+        || "text/html".to_owned(),
+        |(_, parameters)| format!("text/html;{parameters}"),
+    );
+    let resolved_mime = tabular_mime.unwrap_or(if html {
+        &html_mime
+    } else {
+        match source_format {
+            "md" => "text/markdown",
+            "rst" => "text/x-rst",
+            _ => "text/plain",
+        }
+    });
+    let source = xberg::XbergSource { file_name, mime_type: Some(resolved_mime), source_format };
+    let native = xberg::extract_native(source, bytes.clone()).await.map_err(|error| {
+        FileExtractError::ExtractionFailed {
+            file_kind,
+            class: xberg_failure_class(&error),
+            message: error.to_string(),
+        }
+    })?;
+    let mut output = if file_kind == UploadFileKind::Spreadsheet {
+        extraction::tabular::extract_tabular(file_name, mime_type, &bytes, Some(&native)).map_err(
+            |error| FileExtractError::ExtractionFailed {
+                file_kind,
+                class: error.failure_class(),
+                message: error.to_string(),
+            },
+        )?
+    } else if html {
+        extraction::html_main_content::extract_html_main_content(&bytes, mime_type, &native.content)
+            .map_err(|error| FileExtractError::ExtractionFailed {
+                file_kind,
+                class: ExtractionFailureClass::OperationalTerminal,
+                message: error.to_string(),
+            })?
+    } else {
+        extraction::text_like::extract_text_like(&native.content).map_err(|error| {
+            FileExtractError::ExtractionFailed {
+                file_kind,
+                class: ExtractionFailureClass::OperationalTerminal,
+                message: error.to_string(),
+            }
+        })?
+    };
+    let provenance = xberg::project_native(native, source).map_err(|error| {
+        FileExtractError::ExtractionFailed {
+            file_kind,
+            class: xberg_failure_class(&error),
+            message: error.to_string(),
+        }
+    })?;
+    output.warnings.extend(provenance.warnings);
+    output.source_map["native_extraction"] = provenance.source_map;
+    Ok(build_plan_from_extraction(file_kind, output, deterministic_recognition_profile(file_kind)))
 }
 
 /// Builds a runtime extraction plan, delegating image extraction to the configured provider.
@@ -292,6 +420,7 @@ pub async fn build_runtime_file_extraction_plan(
     request: FileExtractionRequest<'_>,
 ) -> Result<FileExtractionPlan, FileExtractError> {
     let FileExtractionRequest {
+        cancellation_token,
         gateway,
         vision_provider,
         vision_api_key,
@@ -304,125 +433,92 @@ pub async fn build_runtime_file_extraction_plan(
     } = request;
     let file_kind = detect_upload_file_kind(file_name, mime_type, &file_bytes);
 
-    if let Some(source_format) = docling_source_format(file_kind, file_name, mime_type) {
-        let vision_binding_available = vision_provider.is_some();
-        let recognition_profile = docling_owned_recognition_profile(
+    let input = VisualRecognitionInput {
+        gateway,
+        vision_provider,
+        api_key: vision_api_key.unwrap_or_default(),
+        base_url: vision_base_url,
+        extra_parameters_json: vision_extra_parameters_json,
+        cancellation_token,
+    };
+    let _ = recognition_policy; // The policy domain validates the singleton Vision policy.
+    if let Some(source_format) = xberg_source_format(file_kind, file_name, mime_type) {
+        let source = xberg::XbergSource { file_name, mime_type, source_format };
+        let mut native = xberg::extract_native(source, file_bytes).await.map_err(|error| {
+            FileExtractError::ExtractionFailed {
+                file_kind,
+                class: xberg_failure_class(&error),
+                message: error.to_string(),
+            }
+        })?;
+        let receipt = recognize_native_visuals(&mut native, file_kind, input).await?;
+        let calls = receipt.calls.clone();
+        let mut output =
+            xberg::project_native(native, source).map_err(|_| FileExtractError::VisionFailed {
+                file_kind,
+                class: ExtractionFailureClass::OperationalTerminal,
+                message: "native extraction projection failed after visual recognition".into(),
+                calls: calls.clone(),
+            })?;
+        receipt.apply(&mut output);
+        if output.content_text.trim().is_empty() {
+            return Err(FileExtractError::VisionFailed {
+                file_kind,
+                class: ExtractionFailureClass::ContentInvalid,
+                message: "document contains no usable native or recognized text".into(),
+                calls,
+            });
+        }
+        return Ok(build_plan_from_extraction(
             file_kind,
-            source_format,
-            recognition_policy,
-            vision_binding_available,
-        )?;
-        return match recognition_profile.engine {
-            RecognitionEngine::Docling => {
-                let mut output = docling::extract_document(
-                    docling::DoclingSource { file_name, mime_type, source_format },
-                    file_bytes,
-                )
-                .await
-                .map_err(|error| FileExtractError::ExtractionFailed {
-                    file_kind,
-                    // Extractor failures cannot prove the source bytes
-                    // unsupported, even when its output is malformed.
-                    class: docling_failure_class(&error),
-                    message: error.to_string(),
-                })?;
-                if docling_embedded_picture_vision_enabled(
-                    recognition_policy,
-                    vision_binding_available,
-                ) {
-                    augment_with_vision_picture_ocr(
-                        &mut output,
-                        file_kind,
-                        VisionOcrInput {
-                            gateway,
-                            vision_provider,
-                            api_key: vision_api_key,
-                            base_url: vision_base_url,
-                            extra_parameters_json: vision_extra_parameters_json,
-                        },
-                    )
-                    .await?;
-                } else {
-                    append_docling_picture_ocr_fallback(&mut output);
-                    output.extracted_images.clear();
-                }
-                Ok(build_plan_from_extraction(file_kind, output, recognition_profile))
-            }
-            RecognitionEngine::Vision => {
-                extract_image_with_vision_provider(
-                    VisionOcrInput {
-                        gateway,
-                        vision_provider,
-                        api_key: vision_api_key,
-                        base_url: vision_base_url,
-                        extra_parameters_json: vision_extra_parameters_json,
-                    },
-                    file_kind,
-                    mime_type,
-                    &file_bytes,
-                    recognition_profile,
-                )
-                .await
-            }
-            RecognitionEngine::Native => Err(unsupported_recognition_engine_error(
-                file_kind,
-                RecognitionEngine::Native,
-                RecognitionCapability::ImageOcr,
-            )),
-        };
+            output,
+            xberg_owned_recognition_profile(file_kind, source_format)?,
+        ));
     }
-
-    match file_kind {
-        UploadFileKind::Image => {
-            extract_image_with_vision_provider(
-                VisionOcrInput {
-                    gateway,
-                    vision_provider,
-                    api_key: vision_api_key,
-                    base_url: vision_base_url,
-                    extra_parameters_json: vision_extra_parameters_json,
-                },
+    if file_kind == UploadFileKind::Image {
+        let provider = vision_provider.ok_or_else(|| missing_vision_binding_error(file_kind))?;
+        let empty = serde_json::json!({});
+        let output = extraction::image::extract_image_with_provider(
+            gateway,
+            extraction::image::VisionProviderInput {
+                provider_kind: &provider.provider_kind,
+                model_name: &provider.model_name,
+                api_key: input.api_key,
+                base_url: vision_base_url,
+                extra_parameters_json: vision_extra_parameters_json.unwrap_or(&empty),
+            },
+            mime_type.unwrap_or("image/png"),
+            &file_bytes,
+            cancellation_token,
+        )
+        .await
+        .map_err(|error| FileExtractError::VisionFailed {
+            file_kind,
+            class: ExtractionFailureClass::OperationalRetryable,
+            message: error.message.into(),
+            calls: error.calls,
+        })?;
+        if output.content_text.trim().is_empty() {
+            let calls = serde_json::from_value(output.usage_json["vision_calls"].clone())
+                .unwrap_or_default();
+            return Err(FileExtractError::VisionFailed {
                 file_kind,
-                mime_type,
-                &file_bytes,
-                RecognitionProfile {
-                    capability: RecognitionCapability::ImageOcr,
-                    engine: RecognitionEngine::Vision,
-                    structure_tier: RecognitionStructureTier::Flat,
-                },
-            )
-            .await
+                class: ExtractionFailureClass::ContentInvalid,
+                message: "image contains no readable text".into(),
+                calls,
+            });
         }
-        UploadFileKind::Pdf | UploadFileKind::Docx | UploadFileKind::Pptx => {
-            Err(runtime_docling_required_error(file_kind))
-        }
-        _ => {
-            // Text / HTML / non-Docling spreadsheet parsers are synchronous
-            // and CPU-heavy (scraper DOM build, calamine sheet scan). Run
-            // them on the blocking pool so the async
-            // runtime's worker threads stay available for concurrent jobs'
-            // network I/O.
-            let file_name_owned = file_name.map(str::to_string);
-            let mime_type_owned = mime_type.map(str::to_string);
-            let recognition_profile = deterministic_recognition_profile(file_kind);
-            tokio::task::spawn_blocking(move || {
-                build_local_file_extraction_plan(
-                    file_name_owned.as_deref(),
-                    mime_type_owned.as_deref(),
-                    &file_bytes,
-                )
-            })
-            .await
-            .map_err(|join_err| FileExtractError::ExtractionFailed {
-                file_kind,
-                // A panicked blocking extraction task is a worker fault, not a
-                // statement about the payload.
-                class: ExtractionFailureClass::OperationalRetryable,
-                message: format!("extraction task failed: {join_err}"),
-            })?
-            .map(|plan| with_plan_recognition_profile(plan, recognition_profile))
-        }
+        return Ok(build_plan_from_extraction(
+            file_kind,
+            output,
+            RecognitionProfile {
+                capability: RecognitionCapability::ImageOcr,
+                engine: RecognitionEngine::Vision,
+                structure_tier: RecognitionStructureTier::Flat,
+            },
+        ));
     }
+    build_model_free_file_extraction_plan(file_name, mime_type, file_bytes).await
 }
 
 /// Builds a text-only extraction plan for inline content that is already UTF-8 text.
@@ -449,26 +545,33 @@ pub fn build_inline_text_extraction_plan(text: &str) -> FileExtractionPlan {
     build_plan_from_extraction(
         UploadFileKind::TextLike,
         output,
-        deterministic_recognition_profile(UploadFileKind::TextLike),
+        RecognitionProfile {
+            capability: RecognitionCapability::TextDecode,
+            engine: RecognitionEngine::Native,
+            structure_tier: RecognitionStructureTier::Paragraph,
+        },
     )
 }
 
 /// Builds an extraction plan for inline text when the caller knows the logical
 /// file name or MIME type. This keeps append/edit materialization on the same
 /// deterministic adapter path as uploads.
-pub fn build_inline_text_extraction_plan_for_source(
+pub async fn build_inline_text_extraction_plan_for_source(
     text: &str,
     file_name: Option<&str>,
     mime_type: Option<&str>,
 ) -> Result<FileExtractionPlan, FileExtractError> {
-    build_local_file_extraction_plan(file_name, mime_type, text.as_bytes())
+    build_model_free_file_extraction_plan(file_name, mime_type, text.as_bytes().to_vec()).await
 }
 
-fn build_plan_from_extraction(
+pub(crate) fn build_plan_from_extraction(
     file_kind: UploadFileKind,
     output: ExtractionOutput,
-    recognition_profile: RecognitionProfile,
+    mut recognition_profile: RecognitionProfile,
 ) -> FileExtractionPlan {
+    if output.extraction_kind == "record_jsonl" || output.source_metadata.source_format == "xlsx" {
+        recognition_profile.engine = RecognitionEngine::Native;
+    }
     let ExtractionOutput {
         extraction_kind,
         content_text,
@@ -499,12 +602,7 @@ fn build_plan_from_extraction(
     // extracted_images dropped here — image bytes no longer needed.
     drop(extracted_images);
 
-    let normalized = normalize_extracted_content(
-        file_kind,
-        recognition_profile.engine,
-        &content_text,
-        &structure_hints,
-    );
+    let normalized = normalize_extracted_content(file_kind, &content_text, &structure_hints);
     let has_source_text = !normalized.source_text.trim().is_empty();
     let has_normalized_text = !normalized.normalized_text.trim().is_empty();
     let source_format_metadata = ExtractionSourceMetadata {
@@ -543,13 +641,13 @@ fn build_plan_from_extraction(
 }
 
 #[must_use]
-pub fn build_docling_pdf_extraction_plan(output: ExtractionOutput) -> FileExtractionPlan {
+pub fn build_xberg_pdf_extraction_plan(output: ExtractionOutput) -> FileExtractionPlan {
     build_plan_from_extraction(
         UploadFileKind::Pdf,
         output,
         RecognitionProfile {
             capability: RecognitionCapability::DocumentLayout,
-            engine: RecognitionEngine::Docling,
+            engine: RecognitionEngine::Xberg,
             structure_tier: RecognitionStructureTier::Layout,
         },
     )
@@ -559,72 +657,40 @@ const fn deterministic_recognition_profile(file_kind: UploadFileKind) -> Recogni
     match file_kind {
         UploadFileKind::Spreadsheet => RecognitionProfile {
             capability: RecognitionCapability::TabularParse,
-            engine: RecognitionEngine::Native,
+            engine: RecognitionEngine::Xberg,
             structure_tier: RecognitionStructureTier::Layout,
         },
         _ => RecognitionProfile {
             capability: RecognitionCapability::TextDecode,
-            engine: RecognitionEngine::Native,
+            engine: RecognitionEngine::Xberg,
             structure_tier: RecognitionStructureTier::Paragraph,
         },
     }
 }
 
-fn docling_owned_recognition_profile(
+pub(crate) fn xberg_owned_recognition_profile(
     file_kind: UploadFileKind,
     source_format: &str,
-    recognition_policy: &LibraryRecognitionPolicy,
-    vision_binding_available: bool,
 ) -> Result<RecognitionProfile, FileExtractError> {
     match file_kind {
         UploadFileKind::Pdf | UploadFileKind::Docx | UploadFileKind::Pptx => {
             Ok(RecognitionProfile {
                 capability: RecognitionCapability::DocumentLayout,
-                engine: RecognitionEngine::Docling,
+                engine: RecognitionEngine::Xberg,
                 structure_tier: RecognitionStructureTier::Layout,
             })
         }
-        UploadFileKind::Image
-            if raster_image_vision_enabled(recognition_policy, vision_binding_available) =>
-        {
-            Ok(RecognitionProfile {
-                capability: RecognitionCapability::ImageOcr,
-                engine: RecognitionEngine::Vision,
-                structure_tier: RecognitionStructureTier::Flat,
-            })
-        }
-        UploadFileKind::Image => match recognition_policy.raster_image_engine {
-            RecognitionEngine::Docling | RecognitionEngine::Vision => Ok(RecognitionProfile {
-                capability: RecognitionCapability::ImageOcr,
-                engine: RecognitionEngine::Docling,
-                structure_tier: RecognitionStructureTier::Layout,
-            }),
-            engine => Err(unsupported_recognition_engine_error(
-                file_kind,
-                engine,
-                RecognitionCapability::ImageOcr,
-            )),
-        },
-        UploadFileKind::TextLike | UploadFileKind::Spreadsheet | UploadFileKind::Binary => {
-            Err(FileExtractError::ExtractionFailed {
-                file_kind,
-                // A recognition-policy/source-format mismatch is an operator
-                // configuration fault, not a rejected payload.
-                class: ExtractionFailureClass::OperationalTerminal,
-                message: format!(
-                    "docling source format {source_format} is not valid for {file_kind:?}"
-                ),
-            })
-        }
+        UploadFileKind::Image => Ok(RecognitionProfile {
+            capability: RecognitionCapability::ImageOcr,
+            engine: RecognitionEngine::Vision,
+            structure_tier: RecognitionStructureTier::Layout,
+        }),
+        _ => Err(FileExtractError::ExtractionFailed {
+            file_kind,
+            class: ExtractionFailureClass::OperationalTerminal,
+            message: format!("native source format {source_format} is not valid for {file_kind:?}"),
+        }),
     }
-}
-
-fn with_plan_recognition_profile(
-    mut plan: FileExtractionPlan,
-    recognition_profile: RecognitionProfile,
-) -> FileExtractionPlan {
-    plan.source_map = with_recognition_source_map(plan.source_map, recognition_profile);
-    plan
 }
 
 fn with_recognition_source_map(
@@ -648,44 +714,34 @@ fn with_recognition_source_map(
 
 fn recognition_engine_ocr_source(engine: &str) -> String {
     match engine {
-        "docling" => "docling".to_string(),
+        "xberg" => "xberg".to_string(),
         "vision" => "vision_llm".to_string(),
         other => other.to_string(),
     }
 }
 
-fn unsupported_recognition_engine_error(
-    file_kind: UploadFileKind,
-    engine: RecognitionEngine,
-    capability: RecognitionCapability,
-) -> FileExtractError {
+fn missing_vision_binding_error(file_kind: UploadFileKind) -> FileExtractError {
     FileExtractError::ExtractionFailed {
         file_kind,
-        // A recognition engine that cannot serve the capability is an operator
-        // policy gap; the payload is not at fault.
         class: ExtractionFailureClass::OperationalTerminal,
-        message: format!(
-            "recognition engine {engine} does not support {} for {} uploads",
-            capability.as_str(),
-            file_kind.display_name()
-        ),
+        message: "explicit Vision recognition requires an active extract_text binding; local OCR is not a fallback".into(),
     }
 }
 
-fn runtime_docling_required_error(file_kind: UploadFileKind) -> FileExtractError {
+fn runtime_xberg_required_error(file_kind: UploadFileKind) -> FileExtractError {
     FileExtractError::ExtractionFailed {
         file_kind,
-        // The file kind needs the runtime docling path; the deterministic local
+        // The file kind needs the runtime xberg path; the deterministic local
         // path is the wrong adapter, which no retry of the same call fixes.
         class: ExtractionFailureClass::OperationalTerminal,
         message: format!(
-            "docling runtime extraction is required for {} uploads",
+            "xberg runtime extraction is required for {} uploads",
             file_kind.display_name()
         ),
     }
 }
 
-fn docling_source_format(
+pub(crate) fn xberg_source_format(
     file_kind: UploadFileKind,
     file_name: Option<&str>,
     mime_type: Option<&str>,
@@ -694,7 +750,7 @@ fn docling_source_format(
         UploadFileKind::Pdf => Some("pdf"),
         UploadFileKind::Docx => Some("docx"),
         UploadFileKind::Pptx => Some("pptx"),
-        UploadFileKind::Image => docling_image_source_format(file_name, mime_type),
+        UploadFileKind::Image => xberg_image_source_format(file_name, mime_type),
         UploadFileKind::Spreadsheet => None,
         UploadFileKind::TextLike | UploadFileKind::Binary => None,
     }
@@ -717,7 +773,7 @@ fn declared_payload_is_record_jsonl(file_name: Option<&str>, mime_type: Option<&
         )
 }
 
-fn docling_image_source_format(
+fn xberg_image_source_format(
     file_name: Option<&str>,
     mime_type: Option<&str>,
 ) -> Option<&'static str> {

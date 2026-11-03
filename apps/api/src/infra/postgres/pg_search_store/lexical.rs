@@ -21,6 +21,37 @@ const LEXICAL_PREFIX_MIN_TOKEN_CHARS: usize = 4;
 /// set are left untouched, so precision is never traded for recall on them.
 pub(super) const LEXICAL_RELAX_FLOOR: usize = 8;
 
+const CHUNK_TEMPORAL_GUARD: &str = "(($4::timestamptz is null and $5::timestamptz is null)
+    or (c.occurred_at is not null
+        and ($4::timestamptz is null or coalesce(c.occurred_until, c.occurred_at) >= $4)
+        and ($5::timestamptz is null or c.occurred_at <= $5)))";
+
+// Same source fields/order as knowledge_chunk.search_tsv in 0001_init.sql,
+// analyzed with the selected config for eligibility, never a second index.
+const CHUNK_CONFIGURED_INTENT_VECTOR: &str = "to_tsvector('{TEXT_SEARCH_CONFIG}', ironrag_unaccent(
+    coalesce(c.content_text, '') || ' ' || coalesce(c.normalized_text, '') || ' '
+    || coalesce(c.window_text, '') || ' '
+    || coalesce(public.ironrag_array_join(c.section_path), '') || ' '
+    || coalesce(public.ironrag_array_join(c.heading_trail), '')
+))";
+
+// Native syntax is authoritative when it differs from an ordinary all-terms
+// query. Metadata belongs to this searchable record too, including positions
+// spanning chunk/title/file boundaries. The physical document PK lookup avoids
+// re-correlating every text hit against the materialized readable-doc census.
+const CHUNK_ORIGINAL_INTENT_GUARD: &str = "(
+    not (select syntax_sensitive from original_intent)
+    or exists (
+        select 1 from knowledge_document intent_document
+        where intent_document.document_id = c.document_id
+          and intent_document.workspace_id = c.workspace_id
+          and intent_document.library_id = c.library_id
+          and ({CHUNK_INTENT_VECTOR} || to_tsvector('{TEXT_SEARCH_CONFIG}', ironrag_unaccent(
+              coalesce(intent_document.title, '') || ' ' || coalesce(intent_document.file_name, '')
+          ))) @@ (select native_query from original_intent)
+    )
+)";
+
 /// Canonical revision-first title lane. Identity and soft-title retrieval differ
 /// only in their bounded document source, score base, and result alias; keeping
 /// the shared SQL here prevents the two access paths from drifting.
@@ -50,10 +81,8 @@ const TITLE_RAW_LANE_SQL_TEMPLATE: &str = "             title_{LANE}_raw as (
                       and rd.readable_revision_id = c.revision_id
                       and c.library_id = $1
                       and c.chunk_state = 'ready'
-                      and (($4::timestamptz is null and $5::timestamptz is null)
-                           or (c.occurred_at is not null
-                               and ($4::timestamptz is null or coalesce(c.occurred_until, c.occurred_at) >= $4)
-                               and ($5::timestamptz is null or c.occurred_at <= $5)))
+                      and {CHUNK_TEMPORAL_GUARD}
+                      and {CHUNK_ORIGINAL_INTENT_GUARD}
                     order by score desc, c.revision_id desc,
                              c.chunk_index asc, c.chunk_id asc
                      limit 2
@@ -100,7 +129,14 @@ fn render_title_raw_lanes() -> String {
 /// two rungs of the relaxation ladder share this template verbatim and differ
 /// only in which tsquery constructor is substituted — the user query text binds
 /// via `$2` and structural identifier terms bind via `$11`; neither is interpolated.
-const CHUNK_LEXICAL_SQL_TEMPLATE: &str = "with readable_docs as (
+const CHUNK_LEXICAL_SQL_TEMPLATE: &str = "with original_intent as materialized (
+                 select native_query, native_query <> plain_query as syntax_sensitive
+                 from (
+                     select websearch_to_tsquery('{TEXT_SEARCH_CONFIG}', ironrag_unaccent($12)) as native_query,
+                            plainto_tsquery('{TEXT_SEARCH_CONFIG}', ironrag_unaccent($12)) as plain_query
+                 ) parsed
+             ),
+             readable_docs as (
                  select d.document_id, d.workspace_id, d.library_id,
                         current_revision.revision_id as readable_revision_id
                  from knowledge_document d
@@ -115,6 +151,20 @@ const CHUNK_LEXICAL_SQL_TEMPLATE: &str = "with readable_docs as (
                  where d.library_id = $1
                    and d.document_state = 'active'
                    and d.deleted_at is null
+             ),
+             eligible_title_docs as not materialized (
+                 select rd.* from readable_docs rd
+                 where not (select syntax_sensitive from original_intent)
+                    or exists (
+                        select 1 from knowledge_chunk c
+                        where c.revision_id = rd.readable_revision_id
+                          and c.document_id = rd.document_id
+                          and c.workspace_id = rd.workspace_id
+                          and c.library_id = rd.library_id
+                          and c.chunk_state = 'ready'
+                          and {CHUNK_TEMPORAL_GUARD}
+                          and {CHUNK_ORIGINAL_INTENT_GUARD}
+                    )
              ),
              readable_document_count as (
                  select count(*)::double precision as value
@@ -177,7 +227,7 @@ const CHUNK_LEXICAL_SQL_TEMPLATE: &str = "with readable_docs as (
              title_identity_docs as (
                  select d.document_id
                  from knowledge_document d
-                 join readable_docs title_readable
+                 join eligible_title_docs title_readable
                    on title_readable.document_id = d.document_id
                   and title_readable.workspace_id = d.workspace_id
                   and title_readable.library_id = d.library_id
@@ -206,7 +256,7 @@ const CHUNK_LEXICAL_SQL_TEMPLATE: &str = "with readable_docs as (
              title_match_docs as (
                  select distinct d.document_id
                  from knowledge_document d
-                 join readable_docs title_readable
+                 join eligible_title_docs title_readable
                    on title_readable.document_id = d.document_id
                   and title_readable.workspace_id = d.workspace_id
                   and title_readable.library_id = d.library_id
@@ -264,10 +314,8 @@ const CHUNK_LEXICAL_SQL_TEMPLATE: &str = "with readable_docs as (
                       )
                       and c.library_id = $1
                       and c.chunk_state = 'ready'
-                      and (($4::timestamptz is null and $5::timestamptz is null)
-                           or (c.occurred_at is not null
-                               and ($4::timestamptz is null or coalesce(c.occurred_until, c.occurred_at) >= $4)
-                               and ($5::timestamptz is null or c.occurred_at <= $5)))
+                      and {CHUNK_TEMPORAL_GUARD}
+                      and {CHUNK_ORIGINAL_INTENT_GUARD}
                  ),
                  -- text_raw's scan already retains only hits whose revision is
                  -- in readable_docs, so the per-hit re-correlation against the
@@ -289,9 +337,13 @@ const CHUNK_LEXICAL_SQL_TEMPLATE: &str = "with readable_docs as (
              ),
 {TITLE_RAW_LANES},
              raw as (
-                 select * from text_raw
-                 union all select * from title_identity_raw
-                 union all select * from title_soft_raw
+                 select chunk_id, document_id, max(score) as score
+                 from (
+                     select * from text_raw
+                     union all select * from title_identity_raw
+                     union all select * from title_soft_raw
+                 ) lane_hits
+                 group by chunk_id, document_id
              ),
              diversified as (
                  select *,
@@ -412,8 +464,19 @@ pub(super) struct ChunkLexicalParams<'a> {
 /// Postgres text-search config name. `text_search_config == "simple"` preserves
 /// the historical analyzer semantics.
 pub(super) fn chunk_lexical_sql(text_search_config: &str) -> (String, String) {
-    let template =
-        CHUNK_LEXICAL_SQL_TEMPLATE.replace("{TITLE_RAW_LANES}", &render_title_raw_lanes());
+    // Only the native eligibility record needs a matching analyzer. Discovery
+    // stays index-driven; the default record can reuse its stored simple vector.
+    let intent_vector =
+        if sanitize_text_search_config(text_search_config) == DEFAULT_TEXT_SEARCH_CONFIG {
+            "c.search_tsv"
+        } else {
+            CHUNK_CONFIGURED_INTENT_VECTOR
+        };
+    let template = CHUNK_LEXICAL_SQL_TEMPLATE
+        .replace("{TITLE_RAW_LANES}", &render_title_raw_lanes())
+        .replace("{CHUNK_TEMPORAL_GUARD}", CHUNK_TEMPORAL_GUARD)
+        .replace("{CHUNK_ORIGINAL_INTENT_GUARD}", CHUNK_ORIGINAL_INTENT_GUARD)
+        .replace("{CHUNK_INTENT_VECTOR}", intent_vector);
     lexical_lane_sql_for_config(&template, text_search_config)
 }
 
@@ -467,6 +530,7 @@ impl PgSearchStore {
             .bind(params.title_soft_raw_enabled)
             .bind(scope.limit.max(1) as i64)
             .bind(params.exact_identifier_terms)
+            .bind(scope.query)
             .fetch_all(&mut *transaction)
             .await
             .context("failed to search knowledge chunks")?;

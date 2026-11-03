@@ -73,12 +73,27 @@ pub fn build_structured_chat_request(
     }
 }
 
+/// Completion outcome reported by the provider protocol, not inferred from text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ChatCompletionStatus {
+    /// The provider reported a normal text completion.
+    Complete,
+    /// The provider reported an output or context limit.
+    Truncated,
+    /// The provider explicitly refused or filtered the response.
+    Refused,
+    /// No recognized native completion signal was supplied.
+    Unknown,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct ChatResponse {
     pub provider_kind: String,
     pub model_name: String,
     pub output_text: String,
     pub usage_json: serde_json::Value,
+    pub completion_status: ChatCompletionStatus,
 }
 
 // =============================================================================

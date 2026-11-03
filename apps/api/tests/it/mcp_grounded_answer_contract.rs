@@ -342,6 +342,7 @@ fn execution_detail_for(scenario: &Scenario, answer_text: &str) -> AssistantExec
             scenario.evidence.relations,
         ),
         reference_summary: None,
+        semantic_verification: None,
         verification_state: scenario.verification_state,
         verification_warnings: scenario
             .warnings

@@ -141,8 +141,6 @@ fn sample_settings() -> Settings {
         mcp_memory_max_search_limit: 25,
         mcp_memory_idempotency_retention_hours: 72,
         mcp_memory_audit_enabled: true,
-        chunking_max_chars: 2800,
-        chunking_overlap_chars: 280,
         provider_concurrency_max_outbound: 16,
         provider_concurrency_query_reserved: 4,
         provider_concurrency_acquire_timeout_ms: 30_000,

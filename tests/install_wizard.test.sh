@@ -55,55 +55,58 @@ done < <(
 )
 check "root .env.example has no ignored Compose keys" "$missing_compose_keys" ""
 
-echo "── recommend_profile thresholds ──"
-check "4 GiB -> micro"   "$(recommend_profile 4096)"  "micro"
-check "7 GiB -> micro"   "$(recommend_profile 7168)"  "micro"
-check "8 GiB -> small"   "$(recommend_profile 8192)"  "small"
-check "12 GiB -> small"  "$(recommend_profile 12288)" "small"
+echo "── profiles size native parsing and remote Vision ──"
+check "4 GiB -> micro" "$(recommend_profile 4096)" "micro"
+check "below 8 GiB -> micro" "$(recommend_profile 8191)" "micro"
+check "8 GiB -> small" "$(recommend_profile 8192)" "small"
+check "below 16 GiB -> small" "$(recommend_profile 16383)" "small"
 check "16 GiB -> medium" "$(recommend_profile 16384)" "medium"
+check "20 GiB -> medium" "$(recommend_profile 20480)" "medium"
 check "30 GiB -> medium" "$(recommend_profile 30720)" "medium"
-check "32 GiB -> large"  "$(recommend_profile 32768)" "large"
-check "64 GiB -> large"  "$(recommend_profile 65536)" "large"
+check "32 GiB -> large" "$(recommend_profile 32768)" "large"
+check "64 GiB -> large" "$(recommend_profile 65536)" "large"
 
-echo "── compute_plan calibration: 4 GiB == docker-compose.yml defaults ──"
-compute_plan 4 4096 ""
-check "micro profile"   "$REC_PROFILE"     "micro"
-check "micro db mem"    "$REC_DB_MEM"      "1024"
-check "micro backend"   "$REC_BACKEND_MEM" "1024"
-check "micro worker"    "$REC_WORKER_MEM"  "768"
-check "micro cache"     "$REC_CACHE_MEM"   "192"
-check "micro frontend"  "$REC_FRONTEND_MEM" "192"
-check "micro steady"    "$REC_STEADY_MIB"  "3200"
-check "micro fits 4G"   "$REC_FITS"        "1"
+compute_plan 4 4096 "micro"
+check "micro profile" "$REC_PROFILE" "micro"
+check "micro db mem" "$REC_DB_MEM" "1024"
+check "micro backend" "$REC_BACKEND_MEM" "1024"
+check "micro worker" "$REC_WORKER_MEM" "768"
+check "micro cache" "$REC_CACHE_MEM" "192"
+check "micro frontend" "$REC_FRONTEND_MEM" "192"
+check "micro steady" "$REC_STEADY_MIB" "3200"
+check "micro fits 4G" "$REC_FITS" "1"
 check "micro provider max" "$REC_PROVIDER_MAX_OUTBOUND" "8"
 check "micro provider reserve" "$REC_PROVIDER_QUERY_RESERVED" "2"
 
-echo "── compute_plan calibration: 16 GiB == .env.example worked example ──"
-compute_plan 8 16384 ""
-check "medium profile"  "$REC_PROFILE"     "medium"
-check "medium db mem"   "$REC_DB_MEM"      "4096"
-check "medium backend"  "$REC_BACKEND_MEM" "3584"
-check "medium worker"   "$REC_WORKER_MEM"  "3072"
-check "medium cache"    "$REC_CACHE_MEM"   "768"
-check "medium frontend" "$REC_FRONTEND_MEM" "256"
-check "medium db cpus"  "$REC_DB_CPUS"     "2.00"
-check "medium be cpus"  "$REC_BACKEND_CPUS" "6.00"
-check "medium fe cpus"  "$REC_FRONTEND_CPUS" "1.00"
-check "medium fits 16G" "$REC_FITS"        "1"
+compute_plan 8 20480 ""
+check "medium profile" "$REC_PROFILE" "medium"
+check "medium db mem" "$REC_DB_MEM" "2048"
+check "medium backend" "$REC_BACKEND_MEM" "1792"
+check "medium worker" "$REC_WORKER_MEM" "3072"
+check "medium steady" "$REC_STEADY_MIB" "7488"
+check "medium cache" "$REC_CACHE_MEM" "384"
+check "medium frontend" "$REC_FRONTEND_MEM" "192"
+check "medium db cpus" "$REC_DB_CPUS" "2.00"
+check "medium be cpus" "$REC_BACKEND_CPUS" "6.00"
+check "medium fe cpus" "$REC_FRONTEND_CPUS" "1.00"
+check "medium fits 20G" "$REC_FITS" "1"
 check "medium provider max" "$REC_PROVIDER_MAX_OUTBOUND" "16"
 check "medium provider reserve" "$REC_PROVIDER_QUERY_RESERVED" "4"
+compute_plan 8 16384 ""
+check "medium fits 16 GiB host" "$REC_FITS" "1"
+compute_plan 8 8192 "medium"
+check "forced medium exceeds 8 GiB headroom" "$REC_FITS" "0"
 
-echo "── compute_plan: large + small sanity ──"
 compute_plan 16 32768 ""
-check "large profile"   "$REC_PROFILE"     "large"
-check "large db mem"    "$REC_DB_MEM"      "8192"
-check "large fits 32G"  "$REC_FITS"        "1"
-compute_plan 4 8192 ""
-check "small profile"   "$REC_PROFILE"     "small"
-check "small steady"    "$REC_STEADY_MIB"  "5952"
-check "small fits 8G"   "$REC_FITS"        "1"
-
-echo "── compute_plan: tiny host must NOT fit (warning path) ──"
+check "large profile" "$REC_PROFILE" "large"
+check "large db mem" "$REC_DB_MEM" "8192"
+check "large worker" "$REC_WORKER_MEM" "5120"
+check "large steady" "$REC_STEADY_MIB" "21504"
+check "large fits 32G" "$REC_FITS" "1"
+compute_plan 4 8192 "small"
+check "small profile" "$REC_PROFILE" "small"
+check "small steady" "$REC_STEADY_MIB" "5952"
+check "small fits 8G" "$REC_FITS" "1"
 compute_plan 2 2048 "micro"
 check "2 GiB micro forced -> no fit" "$REC_FITS" "0"
 
@@ -225,7 +228,7 @@ run_install() { # run_install <dir> [extra args...]
   IRONRAG_INSTALL_SKIP_DOWNLOAD=1 \
   IRONRAG_INSTALL_SKIP_DEPLOY=1 \
   IRONRAG_DETECT_CPUS=8 \
-  IRONRAG_DETECT_MEM_MIB=16384 \
+  IRONRAG_DETECT_MEM_MIB=20480 \
     bash "$INSTALL_SH" local "$dir" "$@" </dev/null >/dev/null 2>&1
 }
 
@@ -235,9 +238,29 @@ run_install_version() { # run_install_version <version> <dir> [extra args...]
   IRONRAG_INSTALL_SKIP_DOWNLOAD=1 \
   IRONRAG_INSTALL_SKIP_DEPLOY=1 \
   IRONRAG_DETECT_CPUS=8 \
-  IRONRAG_DETECT_MEM_MIB=16384 \
+  IRONRAG_DETECT_MEM_MIB=20480 \
     bash "$INSTALL_SH" "$version" "$dir" "$@" </dev/null >/dev/null 2>&1
 }
+
+echo "── integration: 8 GiB host automatically selects small ──"
+LOW_MEMORY_WORK="$(mktemp -d)"
+cp "${ROOT_DIR}/docker-compose.yml" "${LOW_MEMORY_WORK}/docker-compose.yml"
+cp "${ROOT_DIR}/.env.example" "${LOW_MEMORY_WORK}/.env.example"
+IRONRAG_NONINTERACTIVE=1 IRONRAG_INSTALL_SKIP_DOWNLOAD=1 IRONRAG_INSTALL_SKIP_DEPLOY=1 \
+  IRONRAG_DETECT_CPUS=4 IRONRAG_DETECT_MEM_MIB=8192 \
+  bash "$INSTALL_SH" local "$LOW_MEMORY_WORK" </dev/null >/dev/null 2>&1
+check "8 GiB default install succeeds" "$?" "0"
+check "8 GiB worker sized small" "$(env_get IRONRAG_WORKER_MEMORY_LIMIT "${LOW_MEMORY_WORK}/.env")" "1536M"
+check "fresh install has no local OCR toggle" "$(env_get IRONRAG_XBERG_OCR_ENABLED "${LOW_MEMORY_WORK}/.env")" ""
+# Existing obsolete settings are retained as operator data, not regenerated.
+env_file_set IRONRAG_XBERG_OCR_ENABLED false "${LOW_MEMORY_WORK}/.env"
+IRONRAG_NONINTERACTIVE=1 IRONRAG_INSTALL_SKIP_DOWNLOAD=1 IRONRAG_INSTALL_SKIP_DEPLOY=1 \
+  IRONRAG_DETECT_CPUS=4 IRONRAG_DETECT_MEM_MIB=8192 \
+  bash "$INSTALL_SH" --profile micro local "$LOW_MEMORY_WORK" </dev/null >/dev/null 2>&1
+check "8 GiB re-run succeeds" "$?" "0"
+check "obsolete setting preserved on re-run" "$(env_get IRONRAG_XBERG_OCR_ENABLED "${LOW_MEMORY_WORK}/.env")" "false"
+check "profile change preserves pinned worker cap" "$(env_get IRONRAG_WORKER_MEMORY_LIMIT "${LOW_MEMORY_WORK}/.env")" "1536M"
+rm -rf "$LOW_MEMORY_WORK"
 
 # The API's admin-bootstrap contract (validate_ui_bootstrap_admin_settings):
 # login, email and password are all set or all unset. Report the .env state as

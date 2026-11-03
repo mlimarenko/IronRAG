@@ -16,6 +16,7 @@ where
             .await
             .context("load catalog_library row")?
             .ok_or_else(|| anyhow!("library {library_id} disappeared during export"))?;
+    validate_snapshot_recognition_policy(&row)?;
     let mut buffer = serde_json::to_vec(&row).context("serialize catalog_library row")?;
     buffer.push(b'\n');
     inventory_parts.push(

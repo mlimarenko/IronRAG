@@ -95,17 +95,24 @@ async fn load_original_page_identity(
     let Some(owner) = super::find_mutation_for_update(transaction, key).await? else {
         return Ok(None);
     };
-    let identity = sqlx::query_scalar(
-        "select m.request_identity from content_mutation m
+    let has_parent: bool = sqlx::query_scalar(
+        "select exists(select 1 from content_mutation m
          join ops_async_operation o on o.subject_kind = 'content_mutation' and o.subject_id = m.id
-         where m.id = $1 and o.parent_async_operation_id = $2",
+         where m.id = $1 and o.parent_async_operation_id = $2)",
     )
     .bind(owner.id)
     .bind(parent_operation_id)
-    .fetch_optional(&mut **transaction)
-    .await?
-    .ok_or(AdmissionError::IdempotencyConflict { mutation_id: owner.id })?;
-    Ok(Some(identity))
+    .fetch_one(&mut **transaction)
+    .await?;
+    if !has_parent {
+        return Err(AdmissionError::IdempotencyConflict { mutation_id: owner.id });
+    }
+    let identity = owner
+        .request_identity
+        .as_ref()
+        .ok_or(AdmissionError::IdempotencyConflict { mutation_id: owner.id })?;
+    owner.verify_replay(identity)?;
+    Ok(Some(identity.clone()))
 }
 
 /// Admits a fetched snapshot through the canonical content owner while its web

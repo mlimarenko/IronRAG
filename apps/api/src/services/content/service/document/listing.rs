@@ -483,6 +483,22 @@ impl ContentService {
         Ok(summary)
     }
 
+    /// Resolves an active identity without the tombstones used by lifecycle lookup.
+    pub async fn get_active_document_id_by_external_key(
+        &self,
+        state: &AppState,
+        library_id: Uuid,
+        external_key: &str,
+    ) -> Result<Option<Uuid>, ApiError> {
+        content_document_repository::get_active_document_id_by_external_key(
+            &state.persistence.postgres,
+            library_id,
+            external_key,
+        )
+        .await
+        .map_err(|error| ApiError::internal_with_log(error, "document lookup failed"))
+    }
+
     pub async fn get_document_by_external_key(
         &self,
         state: &AppState,

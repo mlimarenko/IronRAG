@@ -8,6 +8,8 @@ import hashlib
 import json
 import math
 import sys
+from dataclasses import replace
+from decimal import Decimal, localcontext
 from pathlib import Path
 from typing import Any, Sequence
 
@@ -19,32 +21,46 @@ from apps.api.benchmarks.grounded_query.run_live_benchmark import (
     BENCHMARK_INTEGRITY_SCHEMA_VERSION,
     CACHE_POLICIES,
     CASE_ORDER_POLICY,
+    BenchmarkCase,
+    answer_item_failures,
     build_answer_latency_summary,
+    build_completeness_summary,
+    build_conversation_cost_summary,
+    build_cost_summary,
     build_matrix_integrity,
-    evaluate_host_snapshot,
-    evaluate_host_snapshot_sequence,
-    normalized_artifact_digest,
-    permute_case_ids_for_round,
-    valid_artifact_digest,
-    validate_data_state_identity,
-    validate_environment_identity,
-    validate_release_host_eligibility_policy,
+    case_definition_sha256,
+    clarification_expectation_matches,
     compute_marker_rank_metrics,
     compute_rank_metrics,
     contains_all,
     contains_any,
     contains_any_whole_word,
+    conversation_cost_records,
+    cost_decimal,
+    evaluate_answer_items,
+    evaluate_host_snapshot,
+    evaluate_host_snapshot_sequence,
     first_answer_sentence,
     lower_text,
     matches_any_regex,
     normalize_relevant_keys,
+    normalized_artifact_digest,
+    permute_case_ids_for_round,
+    preceding_turn_case,
     references_contain_all_labels,
     relation_references_contain_all_text,
     summarize_search_hits,
+    valid_artifact_digest,
+    validate_answer_items,
+    validate_data_state_identity,
+    validate_environment_identity,
+    validate_preceding_turns,
+    validate_release_host_eligibility_policy,
 )
-from apps.api.benchmarks.lifecycle_state import TREATMENT_INVARIANT_FIELDS
-from apps.api.benchmarks.lifecycle_state import canonical_turn_payload
-
+from apps.api.benchmarks.lifecycle_state import (
+    TREATMENT_INVARIANT_FIELDS,
+    canonical_turn_payload,
+)
 
 RANK_METRIC_KEYS = ("mrr", "hit@1", "hit@3", "hit@5", "hit@10")
 LATENCY_PERCENTILE_KEYS = ("p50", "p95", "p99")
@@ -131,7 +147,16 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         default=DEFAULT_MAX_CANDIDATE_P95_MS,
         help="Absolute candidate p95 ceiling in milliseconds (default: 30000).",
     )
+    parser.add_argument(
+        "--max-cost-regression-percent",
+        help="Opt-in per-currency query-cost gate; requires complete paired cost evidence.",
+    )
     args = parser.parse_args(argv)
+    if args.max_cost_regression_percent is not None:
+        try:
+            cost_decimal(args.max_cost_regression_percent)
+        except ValueError as error:
+            parser.error(f"--max-cost-regression-percent: {error}")
     if not math.isfinite(args.max_latency_regression_percent):
         parser.error("--max-latency-regression-percent must be finite")
     if args.max_latency_regression_percent < 0.0:
@@ -229,12 +254,97 @@ def answer_policy_verdicts(
     return required, opening_ok, forbidden
 
 
+def verified_case_definition(case: dict[str, Any]) -> BenchmarkCase:
+    """Bind the persisted evaluation policy to the producer's canonical definition."""
+    policy = case.get("casePolicy")
+    if not isinstance(policy, dict):
+        raise ValueError(
+            "canonical comparison requires casePolicy and rawEvaluationEvidence"
+        )
+    try:
+        definition = BenchmarkCase(**policy)
+        digest = case_definition_sha256(definition)
+    except (TypeError, ValueError, KeyError) as error:
+        raise ValueError("invalid persisted case definition") from error
+    if case.get("caseDefinitionSha256") != digest:
+        raise ValueError("persisted case definition differs from caseDefinitionSha256")
+    if (
+        case.get("caseId") != definition.case_id
+        or case.get("question") != definition.question
+        or case.get("searchQuery") != definition.search_query
+    ):
+        raise ValueError("persisted case identity differs from case definition")
+    return definition
+
+
 def recompute_case_evaluation(
     case: dict[str, Any],
     *,
     expected_library_id: str | None = None,
     expected_workspace_id: str | None = None,
 ) -> dict[str, Any]:
+    definition = verified_case_definition(case)
+    turns = definition.preceding_turns
+    validate_preceding_turns(
+        turns,
+        root=Path(__file__).resolve().parent,
+        final_id=case.get("caseId"),
+    )
+    history = case.get("turnExecutions")
+    if "turnExecutions" in case or turns:
+        if not isinstance(history, list) or len(history) != len(turns) + 1:
+            raise ValueError("missing or incomplete turn history")
+    final = recompute_turn_evaluation(
+        case,
+        expected_library_id=expected_library_id,
+        expected_workspace_id=expected_workspace_id,
+    )
+    if history is None:
+        return final
+    seen: set[str] = set()
+    for index, recorded in enumerate(history):
+        expected = (
+            preceding_turn_case(definition, turns[index])
+            if index < len(turns)
+            else definition
+        )
+        recorded_definition = verified_case_definition(recorded)
+        if recorded_definition != replace(expected, preceding_turns=[]):
+            raise ValueError("turn history expectation definition differs")
+        if (
+            recorded.get("question") != expected.question
+            or recorded.get("caseId") != expected.case_id
+        ):
+            raise ValueError("turn history identity differs")
+        verdict = recompute_turn_evaluation(
+            recorded,
+            expected_library_id=expected_library_id,
+            expected_workspace_id=expected_workspace_id,
+        )
+        execution = recorded["rawEvaluationEvidence"]["turnPayload"]["execution"]
+        if execution["id"] in seen or (
+            turns and execution["conversationId"] != case.get("querySessionId")
+        ):
+            raise ValueError("turn history execution/session identity differs")
+        seen.add(execution["id"])
+        if index < len(turns):
+            final["failedChecks"].extend(
+                f"turn:{expected.case_id}:{failure}"
+                for failure in verdict["failedChecks"]
+            )
+        elif recorded["rawEvaluationEvidence"] != case["rawEvaluationEvidence"]:
+            raise ValueError("final turn history differs from final query evidence")
+    final["passed"] = not final["failedChecks"]
+    return final
+
+
+def recompute_turn_evaluation(
+    case: dict[str, Any],
+    *,
+    expected_library_id: str | None = None,
+    expected_workspace_id: str | None = None,
+) -> dict[str, Any]:
+    verified_case_definition(case)
     policy, turn, detail, search_evidence, search = raw_evaluation_evidence(case)
     expected_question = verified_case_binding(
         case,
@@ -261,6 +371,10 @@ def recompute_case_evaluation(
     ):
         raise ValueError("execution detail belongs to another turn")
     answer = canonical_turn["answerText"]
+    facts = policy.get("expected_facts", [])
+    caveats = policy.get("mandatory_caveats", [])
+    validate_answer_items(facts, caveats, root=Path(__file__).resolve().parent)
+    completeness = evaluate_answer_items(answer, facts, caveats)
     summaries, search_text, ranked_documents, ranked_chunks = summarize_search_hits(search)
     top_title = summaries[0]["title"] if summaries else None
     top_ok = not policy.get("expected_documents_contains") or any(
@@ -282,6 +396,9 @@ def recompute_case_evaluation(
         "answer_required": required,
         "answer_opening_required": opening_ok,
         "answer_forbidden": not forbidden,
+        "answer_clarification": clarification_expectation_matches(
+            policy.get("expected_clarification"), detail
+        ),
         "chunk_references": len(chunk_refs) >= policy.get("min_chunk_reference_count", 0),
         "prepared_segment_references": len(prepared_refs)
         >= policy.get("min_prepared_segment_reference_count", 0),
@@ -312,10 +429,13 @@ def recompute_case_evaluation(
         }.items()
         if value is not None
     }
+    for failure in answer_item_failures(completeness):
+        checks[failure] = False
     return {
         "passed": all(checks.values()),
         "failedChecks": [name for name, passed in checks.items() if not passed],
         "rankMetrics": rank_metrics,
+        "answerCompleteness": completeness,
     }
 
 
@@ -875,6 +995,11 @@ def validate_case_integrities(
             invalid.append(f"{label}.case:{case_id}.caseId")
         if not valid_sha256(case.get("caseDefinitionSha256")):
             invalid.append(f"{label}.case:{case_id}.caseDefinitionSha256")
+        else:
+            try:
+                verified_case_definition(case)
+            except ValueError:
+                invalid.append(f"{label}.case:{case_id}.caseDefinitionSha256")
 
 
 def compare_case_integrities(
@@ -1389,6 +1514,163 @@ def build_correctness_gate(
     }
 
 
+def build_completeness_comparison(
+    baseline_matrix: dict[str, Any], candidate_matrix: dict[str, Any]
+) -> dict[str, Any]:
+    """Report paired item changes without a new gate on historical unannotated files."""
+    baseline = indexed_cases(baseline_matrix)
+    candidate = indexed_cases(candidate_matrix)
+    observations: dict[str, dict[str, Any]] = {}
+    summaries: dict[str, dict[str, Any]] = {}
+    for label, cases in (("baseline", baseline), ("candidate", candidate)):
+        observations[label] = {
+            key: recompute_case_evaluation(case)["answerCompleteness"]
+            for key, case in cases.items()
+        }
+        summaries[label] = build_completeness_summary(
+            [{"answerCompleteness": value} for value in observations[label].values()]
+        )
+    pairs = {}
+    for key in sorted(baseline.keys() | candidate.keys()):
+        before = observations["baseline"].get(key)
+        after = observations["candidate"].get(key)
+        comparable = (
+            before is not None
+            and after is not None
+            and before["status"] == after["status"] == "annotated"
+            and all(
+                baseline[key]["casePolicy"].get(field, [])
+                == candidate[key]["casePolicy"].get(field, [])
+                for field in ("expected_facts", "mandatory_caveats")
+            )
+        )
+        pairs[key] = {
+            "baseline": before,
+            "candidate": after,
+            "comparable": comparable,
+            "regressedIds": (
+                {
+                    family: sorted(
+                        set(before[family]["matchedIds"])
+                        - set(after[family]["matchedIds"])
+                    )
+                    for family in ("facts", "caveats")
+                }
+                if comparable else None
+            ),
+        }
+    return {
+        **summaries,
+        "cases": pairs,
+        "comparable": bool(pairs) and all(pair["comparable"] for pair in pairs.values()),
+    }
+
+
+def build_cost_comparison(
+    baseline_matrix: dict[str, Any],
+    candidate_matrix: dict[str, Any],
+    threshold: str | None = None,
+    *,
+    scope: str = "final_turn_query_execution_tree",
+) -> dict[str, Any]:
+    budget = cost_decimal(threshold) if threshold is not None else None
+    baseline_cases = indexed_cases(baseline_matrix)
+    candidate_cases = indexed_cases(candidate_matrix)
+    definitions_match = baseline_cases.keys() == candidate_cases.keys() and all(
+        case.get("casePolicy", {}).get("preceding_turns", [])
+        == candidate_cases[key].get("casePolicy", {}).get("preceding_turns", [])
+        for key, case in baseline_cases.items()
+    )
+    if scope == "conversation_query_execution_union":
+        baseline = build_conversation_cost_summary(list(baseline_cases.values()))
+        candidate = build_conversation_cost_summary(list(candidate_cases.values()))
+
+        def indexed_turn_costs(cases):
+            return {
+                f"{key}/{turn.get('caseId')}": turn
+                for key, case in cases.items()
+                for turn in conversation_cost_records([case])
+            }
+
+        baseline_cases = indexed_turn_costs(baseline_cases)
+        candidate_cases = indexed_turn_costs(candidate_cases)
+    elif scope == "final_turn_query_execution_tree":
+        baseline = build_cost_summary(list(baseline_cases.values()))
+        candidate = build_cost_summary(list(candidate_cases.values()))
+    else:
+        raise ValueError("invalid cost comparison scope")
+    downgrades: list[str] = []
+    ranks = {"complete": 3, "partial": 2, "unknown": 1}
+    for key, case in baseline_cases.items():
+        before = build_cost_summary([case])["coverageCounts"]
+        after = (
+            build_cost_summary([candidate_cases[key]])["coverageCounts"]
+            if key in candidate_cases
+            else {}
+        )
+        if max(
+            (ranks.get(k, 0) for k, count in before.items() if count), default=0
+        ) > max((ranks.get(k, 0) for k, count in after.items() if count), default=0):
+            downgrades.append(key)
+    currencies = sorted(
+        set(baseline["observedTotalsByCurrency"])
+        | set(candidate["observedTotalsByCurrency"])
+    )
+    changes = {}
+    regressions = []
+    for currency in currencies:
+        old = baseline["observedTotalsByCurrency"].get(currency)
+        new = candidate["observedTotalsByCurrency"].get(currency)
+        delta = percent = None
+        if old is not None and new is not None:
+            with localcontext() as context:
+                context.prec = 256
+                before, after = Decimal(old), Decimal(new)
+                delta = format(after - before, "f")
+                if before:
+                    percent = format((after - before) * 100 / before, "f")
+                elif after == 0:
+                    percent = "0"
+                if budget is not None and (after - before) * 100 > before * budget:
+                    regressions.append(currency)
+        changes[currency] = {
+            "baseline": old,
+            "candidate": new,
+            "delta": delta,
+            "regressionPercent": percent,
+        }
+    paired_currencies = (
+        all(
+            build_cost_summary([baseline_cases[key]])["observedTotalsByCurrency"].keys()
+            == build_cost_summary([candidate_cases.get(key, {})])[
+                "observedTotalsByCurrency"
+            ].keys()
+            for key in baseline_cases
+        )
+        if baseline["complete"] and candidate["complete"]
+        else False
+    )
+    comparable = (
+        baseline["complete"]
+        and candidate["complete"]
+        and baseline_cases.keys() == candidate_cases.keys()
+        and paired_currencies
+        and definitions_match
+    )
+    return {
+        "scope": scope,
+        "enabled": budget is not None,
+        "maxRegressionPercent": threshold,
+        "baseline": baseline,
+        "candidate": candidate,
+        "coverageDowngrades": downgrades,
+        "changesByCurrency": changes,
+        "comparable": comparable,
+        "regressedCurrencies": regressions,
+        "passed": budget is None or (comparable and not regressions),
+    }
+
+
 def build_comparison_report(
     baseline_matrix: dict[str, Any],
     candidate_matrix: dict[str, Any],
@@ -1397,6 +1679,7 @@ def build_comparison_report(
     max_candidate_p50_ms: float = DEFAULT_MAX_CANDIDATE_P50_MS,
     max_candidate_p95_ms: float = DEFAULT_MAX_CANDIDATE_P95_MS,
     comparison_kind: str = "code_change",
+    max_cost_regression_percent: str | None = None,
 ) -> dict[str, Any]:
     if comparison_kind not in COMPARISON_KINDS:
         raise ValueError(f"unsupported comparison kind: {comparison_kind}")
@@ -1405,9 +1688,11 @@ def build_comparison_report(
         candidate_matrix,
         comparison_kind,
     )
-    baseline_latency, candidate_latency, missing_paired_samples = paired_latency_summaries(
-        baseline_matrix,
-        candidate_matrix,
+    baseline_latency, candidate_latency, missing_paired_samples = (
+        paired_latency_summaries(
+            baseline_matrix,
+            candidate_matrix,
+        )
     )
     latency_gate = build_latency_gate(
         baseline_latency,
@@ -1418,9 +1703,30 @@ def build_comparison_report(
         max_candidate_p95_ms=max_candidate_p95_ms,
     )
     correctness_gate = build_correctness_gate(baseline_matrix, candidate_matrix)
-    retrieval_quality_gate = build_retrieval_quality_gate(baseline_matrix, candidate_matrix)
+    retrieval_quality_gate = build_retrieval_quality_gate(
+        baseline_matrix, candidate_matrix
+    )
+    cost_comparison = build_cost_comparison(
+        baseline_matrix, candidate_matrix, max_cost_regression_percent
+    )
+    multiturn = any(
+        case.get("casePolicy", {}).get("preceding_turns")
+        for matrix in (baseline_matrix, candidate_matrix)
+        for case in indexed_cases(matrix).values()
+    )
+    conversation_cost = build_cost_comparison(
+        baseline_matrix,
+        candidate_matrix,
+        max_cost_regression_percent if multiturn else None,
+        scope="conversation_query_execution_union",
+    )
     return {
         "comparisonKind": comparison_kind,
+        "answerCompleteness": build_completeness_comparison(
+            baseline_matrix, candidate_matrix
+        ),
+        "executionCost": cost_comparison,
+        "conversationCost": conversation_cost,
         "inputMatrixSha256": {
             "baseline": stable_json_sha256(baseline_matrix),
             "candidate": stable_json_sha256(candidate_matrix),
@@ -1434,6 +1740,8 @@ def build_comparison_report(
             and latency_gate["passed"]
             and correctness_gate["passed"]
             and retrieval_quality_gate["passed"]
+            and cost_comparison["passed"]
+            and conversation_cost["passed"]
         ),
     }
 
@@ -1597,6 +1905,12 @@ def print_comparison_report(
     print_latency_gate(report["latencyGate"])
     print_retrieval_quality_gate(report["retrievalQualityGate"])
     print_correctness_gate(report["correctnessGate"], candidate_matrix)
+    print("\n--- Final-query execution cost (not conversation or ingest) ---")
+    print(json.dumps(report["executionCost"], ensure_ascii=False, sort_keys=True))
+    print("\n--- Conversation cost (unique actual turn executions, not ingest) ---")
+    print(json.dumps(report["conversationCost"], ensure_ascii=False, sort_keys=True))
+    print("\n--- Answer completeness (literal/regex, not semantic entailment) ---")
+    print(json.dumps(report["answerCompleteness"], ensure_ascii=False, sort_keys=True))
     print(f"\n{'=' * 80}")
     print("OVERALL: " + ("PASS" if report["passed"] else "FAIL"))
     print(f"{'=' * 80}")
@@ -1620,6 +1934,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         max_candidate_p50_ms=args.max_candidate_p50_ms,
         max_candidate_p95_ms=args.max_candidate_p95_ms,
         comparison_kind=args.comparison_kind,
+        max_cost_regression_percent=args.max_cost_regression_percent,
     )
     print_comparison_report(baseline_matrix, candidate_matrix, report)
     if args.json_output:

@@ -3,7 +3,10 @@ use std::collections::BTreeSet;
 use unicode_normalization::UnicodeNormalization;
 
 use super::{
-    table_markdown::normalize_table_cell_text,
+    table_markdown::{
+        normalize_table_cell_text, split_semantic_key_value, split_semantic_segments,
+        unescape_semantic_segment,
+    },
     table_summary::{TableColumnSummary, TableSummaryValueKind, TableSummaryValueShape},
 };
 
@@ -67,24 +70,25 @@ pub fn build_graph_table_row_text(
     semantic_text: &str,
     profile: Option<&TableGraphProfile>,
 ) -> Option<String> {
-    let segments = semantic_text
-        .split(" | ")
+    let segments = split_semantic_segments(semantic_text)
+        .into_iter()
         .map(str::trim)
         .filter(|segment| !segment.is_empty())
         .collect::<Vec<_>>();
-    let data_start =
-        segments.iter().position(|segment| !segment.contains(": ")).map_or(0, |index| index + 1);
+    let data_start = segments.iter().position(|segment| {
+        segment.strip_prefix("Row ").is_some_and(|value| value.parse::<usize>().is_ok())
+    })? + 1;
 
     let mut key_value_pairs = Vec::new();
     for segment in &segments[data_start..] {
-        let Some((key, value)) = segment.split_once(": ") else {
+        let Some((key, value)) = split_semantic_key_value(segment) else {
             continue;
         };
-        let value = normalize_table_cell_text(value);
+        let value = normalize_table_cell_text(&unescape_semantic_segment(value));
         if value.is_empty() {
             continue;
         }
-        key_value_pairs.push((key.trim().to_string(), value));
+        key_value_pairs.push((unescape_semantic_segment(key).trim().to_string(), value));
     }
 
     let subject = build_graph_subject(&key_value_pairs, profile);
@@ -186,13 +190,13 @@ fn build_graph_subject(
 #[cfg(test)]
 mod tests {
     use super::{build_graph_table_row_text, build_table_graph_profile, normalize_table_graph_key};
+    use crate::shared::extraction::table_markdown::SemanticTableContext;
     use crate::shared::extraction::table_summary::build_table_column_summaries;
 
     #[test]
     fn builds_profile_from_column_statistics_instead_of_header_lists() {
         let summaries = build_table_column_summaries(
-            Some("products"),
-            None,
+            SemanticTableContext { sheet_name: Some("products"), ..Default::default() },
             &[
                 "Product Name".to_string(),
                 "Category".to_string(),
@@ -236,8 +240,7 @@ mod tests {
     #[test]
     fn graph_text_uses_profile_to_drop_numeric_identifier_and_unique_noise() {
         let summaries = build_table_column_summaries(
-            Some("organizations"),
-            None,
+            SemanticTableContext { sheet_name: Some("organizations"), ..Default::default() },
             &[
                 "Name".to_string(),
                 "Country".to_string(),
@@ -282,8 +285,7 @@ mod tests {
     #[test]
     fn graph_text_profile_prefers_well_covered_subject_over_sparse_named_column() {
         let summaries = build_table_column_summaries(
-            None,
-            None,
+            SemanticTableContext::default(),
             &["Name".to_string(), "Primary".to_string(), "Group".to_string()],
             &[
                 vec!["Legacy".to_string(), "Alpha".to_string(), "Shared".to_string()],
@@ -308,8 +310,7 @@ mod tests {
     #[test]
     fn graph_text_profile_does_not_use_narrative_column_as_subject() {
         let summaries = build_table_column_summaries(
-            None,
-            None,
+            SemanticTableContext::default(),
             &["Narrative".to_string(), "Label".to_string(), "Group".to_string()],
             &[
                 vec![
@@ -357,6 +358,21 @@ mod tests {
             .expect("graph text");
 
         assert_eq!(text, "Row Label: Alpha | Secondary: Beta");
+    }
+
+    #[test]
+    fn native_table_consumer_graph_excludes_source_ref_but_keeps_literal_field() {
+        use crate::shared::extraction::table_markdown::build_semantic_table_row_text;
+        let source = build_semantic_table_row_text(
+            SemanticTableContext { table_ref: Some(7), ..Default::default() },
+            0,
+            &["Table Ref".into(), "Name".into()],
+            &["literal field".into(), "Alpha".into()],
+        );
+        assert_eq!(
+            build_graph_table_row_text(&source, None),
+            Some("Table Ref: literal field | Name: Alpha".to_string())
+        );
     }
 
     #[test]

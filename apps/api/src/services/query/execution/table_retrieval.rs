@@ -332,7 +332,7 @@ pub(crate) async fn load_table_summary_chunks_for_documents(
 
 pub(crate) fn is_table_analytics_chunk(chunk: &RuntimeMatchedChunk) -> bool {
     let text = chunk.source_text.trim();
-    is_table_summary_text(text) || (text.starts_with("Sheet: ") && text.contains(" | Row "))
+    is_table_summary_text(text) || super::table_row_answer::parse_table_row_chunk(chunk).is_some()
 }
 
 pub(crate) fn merge_table_aggregation_chunks(

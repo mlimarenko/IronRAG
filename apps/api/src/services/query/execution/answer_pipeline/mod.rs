@@ -65,6 +65,7 @@ mod literal_coverage;
 mod literal_revision;
 mod output_boundary;
 mod preflight;
+mod selected_answer;
 mod single_shot;
 mod variant_selection;
 mod verification;

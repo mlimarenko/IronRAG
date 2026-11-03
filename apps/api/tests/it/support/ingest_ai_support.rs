@@ -66,6 +66,7 @@ impl LlmGateway for IngestAiGateway {
             panic!("IRG-199 test: injected panic in the extract_graph provider call");
         }
         Ok(ChatResponse {
+            completion_status: ironrag_backend::integrations::llm::ChatCompletionStatus::Complete,
             provider_kind: std::mem::take(&mut request.provider_kind),
             model_name: std::mem::take(&mut request.model_name),
             output_text: self.graph_output.to_string(),

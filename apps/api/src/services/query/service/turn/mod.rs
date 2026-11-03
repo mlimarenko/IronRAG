@@ -120,10 +120,13 @@ const ASSISTANT_LITERAL_INVENTORY_REVISION_TIMEOUT: Duration = Duration::from_se
 
 mod agent_answer;
 mod agent_grounding;
+mod agent_semantic;
 mod agent_verification;
 mod cache_coordination;
 mod cache_policy;
 mod chunk_reference_detail;
+#[cfg(test)]
+mod controlled_semantic;
 mod execution_detail;
 mod grounded_answer;
 mod pipeline;
@@ -134,9 +137,8 @@ mod runtime;
 use agent_answer::{AgentAnswerStageInput, execute_agent_answer_stages};
 use agent_grounding::{
     AgentAnswerVerificationRequest, ensure_agent_tool_context_bundle,
-    finalize_agent_system_statement, is_system_statement_passthrough,
-    materialize_agent_grounding_from_child_execution, system_statement_kind_from_child_executions,
-    verify_agent_answer_against_tool_evidence,
+    is_system_statement_passthrough, materialize_agent_grounding_from_child_execution,
+    system_statement_kind_from_child_executions, verify_agent_answer_against_tool_evidence,
 };
 use agent_verification::{
     agent_answer_allows_parent_model_revision,

@@ -33,6 +33,17 @@ DOC = UUID("00000000-0000-0000-0000-0000000000d1")
 OP = UUID("00000000-0000-0000-0000-0000000000f1")
 
 
+def _payload_receipt() -> dict[str, object]:
+    return {
+        "asyncOperationId": str(OP),
+        "visibilityIntentId": None,
+        "resultRevisionId": str(WS),
+        "resultChecksum": "sha256:" + "a" * 64,
+        "requestFingerprint": "opaque-payload",
+        "items": [{"id": str(LIB_2), "document_id": str(DOC), "result_revision_id": str(WS)}],
+    }
+
+
 def _visibility_request() -> VisibilityIntentRequest:
     return VisibilityIntentRequest(
         idempotency_key="episode-A",
@@ -567,40 +578,62 @@ async def test_resolve_library_refs_rejects_a_library_response_without_a_page() 
 
 
 # ---------------------------------------------------------------------------
-# find_document / list_documents -- the list endpoint has no exact-match
-# filter, only `search` (ILIKE substring on external_key or rendered filename).
-# Both methods
-# reconstruct an exact lookup from that surface.
+# find_document -- the exact-key point lookup. One request to
+# .../documents/by-external-key?externalKey=..., never a collection walk.
 # ---------------------------------------------------------------------------
 
 
+def _lookup_path(library_id: UUID = LIB) -> str:
+    return f"/v1/content/libraries/{library_id}/documents/by-external-key"
+
+
+def _lookup_item(**overrides: object) -> dict[str, object]:
+    """One ``ContentDocumentListItem`` as the point lookup returns it."""
+    item: dict[str, object] = {
+        "id": str(DOC),
+        "libraryId": str(LIB),
+        "workspaceId": str(WS),
+        "externalKey": "confluence:page:42",
+        "fileName": "page.txt",
+        "documentState": "active",
+        "status": "ready",
+    }
+    item.update(overrides)
+    return item
+
+
 @pytest.mark.asyncio
-async def test_find_document_uses_search_and_matches_exactly() -> None:
+async def test_find_document_performs_one_exact_point_lookup() -> None:
     requests: list[httpx.Request] = []
 
     def handle(request: httpx.Request) -> httpx.Response:
         requests.append(request)
-        assert request.url.params.get("search") == "confluence:page:42"
-        assert "externalKey" not in request.url.params
+        assert request.url.path == _lookup_path()
+        assert request.url.params.get("externalKey") == "confluence:page:42"
+        assert "search" not in request.url.params
+        assert "cursor" not in request.url.params
+        return httpx.Response(200, json=_lookup_item())
+
+    client = _client(httpx.MockTransport(handle))
+    found = await client.find_document(LIB, "confluence:page:42")
+    await client.aclose()
+
+    assert found is not None
+    assert found.id == DOC
+    assert found.external_key == "confluence:page:42"
+    assert len(requests) == 1, "an exact lookup must not fall back to the collection"
+    assert "confluence:page:42" not in requests[0].url.path
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", ["queued", "processing", "ready", "failed", "canceled", "empty"])
+async def test_find_document_preserves_the_canonical_derived_status(status: str) -> None:
+    """The list row carries both the bucket and the raw lifecycle state."""
+
+    def handle(request: httpx.Request) -> httpx.Response:
         return httpx.Response(
             200,
-            json={
-                "items": [
-                    {
-                        "id": "00000000-0000-0000-0000-000000000420",
-                        "libraryId": str(LIB),
-                        "externalKey": "confluence:page:420",
-                        "status": "ready",
-                    },
-                    {
-                        "id": "00000000-0000-0000-0000-000000000042",
-                        "libraryId": str(LIB),
-                        "externalKey": "confluence:page:42",
-                        "status": "ready",
-                    },
-                ],
-                "nextCursor": None,
-            },
+            json=_lookup_item(status=status, documentState="active"),
         )
 
     client = _client(httpx.MockTransport(handle))
@@ -608,20 +641,59 @@ async def test_find_document_uses_search_and_matches_exactly() -> None:
     await client.aclose()
 
     assert found is not None
-    assert str(found.id) == "00000000-0000-0000-0000-000000000042"
-    assert len(requests) == 1, "must resolve in a single request when the match is on page one"
+    assert found.status == status
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "external_key",
+    [
+        "Confluence:Page:42",
+        "confluence:page:42",
+        "confluence:page:42 & more=1/2?x#y+100%",
+        "confluence:page:café:💥",
+        "confluence:page:a+b c",
+    ],
+)
+async def test_find_document_transports_reserved_and_case_sensitive_keys(
+    external_key: str,
+) -> None:
+    requests: list[httpx.Request] = []
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        assert request.url.path == _lookup_path()
+        return httpx.Response(200, json=_lookup_item(externalKey=external_key))
+
+    client = _client(httpx.MockTransport(handle))
+    found = await client.find_document(LIB, external_key)
+    await client.aclose()
+
+    assert found is not None
+    assert found.external_key == external_key
+    assert len(requests) == 1
+    sent = requests[0]
+    assert sent.url.params.get("externalKey") == external_key
+    assert external_key not in sent.url.path
+    assert " " not in sent.url.query.decode()
+    # A raw ampersand would split the query into a second parameter.
+    assert set(sent.url.params.keys()) == {"externalKey"}
 
 
 @pytest.mark.asyncio
 async def test_find_document_returns_none_when_absent() -> None:
+    requests: list[httpx.Request] = []
+
     def handle(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(200, json={"items": [], "nextCursor": None})
+        requests.append(request)
+        return httpx.Response(404, json=_problem("not_found", status=404))
 
     client = _client(httpx.MockTransport(handle))
     found = await client.find_document(LIB, "confluence:page:99")
     await client.aclose()
 
     assert found is None
+    assert [request.url.path for request in requests] == [_lookup_path()]
 
 
 @pytest.mark.asyncio
@@ -642,24 +714,14 @@ async def test_list_documents_accepts_a_terminal_page_without_next_cursor() -> N
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("operation", ["find", "list"])
-async def test_document_collection_rejects_cross_library_resources(operation: str) -> None:
+async def test_document_reads_reject_cross_library_resources(operation: str) -> None:
     external_key = "confluence:page:42"
+    foreign = _lookup_item(libraryId=str(LIB_2))
 
     def handle(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(
-            200,
-            json={
-                "items": [
-                    {
-                        "id": str(DOC),
-                        "libraryId": str(LIB_2),
-                        "externalKey": external_key,
-                        "status": "ready",
-                    }
-                ],
-                "nextCursor": None,
-            },
-        )
+        if request.url.path.endswith("/by-external-key"):
+            return httpx.Response(200, json=foreign)
+        return httpx.Response(200, json={"items": [foreign], "nextCursor": None})
 
     client = _client(httpx.MockTransport(handle))
     try:
@@ -677,8 +739,130 @@ async def test_document_collection_rejects_cross_library_resources(operation: st
 
 
 @pytest.mark.asyncio
-async def test_find_document_returns_none_when_library_gone() -> None:
+async def test_find_document_rejects_a_row_for_another_external_key() -> None:
+    requests: list[httpx.Request] = []
+
     def handle(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(200, json=_lookup_item(externalKey="confluence:page:420"))
+
+    client = _client(httpx.MockTransport(handle))
+    try:
+        with pytest.raises(IronRagError, match="mismatched external key"):
+            await client.find_document(LIB, "confluence:page:42")
+    finally:
+        await client.aclose()
+
+    assert len(requests) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "response",
+    [
+        pytest.param(
+            httpx.Response(403, json=_problem("forbidden", status=403)),
+            id="denied",
+        ),
+        pytest.param(
+            httpx.Response(401, json=_problem("unauthorized", status=401)),
+            id="unauthenticated",
+        ),
+        pytest.param(
+            httpx.Response(500, json=_problem("internal", status=500)),
+            id="server-error",
+        ),
+        pytest.param(
+            httpx.Response(503, text="upstream unavailable"),
+            id="non-problem-error",
+        ),
+    ],
+)
+async def test_find_document_keeps_native_problem_truth_for_non_404_errors(
+    response: httpx.Response,
+) -> None:
+    requests: list[httpx.Request] = []
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return response
+
+    client = _client(httpx.MockTransport(handle))
+    try:
+        with pytest.raises(IronRagProblemError) as raised:
+            await client.find_document(LIB, "confluence:page:42")
+    finally:
+        await client.aclose()
+
+    assert not isinstance(raised.value, IronRagNotFoundError)
+    assert raised.value.problem.status == response.status_code
+    assert [request.url.path for request in requests] == [_lookup_path()]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "payload",
+    [
+        pytest.param([], id="not-an-object"),
+        pytest.param({"libraryId": str(LIB), "externalKey": "confluence:page:42"}, id="no-id"),
+        pytest.param({"id": str(DOC), "externalKey": "confluence:page:42"}, id="no-library"),
+        pytest.param({"id": str(DOC), "libraryId": str(LIB)}, id="no-external-key"),
+        pytest.param({"id": "not-a-uuid", "libraryId": str(LIB)}, id="bad-id"),
+    ],
+)
+async def test_find_document_rejects_a_malformed_success_payload(
+    payload: object,
+) -> None:
+    requests: list[httpx.Request] = []
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(200, json=payload)
+
+    client = _client(httpx.MockTransport(handle))
+    try:
+        with pytest.raises(IronRagError, match="malformed document lookup"):
+            await client.find_document(LIB, "confluence:page:42")
+    finally:
+        await client.aclose()
+
+    assert len(requests) == 1
+
+
+@pytest.mark.asyncio
+async def test_find_document_rejects_a_non_json_success_body() -> None:
+    client = _client(httpx.MockTransport(lambda request: httpx.Response(200, text="<html>")))
+    try:
+        with pytest.raises(IronRagError, match="malformed document lookup"):
+            await client.find_document(LIB, "confluence:page:42")
+    finally:
+        await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_find_document_rejects_an_empty_external_key_without_a_request() -> None:
+    requests: list[httpx.Request] = []
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(200, json=_lookup_item())
+
+    client = _client(httpx.MockTransport(handle))
+    try:
+        with pytest.raises(ValueError, match="external_key must not be empty"):
+            await client.find_document(LIB, "")
+    finally:
+        await client.aclose()
+
+    assert requests == []
+
+
+@pytest.mark.asyncio
+async def test_find_document_returns_none_when_library_gone() -> None:
+    """The point lookup cannot distinguish an absent library from an absent document."""
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == _lookup_path()
         return httpx.Response(404, json=_problem("not_found", status=404))
 
     client = _client(httpx.MockTransport(handle))
@@ -692,8 +876,8 @@ async def test_find_document_returns_none_when_library_gone() -> None:
 async def test_list_documents_raises_not_found_when_library_gone() -> None:
     """A 404 on the collection means the library itself is gone, not an empty page.
 
-    Callers that treat "no documents" and "no library" the same (find_document)
-    catch this locally and convert it -- list_documents must not blur the two,
+    ``find_document`` answers ``None`` for the same status because its point
+    lookup cannot separate the two; the collection walk must not blur them,
     or the reap sweep's ``except IronRagNotFoundError`` self-heal for a
     deleted library (sync.py) can never fire.
     """
@@ -757,7 +941,9 @@ async def test_list_documents_follows_cursor_pages() -> None:
 
 
 @pytest.mark.asyncio
-async def test_list_documents_external_key_narrows_via_search_and_filters_exact() -> None:
+async def test_list_documents_search_narrows_without_an_exact_client_filter() -> None:
+    """``search`` is the server's substring filter; the walk yields every match."""
+
     def handle(request: httpx.Request) -> httpx.Response:
         assert request.url.params.get("search") == "source:page:1"
         return httpx.Response(
@@ -782,19 +968,10 @@ async def test_list_documents_external_key_narrows_via_search_and_filters_exact(
         )
 
     client = _client(httpx.MockTransport(handle))
-    documents = [doc async for doc in client.list_documents(LIB, external_key="source:page:1")]
+    documents = [doc async for doc in client.list_documents(LIB, search="source:page:1")]
     await client.aclose()
 
-    assert [d.external_key for d in documents] == ["source:page:1"]
-
-
-@pytest.mark.asyncio
-async def test_list_documents_rejects_search_and_external_key_together() -> None:
-    client = _client(httpx.MockTransport(lambda request: httpx.Response(200, json={})))
-    with pytest.raises(ValueError, match="either search or external_key"):
-        async for _ in client.list_documents(LIB, search="a", external_key="b"):
-            pass
-    await client.aclose()
+    assert [d.external_key for d in documents] == ["source:page:10", "source:page:1"]
 
 
 @pytest.mark.asyncio
@@ -968,11 +1145,12 @@ async def test_get_document_unwraps_document_envelope() -> None:
             json={
                 "document": {
                     "id": str(DOC),
-                    "libraryId": str(LIB),
-                    "externalKey": "source:page:1",
-                    "documentState": "active",
+                    "library_id": str(LIB),
+                    "external_key": "source:page:1",
+                    "document_state": "active",
                 },
                 "fileName": "page.md",
+                "head": None,
             },
         )
 
@@ -1016,12 +1194,13 @@ async def test_create_document_json_path_sends_camel_case_body() -> None:
                 "document": {
                     "document": {
                         "id": str(DOC),
-                        "libraryId": str(LIB),
-                        "externalKey": "source:page:1",
-                        "documentState": "active",
+                        "library_id": str(LIB),
+                        "external_key": "source:page:1",
+                        "document_state": "active",
                     },
+                    "head": None,
                 },
-                "mutation": {"mutation": {"id": str(OP)}, "items": []},
+                "mutation": _payload_receipt(),
             },
             headers={"Location": f"/v1/content/documents/{DOC}"},
         )
@@ -1060,12 +1239,13 @@ async def test_create_document_multipart_omits_redundant_library_id_field() -> N
                 "document": {
                     "document": {
                         "id": str(DOC),
-                        "libraryId": str(LIB),
-                        "externalKey": "source:image:1",
-                        "documentState": "active",
+                        "library_id": str(LIB),
+                        "external_key": "source:image:1",
+                        "document_state": "active",
                     },
+                    "head": None,
                 },
-                "mutation": {"mutation": {"id": str(OP)}, "items": []},
+                "mutation": _payload_receipt(),
             },
         )
 
@@ -1098,12 +1278,13 @@ async def test_create_document_multipart_omits_parent_external_key_when_unset() 
                 "document": {
                     "document": {
                         "id": str(DOC),
-                        "libraryId": str(LIB),
-                        "externalKey": "source:page:1",
-                        "documentState": "active",
+                        "library_id": str(LIB),
+                        "external_key": "source:page:1",
+                        "document_state": "active",
                     },
+                    "head": None,
                 },
-                "mutation": {"mutation": {"id": str(OP)}, "items": []},
+                "mutation": _payload_receipt(),
             },
         )
 
@@ -1170,7 +1351,7 @@ async def test_create_revision_append_json_body() -> None:
         bodies.append(request.content)
         return httpx.Response(
             202,
-            json={"mutation": {"id": str(OP)}, "items": [], "asyncOperationId": str(OP)},
+            json=_payload_receipt(),
             headers={"Location": f"/v1/ops/operations/{OP}"},
         )
 
@@ -1199,7 +1380,7 @@ async def test_create_revision_uses_the_revision_create_timeout() -> None:
 
     def handle(request: httpx.Request) -> httpx.Response:
         timeouts.append(request.extensions.get("timeout"))
-        return httpx.Response(202, json={"asyncOperationId": str(OP)})
+        return httpx.Response(202, json=_payload_receipt())
 
     client = _client(httpx.MockTransport(handle))
     await client.create_revision(
@@ -1221,7 +1402,7 @@ async def test_create_revision_replace_multipart_file() -> None:
     def handle(request: httpx.Request) -> httpx.Response:
         assert request.headers["content-type"].startswith("multipart/form-data")
         bodies.append(request.content)
-        return httpx.Response(202, json={"asyncOperationId": str(OP)})
+        return httpx.Response(202, json=_payload_receipt())
 
     client = _client(httpx.MockTransport(handle))
     handle_result = await client.create_revision(
@@ -1299,8 +1480,9 @@ async def test_visibility_contract_revision_binding_and_complete_metadata_wire(
                 "resultRevisionId": str(WS),
                 "resultChecksum": "sha256:" + "a" * 64,
                 "requestFingerprint": "opaque-payload",
+                "visibilityIntentId": str(OP),
                 "items": [
-                    {"id": str(LIB_2), "documentId": str(DOC), "visibilityIntentId": str(OP)}
+                    {"id": str(LIB_2), "document_id": str(DOC), "result_revision_id": str(WS)}
                 ],
             },
         )
@@ -1381,9 +1563,9 @@ async def test_visibility_contract_detail_uses_canonical_head_lineage(nested: bo
     detail = {
         "document": {"id": str(DOC), "libraryId": str(LIB), "externalKey": "echo:page:1"},
         "head": {
-            "visibilityIntentId": str(OP),
-            "readableRevisionId": str(WS),
-            "readableMutationItemId": str(LIB_2),
+            "document_id": str(DOC),
+            "visibility_intent_id": str(OP),
+            "readable_revision_id": str(WS),
         },
     }
     client = _client(
@@ -1397,7 +1579,27 @@ async def test_visibility_contract_detail_uses_canonical_head_lineage(nested: bo
     resource = await client.get_document(DOC)
     assert resource.visibility_intent_id == OP
     assert resource.readable_revision_id == WS
-    assert resource.readable_mutation_item_id == LIB_2
+    await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_null_head_does_not_inherit_document_or_envelope_currentness() -> None:
+    detail = {
+        "document": {
+            "id": str(DOC),
+            "library_id": str(LIB),
+            "external_key": "echo:page:1",
+            "visibility_intent_id": str(OP),
+            "readable_revision_id": str(WS),
+        },
+        "visibility_intent_id": str(OP),
+        "readable_revision_id": str(WS),
+        "head": None,
+    }
+    client = _client(httpx.MockTransport(lambda request: httpx.Response(200, json=detail)))
+    resource = await client.get_document(DOC)
+    assert resource.visibility_intent_id is None
+    assert resource.readable_revision_id is None
     await client.aclose()
 
 

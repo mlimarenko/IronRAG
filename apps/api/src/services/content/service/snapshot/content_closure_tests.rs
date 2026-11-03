@@ -25,12 +25,14 @@ impl ContentArchiveFixture {
         manifest.library_id = library_id;
         manifest.postgres_tables.push("knowledge_revision".to_owned());
         let identity = json!({"workspaceId": workspace_id, "libraryId": library_id,
-            "documentId": document_id, "operationKind": "visibility", "sourceIdentity": "source-v3",
+            "documentId": document_id, "requestedByPrincipalId": null, "requestSurface": "rest",
+            "operationKind": "visibility", "sourceIdentity": "source-v3",
             "materializationToken": null, "replacement": replacement});
         let payload_identity = json!({"workspaceId": workspace_id, "libraryId": library_id,
-            "target": {"kind": "existing", "documentId": document_id}, "operationKind": "replace",
-            "revision": {"visibilityIntentId": intent_id},
-            "sourceIdentity": "source-v3", "materializationToken": null, "replacement": replacement});
+            "operationKind": "replace", "sourceIdentity": "source-v3", "materializationToken": null,
+            "target": {"kind": "existing", "documentId": document_id},
+            "revision": {"contentSourceKind": "upload", "visibilityIntentId": intent_id, "baseRevisionId": null},
+            "replacement": replacement});
         let mut rows = vec![
             (
                 "content_document",
@@ -398,7 +400,7 @@ fn archive4_predecessor_audit_is_not_read_authority_for_admitted_revision() {
 }
 
 fn identity_digest(identity: &Value) -> String {
-    format!("v1:sha256:{}", hex::encode(Sha256::digest(serde_json::to_vec(identity).unwrap())))
+    crate::infra::repositories::admission_repository::fingerprint(identity).unwrap()
 }
 
 #[test]
@@ -442,8 +444,12 @@ fn archive3_preserves_unbound_web_run_identity_without_inventing_page_descriptor
     let original_scope = mutation["request_identity"].clone();
     mutation["operation_kind"] = json!("web_capture");
     mutation["request_identity"] = json!({"workspaceId": original_scope["workspaceId"],
-        "libraryId": original_scope["libraryId"], "seedUrl": "https://example.test/seed",
-        "mode": "single_page"});
+        "libraryId": original_scope["libraryId"], "operationKind": "web_capture",
+        "sourceIdentity": "https://example.test/seed", "seedUrl": "https://example.test/seed",
+        "normalizedSeedUrl": "https://example.test/seed", "mode": "single_page",
+        "boundaryPolicy": "same_host", "maxDepth": 0, "maxPages": 1,
+        "crawlAllowPatterns": [], "crawlBlockPatterns": [],
+        "materializationAllowPatterns": [], "materializationBlockPatterns": []});
     mutation["request_fingerprint"] = json!(identity_digest(&mutation["request_identity"]));
     fixture.validate().unwrap();
 }
@@ -456,6 +462,12 @@ fn archive3_rejects_missing_identity_and_modified_fingerprint() {
     let mut fixture = ContentArchiveFixture::new(false);
     fixture.row_mut("content_mutation")["request_fingerprint"] = json!("wrong");
     assert!(fixture.validate().unwrap_err().to_string().contains("fingerprint mismatch"));
+    let mut fixture = ContentArchiveFixture::new(false);
+    let mutation = fixture.row_mut("content_mutation");
+    let digest = mutation["request_fingerprint"].as_str().unwrap();
+    let last = if digest.ends_with('0') { '1' } else { '0' };
+    mutation["request_fingerprint"] = json!(format!("{}{last}", &digest[..digest.len() - 1]));
+    assert!(fixture.validate().unwrap_err().to_string().contains("fingerprint mismatch"));
 }
 
 #[test]
@@ -466,7 +478,6 @@ fn archive3_rejects_retired_policy_columns_and_identity_inputs() {
     let mut fixture = ContentArchiveFixture::new(false);
     let mutation = fixture.row_mut("content_mutation");
     mutation["request_identity"]["visibilityPolicy"] = json!("readable");
-    mutation["request_fingerprint"] = json!(identity_digest(&mutation["request_identity"]));
     assert!(fixture.validate().unwrap_err().to_string().contains("retired policy identity input"));
 }
 

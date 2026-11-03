@@ -109,6 +109,7 @@ fn sample_binding() -> ResolvedRuntimeBinding {
 
 fn chat_response_with(output_text: &str) -> ChatResponse {
     ChatResponse {
+        completion_status: crate::integrations::llm::ChatCompletionStatus::Complete,
         provider_kind: "openai".to_string(),
         model_name: "gpt-5.4-nano".to_string(),
         output_text: output_text.to_string(),

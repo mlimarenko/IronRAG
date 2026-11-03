@@ -83,7 +83,7 @@ impl SnapshotContentClosure {
             for table in POSTGRES_CONTENT_TABLES {
                 anyhow::ensure!(
                     manifest.postgres_tables.iter().any(|name| name == table),
-                    "snapshot schema 4 requires complete content table inventory"
+                    "snapshot schema {SNAPSHOT_SCHEMA_VERSION} requires complete content table inventory"
                 );
             }
         }
@@ -446,7 +446,10 @@ fn nonnegative_integer(row: &Value, field: &str) -> anyhow::Result<i64> {
 }
 
 fn explicit_optional_uuid(row: &Value, field: &str) -> anyhow::Result<Option<Uuid>> {
-    anyhow::ensure!(row.get(field).is_some(), "snapshot schema 4 missing {field}");
+    anyhow::ensure!(
+        row.get(field).is_some(),
+        "snapshot schema {SNAPSHOT_SCHEMA_VERSION} missing {field}"
+    );
     optional_uuid_field(row, field)
 }
 
@@ -466,7 +469,7 @@ fn validate_identity(mutation: &Value) -> anyhow::Result<()> {
     validate_representation_namespace(mutation)?;
     anyhow::ensure!(
         mutation.get("visibility_policy").is_none(),
-        "snapshot schema 4 rejects retired policy column"
+        "snapshot schema {SNAPSHOT_SCHEMA_VERSION} rejects retired policy column"
     );
     let identity = mutation
         .get("request_identity")
@@ -474,19 +477,17 @@ fn validate_identity(mutation: &Value) -> anyhow::Result<()> {
         .ok_or_else(|| anyhow!("snapshot mutation missing immutable request identity"))?;
     anyhow::ensure!(
         identity.get("visibilityPolicy").is_none(),
-        "snapshot schema 4 rejects retired policy identity input"
+        "snapshot schema {SNAPSHOT_SCHEMA_VERSION} rejects retired policy identity input"
     );
-    let digest =
-        format!("v1:sha256:{}", hex::encode(Sha256::digest(serde_json::to_vec(identity)?)));
+    let digest = mutation["request_fingerprint"]
+        .as_str()
+        .ok_or_else(|| anyhow!("snapshot immutable request fingerprint missing"))?;
+    crate::infra::repositories::admission_repository::verify_fingerprint(identity, digest)?;
     // The request records its original authenticated scope. A restore remaps
     // relational ownership but must not edit semantic identity or its digest;
     // a subsequent backup must still accept that same immutable admission.
     required_uuid_field("request_identity", identity, "workspaceId")?;
     required_uuid_field("request_identity", identity, "libraryId")?;
-    anyhow::ensure!(
-        mutation["request_fingerprint"].as_str() == Some(digest.as_str()),
-        "snapshot immutable request fingerprint mismatch"
-    );
     Ok(())
 }
 

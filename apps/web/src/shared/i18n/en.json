@@ -105,7 +105,6 @@
         "requirements": "Requirements",
         "systemPrompt": "System prompt",
         "tokenOptional": "Token (optional)",
-        "reasoningEffort": "Reasoning",
         "serviceTier": "Service tier"
       },
       "inheritanceTooltip": "Library settings override workspace settings; workspace settings override instance settings.",
@@ -253,7 +252,6 @@
         "saveRejected": "The server rejected this reasoning selection. Review the mode and the raw parameters, then try again."
       },
       "requestTuning": {
-        "providerDefault": "Provider default",
         "reasoning": {
           "none": "Off",
           "low": "Low",
@@ -261,7 +259,6 @@
           "high": "High"
         },
         "reasoningBadge": "Reasoning: {{effort}}",
-        "reasoningHint": "Off is fastest and cheapest; classification and extraction lose nothing with it.",
         "tier": {
           "standard": "Standard",
           "flex": "Flex · −50%"
@@ -485,12 +482,10 @@
         "patternsHint": "One rule per line. Prefix with url_prefix:, path_prefix:, or glob:; otherwise the kind is inferred.",
         "processingTitle": "Recognition and retrieval",
         "providerCallsSummary": "{{count}} provider calls",
-        "rasterImageEngine": "Raster image engine",
+        "visionRequired": "Image OCR requires Vision",
+        "visionHelp": "Images and scanned pages use the extract_text Vision binding. Native document text does not require Vision.",
+        "configureExtractText": "Configure extract_text binding",
         "readinessSummary": "{{ready}} ready · {{blocked}} blocked",
-        "recognitionEngines": {
-          "docling": "Docling",
-          "vision": "Vision model"
-        },
         "requiredFields": "Display name, slug, and text search configuration are required.",
         "saveFailed": "Failed to save library settings.",
         "saveSuccess": "Library settings saved.",
@@ -872,6 +867,63 @@
     "showMore": "Show more",
     "sources": "See all sources",
     "sourcesShown": "Shown {{shown}} of {{total}}",
+    "semantic": {
+      "title": "Answer assessment",
+      "checkedCandidate": "These findings concern the checked candidate, not the replacement answer shown in chat.",
+      "checkedAnswer": "Findings concern the exact checked text below. Source support, completeness and response type are assessed separately from answer readiness.",
+      "claimSupport": "Factual support",
+      "completeness": "Completeness",
+      "responseClassification": "Response type",
+      "missingCaveats": "Missing essential caveats",
+      "answerBlocks": "Checked answer blocks",
+      "block": "Block {{number}}",
+      "checkedText": "Exact checked text",
+      "sourceQuote": "Exact source quote",
+      "assertsAbsence": "This block claims a fact is absent from the document.",
+      "status": {
+        "completed": "Assessment completed",
+        "failed": "Assessment failed",
+        "not_run": "Assessment not run"
+      },
+      "support": {
+        "supported": "Supported by sources",
+        "contradicted": "Contradicted by sources",
+        "insufficient_evidence": "Insufficient information",
+        "mixed": "Partially supported",
+        "no_factual_claims": "No factual claims"
+      },
+      "complete": {
+        "complete": "No essential omissions found",
+        "missing_essential_caveats": "Essential caveats missing",
+        "undetermined": "Completeness undetermined"
+      },
+      "response": {
+        "factual_answer": "Factual answer",
+        "correct_source_bounded_abstention": "Justified source-bounded abstention. This does not confirm an unavailable fact.",
+        "false_refusal": "Unjustified refusal: the question was answerable",
+        "unresolved_refusal": "Refusal not established as justified by the available evidence"
+      },
+      "scope": {
+        "selected_excerpt": "Selected excerpt only",
+        "complete_document": "Complete document checked"
+      },
+      "failure": {
+        "timeout": "The assessment timed out. No factual judgment was obtained.",
+        "provider_refusal": "The assessment provider refused the request. No factual judgment was obtained.",
+        "provider_error": "The assessment service failed. No factual judgment was obtained.",
+        "invalid_response": "The assessment response was invalid. No factual judgment was obtained.",
+        "invalid_provenance": "The assessment evidence could not be validated. No factual judgment was obtained."
+      },
+      "notRun": {
+        "disabled": "Semantic assessment is disabled.",
+        "binding_unavailable": "No assessment model is configured.",
+        "no_evidence": "No authorized source text was available for assessment.",
+        "non_factual_response": "This clarification or system statement is not a factual answer to assess.",
+        "empty_answer": "No nonempty answer was available for assessment.",
+        "input_limit_exceeded": "The assessment input exceeded its size limit.",
+        "unsupported_structured_transport": "The assessment service cannot enforce the required response format."
+      }
+    },
     "subtitle": "Ask one library at a time and inspect the evidence behind every claim.",
     "systemPrompt": "System prompt",
     "temporarilyUnavailable": "The assistant is temporarily unavailable. Try again shortly.",
@@ -1199,7 +1251,7 @@
         "canonical_pipeline_failed": "Retry processing. If the same stage fails again, inspect the pipeline stage details and provider configuration.",
         "children_failed": "Open the failed documents in the batch, fix each document-level error, then retry only the failed items.",
         "delete_failed": "Refresh the list and retry deletion for the remaining documents.",
-        "docling_insufficient_memory": "Raise the worker memory limit IRONRAG_WORKER_MEMORY_LIMIT (in docker-compose or helm values) and recreate the container: docker compose up -d --force-recreate worker. A single docling process needs ≥2560 MiB plus headroom.",
+        "xberg_insufficient_memory": "Set IRONRAG_WORKER_MEMORY_LIMIT to at least 12 GiB and recreate the worker. Local OCR requires at least 8 GiB plus 256 MiB of available memory before extraction can start.",
         "document_deleted": "No fix is needed for deleted documents.",
         "extraction_failed": "Retry processing or upload a clean exported copy of the document.",
         "finalize_failed": "Retry processing after storage and graph services are healthy.",
@@ -1273,7 +1325,7 @@
         "canonical_pipeline_failed": "Document processing failed.",
         "children_failed": "Some documents in the batch operation failed.",
         "delete_failed": "Some documents could not be deleted.",
-        "docling_insufficient_memory": "The document extractor (docling) ran out of memory in the worker container.",
+        "xberg_insufficient_memory": "There is not enough memory available in the worker container for local Xberg OCR.",
         "document_deleted": "The document was deleted before processing completed.",
         "extraction_failed": "Content extraction failed before indexing could continue.",
         "finalize_failed": "The document could not be finalized after processing.",
@@ -1810,7 +1862,7 @@
     "searchLibraries": "Search libraries",
     "searchWorkspaces": "Search workspaces",
     "switchScope": "Switch workspace & library",
-    "update": "Update available",
+    "update": "Update available: {{version}}",
     "userMenu": "User menu"
   }
 }

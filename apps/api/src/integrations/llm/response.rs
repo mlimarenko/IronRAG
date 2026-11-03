@@ -11,7 +11,7 @@ use crate::{
     },
 };
 
-use super::{ChatToolCall, openai_compatible::extract_message_content_text};
+use super::{ChatCompletionStatus, ChatToolCall, openai_compatible::extract_message_content_text};
 
 pub(super) async fn read_provider_response_body(
     response: reqwest::Response,
@@ -111,10 +111,40 @@ pub(super) fn provider_usage_json(body: &serde_json::Value) -> serde_json::Value
     usage_json
 }
 
+pub(super) fn openai_completion_status(choice: &serde_json::Value) -> ChatCompletionStatus {
+    let message = choice.get("message").or_else(|| choice.get("delta"));
+    let explicit_refusal = message.is_some_and(|message| {
+        message.get("refusal").is_some_and(serde_json::Value::is_string)
+            || message.get("content").and_then(serde_json::Value::as_array).is_some_and(|parts| {
+                parts.iter().any(|part| {
+                    part.get("type").and_then(serde_json::Value::as_str) == Some("refusal")
+                })
+            })
+    });
+    if explicit_refusal {
+        return ChatCompletionStatus::Refused;
+    }
+    match choice.get("finish_reason").and_then(serde_json::Value::as_str) {
+        Some("stop") => ChatCompletionStatus::Complete,
+        Some("length") => ChatCompletionStatus::Truncated,
+        Some("content_filter") => ChatCompletionStatus::Refused,
+        _ => ChatCompletionStatus::Unknown,
+    }
+}
+
+pub(super) fn openai_chat_response(
+    body: &serde_json::Value,
+) -> (String, serde_json::Value, ChatCompletionStatus) {
+    let choice = &body["choices"][0];
+    let output_text =
+        choice.pointer("/message/content").map(extract_message_content_text).unwrap_or_default();
+    (output_text, provider_usage_json(body), openai_completion_status(choice))
+}
+
 pub(super) fn native_chat_response(
     runtime_kind: &str,
     body: serde_json::Value,
-) -> std::result::Result<(String, serde_json::Value), ProviderCallError> {
+) -> std::result::Result<(String, serde_json::Value, ChatCompletionStatus), ProviderCallError> {
     let output_text = match runtime_kind {
         ANTHROPIC_MESSAGES_RUNTIME_KIND => body
             .get("content")
@@ -145,7 +175,47 @@ pub(super) fn native_chat_response(
         .or_else(|| body.get("usageMetadata"))
         .cloned()
         .unwrap_or_else(|| serde_json::json!({}));
-    Ok((output_text, usage_json))
+    let completion_status = match runtime_kind {
+        ANTHROPIC_MESSAGES_RUNTIME_KIND => {
+            match body.get("stop_reason").and_then(serde_json::Value::as_str) {
+                Some("end_turn" | "stop_sequence") => ChatCompletionStatus::Complete,
+                Some("max_tokens" | "model_context_window_exceeded") => {
+                    ChatCompletionStatus::Truncated
+                }
+                Some("refusal") => ChatCompletionStatus::Refused,
+                _ => ChatCompletionStatus::Unknown,
+            }
+        }
+        GEMINI_GENERATE_CONTENT_RUNTIME_KIND => {
+            let finish_reason =
+                body.pointer("/candidates/0/finishReason").and_then(serde_json::Value::as_str);
+            let block_reason =
+                body.pointer("/promptFeedback/blockReason").and_then(serde_json::Value::as_str);
+            if matches!(
+                block_reason,
+                Some("SAFETY" | "OTHER" | "BLOCKLIST" | "PROHIBITED_CONTENT" | "IMAGE_SAFETY")
+            ) {
+                ChatCompletionStatus::Refused
+            } else {
+                match finish_reason {
+                    Some("STOP") => ChatCompletionStatus::Complete,
+                    Some("MAX_TOKENS") => ChatCompletionStatus::Truncated,
+                    Some(
+                        "SAFETY"
+                        | "RECITATION"
+                        | "BLOCKLIST"
+                        | "PROHIBITED_CONTENT"
+                        | "SPII"
+                        | "IMAGE_SAFETY"
+                        | "IMAGE_PROHIBITED_CONTENT",
+                    ) => ChatCompletionStatus::Refused,
+                    _ => ChatCompletionStatus::Unknown,
+                }
+            }
+        }
+        _ => return Err(ProviderCallError::protocol("unsupported native provider runtime kind")),
+    };
+    Ok((output_text, usage_json, completion_status))
 }
 
 /// Parsed fields extracted from a non-streaming OpenAI-compatible

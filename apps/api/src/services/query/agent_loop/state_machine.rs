@@ -171,14 +171,12 @@ impl McpAgentLoopState {
         grounded_answer_outcome: Option<AgentGroundedAnswerOutcome>,
         stopped_reason: AgentStopReason,
     ) -> AgentTurnResult {
-        let iterations = self.debug_iterations.len();
         AgentTurnResult {
             answer,
             answer_provenance,
             grounded_answer_outcome,
             usage_json: std::mem::replace(&mut self.usage_json, serde_json::json!({})),
             provider_calls: std::mem::take(&mut self.provider_calls),
-            iterations,
             assistant_grounding: std::mem::take(&mut self.assistant_grounding),
             child_query_execution_ids: std::mem::take(&mut self.child_query_execution_ids),
             debug_iterations: std::mem::take(&mut self.debug_iterations),

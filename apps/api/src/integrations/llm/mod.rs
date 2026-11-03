@@ -11,12 +11,13 @@ mod types;
 
 pub(crate) use embeddings::embedding_request_parameters;
 pub use gateway::UnifiedGateway;
-pub(crate) use provider::{binding_request_policy, disable_bounded_answer_reasoning};
+pub(crate) use provider::disable_bounded_answer_reasoning;
+pub(crate) use request::provider_system_prompt;
 pub use types::{
-    ChatMessage, ChatRequest, ChatRequestSeed, ChatResponse, ChatToolCall, ChatToolDef,
-    EmbeddingBatchRequest, EmbeddingBatchResponse, EmbeddingRequest, EmbeddingResponse, LlmGateway,
-    ToolUseRequest, ToolUseResponse, VisionRequest, VisionResponse, build_structured_chat_request,
-    build_text_chat_request,
+    ChatCompletionStatus, ChatMessage, ChatRequest, ChatRequestSeed, ChatResponse, ChatToolCall,
+    ChatToolDef, EmbeddingBatchRequest, EmbeddingBatchResponse, EmbeddingRequest,
+    EmbeddingResponse, LlmGateway, ToolUseRequest, ToolUseResponse, VisionRequest, VisionResponse,
+    build_structured_chat_request, build_text_chat_request,
 };
 
 #[cfg(test)]

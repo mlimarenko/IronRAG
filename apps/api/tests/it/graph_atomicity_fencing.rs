@@ -1232,6 +1232,187 @@ async fn backend_pid(connection: &mut PgConnection) -> Result<i32> {
         .map_err(Into::into)
 }
 
+#[tokio::test]
+#[ignore = "requires local postgres with the pgvector extensions"]
+async fn graph_savepoint_native_deadline_rolls_back_probe_and_preserves_outer_authority()
+-> Result<()> {
+    let fixture = GraphAtomicityFixture::create("savepoint-native-deadline").await?;
+    let result = async {
+        let attempt = fixture
+            .create_graph_attempt(
+                fixture.revision_id,
+                fixture.chunk_id,
+                "savepoint-native-deadline",
+                &[],
+            )
+            .await?;
+        let before =
+            graph_digest(&fixture, attempt.job_id, attempt.attempt_id, fixture.revision_id).await?;
+        let mut guard = acquire_graph_guard(fixture.pool(), &attempt, fixture.document_id).await?;
+        sqlx::query("create temporary table graph_deadline_probe (value integer) on commit drop")
+            .execute(guard.connection())
+            .await?;
+        sqlx::query("set local statement_timeout = '2s'").execute(guard.connection()).await?;
+        let started = tokio::time::Instant::now();
+        let result = guard
+            .run_graph_savepoint(started + StdDuration::from_millis(250), |connection| {
+                Box::pin(async move {
+                    sqlx::query("insert into graph_deadline_probe values (1)")
+                        .execute(&mut *connection)
+                        .await?;
+                    sqlx::query("select pg_sleep(10)").execute(&mut *connection).await?;
+                    Ok::<_, sqlx::Error>(())
+                })
+            })
+            .await;
+        let error = match result {
+            Err(runtime_graph_repository::GraphSavepointError::Operation(error)) => error,
+            Err(runtime_graph_repository::GraphSavepointError::Sqlx(error)) => {
+                bail!(
+                    "savepoint control failed instead of rolling back the callback timeout: {error}"
+                );
+            }
+            Ok(()) => bail!("native statement timeout did not interrupt the callback"),
+        };
+        let database_error =
+            error.as_database_error().context("deadline must fail natively in PostgreSQL")?;
+        assert_eq!(database_error.code().as_deref(), Some("57014"));
+        assert!(database_error.message().contains("statement timeout"));
+        assert!(
+            started.elapsed() < StdDuration::from_millis(1500),
+            "the callback must use its deadline, not the previous two-second cap"
+        );
+        let staged: i64 = sqlx::query_scalar("select count(*) from graph_deadline_probe")
+            .fetch_one(guard.connection())
+            .await?;
+        assert_eq!(staged, 0, "callback mutations must be explicitly rolled back");
+        let restored: String =
+            sqlx::query_scalar("select setting from pg_settings where name = 'statement_timeout'")
+                .fetch_one(guard.connection())
+                .await?;
+        assert_eq!(restored, "2000", "rollback must restore the outer cap");
+        let continued = guard
+            .run_graph_savepoint(
+                tokio::time::Instant::now() + StdDuration::from_secs(1),
+                |connection| {
+                    Box::pin(async move {
+                        sqlx::query("insert into graph_deadline_probe values (2)")
+                            .execute(connection)
+                            .await?;
+                        Ok::<_, sqlx::Error>(())
+                    })
+                },
+            )
+            .await;
+        assert!(continued.is_ok(), "outer authority guard must remain usable after rollback");
+        guard.rollback().await?;
+        let after =
+            graph_digest(&fixture, attempt.job_id, attempt.attempt_id, fixture.revision_id).await?;
+        assert_eq!(
+            after, before,
+            "deadline failure must not alter accepted lifecycle or graph state"
+        );
+        Ok(())
+    }
+    .await;
+    fixture.cleanup().await?;
+    result
+}
+
+#[tokio::test]
+#[ignore = "requires local postgres with the pgvector extensions"]
+async fn graph_savepoint_success_restores_shorter_cap_before_lifecycle_publication() -> Result<()> {
+    let fixture = GraphAtomicityFixture::create("savepoint-cap-restore").await?;
+    let result = async {
+        let attempt = fixture.create_graph_attempt(
+            fixture.revision_id, fixture.chunk_id, "savepoint-cap-restore", &[],
+        ).await?;
+        let mut guard = acquire_graph_guard(fixture.pool(), &attempt, fixture.document_id).await?;
+        sqlx::query("set local statement_timeout = '120ms'").execute(guard.connection()).await?;
+        let result = guard.run_graph_savepoint(
+            tokio::time::Instant::now() + StdDuration::from_secs(2),
+            |connection| Box::pin(async move {
+                sqlx::query_scalar::<_, String>("select setting from pg_settings where name = 'statement_timeout'")
+                    .fetch_one(connection).await
+            }),
+        ).await;
+        let inside = match result {
+            Ok(setting) => setting,
+            Err(_) => bail!("successful savepoint unexpectedly failed"),
+        };
+        assert_eq!(inside, "120", "a reconcile deadline must not extend a shorter session cap");
+        let restored: String = sqlx::query_scalar("select setting from pg_settings where name = 'statement_timeout'")
+            .fetch_one(guard.connection()).await?;
+        assert_eq!(restored, "120");
+
+        // A shorter reconcile cap must also be removed on success, so later
+        // lifecycle work retains its own previously configured allowance.
+        sqlx::query("set local statement_timeout = '2s'").execute(guard.connection()).await?;
+        let result = guard.run_graph_savepoint(
+            tokio::time::Instant::now() + StdDuration::from_millis(120),
+            |connection| Box::pin(async move {
+                let cap: i64 = sqlx::query_scalar("select setting::bigint from pg_settings where name = 'statement_timeout'")
+                    .fetch_one(connection).await?;
+                Ok::<_, sqlx::Error>(cap)
+            }),
+        ).await;
+        match result {
+            Ok(cap) => assert!((1..=120).contains(&cap)),
+            Err(_) => bail!("short successful reconcile savepoint failed"),
+        }
+        let restored: String = sqlx::query_scalar("select setting from pg_settings where name = 'statement_timeout'")
+            .fetch_one(guard.connection()).await?;
+        assert_eq!(restored, "2000");
+        sqlx::query("select pg_sleep(0.2)").execute(guard.connection()).await?;
+        let completed_at = Utc::now();
+        let publication = ingest_repository::publish_graph_refresh_success_with_graph_guard(
+            guard,
+            &graph_publication_command(&fixture, &attempt, completed_at),
+            &ingest_repository::GraphRefreshPublicationEffects {
+                terminal_stage_events: vec![terminal_graph_event(attempt.attempt_id, 0, completed_at)],
+            },
+        ).await?;
+        assert!(matches!(publication, ingest_repository::PublishGraphRefreshSuccessOutcome::Applied { .. }));
+        assert_terminal_stage_state(fixture.pool(), &attempt, &[1]).await?;
+        Ok(())
+    }.await;
+    fixture.cleanup().await?;
+    result
+}
+
+#[tokio::test]
+#[ignore = "requires local postgres with the pgvector extensions"]
+async fn graph_sql_deadline_expiry_never_disables_preexisting_timeout() -> Result<()> {
+    let fixture = GraphAtomicityFixture::create("deadline-expired").await?;
+    let result = async {
+        let mut transaction = fixture.pool().begin().await?;
+        sqlx::query("set local statement_timeout = '75ms'").execute(&mut *transaction).await?;
+        let deadline = runtime_graph_repository::RuntimeGraphSqlDeadline::at(
+            tokio::time::Instant::now() + StdDuration::from_secs(1),
+        );
+        let previous = deadline.install(&mut transaction).await?;
+        assert_eq!(previous, "75");
+        let current: String =
+            sqlx::query_scalar("select setting from pg_settings where name = 'statement_timeout'")
+                .fetch_one(&mut *transaction)
+                .await?;
+        assert_eq!(current, "75");
+        let expired =
+            runtime_graph_repository::RuntimeGraphSqlDeadline::at(tokio::time::Instant::now());
+        assert!(expired.install(&mut transaction).await.is_err());
+        let unchanged: String =
+            sqlx::query_scalar("select setting from pg_settings where name = 'statement_timeout'")
+                .fetch_one(&mut *transaction)
+                .await?;
+        assert_eq!(unchanged, "75", "an expired budget must fail before setting zero");
+        transaction.rollback().await?;
+        Ok(())
+    }
+    .await;
+    fixture.cleanup().await?;
+    result
+}
+
 async fn lock_attempt_row(
     pool: &PgPool,
     attempt_id: Uuid,

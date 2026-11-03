@@ -359,9 +359,9 @@ pub(crate) async fn project_rebuild_normalized_graph_with_connection(
     scope: &GraphProjectionScope,
 ) -> Result<GraphProjectionOutcome, GraphServiceError> {
     synchronize_rebuilt_graph_support_with_connection(connection, scope).await?;
-    let projection_writes = load_rebuilt_graph_projection_writes(state, connection, scope).await?;
+    let (node_count, edge_count) = prune_rebuilt_graph_projection(state, connection, scope).await?;
 
-    publish_rebuilt_graph_projection(state, connection, scope, &projection_writes).await
+    publish_rebuilt_graph_projection(connection, scope, node_count, edge_count).await
 }
 
 /// Synchronizes rebuilt-graph support counts and logs the prune outcome.
@@ -389,43 +389,142 @@ async fn synchronize_rebuilt_graph_support_with_connection(
     Ok(())
 }
 
-/// Loads, sanitizes and prunes the writes for a rebuilt graph projection.
-async fn load_rebuilt_graph_projection_writes(
+/// Compact rebuild classifier. Payload columns stay in PostgreSQL unchanged.
+#[derive(Default)]
+struct RebuildProjectionClassifier {
+    nodes: std::collections::HashMap<Uuid, RebuildProjectionNode>,
+    rejected_edges: Vec<Uuid>,
+    edge_count: usize,
+}
+
+struct RebuildProjectionNode {
+    identity_key: String,
+    allowed: bool,
+    document: bool,
+    connected: bool,
+}
+
+impl RebuildProjectionClassifier {
+    fn node(
+        &mut self,
+        guard: &GraphQualityGuardService,
+        node: repositories::RuntimeGraphRebuildNodeRow,
+    ) {
+        self.nodes.insert(
+            node.id,
+            RebuildProjectionNode {
+                allowed: guard.allows_node(&node.node_type, &node.label),
+                document: node.node_type == "document",
+                identity_key: node.identity_key,
+                connected: false,
+            },
+        );
+    }
+
+    fn edge(
+        &mut self,
+        guard: &GraphQualityGuardService,
+        edge: repositories::RuntimeGraphRebuildEdgeRow,
+    ) {
+        let allowed =
+            self.nodes.get(&edge.from_node_id).zip(self.nodes.get(&edge.to_node_id)).is_some_and(
+                |(from, to)| {
+                    from.allowed
+                        && to.allowed
+                        && guard.allows_relation(
+                            &from.identity_key,
+                            &to.identity_key,
+                            &edge.relation_type,
+                        )
+                },
+            );
+        if allowed {
+            self.edge_count += 1;
+            // Both endpoints were checked above, including the self-loop case.
+            if let Some(node) = self.nodes.get_mut(&edge.from_node_id) {
+                node.connected = true;
+            }
+            if let Some(node) = self.nodes.get_mut(&edge.to_node_id) {
+                node.connected = true;
+            }
+        } else {
+            self.rejected_edges.push(edge.id);
+        }
+    }
+
+    fn finish(self) -> (Vec<Uuid>, Vec<Uuid>, usize, usize) {
+        let node_count = self
+            .nodes
+            .values()
+            .filter(|node| node.allowed && (node.document || node.connected))
+            .count();
+        let rejected_nodes = self
+            .nodes
+            .into_iter()
+            .filter(|(_, node)| !node.allowed || (!node.document && !node.connected))
+            .map(|(id, _)| id)
+            .collect();
+        (rejected_nodes, self.rejected_edges, node_count, self.edge_count)
+    }
+}
+
+async fn prune_rebuilt_graph_projection(
     state: &AppState,
     connection: &mut PgConnection,
     scope: &GraphProjectionScope,
-) -> Result<ProjectionWrites, GraphServiceError> {
-    let nodes = repositories::list_admitted_runtime_graph_nodes_by_library_with_executor(
-        &mut *connection,
+) -> Result<(usize, usize), GraphServiceError> {
+    let guard = &state.bulk_ingest_hardening_services.graph_quality_guard;
+    let mut classifier = RebuildProjectionClassifier::default();
+    repositories::visit_runtime_graph_rebuild_nodes(
+        connection,
         scope.library_id,
         scope.projection_version,
+        |node| classifier.node(guard, node),
     )
     .await
-    .context("failed to load rebuilt graph nodes for projection")?;
-    let edges = repositories::list_admitted_runtime_graph_edges_by_library_with_executor(
-        &mut *connection,
+    .context("failed to scan rebuilt graph nodes")?;
+    repositories::visit_runtime_graph_rebuild_edges(
+        connection,
         scope.library_id,
         scope.projection_version,
+        |edge| classifier.edge(guard, edge),
     )
     .await
-    .context("failed to load rebuilt graph edges for projection")?;
-
-    let projection_quality_guard = state.bulk_ingest_hardening_services.graph_quality_guard.clone();
-    let sanitize_task = tokio::task::spawn_blocking(move || {
-        projection_writes_from_rows(&projection_quality_guard, &nodes, &edges)
-    });
-    let projection_writes =
-        sanitize_task.await.context("rebuilt graph projection sanitize task panicked")?;
-    prune_disallowed_projection_rows_with_connection(connection, scope, &projection_writes).await?;
-    Ok(projection_writes)
+    .context("failed to scan rebuilt graph edges")?;
+    // Classify the entire graph before deleting: a valid connection may occur in
+    // the final page. Only compact identities and rejected IDs survive the scan.
+    let (nodes, edges, node_count, edge_count) = classifier.finish();
+    for edge_ids in edges.chunks(512) {
+        repositories::prune_runtime_graph_projection_rows_with_connection(
+            connection,
+            scope.library_id,
+            scope.projection_version,
+            &[],
+            edge_ids,
+        )
+        .await
+        .context("failed to prune rejected rebuild edges")?;
+    }
+    for node_ids in nodes.chunks(512) {
+        repositories::prune_runtime_graph_projection_rows_with_connection(
+            connection,
+            scope.library_id,
+            scope.projection_version,
+            node_ids,
+            &[],
+        )
+        .await
+        .context("failed to prune rejected rebuild nodes")?;
+    }
+    Ok((node_count, edge_count))
 }
 
 /// Publishes the rebuilt graph projection and its terminal snapshot.
 async fn publish_rebuilt_graph_projection(
-    state: &AppState,
     connection: &mut PgConnection,
     scope: &GraphProjectionScope,
-    projection_writes: &ProjectionWrites,
+    node_count: usize,
+    edge_count: usize,
 ) -> Result<GraphProjectionOutcome, GraphServiceError> {
     let provenance_coverage_percent = provenance_coverage_percent_with_connection(
         connection,
@@ -433,8 +532,6 @@ async fn publish_rebuilt_graph_projection(
         scope.projection_version,
     )
     .await?;
-    let node_count = projection_writes.nodes.len();
-    let edge_count = projection_writes.edges.len();
     let snapshot_node_count = i32::try_from(node_count).unwrap_or(i32::MAX);
     let snapshot_edge_count = i32::try_from(edge_count).unwrap_or(i32::MAX);
     let graph_status = rebuilt_graph_status(node_count, edge_count);
@@ -449,17 +546,6 @@ async fn publish_rebuilt_graph_projection(
     )
     .await
     .context("failed to claim rebuilt graph snapshot")?;
-
-    execute_projection_write_retries(state, || {
-        state.graph_store.replace_library_projection(
-            scope.library_id,
-            scope.projection_version,
-            &projection_writes.nodes,
-            &projection_writes.edges,
-        )
-    })
-    .await
-    .context("failed to refresh the rebuilt graph view")?;
 
     persist_rebuild_runtime_graph_snapshot_with_connection(
         connection,
@@ -590,35 +676,6 @@ async fn prune_disallowed_projection_rows(
     )
     .await
     .context("failed to atomically prune disallowed graph projection rows")?;
-    trace_disallowed_projection_prune(scope, &outcome);
-    Ok(())
-}
-
-async fn prune_disallowed_projection_rows_with_connection(
-    connection: &mut PgConnection,
-    scope: &GraphProjectionScope,
-    projection_writes: &ProjectionWrites,
-) -> Result<(), GraphServiceError> {
-    // A whole-library rebuild commits the normalized tables as the new source
-    // projection, so keep them identical to the sanitized graph-store payload.
-    // Unlike a targeted refresh, it is safe to remove every rejected row,
-    // including relation-quality failures and the non-document nodes they
-    // orphan. The ordinary/targeted path deliberately retains view-only
-    // orphans and continues to use the narrower quality-prune sets above.
-    if projection_writes.remove_node_ids.is_empty() && projection_writes.remove_edge_ids.is_empty()
-    {
-        return Ok(());
-    }
-
-    let outcome = repositories::prune_runtime_graph_projection_rows_with_connection(
-        connection,
-        scope.library_id,
-        scope.projection_version,
-        &projection_writes.remove_node_ids,
-        &projection_writes.remove_edge_ids,
-    )
-    .await
-    .context("failed to atomically prune disallowed rebuilt graph projection rows")?;
     trace_disallowed_projection_prune(scope, &outcome);
     Ok(())
 }
@@ -1155,6 +1212,74 @@ mod tests {
         assert_eq!(projection_writes.remove_edge_ids, vec![rejected_edge_id]);
         assert!(projection_writes.projection_pruned_node_ids.is_empty());
         assert!(projection_writes.projection_pruned_edge_ids.is_empty());
+    }
+
+    #[test]
+    fn compact_rebuild_classifier_matches_payload_projection_across_pages() {
+        let library_id = Uuid::now_v7();
+        let ids = (0..520).map(|_| Uuid::now_v7()).collect::<Vec<_>>();
+        let mut nodes = ids
+            .iter()
+            .enumerate()
+            .map(|(index, id)| {
+                runtime_node(library_id, *id, &format!("entity:{index}"), "Entity", "entity")
+            })
+            .collect::<Vec<_>>();
+        nodes[0].node_type = "document".to_string();
+        nodes[1].label = "false".to_string();
+        nodes[2].node_type = "document".to_string();
+        let mut edges = vec![
+            runtime_edge(library_id, ids[0], ids[1], "literal"),
+            runtime_edge(library_id, ids[0], ids[3], "invalid"),
+            runtime_edge(library_id, ids[4], ids[4], "loop"),
+            runtime_edge(library_id, ids[5], Uuid::now_v7(), "missing"),
+        ];
+        edges[1].relation_type = "Invalid Predicate".to_string();
+        // Connections arriving after a page boundary must retain earlier nodes.
+        edges.extend((6..519).map(|index| runtime_edge(library_id, ids[index], ids[519], "late")));
+        for guard in
+            [GraphQualityGuardService::default(), GraphQualityGuardService::new(false, false)]
+        {
+            let expected = projection_writes_from_rows(&guard, &nodes, &edges);
+            let mut classifier = RebuildProjectionClassifier::default();
+            for page in nodes.chunks(512) {
+                for node in page {
+                    classifier.node(
+                        &guard,
+                        repositories::RuntimeGraphRebuildNodeRow {
+                            id: node.id,
+                            identity_key: node.identity_key.clone(),
+                            label: node.label.clone(),
+                            node_type: node.node_type.clone(),
+                        },
+                    );
+                }
+            }
+            for page in edges.chunks(512) {
+                for edge in page {
+                    classifier.edge(
+                        &guard,
+                        repositories::RuntimeGraphRebuildEdgeRow {
+                            id: edge.id,
+                            from_node_id: edge.from_node_id,
+                            to_node_id: edge.to_node_id,
+                            relation_type: edge.relation_type.clone(),
+                        },
+                    );
+                }
+            }
+            let (removed_nodes, removed_edges, node_count, edge_count) = classifier.finish();
+            assert_eq!(node_count, expected.nodes.len());
+            assert_eq!(edge_count, expected.edges.len());
+            assert_eq!(
+                removed_nodes.into_iter().collect::<BTreeSet<_>>(),
+                expected.remove_node_ids.into_iter().collect()
+            );
+            assert_eq!(
+                removed_edges.into_iter().collect::<BTreeSet<_>>(),
+                expected.remove_edge_ids.into_iter().collect()
+            );
+        }
     }
 
     fn runtime_node(

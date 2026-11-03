@@ -1,7 +1,8 @@
 use anyhow::{Context, Result};
 
+use super::ChatCompletionStatus;
 use super::openai_compatible::extract_message_content_text;
-use super::response::overlay_provider_usage;
+use super::response::{openai_completion_status, overlay_provider_usage};
 use crate::shared::provider_http::{
     PROVIDER_STREAM_FRAME_MAX_BYTES, PROVIDER_STREAM_TOTAL_MAX_BYTES,
 };
@@ -101,6 +102,7 @@ pub(super) fn consume_openai_compatible_stream_frame(
     frame: &str,
     output_text: &mut String,
     usage_json: &mut serde_json::Value,
+    completion_status: &mut ChatCompletionStatus,
     on_delta: &mut (dyn FnMut(String) + Send),
 ) -> Result<bool> {
     if frame.trim().is_empty() || frame.starts_with(':') {
@@ -138,17 +140,35 @@ pub(super) fn consume_openai_compatible_stream_frame(
         on_delta(delta);
     }
     overlay_provider_usage(usage_json, &payload);
+    if let Some(choice) = payload.pointer("/choices/0") {
+        let status = openai_completion_status(choice);
+        // Refusal and truncation cannot be undone by later text or usage frames.
+        // A usage-only frame or [DONE] is not a native completion signal.
+        *completion_status = match (*completion_status, status) {
+            (ChatCompletionStatus::Refused, _) | (_, ChatCompletionStatus::Refused) => {
+                ChatCompletionStatus::Refused
+            }
+            (ChatCompletionStatus::Truncated, _) | (_, ChatCompletionStatus::Truncated) => {
+                ChatCompletionStatus::Truncated
+            }
+            (_, status) if choice.get("finish_reason").is_some_and(|value| !value.is_null()) => {
+                status
+            }
+            (current, _) => current,
+        };
+    }
     Ok(false)
 }
 
 pub(super) async fn drain_openai_compatible_stream(
     mut response: reqwest::Response,
     on_delta: &mut (dyn FnMut(String) + Send),
-) -> Result<(String, serde_json::Value)> {
+) -> Result<(String, serde_json::Value, ChatCompletionStatus)> {
     let limits = ProviderStreamLimits::default();
     validate_stream_content_length(&response, limits)?;
     let mut output_text = String::new();
     let mut usage_json = serde_json::json!({});
+    let mut completion_status = ChatCompletionStatus::Unknown;
     let mut buffer = BoundedSseBuffer::new(limits);
 
     while let Some(chunk) = response.chunk().await? {
@@ -157,9 +177,10 @@ pub(super) async fn drain_openai_compatible_stream(
                 &frame,
                 &mut output_text,
                 &mut usage_json,
+                &mut completion_status,
                 on_delta,
             )? {
-                return Ok((output_text, usage_json));
+                return Ok((output_text, usage_json, completion_status));
             }
         }
     }
@@ -169,11 +190,12 @@ pub(super) async fn drain_openai_compatible_stream(
             &frame,
             &mut output_text,
             &mut usage_json,
+            &mut completion_status,
             on_delta,
         )?;
     }
 
-    Ok((output_text, usage_json))
+    Ok((output_text, usage_json, completion_status))
 }
 
 fn extract_stream_delta_text(payload: &serde_json::Value) -> String {

@@ -532,7 +532,7 @@ pub(super) fn null_field_if_present(row: &mut serde_json::Value, field: &str) {
 pub(super) struct SnapshotManifestSections {
     pub(super) postgres_tables: HashSet<String>,
     /// Declared vector relations derived from the authoritative Postgres
-    /// section list; schema 4 requires `vector_shards` to match this set exactly.
+    /// section list; the current schema requires `vector_shards` to match it exactly.
     pub(super) vector_shards: BTreeMap<String, u64>,
 }
 

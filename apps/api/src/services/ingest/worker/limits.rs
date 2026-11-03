@@ -8,7 +8,7 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 use crate::{
     infra::repositories::content_revision_repository,
-    integrations::docling,
+    integrations::xberg,
     shared::{
         admission::{PermitWaitError, acquire_permit_within},
         telemetry,
@@ -67,14 +67,14 @@ fn heavy_revision_permit_error(error: PermitWaitError) -> anyhow::Error {
 }
 
 /// Bounded wait for one heavy-revision pipeline slot. Override with
-/// `IRONRAG_INGESTION_HEAVY_ACQUIRE_TIMEOUT_SECS`; the default matches Docling
-/// because one pipeline slot is backed by one Docling queue.
+/// `IRONRAG_INGESTION_HEAVY_ACQUIRE_TIMEOUT_SECS`; the default matches Xberg
+/// because one pipeline slot is backed by one Xberg queue.
 fn heavy_revision_acquire_timeout_secs() -> u64 {
     std::env::var("IRONRAG_INGESTION_HEAVY_ACQUIRE_TIMEOUT_SECS")
         .ok()
         .and_then(|raw| raw.parse::<u64>().ok())
         .filter(|value| *value > 0)
-        .unwrap_or_else(docling::default_docling_acquire_timeout_secs)
+        .unwrap_or_else(xberg::default_xberg_acquire_timeout_secs)
 }
 
 fn is_heavy_revision_pipeline_job(
@@ -146,11 +146,11 @@ fn invalid_heavy_pipeline_parallelism(value: &str) -> usize {
 fn auto_heavy_revision_pipeline_parallelism() -> usize {
     let cpu_parallelism = telemetry::detect_container_cpu_parallelism().unwrap_or(1);
     let memory_limit_bytes = telemetry::detect_container_memory_limit_bytes();
-    let docling_parallelism = docling::configured_max_concurrency();
+    let xberg_parallelism = xberg::configured_max_concurrency();
     let parallelism = auto_heavy_revision_pipeline_parallelism_for_limits(
         cpu_parallelism,
         memory_limit_bytes,
-        docling_parallelism,
+        xberg_parallelism,
     );
     let memory_limit_mib = memory_limit_bytes.map(|bytes| bytes / (1024 * 1024));
     let soft_limit_mib = memory_limit_mib.map(|mib| mib.saturating_mul(9) / 10);
@@ -164,8 +164,8 @@ fn auto_heavy_revision_pipeline_parallelism() -> usize {
         reserved_mib = HEAVY_PIPELINE_AUTO_RESERVED_MEMORY_MIB,
         per_job_mib = HEAVY_PIPELINE_AUTO_MEMORY_PER_JOB_MIB,
         max_parallelism = HEAVY_PIPELINE_AUTO_MAX_PARALLELISM,
-        docling_parallelism,
-        docling_waiters_per_process = docling::DOCLING_WAITERS_PER_PROCESS,
+        xberg_parallelism,
+        xberg_waiters_per_process = xberg::XBERG_WAITERS_PER_PROCESS,
         parallelism,
         "heavy revision pipeline auto parallelism resolved"
     );
@@ -192,12 +192,12 @@ fn warn_insufficient_heavy_pipeline_budget(
 pub(super) fn auto_heavy_revision_pipeline_parallelism_for_limits(
     cpu_parallelism: usize,
     memory_limit_bytes: Option<u64>,
-    docling_parallelism: usize,
+    xberg_parallelism: usize,
 ) -> usize {
     let cpu_bound = cpu_parallelism.clamp(1, HEAVY_PIPELINE_AUTO_MAX_PARALLELISM);
-    let docling_bound = docling_parallelism
+    let xberg_bound = xberg_parallelism
         .max(1)
-        .saturating_mul(docling::DOCLING_WAITERS_PER_PROCESS)
+        .saturating_mul(xberg::XBERG_WAITERS_PER_PROCESS)
         .min(HEAVY_PIPELINE_AUTO_MAX_PARALLELISM);
     let memory_bound =
         memory_limit_bytes.map(|bytes| bytes / (1024 * 1024)).map_or(1, |memory_mib| {
@@ -209,7 +209,7 @@ pub(super) fn auto_heavy_revision_pipeline_parallelism_for_limits(
         });
 
     cpu_bound
-        .min(docling_bound)
+        .min(xberg_bound)
         .min(memory_bound.max(1))
         .clamp(1, HEAVY_PIPELINE_AUTO_MAX_PARALLELISM)
 }

@@ -103,9 +103,7 @@ printf 'validated app.oidc without runtimeSecret.existingSecret is rejected\n'
   --set app.ingestion.maxParallelJobsGlobal=12 \
   --set app.ingestion.maxParallelJobsPerWorkspace=12 \
   --set app.ingestion.maxParallelJobsPerLibrary=12 \
-  --set app.ingestion.doclingPageBatchSize=5 \
-  --set app.ingestion.doclingPageStreamWindowPages=5 \
-  --set app.ingestion.doclingMaxConcurrency=1 \
+  --set app.ingestion.xbergPageBatchSize=5 \
   --set app.ingestion.graphExtractParallelismPerDocument=2 \
   --set-string storage.filesystem.existingClaim=ironrag-content-data \
   --set-string api.image.digest=sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
@@ -281,7 +279,8 @@ for component in ("api", "worker", "web"):
         if "kind: Deployment" in document and expected_name in document
     ]
     assert len(deployment) == 1, f"missing default Deployment for {component}"
-    assert re.search(r"^  replicas: 2$", deployment[0], re.MULTILINE), (
+    replicas = 1 if component == "worker" else 2
+    assert re.search(rf"^  replicas: {replicas}$", deployment[0], re.MULTILINE), (
         f"non-HPA Deployment {component} must retain its configured replica count"
     )
 
@@ -514,9 +513,7 @@ for runtime_setting in (
     'IRONRAG_INGESTION_MAX_PARALLEL_JOBS_GLOBAL: "12"',
     'IRONRAG_INGESTION_MAX_PARALLEL_JOBS_PER_WORKSPACE: "12"',
     'IRONRAG_INGESTION_MAX_PARALLEL_JOBS_PER_LIBRARY: "12"',
-    'IRONRAG_DOCLING_PAGE_BATCH_SIZE: "5"',
-    'IRONRAG_DOCLING_PAGE_STREAM_WINDOW_PAGES: "5"',
-    'IRONRAG_DOCLING_MAX_CONCURRENCY: "1"',
+    'IRONRAG_XBERG_PAGE_BATCH_SIZE: "5"',
     'IRONRAG_INGESTION_HEAVY_PIPELINE_PARALLELISM: "auto"',
     'IRONRAG_INGESTION_EMBEDDING_PARALLELISM: "8"',
     'IRONRAG_INGESTION_GRAPH_EXTRACT_PARALLELISM_PER_DOC: "2"',
@@ -658,9 +655,9 @@ then
 fi
 
 if "${HELM_BIN}" template ironrag "${CHART_DIR}" \
-  --set app.ingestion.doclingMaxConcurrency=0 >/dev/null 2>&1
+  --set app.ingestion.xbergPageBatchSize=0 >/dev/null 2>&1
 then
-  echo "Helm schema accepted zero Docling concurrency" >&2
+  echo "Helm schema accepted a zero native page batch size" >&2
   exit 1
 fi
 

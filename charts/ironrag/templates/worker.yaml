@@ -80,6 +80,8 @@ spec:
           volumeMounts:
             - name: tmp
               mountPath: /tmp
+            - name: tmp
+              mountPath: /var/tmp
             {{- if eq .Values.storage.provider "filesystem" }}
             - name: content-storage
               mountPath: {{ .Values.storage.rootPath }}
@@ -94,7 +96,7 @@ spec:
           emptyDir:
             # Disk-backed (node ephemeral storage), NOT medium: Memory. The
             # worker writes uploaded/extracted file bytes to /tmp via tempfile
-            # (docling extraction path); a RAM-backed /tmp charges those bytes
+            # (native extraction path); a RAM-backed /tmp charges those bytes
             # to the pod memory cgroup and can OOM the worker on a large file.
             # Keeping it on disk lands the bytes in ephemeral-storage (capped
             # by the resource preset), off the memory budget. Mirrors the host

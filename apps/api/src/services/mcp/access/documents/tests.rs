@@ -1,7 +1,7 @@
 use super::*;
 use super::{
     management::list_documents_matches_status_filter,
-    read::{effective_read_start_offset, merge_visual_description_into_content},
+    read::{canonical_read_window, effective_read_start_offset},
     search::{chunk_search_query_variants, search_document_hit_order},
 };
 use crate::{
@@ -14,28 +14,27 @@ use ironrag_contracts::documents::DocumentReadiness;
 use uuid::Uuid;
 
 #[test]
-fn image_visual_description_appends_to_existing_text_once() {
-    let merged = merge_visual_description_into_content(
-        Some("Visible text from OCR"),
-        Some("A restaurant sign with menu items."),
-    );
-
-    assert!(merged.contains("Visible text from OCR"));
-    assert!(merged.contains("## Source Image Description"));
-    assert!(merged.contains("A restaurant sign with menu items."));
+fn full_read_window_preserves_exact_canonical_whitespace_and_unicode_offsets() {
+    let canonical = "\n  Условие: подтверждение обязательно.\n";
+    let window = canonical_read_window(canonical, &McpReadMode::Full, 5, 100);
+    assert_eq!(window.content, canonical);
+    assert_eq!(window.start, 0);
+    assert_eq!(window.end, canonical.chars().count());
+    assert_eq!(window.total, canonical.chars().count());
+    assert!(!window.has_more);
 }
 
 #[test]
-fn image_visual_description_is_not_duplicated_when_already_present() {
-    let merged = merge_visual_description_into_content(
-        Some("Visible text\n\n## Source Image Description\nA restaurant sign with menu items."),
-        Some("A restaurant sign with menu items."),
-    );
-
-    assert_eq!(
-        merged,
-        "Visible text\n\n## Source Image Description\nA restaurant sign with menu items."
-    );
+fn bounded_read_window_addresses_only_the_selected_canonical_characters() {
+    let canonical = "\n  Условие: подтверждение обязательно.\n";
+    let window = canonical_read_window(canonical, &McpReadMode::Full, 3, 7);
+    assert_eq!(window.content, "Условие");
+    assert_eq!((window.start, window.end, window.total), (3, 10, canonical.chars().count()));
+    assert!(window.has_more);
+    let empty = canonical_read_window("", &McpReadMode::Full, 0, 100);
+    assert!(empty.content.is_empty());
+    assert_eq!((empty.start, empty.end, empty.total), (0, 0, 0));
+    assert!(!empty.has_more);
 }
 
 #[test]

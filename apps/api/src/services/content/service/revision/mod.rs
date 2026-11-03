@@ -63,13 +63,10 @@ use crate::{
     },
     shared::extraction::file_extract::{
         ExtractionFailureClass, FileExtractError, FileExtractionPlan, FileExtractionRequest,
-        UploadAdmissionError, UploadFileKind, VisionOcrInput, append_docling_picture_ocr_fallback,
-        augment_docling_output_with_vision_picture_ocr, build_docling_pdf_extraction_plan,
-        build_runtime_file_extraction_plan, docling_embedded_picture_vision_enabled,
+        UploadAdmissionError, UploadFileKind, build_runtime_file_extraction_plan,
         validate_upload_file_admission,
     },
     shared::extraction::{
-        ExtractionOutput,
         record_jsonl::RECORD_JSONL_SOURCE_FORMAT,
         structured_document::StructuredBlockKind,
         table_graph::{TableGraphProfile, build_table_graph_profile},
@@ -98,7 +95,6 @@ mod preparation;
 mod source;
 mod source_guard;
 
-pub(crate) use extraction::DoclingPdfExtractionPlanInput;
 pub(crate) use preparation::preparation_fence_text;
 pub(crate) use source::InlineFileSourceInput;
 pub(crate) use source_guard::PersistedRevisionSourceGuard;

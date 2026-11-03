@@ -21,6 +21,9 @@ mod fusion;
 mod graph_retrieval;
 mod graph_retrieval_error;
 mod hyde;
+#[cfg(test)]
+#[path = "native_table_consumer_tests.rs"]
+mod native_table_consumer_tests;
 mod output_boundary;
 mod port_answer;
 mod preflight;
@@ -32,6 +35,8 @@ pub(crate) mod retrieval_plan;
 mod retrieval_plan_tests;
 mod retrieve;
 mod semantic_rerank;
+pub(crate) mod semantic_verification;
+pub(crate) use semantic_verification::persisted_semantic_verification;
 mod source_context;
 mod source_excerpt;
 mod source_focus_selection;

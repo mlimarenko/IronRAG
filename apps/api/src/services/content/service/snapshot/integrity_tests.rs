@@ -1,6 +1,58 @@
 use super::test_support::*;
 use super::*;
 
+#[tokio::test]
+async fn schema6_rejects_schema5_without_converting_the_archive() {
+    let mut manifest = manifest_with_sections(vec!["catalog_library"], false);
+    manifest.schema_version = 5;
+    let part = br#"{"recognition_policy":{"rasterImageEngine":"xberg"}}
+"#;
+    let spool = spool_prevalidation_test_archive(
+        &manifest,
+        "postgres/catalog_library/part-000001.ndjson",
+        part,
+        1,
+    )
+    .await;
+    let error = prevalidate_snapshot_archive(&spool).await.unwrap_err();
+    assert!(format!("{error:#}").contains("schema_version"));
+}
+
+#[tokio::test]
+async fn schema6_rejects_retired_or_partial_current_policy_before_restore() {
+    let manifest = manifest_with_sections(vec!["catalog_library"], false);
+    for row in [
+        serde_json::json!({"recognition_policy":{"rasterImageEngine":"docling"}}),
+        serde_json::json!({"recognition_policy":{"rasterImageEngine":"native"}}),
+        serde_json::json!({"recognition_policy":{"rasterImageEngine":"xberg"}}),
+        serde_json::json!({"recognition_policy":{}}),
+        serde_json::json!({}),
+    ] {
+        let part = serde_json::to_vec(&row).unwrap();
+        let spool = spool_prevalidation_test_archive(
+            &manifest,
+            "postgres/catalog_library/part-000001.ndjson",
+            &part,
+            1,
+        )
+        .await;
+        assert!(prevalidate_snapshot_archive(&spool).await.is_err());
+    }
+}
+
+#[test]
+fn schema6_current_policy_validation_does_not_reinterpret_historical_provenance() {
+    for engine in ["docling", "native", "xberg", "vision"] {
+        let row = serde_json::json!({
+            "recognition_policy":{"rasterImageEngine":"vision"},
+            "historicalExtraction":{"engine":engine,"raw":{"unchanged":true}}
+        });
+        let original = row.clone();
+        validate_snapshot_recognition_policy(&row).unwrap();
+        assert_eq!(row, original);
+    }
+}
+
 fn complete_content_manifest(manifest: &SnapshotManifest) -> SnapshotManifest {
     let mut manifest = manifest.clone();
     for table in POSTGRES_CONTENT_TABLES {
@@ -46,7 +98,7 @@ async fn spool_prevalidation_test_archive(
 async fn prevalidation_accepts_self_described_terminal_inventory() {
     let manifest = manifest_with_sections(vec!["catalog_library"], false);
     let part_path = "postgres/catalog_library/part-000001.ndjson";
-    let part = br#"{"id":"00000000-0000-0000-0000-000000000000"}
+    let part = br#"{"id":"00000000-0000-0000-0000-000000000000","recognition_policy":{"rasterImageEngine":"vision"}}
 "#;
     let spool = spool_prevalidation_test_archive(&manifest, part_path, part, 1).await;
     let (prevalidated, verification) = prevalidate_snapshot_archive(&spool).await.unwrap();
@@ -71,7 +123,7 @@ async fn prevalidation_rejects_oversized_decompressed_entry_before_payload_alloc
 async fn prevalidation_rejects_decompressed_total_over_cap() {
     let manifest = manifest_with_sections(vec!["catalog_library"], false);
     let part_path = "postgres/catalog_library/part-000001.ndjson";
-    let part = br#"{"id":"00000000-0000-0000-0000-000000000000"}
+    let part = br#"{"id":"00000000-0000-0000-0000-000000000000","recognition_policy":{"rasterImageEngine":"vision"}}
 "#;
     let spool = spool_prevalidation_test_archive(&manifest, part_path, part, 1).await;
     let manifest_size = serde_json::to_vec_pretty(&manifest).unwrap().len() as u64;
@@ -96,7 +148,7 @@ async fn spool_blob_test_archive(
     let mut counts = empty_content_counts(&manifest);
     counts.insert("catalog_library".to_owned(), 1);
     let part_path = "postgres/catalog_library/part-000001.ndjson";
-    let part = br#"{"id":"00000000-0000-0000-0000-000000000000"}
+    let part = br#"{"id":"00000000-0000-0000-0000-000000000000","recognition_policy":{"rasterImageEngine":"vision"}}
 "#;
     let summary = SnapshotSummary {
         inventory: SnapshotInventory {

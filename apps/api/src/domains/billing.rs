@@ -113,7 +113,12 @@ pub enum BillingExecutionOwnerKind {
     QueryExecution,
     GraphExtractionAttempt,
     IngestAttempt,
+    McpDocumentRead,
+    KnowledgeSearch,
 }
+
+pub(crate) const MCP_SOURCE_IMAGE_DESCRIPTION_CALL_KIND: &str = "mcp_source_image_description";
+pub(crate) const KNOWLEDGE_SEARCH_EMBEDDING_CALL_KIND: &str = "knowledge_search_embedding";
 
 impl BillingExecutionOwnerKind {
     /// Exact `billing_owning_execution_kind` Postgres enum key. Also
@@ -127,6 +132,8 @@ impl BillingExecutionOwnerKind {
             Self::QueryExecution => "query_execution",
             Self::GraphExtractionAttempt => "graph_extraction_attempt",
             Self::IngestAttempt => "ingest_attempt",
+            Self::McpDocumentRead => "mcp_document_read",
+            Self::KnowledgeSearch => "knowledge_search",
         }
     }
 }

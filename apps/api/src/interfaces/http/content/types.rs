@@ -137,9 +137,8 @@ pub struct ContentDocumentListItem {
     pub uploaded_at: DateTime<Utc>,
     pub document_state: String,
     /// Persisted connector identity (`content_document.external_key`).
-    /// Connectors look this up via list to decide whether to upload or
-    /// replace; exposed so a paginated list pass is sufficient instead
-    /// of a per-document detail roundtrip.
+    /// Connectors use the exact external-key lookup to decide whether to
+    /// upload or replace.
     pub external_key: String,
     /// Status bucket derived server-side.
     pub status: DocumentStatus,
@@ -375,15 +374,15 @@ pub struct ContentMutationDetailResponse {
     pub job_id: Option<Uuid>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub async_operation_id: Option<Uuid>,
-    /// Durable admission visibility policy of this mutation. Always emitted so
-    /// a client can never treat the field as absent and silently assume
-    /// readability; unknown values are a decode error, not a default.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub operation_status: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub result_revision_id: Option<Uuid>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub result_checksum: Option<String>,
+    /// Immutable result revision binding. Explicit null denotes unbound work.
+    #[schema(required = true)]
+    pub visibility_intent_id: Option<Uuid>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub request_fingerprint: Option<String>,
 }
@@ -552,6 +551,7 @@ pub(super) fn map_mutation_admission(
         operation_status: admission.operation_status,
         result_revision_id: admission.result_revision_id,
         result_checksum: admission.result_checksum,
+        visibility_intent_id: admission.visibility_intent_id,
         request_fingerprint: admission.request_fingerprint,
     }
 }

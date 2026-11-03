@@ -1,6 +1,56 @@
 use super::*;
 
 #[test]
+fn companion_prose_conditions_survive_bounded_context_assembly() {
+    for (core, before, after) in [
+        (
+            "Повторный запрос допустим.",
+            "Сначала дождитесь результата.",
+            "После подтверждения записи повтор запрещён.",
+        ),
+        (
+            "Requests are limited to five per hour.",
+            "Obtain approval before starting.",
+            "Wait for the next hour before retrying.",
+        ),
+    ] {
+        let document_id = Uuid::now_v7();
+        let revision_id = Uuid::now_v7();
+        let document_index = HashMap::from([(document_id, document_row(document_id, revision_id))]);
+        let mut row = chunk_row(document_id, revision_id, 3, "paragraph", core);
+        let chunk_id = row.chunk_id;
+        let window = format!("{before} {core} {after}");
+        row.window_text = Some(window.clone());
+
+        let mapped = map_companion_chunk(row, 0.6, &document_index, &[]).unwrap();
+        let context = crate::services::query::execution::context::assemble_bounded_context(
+            &[],
+            &[],
+            std::slice::from_ref(&mapped),
+            2_048,
+        );
+
+        assert_eq!(mapped.source_text, window);
+        assert_eq!(
+            (mapped.chunk_id, mapped.document_id, mapped.revision_id),
+            (chunk_id, document_id, revision_id)
+        );
+        assert_eq!(mapped.chunk_index, 3);
+        assert_eq!(mapped.chunk_kind.as_deref(), Some("paragraph"));
+        assert_eq!(
+            mapped.score_kind,
+            crate::services::query::execution::RuntimeChunkScoreKind::SourceContext
+        );
+        assert_eq!(mapped.score, Some(0.6));
+        for text in [before, core, after] {
+            assert!(context.contains(text), "Missing {text}: {context}");
+            assert_eq!(mapped.source_text.matches(text).count(), 1);
+        }
+        assert!(context.len() <= 2_048);
+    }
+}
+
+#[test]
 fn structural_source_profile_marker_is_recognized_without_kind() {
     let document_id = Uuid::now_v7();
     let revision_id = Uuid::now_v7();

@@ -75,139 +75,43 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,id=ironrag-cargo-reg,sha
       exit 1; \
     fi \
  && echo "Cache bust: ${CACHEBUST}" \
- && cargo build --release -p ironrag-backend \
+ && cargo build --locked --release -p ironrag-backend \
       $(if [ -n "${CARGO_FEATURES}" ]; then echo "--features ${CARGO_FEATURES}"; fi) \
       --bin ironrag-backend \
       --bin ironrag-cli \
       --bin ironrag-emit-openapi \
-      --bin ironrag-maintenance \
+       --bin ironrag-maintenance \
+       --bin ironrag-extract \
  && mkdir -p /out \
  && cp target/release/ironrag-backend /out/ \
  && cp target/release/ironrag-cli /out/ \
  && cp target/release/ironrag-emit-openapi /out/ \
- && cp target/release/ironrag-maintenance /out/
+  && cp target/release/ironrag-maintenance /out/ \
+  && cp target/release/ironrag-extract /out/
 
-# ── Stage 2: Docling / Python base ─────────────────────────────────────
-# Isolated from the Rust builder so this stage is cached across
-# application-code changes without re-downloading model weights.
-FROM python:3.14.4-slim-trixie AS docling-base
+# ── Stage 2: native parsing runtime; image recognition uses LLM Vision ──
+FROM debian:trixie-slim@sha256:62bd423aeee912639ca8ee681c2b762cb3e25137e0a92b20be455898a9f034ad AS runtime
 WORKDIR /app
-ARG DOCLING_VERSION=2.132.0
-ARG URLLIB3_VERSION=2.8.0
-ARG TESSDATA_REVISION=e12c65a915945e4c28e237a9b52bc4a8f39a0cec
-ARG CHINESE_TESSDATA_SHA256=4fef2d1306c8e87616d4d3e4c6c67faf5d44be3342290cf8f2f0f6e3aa7e735b
-ARG TESSDATA_LICENSE_SHA256=a6cba85bc92e0cff7a450b1d873c0eaa2e9fc96bf472df0247a26bec77bf3ff9
-ARG TESSDATA_README_SHA256=08c87523fb799c5bae6380f6ffa1a823494ab78f63906d7255dddd7671f94a5f
-ARG TORCH_VERSION=2.12.0+cpu
-ARG TORCHVISION_VERSION=0.27.0+cpu
-ENV VIRTUAL_ENV=/opt/ironrag-docling
-ENV PATH="${VIRTUAL_ENV}/bin:${PATH}"
-ENV PYTHONUNBUFFERED=1
-
 COPY docker/apt/debian-backports.sources /etc/apt/sources.list.d/debian-backports.sources
 COPY docker/apt/90-backports /etc/apt/preferences.d/90-backports
-# The apt layer is this stage's cache boundary: BuildKit registry cache keeps
-# `apt-get upgrade` from re-running, so Debian security updates published after
-# the layer was first built never reach the image. Bump APT_CACHEBUST to force
-# the apt layer (and everything after it) to rebuild with current package
-# versions — the same manual pattern as CACHEBUST in the builder stage.
-ARG APT_CACHEBUST=20261001
-# Use the accuracy model for Chinese; the distribution's fast model loses
-# characters in sparse picture text. Ship its upstream license declaration and
-# provenance alongside the only installed Chinese model.
+ARG APT_CACHEBUST=20261022
 RUN echo "apt cache bust: ${APT_CACHEBUST}" \
-  && apt-get update \
-  && apt-get upgrade -y \
-  && apt-get install -y --no-install-recommends \
-    ca-certificates \
-    curl \
-    libgl1 \
-    libglib2.0-0 \
-    libgomp1 \
-    tesseract-ocr \
-    tesseract-ocr-eng \
-    tesseract-ocr-rus \
-  && rm -rf /var/lib/apt/lists/* \
-  && python -m venv "${VIRTUAL_ENV}" \
-  && "${VIRTUAL_ENV}/bin/pip" install --no-cache-dir --upgrade pip \
-  && "${VIRTUAL_ENV}/bin/pip" install --no-cache-dir \
-    --index-url https://download.pytorch.org/whl/cpu \
-    --extra-index-url https://pypi.org/simple \
-    "torch==${TORCH_VERSION}" \
-    "torchvision==${TORCHVISION_VERSION}" \
-  && "${VIRTUAL_ENV}/bin/pip" install --no-cache-dir \
-    "docling==${DOCLING_VERSION}" \
-    "urllib3==${URLLIB3_VERSION}" \
-  && "${VIRTUAL_ENV}/bin/python" -m pip uninstall --yes pip \
-  && /usr/local/bin/python -m pip uninstall --yes pip \
-  && "${VIRTUAL_ENV}/bin/python" -c 'import importlib.util; assert importlib.util.find_spec("pip") is None' \
-  && /usr/local/bin/python -c 'import importlib.util; assert importlib.util.find_spec("pip") is None' \
-  && curl --fail --location --max-time 120 \
-      "https://raw.githubusercontent.com/tesseract-ocr/tessdata_best/${TESSDATA_REVISION}/chi_sim.traineddata" \
-      --output /usr/share/tesseract-ocr/5/tessdata/chi_sim.traineddata \
-  && mkdir -p /usr/share/doc/tessdata_best \
-  && curl --fail --location --max-time 120 \
-      "https://raw.githubusercontent.com/tesseract-ocr/tessdata_best/${TESSDATA_REVISION}/LICENSE" \
-      --output /usr/share/doc/tessdata_best/LICENSE \
-  && curl --fail --location --max-time 120 \
-      "https://raw.githubusercontent.com/tesseract-ocr/tessdata_best/${TESSDATA_REVISION}/README.md" \
-      --output /usr/share/doc/tessdata_best/README.md \
-  && printf '%s  %s\n' \
-      "${CHINESE_TESSDATA_SHA256}" /usr/share/tesseract-ocr/5/tessdata/chi_sim.traineddata \
-      "${TESSDATA_LICENSE_SHA256}" /usr/share/doc/tessdata_best/LICENSE \
-      "${TESSDATA_README_SHA256}" /usr/share/doc/tessdata_best/README.md \
-      | sha256sum --check \
-  && printf '%s\n' \
-      'Model: chi_sim.traineddata (unmodified)' \
-      'Upstream: https://github.com/tesseract-ocr/tessdata_best' \
-      "Revision: ${TESSDATA_REVISION}" \
-      "Model SHA256: ${CHINESE_TESSDATA_SHA256}" \
-      'License: Apache-2.0; see LICENSE and the upstream README.md declaration' \
-      > /usr/share/doc/tessdata_best/MODEL
-
-# Package installation is finished. Both interpreters are installer-free before
-# model download and OCR warmup prove that the runtime does not depend on pip.
-
-COPY apps/api/docker/docling-extract.py /usr/local/bin/ironrag-docling-extract
-
-RUN chmod +x /usr/local/bin/ironrag-docling-extract \
-  && adduser --disabled-password --gecos "" appuser \
-  && mkdir -p /var/lib/ironrag/content-storage \
-  && HOME=/home/appuser "${VIRTUAL_ENV}/bin/docling-tools" models download layout tableformer \
-  && printf '%s\n' \
-    'from pathlib import Path' \
-    'from PIL import Image, ImageDraw' \
-    'target = Path("/tmp/docling-ocr-warmup.png")' \
-    'image = Image.new("RGB", (420, 120), "white")' \
-    'draw = ImageDraw.Draw(image)' \
-    'draw.text((24, 42), "IronRAG Docling OCR warmup", fill="black")' \
-    'image.save(target)' \
-    | "${VIRTUAL_ENV}/bin/python" \
-  && HOME=/home/appuser /usr/local/bin/ironrag-docling-extract /tmp/docling-ocr-warmup.png >/tmp/docling-ocr-warmup.json \
-  && rm -f /tmp/docling-ocr-warmup.png /tmp/docling-ocr-warmup.json \
-  && chown -R appuser:appuser /app /var/lib/ironrag \
-  && chown -R appuser:appuser "${VIRTUAL_ENV}" \
-  && chown -R appuser:appuser /home/appuser
-
-# Cached Docling model cards carry their license declarations. TableFormer uses
-# CDLA-Permissive-2.0; include its agreement text alongside the native Apache text.
-COPY apps/api/docker/model-licenses/CDLA-Permissive-2.0.txt \
-     /usr/share/common-licenses/CDLA-Permissive-2.0
-
-# ── Stage 3: Runtime assembly ──────────────────────────────────────────
-FROM docling-base AS runtime
-
-COPY --from=builder /out/ironrag-backend /usr/local/bin/ironrag-backend
-COPY --from=builder /out/ironrag-cli /usr/local/bin/ironrag-cli
-COPY --from=builder /out/ironrag-emit-openapi /usr/local/bin/ironrag-emit-openapi
-COPY --from=builder /out/ironrag-maintenance /usr/local/bin/ironrag-maintenance
+    && apt-get update && apt-get upgrade -y \
+    && apt-get install -y --no-install-recommends \
+        adduser ca-certificates libssl3t64 libstdc++6 util-linux procps \
+    && rm -rf /var/lib/apt/lists/* \
+    && adduser --disabled-password --gecos "" appuser \
+    && mkdir -p /var/lib/ironrag/content-storage \
+    && chown -R appuser:appuser /app /var/lib/ironrag
+COPY --from=builder /out/ /usr/local/bin/
 COPY apps/api/migrations /app/migrations
 COPY apps/api/docker/runtime-entrypoint.sh /usr/local/bin/runtime-entrypoint.sh
-COPY apps/api/docker/docling-extract.py /usr/local/bin/ironrag-docling-extract
-
-RUN chmod +x /usr/local/bin/runtime-entrypoint.sh /usr/local/bin/ironrag-docling-extract
-
-ENV HOME=/home/appuser
+RUN chmod +x /usr/local/bin/runtime-entrypoint.sh \
+    && test -x /bin/kill \
+    && ldd /usr/local/bin/ironrag-extract \
+    && ! ldd /usr/local/bin/ironrag-extract | grep -q 'not found'
+ENV HOME=/home/appuser \
+    IRONRAG_XBERG_EXTRACT_BIN=ironrag-extract
 USER appuser
 
 # Baked runtime tuning (image default; override per-deployment via env if needed):
@@ -225,6 +129,6 @@ ENV _RJEM_MALLOC_CONF=background_thread:true,narenas:4,dirty_decay_ms:1000,muzzy
 
 EXPOSE 8080
 HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=5 \
-  CMD curl -fsS http://127.0.0.1:8080/v1/health >/dev/null || exit 1
+  CMD ["ironrag-cli", "probe", "--endpoint", "health"]
 ENTRYPOINT ["/usr/local/bin/runtime-entrypoint.sh"]
 CMD ["ironrag-backend"]

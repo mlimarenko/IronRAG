@@ -10,13 +10,13 @@ use crate::{
 };
 
 use super::{
-    UnifiedGateway,
-    openai_compatible::{OpenAiCompatibleRequest, extract_message_content_text},
+    ChatCompletionStatus, UnifiedGateway,
+    openai_compatible::OpenAiCompatibleRequest,
     provider::{apply_provider_auth, provider_endpoint_url},
     request::{NativeChatRequest, native_chat_request_body},
     response::{
-        native_chat_response, parse_provider_json_body, provider_http_error_from_response,
-        provider_usage_json, read_provider_response_body,
+        native_chat_response, openai_chat_response, parse_provider_json_body,
+        provider_http_error_from_response, read_provider_response_body,
     },
     streaming::drain_openai_compatible_stream,
 };
@@ -40,7 +40,7 @@ impl UnifiedGateway {
     pub(super) async fn call_native_chat(
         &self,
         call: NativeChatCall<'_>,
-    ) -> Result<(String, serde_json::Value)> {
+    ) -> Result<(String, serde_json::Value, ChatCompletionStatus)> {
         let endpoint_path = call.runtime.chat_path.replace("{model}", call.model_name);
         let endpoint_url =
             provider_endpoint_url(call.provider_kind, call.base_url, &endpoint_path)?;
@@ -124,7 +124,7 @@ impl UnifiedGateway {
         &self,
         request: OpenAiCompatibleRequest<'_>,
         allow_private_network: bool,
-    ) -> Result<(String, serde_json::Value)> {
+    ) -> Result<(String, serde_json::Value, ChatCompletionStatus)> {
         let request_body = request.body()?;
         let endpoint_url =
             provider_endpoint_url(request.provider_kind, request.base_url, &request.chat_path)?;
@@ -178,18 +178,7 @@ impl UnifiedGateway {
 
                 let body = parse_provider_json_body(&body_bytes, request.provider_kind, "chat")?;
 
-                let output_text = body
-                    .get("choices")
-                    .and_then(|v| v.as_array())
-                    .and_then(|arr| arr.first())
-                    .and_then(|v| v.get("message"))
-                    .and_then(|v| v.get("content"))
-                    .map(extract_message_content_text)
-                    .unwrap_or_default();
-
-                let usage_json = provider_usage_json(&body);
-
-                Ok((output_text, usage_json))
+                Ok(openai_chat_response(&body))
             },
             self.retry_policy,
         )
@@ -202,7 +191,7 @@ impl UnifiedGateway {
         request: OpenAiCompatibleRequest<'_>,
         allow_private_network: bool,
         on_delta: &mut (dyn FnMut(String) + Send),
-    ) -> Result<(String, serde_json::Value)> {
+    ) -> Result<(String, serde_json::Value, ChatCompletionStatus)> {
         let request_body = request.body()?;
         let endpoint_url =
             provider_endpoint_url(request.provider_kind, request.base_url, &request.chat_path)?;

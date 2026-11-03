@@ -272,6 +272,22 @@ impl ResolvedRuntimeBinding {
             .filter(|value| !value.is_empty())
     }
 
+    /// Structured-output policy from the same resolved runtime profile the
+    /// gateway consumes. Missing or malformed policy grants no capability.
+    #[must_use]
+    pub fn provider_structured_output_mode(
+        &self,
+    ) -> Option<crate::domains::provider_profiles::ProviderStructuredOutputMode> {
+        serde_json::from_value(
+            self.extra_parameters_json
+                .get("_providerProfile")?
+                .get("runtime")?
+                .get("structuredOutput")?
+                .clone(),
+        )
+        .ok()
+    }
+
     /// Whether the merged provider profile permits a private-network base URL.
     ///
     /// A missing or non-boolean policy fails closed: the provider endpoint is

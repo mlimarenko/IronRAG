@@ -22,10 +22,6 @@ macro_rules! current_graph_target {
     ($target:literal, $kind:literal) => {
         concat!(
             "exists (select 1 from runtime_graph_evidence visible_evidence
-             join content_current_revision current_revision
-               on current_revision.document_id = visible_evidence.document_id
-              and current_revision.revision_id = visible_evidence.revision_id
-              and current_revision.library_id = visible_evidence.library_id
              where visible_evidence.target_id = ",
             $target,
             ".id
@@ -53,6 +49,8 @@ macro_rules! current_graph_target {
         )
     };
 }
+
+pub(super) use current_graph_target;
 
 /// The shared `on conflict` body every runtime graph node upsert uses.
 ///
@@ -89,39 +87,58 @@ macro_rules! runtime_graph_node_conflict_update {
 pub(super) use runtime_graph_node_conflict_update;
 
 pub(super) fn admitted_runtime_graph_nodes_query(extra_filter: &str) -> String {
+    admitted_runtime_graph_nodes_select_query(
+        "node.id, node.library_id, node.\u{63}anonical_key, node.label, node.node_type,
+         node.aliases_json, node.summary, node.metadata_json, node.support_count,
+         node.projection_version, node.created_at, node.updated_at",
+        extra_filter,
+    )
+}
+
+pub(super) fn admitted_runtime_graph_nodes_select_query(
+    columns: &str,
+    extra_filter: &str,
+) -> String {
     let node_visibility = current_graph_target!("node", "node");
     let edge_visibility = current_graph_target!("edge", "edge");
     format!(
-        "with admitted_edges as (
-            select edge.from_node_id, edge.to_node_id
-            from runtime_graph_edge as edge
-            where edge.library_id = $1
-               and edge.projection_version = $2
-               and {edge_visibility}
-              and btrim(edge.relation_type) <> ''
-              and edge.from_node_id <> edge.to_node_id
-         ),
-         admitted_edge_endpoints as (
-            select admitted_edges.from_node_id as node_id
-            from admitted_edges
-            union
-            select admitted_edges.to_node_id as node_id
-            from admitted_edges
-         )
-         select node.id, node.library_id, node.\u{63}anonical_key, node.label, node.node_type,
-            node.aliases_json, node.summary, node.metadata_json, node.support_count,
-            node.projection_version, node.created_at, node.updated_at
+        "select {columns}
          from runtime_graph_node as node
-         left join admitted_edge_endpoints as admitted on admitted.node_id = node.id
          where node.library_id = $1
             and node.projection_version = $2
+            {extra_filter}
             and {node_visibility}
-           {extra_filter}
-           and (
-                node.node_type = 'document'
-                or admitted.node_id is not null
+            and (
+                 node.node_type = 'document'
+                 or exists (
+                     select 1 from runtime_graph_edge as edge
+                     where edge.library_id = $1 and edge.projection_version = $2
+                       and edge.from_node_id = node.id
+                       and btrim(edge.relation_type) <> ''
+                       and edge.from_node_id <> edge.to_node_id
+                       and {edge_visibility}
+                 )
+                 or exists (
+                     select 1 from runtime_graph_edge as edge
+                     where edge.library_id = $1 and edge.projection_version = $2
+                       and edge.to_node_id = node.id
+                       and btrim(edge.relation_type) <> ''
+                       and edge.from_node_id <> edge.to_node_id
+                       and {edge_visibility}
+                 )
            )
          order by node.node_type asc, node.label asc, node.created_at asc, node.id asc"
+    )
+}
+
+pub(super) fn admitted_runtime_graph_edges_select_query(columns: &str) -> String {
+    let visibility = current_graph_target!("edge", "edge");
+    format!(
+        "select {columns} from runtime_graph_edge as edge
+        where library_id = $1 and projection_version = $2
+          and btrim(relation_type) <> '' and from_node_id <> to_node_id
+          and {visibility}
+        order by relation_type asc, created_at asc, id asc"
     )
 }
 
@@ -129,6 +146,17 @@ pub(super) fn admitted_runtime_graph_counts_query() -> String {
     let node_visibility = current_graph_target!("node", "node");
     let edge_visibility = current_graph_target!("edge", "edge");
     runtime_graph_counts_query("", node_visibility, edge_visibility, "")
+}
+
+pub(super) fn runtime_graph_nodes_by_ids_or_document_type_select_query(columns: &str) -> String {
+    let visibility = current_graph_target!("node", "node");
+    format!(
+        "select {columns} from runtime_graph_node as node
+        where library_id=$1 and projection_version=$2
+          and (node_type='document' or id=any($3::uuid[]))
+          and {visibility}
+        order by node_type asc, label asc, created_at asc, id asc"
+    )
 }
 
 /// Substitutes only the exact leased candidate for its public source.

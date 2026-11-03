@@ -40,7 +40,39 @@
     },
     {
       "id": "inventory_wsdl",
-      "question": "Какой WSDL у inventory soap api?",
+      "expectedFacts": [
+        {
+          "id": "inventory-authoritative-wsdl-url",
+          "fixture": "corpus/docs/inventory_soap_api_contract.md",
+          "sourceExcerpt": "- WSDL URL: `http://demo.local:8080/inventory-api/ws/inventory.wsdl`",
+          "sourceSha256": "d81cb81802199e5e6526ca97777b5f6597a151aa2142757feeba25ac5f510a6f",
+          "requiredAll": ["http://demo.local:8080/inventory-api/ws/inventory.wsdl"],
+          "requiredAny": [],
+          "requiredRegexAny": []
+        }
+      ],
+      "question": "Теперь переключимся на inventory SOAP API. Какой у него WSDL?",
+      "precedingTurns": [
+        {
+          "id": "checkout_before_inventory",
+          "expectedFacts": [
+            {
+              "id": "checkout-system-info-get-endpoint",
+              "fixture": "corpus/docs/checkout_runtime_contract.md",
+              "sourceExcerpt": "- Method: `GET`\n- Path: `/system/info`\n- Purpose: return the current checkout server system information, build metadata, and runtime status.",
+              "sourceSha256": "557102e8ba4835a2509d22d4937c31f7e9a8672075b7382f4a9d7c3c60b1626e",
+              "requiredAll": ["GET", "/system/info"],
+              "requiredAny": [],
+              "requiredRegexAny": ["\\bGET\\b[*_`]*\\s+(?:endpoint\\s+)?[*_`]*/system/info\\b(?![\\w/-])", "\\bMethod:[ \\t]*[*_`]*GET[*_`]*[ \\t]*\\r?\\n[ \\t]*-[ \\t]+Path:[ \\t]*[*_`]*/system/info\\b(?![\\w/-])"]
+            }
+          ],
+          "question": "Какой REST endpoint возвращает текущую информацию checkout server?",
+          "answerRequiredAll": ["/system/info"],
+          "answerRequiredAny": ["GET", "system information"],
+          "answerForbiddenAny": ["/serverinfo"],
+          "allowedVerificationStates": ["verified"]
+        }
+      ],
       "searchQuery": "inventory soap api wsdl",
       "expectedDocumentsContains": [
         "inventory_soap_api_contract"
@@ -70,6 +102,17 @@
     },
     {
       "id": "graphql_absent",
+      "expectedFacts": [
+        {
+          "id": "library-graphql-explicitly-not-published",
+          "fixture": "corpus/docs/checkout_runtime_contract.md",
+          "sourceExcerpt": "The checkout server does not publish a GraphQL API.\n\n- No `/graphql` endpoint is exposed for this library.\n- No GraphQL schema or GraphQL introspection contract is available.",
+          "sourceSha256": "557102e8ba4835a2509d22d4937c31f7e9a8672075b7382f4a9d7c3c60b1626e",
+          "requiredAll": ["GraphQL"],
+          "requiredAny": [],
+          "requiredRegexAny": ["does not publish (?:a )?GraphQL API", "GraphQL API (?:is not present|is not published|не публикуется|отсутствует)", "(?:GraphQL API|API GraphQL) (?:в (?:этой )?библиотеке )?нет", "нет (?:API )?GraphQL", "GraphQL API не предоставляется"]
+        }
+      ],
       "question": "Есть ли в этой библиотеке GraphQL API?",
       "searchQuery": "graphql api present absent technical contract",
       "expectedDocumentsContains": [

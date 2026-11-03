@@ -116,7 +116,16 @@ async fn purge_library_orphans_and_reproject(
         "orphan knowledge documents removed",
     );
 
-    match state.application_services.graph.rebuild_library_graph(state, library.id).await {
+    match state
+        .application_services
+        .graph
+        .rebuild_library_graph(
+            state,
+            library.id,
+            crate::services::graph::service::GraphRebuildRecovery::AdmitReextraction,
+        )
+        .await
+    {
         Ok(outcome) => {
             report.graph_rebuilds_completed += 1;
             log_runtime_graph_reprojected(

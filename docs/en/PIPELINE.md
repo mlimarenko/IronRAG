@@ -20,20 +20,25 @@ retrieval. It supports Markdown, text, source code, JSON, YAML, JSONL/NDJSON,
 TOML, PDF, images, DOCX, PPTX, CSV, TSV, XLS, XLSX, XLSB, ODS, and web pages.
 Video is not supported.
 
-New libraries use `IRONRAG_RECOGNITION_DEFAULT_RASTER_IMAGE_ENGINE`: `docling`
-or `vision`; the default is `vision`. Update a library policy with
-`PUT /v1/catalog/libraries/{libraryId}/recognition-policy`. Ingestion fails if
-`vision` has no compatible model binding.
+All current library policies are `{"rasterImageEngine":"vision"}`.
+`IRONRAG_RECOGNITION_DEFAULT_RASTER_IMAGE_ENGINE` accepts only `vision`.
+`PUT /v1/catalog/libraries/{libraryId}/recognition-policy` accepts that singleton
+shape only; `xberg` is rejected, not treated as an alias. The library inspector
+shows a fixed Vision requirement and opens the `extract_text` binding settings.
+Image OCR, including scanned pages, uses the existing `extract_text` Vision
+binding. Missing Vision configuration fails visual work explicitly; deterministic
+native text/structure parsing does not require a Vision model.
 
-PDF, DOCX, and PPTX use Docling on CPU. PDF processing accepts:
+Xberg handles PDF, DOCX, PPTX, text, Markdown/RST, HTML, CSV/TSV and ordinary
+spreadsheets. Product-specific projections retain named XLSX Tables and typed
+JSON/JSONL/YAML/TOML record semantics.
 
-- `IRONRAG_DOCLING_PAGE_BATCH_SIZE`
-- `IRONRAG_DOCLING_PAGE_STREAM_WINDOW_PAGES` (default `40`)
-- `IRONRAG_DOCLING_MAX_CONCURRENCY`
-- `IRONRAG_INGESTION_HEAVY_PIPELINE_PARALLELISM=auto`
+- `IRONRAG_XBERG_PAGE_BATCH_SIZE` controls resumable page batches (default `10`).
+- `IRONRAG_XBERG_TIMEOUT_SECS` bounds each child request (default and maximum `300`).
 
-These settings bound concurrent large-PDF processing. A document that cannot
-fit the required memory budget fails with `docling_insufficient_memory`.
+Xberg supplies native document text/structure only. There are no local OCR model
+assets or OCR enable flags. See [capacity planning](./CAPACITY-PLANNING.md) for
+worker and host budgets.
 
 PostgreSQL stores users, workspaces, libraries, documents, search data, audit
 events, and pgvector embeddings. Original source bytes use the configured
@@ -93,6 +98,13 @@ denial obligation even while payload processing is busy. The request contains
 `documentHint`. Nullable metadata describes this replacement; it does not inherit
 the previous revision's metadata. Retransmission uses the same key and identity.
 
+Admission fingerprints use `v1:sha256:` and the SHA-256 digest of the complete
+normalized identity encoded as compact UTF-8 JSON with object keys sorted by
+UTF-8 bytes at every level. Arrays keep their order; schema numbers are integers.
+Stored identities must already be normalized, and their fingerprint must match
+the identity. A replay returns the original verified receipt and bundle IDs.
+Snapshots retain the original identity and fingerprint when ownership is remapped.
+
 Admission withdraws the public head and captures a retained revision floor.
 Submit the matching replacement with the receipt's `visibilityIntentId`; its first
 bound payload key is immutable. Successful unrelated or superseded work cannot
@@ -138,22 +150,27 @@ An archive can restore into an empty library or back into its source library. It
 cannot restore into a second library while the source library exists in the same
 deployment; the operation fails with `snapshot_source_already_present`.
 
-Archive schema version 3 preserves the retained revision counter, current
+Archive schema version 6 preserves the retained revision counter, current
 visibility intent and its floor, immutable admission request identity and
-fingerprint, payload-to-intent binding, and exact published mutation-item lineage.
+fingerprint, payload-to-intent binding, and revision-owned publication admissions.
 The complete inventory and content-reference closure are validated before target
 writes. Malformed identities, cross-scope references, ambiguous intent lineage,
 invalid counter/floor relationships and forged readable owners refuse the import.
 No readable owner, identity or visibility decision is reconstructed from history.
 The retired `visibility_policy` column and `visibilityPolicy` identity input are
-not part of schema 3 and are rejected.
+not part of schema 6 and are rejected. Current library recognition policies accept
+only `vision`; historical extraction provenance remains opaque and unchanged.
 
 Backup is source-owned, not a public-read projection: when `blobs` is selected,
 restricted historical and pending revision bytes travel too. Restriction survives
 restore and null-head repair; only the exact bound READY item becomes current.
 Chunk-vector sections retain the current-only lifecycle and observed lane counts.
-Library and workspace archives use schema 3 exclusively; versions 1 and 2 are
+Library and workspace archives use schema 6 exclusively; earlier versions are
 refused with `snapshot_unsupported_schema_version`, without conversion or fallback.
-Re-export from a deployment running this version, or re-ingest the sources.
+Preserve each original archive and its immutable creator runtime. Restore an older
+archive with that runtime in isolation, apply the guarded native baseline
+transitions including `vision-recognition-schema`, then export schema 6 with the
+current runtime. Schema-5 Xberg policies are not silently converted. The current
+reader has no compatibility parser.
 Library and workspace exports require existing system-administrator authority;
 ordinary document/library readers and workspace administrators cannot export history.

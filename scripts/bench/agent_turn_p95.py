@@ -1209,7 +1209,7 @@ def build_parser() -> argparse.ArgumentParser:
         prog="agent_turn_p95.py",
         description=(
             "Benchmark IronRAG UI assistant turn latency.\n"
-            "Measures p50/p95/p99 across N questions; exits 1 if p95 > 28 000 ms.\n\n"
+            "Measures p50/p95/p99 across N questions; gates p95 and optionally experiment p99.\n\n"
             "Required env vars: IRONRAG_LIBRARY_ID plus IRONRAG_API_TOKEN or "
             "IRONRAG_PROBE_PASSWORD\n"
             "Optional env vars: IRONRAG_API_BASE_URL, IRONRAG_LOGIN, "
@@ -1276,6 +1276,13 @@ def build_parser() -> argparse.ArgumentParser:
         default=P95_GATE_MS,
         metavar="N",
         help=f"p95 latency gate in milliseconds (default: {P95_GATE_MS})",
+    )
+    parser.add_argument(
+        "--p99-gate-ms",
+        type=non_negative_int_arg,
+        default=None,
+        metavar="N",
+        help="Optional experiment p99 gate in milliseconds, using unrounded client timings",
     )
     parser.add_argument(
         "--output-path",
@@ -1382,6 +1389,29 @@ def build_experiment_artifact(
         and artifact["summary"]["latency"]["p95_ms"] is not None
         and artifact["summary"]["latency"]["p95_ms"] <= args.p95_gate_ms
     )
+    p99_gate_ms = getattr(args, "p99_gate_ms", None)
+    if p99_gate_ms is not None:
+        artifact["acceptancePolicy"]["p99GateMs"] = p99_gate_ms
+        samples = result["samples"]
+        valid = (
+            len(samples) == result["attempted"] == result["successful"]
+            and len(samples) > 0
+            and all(
+                "error" not in sample
+                and isinstance(sample.get("started_offset_ns"), int)
+                and not isinstance(sample.get("started_offset_ns"), bool)
+                and isinstance(sample.get("completed_offset_ns"), int)
+                and not isinstance(sample.get("completed_offset_ns"), bool)
+                and sample["completed_offset_ns"] >= sample["started_offset_ns"]
+                for sample in samples
+            )
+        )
+        p99_ns = percentile(
+            [sample["completed_offset_ns"] - sample["started_offset_ns"] for sample in samples], 99
+        ) if valid else None
+        artifact["gatePassed"] = (
+            artifact["gatePassed"] and p99_ns is not None and p99_ns <= p99_gate_ms * 1_000_000
+        )
     artifact["artifactFingerprintSha256"] = stable_json_sha256(artifact)
     return artifact
 
@@ -1516,6 +1546,8 @@ def run_experiment_mode(
 def main() -> int:
     parser = build_parser()
     args = parser.parse_args()
+    if args.p99_gate_ms is not None and not args.experiment_id:
+        parser.error("--p99-gate-ms requires --experiment-id")
 
     base_url = os.environ.get("IRONRAG_API_BASE_URL", DEFAULT_BASE_URL).rstrip("/")
     login = os.environ.get("IRONRAG_LOGIN", "admin")

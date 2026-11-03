@@ -1900,6 +1900,90 @@ async fn seed_suppressed_document(
     Ok((document_id, suppressed.mutation.id))
 }
 
+/// The archive verifies the immutable identity after JSONB and before restore.
+#[tokio::test]
+#[ignore = "requires local postgres and redis"]
+async fn immutable_upload_identity_exports_after_jsonb_and_rejects_tampering() -> Result<()> {
+    use ironrag_backend::infra::repositories::admission_repository::fingerprint;
+
+    let fixture = ContentLifecycleFixture::create().await?;
+    let result = Box::pin(async {
+        let source_id = create_library(&fixture, "identity-jsonb-source").await?;
+        let (_, _, mutation_id) = seed_readable_content_document(&fixture, source_id).await?;
+        let pool = &fixture.state.persistence.postgres;
+        let (stored, accepted): (Value, String) = sqlx::query_as(
+            "select request_identity, request_fingerprint from content_mutation where id=$1",
+        )
+        .bind(mutation_id)
+        .fetch_one(pool)
+        .await?;
+        assert_eq!(fingerprint(&stored)?, accepted);
+        let archive =
+            export_archive(&fixture, source_id, vec![IncludeKind::LibraryData, IncludeKind::Blobs])
+                .await?;
+        let retained: (Value, String) = sqlx::query_as(
+            "select request_identity, request_fingerprint from content_mutation where id=$1",
+        )
+        .bind(mutation_id)
+        .fetch_one(pool)
+        .await?;
+        assert_eq!(retained, (stored, accepted));
+        let target_id = create_library(&fixture, "identity-jsonb-target").await?;
+        for field in ["request_identity", "request_fingerprint"] {
+            let tampered = rewrite_archive_entries(&archive, |path, bytes| {
+                if !path.starts_with("postgres/content_mutation/") {
+                    return Ok(bytes);
+                }
+                let mut rewritten = Vec::new();
+                for line in bytes.split(|byte| *byte == b'\n').filter(|line| !line.is_empty()) {
+                    let mut row: Value = serde_json::from_slice(line)?;
+                    if field == "request_identity" {
+                        row[field]["sourceIdentity"] = json!("tampered-source");
+                    } else {
+                        let digest = row[field].as_str().context("fingerprint")?;
+                        let replacement = if digest.ends_with('0') { '1' } else { '0' };
+                        row[field] = json!(format!("{}{replacement}", &digest[..digest.len()-1]));
+                    }
+                    serde_json::to_writer(&mut rewritten, &row)?;
+                    rewritten.push(b'\n');
+                }
+                Ok(rewritten)
+            })
+            .await?;
+            let failure = restore_library_archive(
+                &fixture.state,
+                target_id,
+                std::io::Cursor::new(tampered),
+                OverwriteMode::Reject,
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(failure.failure_code(), SnapshotImportFailureKind::ArchiveInvalid.code());
+            assert!(
+                format!("{failure:?}").contains("admission fingerprint mismatch"),
+                "{failure:?}"
+            );
+            let counts: (i64, i64, i64, i64, i64, i64, i64) = sqlx::query_as(
+                "select (select count(*) from content_document where library_id=$1),
+                (select count(*) from content_mutation where library_id=$1),
+                (select count(*) from knowledge_document where library_id=$1),
+                (select count(*) from content_revision where library_id=$1),
+                (select count(*) from content_chunk c join content_revision r on r.id=c.revision_id where r.library_id=$1),
+                (select count(*) from knowledge_revision where library_id=$1),
+                (select count(*) from knowledge_chunk where library_id=$1)",
+            )
+            .bind(target_id)
+            .fetch_one(pool)
+            .await?;
+            assert_eq!(counts, (0, 0, 0, 0, 0, 0, 0), "tampered identity must refuse before target mutation");
+        }
+        Ok(())
+    })
+    .await;
+    fixture.cleanup().await?;
+    result
+}
+
 /// A visibility intent with a failed bound replacement must survive
 /// an export → restore, keep the persisted obligation, and survive the
 /// real null-head repair pass without reviving the restricted base revision.
@@ -2537,12 +2621,12 @@ async fn archive3_published_bound_c_preserves_intent_item_identity_and_metadata(
         tx.commit().await?;
         let current: Uuid = sqlx::query_scalar("select revision_id from content_current_revision where document_id=$1").bind(document_id).fetch_one(pool).await?;
         assert_eq!(current, revision_id, "canonical C must be public before export");
-        let expected_identity: serde_json::Value = sqlx::query_scalar("select request_identity from content_mutation where id=$1").bind(c.mutation.id).fetch_one(pool).await?;
+        let expected_identity: (serde_json::Value, String) = sqlx::query_as("select request_identity, request_fingerprint from content_mutation where id=$1").bind(c.mutation.id).fetch_one(pool).await?;
         let target_id = restore_content_into_fresh_library(&fixture, source_id, "archive3-bound-target").await?;
         let restored: (Uuid, Uuid) = sqlx::query_as("select revision_id, visibility_intent_id from content_current_revision where document_id=$1 and library_id=$2")
             .bind(document_id).bind(target_id).fetch_one(pool).await?;
         assert_eq!(restored, (revision_id, intent.visibility_intent_id));
-        let restored_identity: serde_json::Value = sqlx::query_scalar("select request_identity from content_mutation where id=$1").bind(c.mutation.id).fetch_one(pool).await?;
+        let restored_identity: (serde_json::Value, String) = sqlx::query_as("select request_identity, request_fingerprint from content_mutation where id=$1").bind(c.mutation.id).fetch_one(pool).await?;
         assert_eq!(restored_identity, expected_identity);
         let metadata: (Option<String>, Option<String>) = sqlx::query_as("select title, language_code from content_revision where id=$1")
             .bind(revision_id).fetch_one(pool).await?;

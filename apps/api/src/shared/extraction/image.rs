@@ -13,7 +13,7 @@ use crate::{
     },
 };
 
-const IMAGE_OCR_PROMPT: &str = "Return only the text visible in this image as plain UTF-8 text, one logical flow with newlines where line breaks are visible. Preserve the original writing system of every word verbatim. When a glyph could be read as either its native script form or as a visually similar character in another script, choose the script that matches the surrounding word — never homogenize a word's script by substituting confusable look-alikes across scripts. Treat each word as a single-script unit unless the source itself mixes scripts within one word. Do not transliterate, romanize, or normalize any character into a different writing system. Do not add headings, explanations, summaries, entity lists, markdown fences, or wrapping quotes. If no readable text is visible, return an empty string.";
+pub const IMAGE_OCR_PROMPT: &str = "Transcribe every visible word verbatim, preserving its writing system and line breaks. Return exactly one JSON object: {\"outcome\":\"text\",\"text\":\"visible text\"} for readable text, or {\"outcome\":\"no_text\"} for a blank or decorative image with no readable text. Do not describe the image, invent text, transliterate, or wrap the JSON in markdown.";
 const IMAGE_DESCRIPTION_PROMPT: &str = "Describe this image in detail, including any text, data, tables, diagrams, charts, formulas, signage, and other visually meaningful content that is visible.";
 
 pub struct ImageVisionOutput {
@@ -39,16 +39,106 @@ pub struct VisionProviderInput<'a> {
     pub extra_parameters_json: &'a serde_json::Value,
 }
 
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+#[serde(tag = "outcome", rename_all = "snake_case", deny_unknown_fields)]
+pub enum VisualTextOutcome {
+    Text { text: String },
+    NoText,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct VisionCallReceipt {
+    pub provider_kind: String,
+    pub model_name: String,
+    pub usage_json: serde_json::Value,
+}
+
+#[derive(Debug)]
+pub struct VisionRecognitionError {
+    pub message: &'static str,
+    pub calls: Vec<VisionCallReceipt>,
+}
+
+impl std::fmt::Display for VisionRecognitionError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.message)
+    }
+}
+
+impl std::error::Error for VisionRecognitionError {}
+
+pub struct RecognizedVisual {
+    pub outcome: VisualTextOutcome,
+    pub calls: Vec<VisionCallReceipt>,
+    pub warnings: Vec<String>,
+    pub mime_type: String,
+}
+
+fn parse_visual_response(text: &str) -> Option<VisualTextOutcome> {
+    let outcome: VisualTextOutcome = serde_json::from_str(text).ok()?;
+    match &outcome {
+        VisualTextOutcome::Text { text } if text.trim().is_empty() => None,
+        _ => Some(outcome),
+    }
+}
+
+/// Empty responses alone receive one retry. Every completed call keeps its raw usage.
+pub async fn recognize_visual(
+    gateway: &dyn LlmGateway,
+    input: VisionProviderInput<'_>,
+    mime_type: &str,
+    file_bytes: &[u8],
+    cancellation_token: Option<&tokio_util::sync::CancellationToken>,
+) -> std::result::Result<RecognizedVisual, VisionRecognitionError> {
+    let mut calls = Vec::new();
+    for attempt in 0..2 {
+        if cancellation_token.is_some_and(tokio_util::sync::CancellationToken::is_cancelled) {
+            return Err(VisionRecognitionError { message: "visual recognition canceled", calls });
+        }
+        let response = run_vision_image_request(
+            gateway, input, mime_type, file_bytes, IMAGE_OCR_PROMPT,
+        ).await.map_err(|_| VisionRecognitionError {
+            // Provider errors may contain credentials or response bodies.
+            message: "Vision request failed; check the extract_text binding and provider diagnostics",
+            calls: calls.clone(),
+        })?;
+        calls.push(VisionCallReceipt {
+            provider_kind: response.provider_kind,
+            model_name: response.model_name,
+            usage_json: response.usage_json,
+        });
+        if response.text.trim().is_empty() && attempt == 0 {
+            continue;
+        }
+        let outcome =
+            parse_visual_response(&response.text).ok_or_else(|| VisionRecognitionError {
+                message: "Vision returned an empty or invalid recognition outcome",
+                calls: calls.clone(),
+            })?;
+        return Ok(RecognizedVisual {
+            outcome,
+            calls,
+            warnings: response.warnings,
+            mime_type: response.mime_type,
+        });
+    }
+    unreachable!("the second attempt always returns an outcome or error")
+}
+
 pub async fn extract_image_with_provider(
     gateway: &dyn LlmGateway,
     input: VisionProviderInput<'_>,
     mime_type: &str,
     file_bytes: &[u8],
-) -> Result<ExtractionOutput> {
+    cancellation_token: Option<&tokio_util::sync::CancellationToken>,
+) -> std::result::Result<ExtractionOutput, VisionRecognitionError> {
     let response =
-        run_vision_image_request(gateway, input, mime_type, file_bytes, IMAGE_OCR_PROMPT).await?;
-
-    let layout = build_text_layout_from_content(&response.text);
+        recognize_visual(gateway, input, mime_type, file_bytes, cancellation_token).await?;
+    let text = match &response.outcome {
+        VisualTextOutcome::Text { text } => text.as_str(),
+        VisualTextOutcome::NoText => "",
+    };
+    let layout = build_text_layout_from_content(text);
 
     Ok(ExtractionOutput {
         extraction_kind: "vision_image".into(),
@@ -63,10 +153,15 @@ pub async fn extract_image_with_provider(
         structure_hints: layout.structure_hints,
         source_map: serde_json::json!({
             "mime_type": response.mime_type,
+            "visual_recognition": [{"kind":"raster_frame", "source_unit":1,
+                "ordinal":0,"native_index":1,"source_path":null,
+                "payload_sha256":hex::encode(<sha2::Sha256 as sha2::Digest>::digest(file_bytes)),
+                "prompt_sha256":hex::encode(<sha2::Sha256 as sha2::Digest>::digest(IMAGE_OCR_PROMPT.as_bytes())),
+                "outcome":response.outcome}],
         }),
-        provider_kind: Some(response.provider_kind),
-        model_name: Some(response.model_name),
-        usage_json: response.usage_json,
+        provider_kind: Some(input.provider_kind.to_owned()),
+        model_name: Some(input.model_name.to_owned()),
+        usage_json: serde_json::json!({"vision_calls":response.calls}),
         extracted_images: Vec::new(),
     })
 }
@@ -140,9 +235,8 @@ const PNG_SIGNATURE: &[u8; 8] = b"\x89PNG\r\n\x1a\n";
 
 /// Whether the bytes carry a raster-image signature the extraction stack can
 /// decode. Reuses the decoder crate's own magic scan instead of a second
-/// signature table, and accepts only the formats the upload MIME set and
-/// `docling` image sources cover, so an unknown binary is not routed to a
-/// decoder that cannot open it.
+/// signature table, and accepts only supported upload formats so an unknown
+/// binary is not routed to a decoder that cannot open it.
 #[must_use]
 pub(crate) fn bytes_look_like_raster_image(file_bytes: &[u8]) -> bool {
     matches!(
@@ -339,7 +433,11 @@ mod tests {
             Ok(VisionResponse {
                 provider_kind: std::mem::take(&mut request.provider_kind),
                 model_name: std::mem::take(&mut request.model_name),
-                output_text: format!("diagram text and entities [{mime_type}]"),
+                output_text: if request.prompt == IMAGE_OCR_PROMPT {
+                    serde_json::json!({"outcome":"text","text":format!("diagram text and entities [{mime_type}]")}).to_string()
+                } else {
+                    format!("diagram text and entities [{mime_type}]")
+                },
                 usage_json: serde_json::json!({}),
             })
         }
@@ -360,6 +458,7 @@ mod tests {
             },
             "image/png",
             &valid_png_bytes(),
+            None,
         )
         .await
         .expect("image extraction");
@@ -386,6 +485,7 @@ mod tests {
             },
             "image/webp",
             &valid_png_bytes(),
+            None,
         )
         .await
         .expect("image extraction");
@@ -480,6 +580,7 @@ mod tests {
             },
             "image/png",
             &valid_png_bytes(),
+            None,
         )
         .await
         .expect("image extraction");
@@ -503,6 +604,7 @@ mod tests {
             },
             "image/png",
             &valid_png_bytes(),
+            None,
         )
         .await
         .expect("image extraction");

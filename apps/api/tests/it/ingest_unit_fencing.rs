@@ -22,6 +22,13 @@ use ironrag_backend::{
 
 const STAGE_NAME: &str = "extract_content";
 
+fn extraction_identity() -> serde_json::Value {
+    use ironrag_backend::integrations::extraction_protocol::{CONTRACT, ENGINE, PRODUCER, PROFILE};
+    serde_json::json!({"source_sha256":"a".repeat(64),"contract":CONTRACT,"producer":PRODUCER,
+        "engine":ENGINE,"profile":PROFILE,"local_ocr":true,"policy":{"rasterImageEngine":"xberg"},
+        "page_batch_size":2,"source_unit_count":2})
+}
+
 fn sha256_text(value: &str) -> String {
     format!("sha256:{}", hex::encode(Sha256::digest(value.as_bytes())))
 }
@@ -50,7 +57,9 @@ fn unit_artifact(
         content_text: Some(content_text.to_string()),
         structure_hints_json: Some(serde_json::json!({ "lines": [] })),
         source_metadata_json: Some(serde_json::json!({ "pageCount": 2 })),
-        source_map_json: Some(serde_json::json!({ "adapter": "test" })),
+        source_map_json: Some(
+            serde_json::json!({ "adapter": "xberg", "extraction_identity": extraction_identity() }),
+        ),
         warnings_json: serde_json::json!([]),
         usage_json: serde_json::json!({}),
         provider_kind: Some(provider_kind.to_string()),
@@ -60,6 +69,7 @@ fn unit_artifact(
             "pageCount": 2,
             "pageBatchSize": 2,
             "streamed": true,
+            "extractionIdentity": extraction_identity(),
         }),
         elapsed_ms: Some(7),
         started_at: Some(Utc::now()),
@@ -68,7 +78,8 @@ fn unit_artifact(
 
 #[tokio::test]
 #[ignore = "requires local postgres service"]
-async fn newest_attempt_recomputes_units_and_stale_attempt_cannot_replace_them() -> Result<()> {
+async fn completed_history_is_visible_and_immutable_across_attempts_and_progress_binds_identity()
+-> Result<()> {
     let settings = Settings::from_env().context("load ingest unit fencing settings")?;
     let database =
         TempPostgresDatabase::create(&settings.database_url, "ingest_unit_fencing").await?;
@@ -240,9 +251,10 @@ async fn newest_attempt_recomputes_units_and_stale_attempt_cannot_replace_them()
                 return Err(anyhow!("newest attempt unexpectedly lost unit authority"));
             }
         };
-        assert!(
-            current_attempt_rows.is_empty(),
-            "a new attempt must not adopt output whose provider/model/config provenance is unbound"
+        assert_eq!(
+            current_attempt_rows.len(),
+            1,
+            "historical completed primary keys must remain visible before resumption"
         );
 
         let newest_bytes = "newest attempt exact bytes\nreplacement";
@@ -252,8 +264,11 @@ async fn newest_attempt_recomputes_units_and_stale_attempt_cannot_replace_them()
             newest,
             &unit_artifact(newest_bytes, &newest_checksum, "new-provider", "new-model"),
         )
-        .await?;
-        assert!(matches!(newest_write, IngestAttemptMutationOutcome::Applied(_)));
+        .await;
+        assert!(
+            matches!(newest_write, Err(sqlx::Error::RowNotFound)),
+            "a new attempt must use a controlled new revision, not overwrite completed history"
+        );
 
         let stale_write = ingest_repository::upsert_content_revision_ingest_unit_completed_fenced(
             &pool,
@@ -274,14 +289,20 @@ async fn newest_attempt_recomputes_units_and_stale_attempt_cannot_replace_them()
         ));
         assert!(matches!(
             ingest_repository::sum_completed_content_revision_ingest_unit_pages_fenced(
-                &pool, first, STAGE_NAME,
+                &pool,
+                first,
+                STAGE_NAME,
+                &extraction_identity(),
             )
             .await?,
             IngestAttemptMutationOutcome::AuthorityLost
         ));
         assert!(matches!(
             ingest_repository::get_content_revision_ingest_unit_page_progress_fenced(
-                &pool, first, STAGE_NAME,
+                &pool,
+                first,
+                STAGE_NAME,
+                &extraction_identity(),
             )
             .await?,
             IngestAttemptMutationOutcome::AuthorityLost
@@ -294,19 +315,22 @@ async fn newest_attempt_recomputes_units_and_stale_attempt_cannot_replace_them()
         )
         .await?;
         assert_eq!(persisted.len(), 1);
-        assert_eq!(persisted[0].attempt_id, Some(newest_attempt.id));
-        assert_eq!(persisted[0].content_text.as_deref(), Some(newest_bytes));
+        assert_eq!(persisted[0].attempt_id, Some(first_attempt.id));
+        assert_eq!(persisted[0].content_text.as_deref(), Some(resumable_bytes));
         assert_eq!(
             persisted[0].content_text.as_deref().map(str::as_bytes),
-            Some(newest_bytes.as_bytes())
+            Some(resumable_bytes.as_bytes())
         );
-        assert_eq!(persisted[0].content_checksum.as_deref(), Some(newest_checksum.as_str()));
-        assert_eq!(persisted[0].provider_kind.as_deref(), Some("new-provider"));
-        assert_eq!(persisted[0].model_name.as_deref(), Some("new-model"));
+        assert_eq!(persisted[0].content_checksum.as_deref(), Some(resumable_checksum.as_str()));
+        assert_eq!(persisted[0].provider_kind.as_deref(), Some("first-provider"));
+        assert_eq!(persisted[0].model_name.as_deref(), Some("first-model"));
 
         let newest_progress =
             ingest_repository::get_content_revision_ingest_unit_page_progress_fenced(
-                &pool, newest, STAGE_NAME,
+                &pool,
+                newest,
+                STAGE_NAME,
+                &extraction_identity(),
             )
             .await?;
         match newest_progress {
@@ -316,6 +340,38 @@ async fn newest_attempt_recomputes_units_and_stale_attempt_cannot_replace_them()
             }
             IngestAttemptMutationOutcome::AuthorityLost => {
                 return Err(anyhow!("newest attempt unexpectedly lost progress authority"));
+            }
+        }
+
+        for key in
+            ["source_sha256", "contract", "producer", "engine", "profile", "local_ocr", "policy"]
+        {
+            let mut different = extraction_identity();
+            different[key] = serde_json::json!("different");
+            let sum = ingest_repository::sum_completed_content_revision_ingest_unit_pages_fenced(
+                &pool, newest, STAGE_NAME, &different,
+            )
+            .await?;
+            assert!(
+                matches!(sum, IngestAttemptMutationOutcome::Applied(0)),
+                "sum must exclude changed {key}"
+            );
+            let progress =
+                ingest_repository::get_content_revision_ingest_unit_page_progress_fenced(
+                    &pool, newest, STAGE_NAME, &different,
+                )
+                .await?;
+            match progress {
+                IngestAttemptMutationOutcome::Applied(progress) => {
+                    assert_eq!(
+                        progress.completed_page_count, 0,
+                        "progress must exclude changed {key}"
+                    );
+                    assert_eq!(progress.total_page_count, None);
+                }
+                IngestAttemptMutationOutcome::AuthorityLost => {
+                    return Err(anyhow!("unexpected authority loss"));
+                }
             }
         }
 

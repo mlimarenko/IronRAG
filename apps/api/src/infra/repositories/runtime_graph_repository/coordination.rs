@@ -5,6 +5,48 @@ use crate::infra::knowledge_plane::IngestRevisionWriteAuthority;
 
 use super::super::{catalog_repository, ingest_repository};
 
+/// A caller-owned deadline, enforced by PostgreSQL as well as its Rust future.
+/// Installing the remaining budget never extends a shorter session timeout.
+#[derive(Clone, Copy)]
+pub struct RuntimeGraphSqlDeadline {
+    deadline: tokio::time::Instant,
+}
+
+impl RuntimeGraphSqlDeadline {
+    #[must_use]
+    pub const fn at(deadline: tokio::time::Instant) -> Self {
+        Self { deadline }
+    }
+
+    /// Applies a transaction-local statement cap and returns the preceding cap.
+    /// Call before each SQL boundary; zero must never disable PostgreSQL's timer.
+    ///
+    /// # Errors
+    /// Returns an error when the deadline is exhausted or PostgreSQL refuses it.
+    pub async fn install(
+        &self,
+        connection: &mut sqlx::PgConnection,
+    ) -> Result<String, sqlx::Error> {
+        let remaining = self.deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            return Err(sqlx::Error::Protocol("graph SQL deadline exhausted".into()));
+        }
+        let milliseconds =
+            i64::try_from(remaining.as_nanos().div_ceil(1_000_000).min(i32::MAX as u128))
+                .map_err(|error| sqlx::Error::Protocol(error.to_string()))?;
+        let (previous, _installed) = sqlx::query_as::<_, (String, String)>(
+            "select setting,
+                set_config('statement_timeout',
+                    least(coalesce(nullif(setting::bigint, 0), $1), $1)::text, true)
+             from pg_settings where name = 'statement_timeout'",
+        )
+        .bind(milliseconds)
+        .fetch_one(connection)
+        .await?;
+        Ok(previous)
+    }
+}
+
 /// Owned authority boundary spanning graph reconcile through lifecycle
 /// publication.
 ///
@@ -32,11 +74,16 @@ impl IngestRevisionGraphPublicationGuard {
     /// released, while errors (including cancellation/timeout mapped by the
     /// caller) are rolled back before this guard is returned. This keeps a
     /// degraded lifecycle publication from committing partial graph state.
+    /// The SQL cap is installed inside the savepoint and restored on both paths;
+    /// a timed-out client future cannot leave an unlimited active statement in
+    /// front of its rollback. The outer lifecycle transaction keeps its policy.
     pub async fn run_graph_savepoint<T, E, F>(
         &mut self,
+        deadline: tokio::time::Instant,
         operation: F,
     ) -> Result<T, GraphSavepointError<E>>
     where
+        E: From<sqlx::Error>,
         F: for<'connection> FnOnce(
             &'connection mut sqlx::PgConnection,
         ) -> std::pin::Pin<
@@ -47,7 +94,20 @@ impl IngestRevisionGraphPublicationGuard {
             .execute(&mut *self.transaction)
             .await
             .map_err(GraphSavepointError::Sqlx)?;
-        match operation(&mut self.transaction).await {
+        let budget = RuntimeGraphSqlDeadline::at(deadline);
+        let outcome = async {
+            let preceding = budget.install(&mut self.transaction).await.map_err(E::from)?;
+            let value = operation(&mut self.transaction).await?;
+            budget.install(&mut self.transaction).await.map_err(E::from)?;
+            sqlx::query("select set_config('statement_timeout', $1, true)")
+                .bind(preceding)
+                .execute(&mut *self.transaction)
+                .await
+                .map_err(E::from)?;
+            Ok::<_, E>(value)
+        }
+        .await;
+        match outcome {
             Ok(value) => {
                 sqlx::query("release savepoint ingest_graph_reconcile")
                     .execute(&mut *self.transaction)
@@ -426,6 +486,48 @@ async fn lock_ingest_revision_graph_authority(
 #[must_use = "the rebuild guard must be committed or rolled back"]
 pub struct RuntimeGraphRebuildGuard {
     connection: PoolConnection<Postgres>,
+    library_id: Uuid,
+    policy: RuntimeGraphRebuildCoordination,
+    backend_pid: i32,
+}
+
+/// Coordination selected explicitly by the rebuild caller.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RuntimeGraphRebuildCoordination {
+    /// Do not defer lifecycle writers; concurrent changes can reject publication.
+    Optimistic,
+    /// Hold the canonical library lifecycle lock through publication or rollback.
+    FenceWriters { deadline: chrono::DateTime<chrono::Utc> },
+}
+
+// PostgreSQL 18 enforces both pre-transaction statement waits and the full
+// transaction server-side. Each installation derives from the same absolute
+// cutoff, so time spent acquiring earlier locks is never added back.
+// After BEGIN, PostgreSQL does not shorten an active nonzero transaction timer;
+// disarm it before computing and installing the fresh budget in one statement.
+async fn install_rebuild_deadline(
+    connection: &mut sqlx::PgConnection,
+    deadline: chrono::DateTime<chrono::Utc>,
+    rearm_transaction: bool,
+) -> Result<(), sqlx::Error> {
+    let (remaining, _, _) = sqlx::query_as::<_, (i64, Option<String>, Option<String>)>(
+        "with disarm as materialized (
+            select case when $2 then set_config('transaction_timeout', '0', false)
+                        else current_setting('transaction_timeout') end as previous
+         ), budget as materialized (
+            select floor(extract(epoch from ($1::timestamptz - clock_timestamp())) * 1000)::bigint as ms
+            from disarm where previous is not null
+         ) select ms,
+           case when ms between 1 and 2147483647 then set_config('transaction_timeout', ms::text, false) end,
+           case when ms between 1 and 2147483647 then set_config('statement_timeout', ms::text, false) end
+         from budget",
+    ).bind(deadline).bind(rearm_transaction).fetch_one(&mut *connection).await?;
+    if !(1..=i64::from(i32::MAX)).contains(&remaining) {
+        return Err(sqlx::Error::Protocol(
+            "writer fence deadline is expired or outside PostgreSQL timeout range".into(),
+        ));
+    }
+    Ok(())
 }
 
 impl RuntimeGraphRebuildGuard {
@@ -444,7 +546,9 @@ impl RuntimeGraphRebuildGuard {
     /// Returns any `SQLx` error raised while committing the transaction or
     /// closing its dedicated session.
     pub async fn commit(self) -> Result<(), sqlx::Error> {
-        finalize_runtime_graph_rebuild_connection(self.connection, "COMMIT").await
+        let result = finalize_runtime_graph_rebuild_connection(self.connection, "COMMIT").await;
+        tracing::info!(library_id = %self.library_id, policy = ?self.policy, backend_pid = self.backend_pid, success = result.is_ok(), "graph rebuild guard commit finalized");
+        result
     }
 
     /// Rolls back rebuild data before closing the session and releasing locks.
@@ -453,7 +557,9 @@ impl RuntimeGraphRebuildGuard {
     /// Returns any `SQLx` error raised while rolling back the transaction or
     /// closing its dedicated session.
     pub async fn rollback(self) -> Result<(), sqlx::Error> {
-        finalize_runtime_graph_rebuild_connection(self.connection, "ROLLBACK").await
+        let result = finalize_runtime_graph_rebuild_connection(self.connection, "ROLLBACK").await;
+        tracing::info!(library_id = %self.library_id, policy = ?self.policy, backend_pid = self.backend_pid, success = result.is_ok(), "graph rebuild guard rollback finalized");
+        result
     }
 }
 
@@ -484,7 +590,7 @@ pub enum RuntimeGraphRebuildGuardAcquireOutcome {
     Acquired(RuntimeGraphRebuildGuard),
     /// The target library disappeared before its lifetime lock was acquired.
     LibraryNotFound,
-    /// Another runtime-graph rebuild already owns global admission.
+    /// Global admission or the requested library lifecycle fence is busy.
     Busy,
 }
 
@@ -494,10 +600,11 @@ pub enum RuntimeGraphRebuildGuardAcquireOutcome {
 /// lock so multiple rebuild waiters cannot occupy pooled connections while
 /// waiting. It then
 /// takes the blocking graph-merge and raw-graph session locks in that fixed
-/// order and enters `REPEATABLE READ`. The first snapshot query locks the target
-/// library `FOR KEY SHARE`, keeping it alive through publication. No document
-/// row is locked, which avoids reversing the document-first ordering used by
-/// ingest reconcile.
+/// order before entering `REPEATABLE READ`. Optimistic callers take a library
+/// lifetime key-share lock. The explicit writer-fence policy attempts the
+/// canonical lifecycle row lock with NOWAIT on this same connection: no
+/// library row is held while waiting for either graph lock, and contention
+/// rolls back the fresh snapshot and releases the session locks as `Busy`.
 ///
 /// Returns [`RuntimeGraphRebuildGuardAcquireOutcome::Busy`] without waiting
 /// when another rebuild owns global admission, and
@@ -511,9 +618,13 @@ pub enum RuntimeGraphRebuildGuardAcquireOutcome {
 pub async fn acquire_runtime_library_graph_rebuild_guard(
     pool: &PgPool,
     library_id: Uuid,
+    policy: RuntimeGraphRebuildCoordination,
 ) -> Result<RuntimeGraphRebuildGuardAcquireOutcome, sqlx::Error> {
     let mut connection = pool.acquire().await?;
     connection.close_on_drop();
+    if let RuntimeGraphRebuildCoordination::FenceWriters { deadline } = policy {
+        install_rebuild_deadline(&mut connection, deadline, false).await?;
+    }
     let admitted = sqlx::query_scalar::<_, bool>(
         "select pg_try_advisory_lock(
             hashtextextended('graph-rebuild-admission', 0)
@@ -526,6 +637,9 @@ pub async fn acquire_runtime_library_graph_rebuild_guard(
         return Ok(RuntimeGraphRebuildGuardAcquireOutcome::Busy);
     }
 
+    if let RuntimeGraphRebuildCoordination::FenceWriters { deadline } = policy {
+        install_rebuild_deadline(&mut connection, deadline, false).await?;
+    }
     sqlx::query(
         "select pg_advisory_lock(
             hashtextextended('graph-merge:' || $1::text, 0)
@@ -534,27 +648,55 @@ pub async fn acquire_runtime_library_graph_rebuild_guard(
     .bind(library_id.to_string())
     .execute(&mut *connection)
     .await?;
+    if let RuntimeGraphRebuildCoordination::FenceWriters { deadline } = policy {
+        install_rebuild_deadline(&mut connection, deadline, false).await?;
+    }
     sqlx::query("select pg_advisory_lock(hashtextextended($1::text, 0))")
         .bind(library_id.to_string())
         .execute(&mut *connection)
         .await?;
 
+    if let RuntimeGraphRebuildCoordination::FenceWriters { deadline } = policy {
+        install_rebuild_deadline(&mut connection, deadline, false).await?;
+    }
+    let backend_pid =
+        sqlx::query_scalar::<_, i32>("select pg_backend_pid()").fetch_one(&mut *connection).await?;
     sqlx::query("begin isolation level repeatable read").execute(&mut *connection).await?;
-    let library_locked = sqlx::query_scalar::<_, Uuid>(
-        "select id
-         from catalog_library
-         where id = $1
-         for key share",
-    )
-    .bind(library_id)
-    .fetch_optional(&mut *connection)
-    .await?;
+    if let RuntimeGraphRebuildCoordination::FenceWriters { deadline } = policy {
+        install_rebuild_deadline(&mut connection, deadline, true).await?;
+    }
+    let statement = match policy {
+        RuntimeGraphRebuildCoordination::Optimistic => {
+            "select id from catalog_library where id = $1 for key share"
+        }
+        RuntimeGraphRebuildCoordination::FenceWriters { .. } => {
+            "select id from catalog_library where id = $1 and lifecycle_state = 'active' for no key update nowait"
+        }
+    };
+    let library_locked = sqlx::query_scalar::<_, Uuid>(statement)
+        .bind(library_id)
+        .fetch_optional(&mut *connection)
+        .await;
+    let library_locked = match library_locked {
+        Ok(row) => row,
+        Err(sqlx::Error::Database(error)) if error.code().as_deref() == Some("55P03") => {
+            finalize_runtime_graph_rebuild_connection(connection, "ROLLBACK").await?;
+            return Ok(RuntimeGraphRebuildGuardAcquireOutcome::Busy);
+        }
+        Err(error) => return Err(error),
+    };
     if library_locked.is_none() {
         finalize_runtime_graph_rebuild_connection(connection, "ROLLBACK").await?;
         return Ok(RuntimeGraphRebuildGuardAcquireOutcome::LibraryNotFound);
     }
 
-    Ok(RuntimeGraphRebuildGuardAcquireOutcome::Acquired(RuntimeGraphRebuildGuard { connection }))
+    tracing::info!(library_id = %library_id, ?policy, backend_pid, "graph rebuild guard acquired");
+    Ok(RuntimeGraphRebuildGuardAcquireOutcome::Acquired(RuntimeGraphRebuildGuard {
+        connection,
+        library_id,
+        policy,
+        backend_pid,
+    }))
 }
 
 /// Acquires a library-scoped `PostgreSQL` advisory lock for runtime-graph writes.
@@ -722,6 +864,77 @@ pub async fn count_runtime_graph_filtered_artifacts_by_ingestion_run(
 #[cfg(test)]
 mod tests {
     use super::{ReconcileGuardAbort, first_reconcile_guard_abort};
+
+    #[tokio::test]
+    #[ignore = "requires local postgres service"]
+    async fn rebuild_deadline_rearms_an_active_transaction_timer() -> anyhow::Result<()> {
+        use anyhow::{Context, ensure};
+        use std::time::Duration;
+
+        let url =
+            std::env::var("IRONRAG_DATABASE_URL").context("local PostgreSQL fixture required")?;
+        let pool = sqlx::postgres::PgPoolOptions::new().max_connections(3).connect(&url).await?;
+        let mut holder = pool.begin().await?;
+        sqlx::query("select pg_advisory_xact_lock(918239)").execute(&mut *holder).await?;
+        let mut guarded = pool.begin().await?;
+        sqlx::query("set local transaction_timeout = '10s'").execute(&mut *guarded).await?;
+        let pid = sqlx::query_scalar::<_, i32>("select pg_backend_pid()")
+            .fetch_one(&mut *guarded)
+            .await?;
+        super::install_rebuild_deadline(
+            &mut guarded,
+            chrono::Utc::now() + chrono::Duration::milliseconds(900),
+            true,
+        )
+        .await?;
+        let wait_query = tokio::time::timeout(
+            Duration::from_secs(3),
+            sqlx::query("select pg_advisory_xact_lock(918239)").execute(&mut *guarded),
+        );
+        let observe = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let blocked = sqlx::query_scalar::<_, bool>("select exists(select 1 from pg_stat_activity where pid=$1 and wait_event_type='Lock')")
+                    .bind(pid).fetch_one(&pool).await?;
+                if blocked {
+                    return Ok::<_, sqlx::Error>(());
+                }
+                tokio::task::yield_now().await;
+            }
+        });
+        let (query_result, observed) = tokio::join!(wait_query, observe);
+        let backend_gone = tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                let present = sqlx::query_scalar::<_, bool>(
+                    "select exists(select 1 from pg_stat_activity where pid=$1)",
+                )
+                .bind(pid)
+                .fetch_one(&pool)
+                .await?;
+                if !present {
+                    return Ok::<_, sqlx::Error>(());
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await;
+        let still_held = !sqlx::query_scalar::<_, bool>("select pg_try_advisory_xact_lock(918239)")
+            .fetch_one(&pool)
+            .await?;
+        holder.rollback().await?;
+        drop(guarded);
+        pool.close().await;
+        ensure!(matches!(observed, Ok(Ok(()))), "server query did not reach the held lock");
+        ensure!(still_held, "blocking lock was released before the deadline result");
+        ensure!(
+            matches!(query_result, Ok(Err(_))),
+            "active transaction timer did not expire at the refreshed cutoff"
+        );
+        ensure!(
+            matches!(backend_gone, Ok(Ok(()))),
+            "timed-out backend and its locks were not released"
+        );
+        Ok(())
+    }
 
     #[test]
     fn first_unsatisfied_guard_decides_the_abort() {

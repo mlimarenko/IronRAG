@@ -127,6 +127,7 @@ pub(super) fn project_ui_evidence_bundle(
         reference_summary,
         verification_state,
         verification_warnings,
+        semantic_verification,
         answer_disposition,
         clarification,
         runtime_summary,
@@ -149,6 +150,7 @@ pub(super) fn project_ui_evidence_bundle(
         reference_summary: Some(projection.summary),
         verification_state,
         verification_warnings,
+        semantic_verification,
         answer_disposition,
         clarification,
         runtime_summary,
@@ -174,6 +176,7 @@ pub(super) fn project_ui_execution_detail(
         reference_summary,
         verification_state,
         verification_warnings,
+        semantic_verification,
         answer_disposition,
         clarification,
     } = detail;
@@ -200,6 +203,7 @@ pub(super) fn project_ui_execution_detail(
         reference_summary: Some(projection.summary),
         verification_state,
         verification_warnings,
+        semantic_verification,
         answer_disposition,
         clarification,
     }

@@ -293,7 +293,7 @@ pub(super) fn provider_response_format(
     }
 }
 
-pub(super) fn provider_system_prompt(
+pub(crate) fn provider_system_prompt(
     provider_kind: &str,
     requested_system_prompt: Option<&str>,
     requested_response_format: Option<&serde_json::Value>,

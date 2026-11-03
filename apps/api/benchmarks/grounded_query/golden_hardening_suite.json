@@ -46,6 +46,28 @@
     },
     {
       "id": "aurora_quorum_fixed_size",
+      "expectedFacts": [
+        {
+          "id": "quorum-fixed-five",
+          "fixture": "corpus/docs/aurora_capacity_plan.md",
+          "sourceExcerpt": "The quorum tier is fixed at 5 nodes and must never be resized by\nthe autoscaler, because the consensus protocol requires a stable member set.",
+          "sourceSha256": "b86a83c7d001b691c1fff5a543b932185b210d005a9242046afcf860c53be4c8",
+          "requiredAll": ["quorum"],
+          "requiredAny": [],
+          "requiredRegexAny": ["(?:fixed\\s+at\\s+|\\b)[*_`]*5[*_`]*\\s*nodes?\\b"]
+        }
+      ],
+      "mandatoryCaveats": [
+        {
+          "id": "quorum-no-autoscale",
+          "fixture": "corpus/docs/aurora_capacity_plan.md",
+          "sourceExcerpt": "must never be resized by\nthe autoscaler",
+          "sourceSha256": "b86a83c7d001b691c1fff5a543b932185b210d005a9242046afcf860c53be4c8",
+          "requiredAll": ["autoscaler"],
+          "requiredAny": [],
+          "requiredRegexAny": ["\\b(?:must\\s+never|must\\s+not|cannot|can['’]t|may\\s+not|never)\\s+(?:be\\s+)?resiz(?:e|ed)\\b"]
+        }
+      ],
       "question": "How many nodes does the Aurora quorum tier run, and may the autoscaler resize it?",
       "searchQuery": "Aurora quorum tier fixed nodes autoscaler",
       "expectedDocumentsContains": [
@@ -71,6 +93,37 @@
     },
     {
       "id": "aurora_latency_budgets",
+      "expectedFacts": [
+        {
+          "id": "synchronous-budget-250ms",
+          "fixture": "corpus/docs/aurora_capacity_plan.md",
+          "sourceExcerpt": "Every synchronous request carries an end-to-end latency budget of 250 ms,\nmeasured at the edge.",
+          "sourceSha256": "b86a83c7d001b691c1fff5a543b932185b210d005a9242046afcf860c53be4c8",
+          "requiredAll": ["synchronous"],
+          "requiredAny": [],
+          "requiredRegexAny": ["\\b250\\s*[*_`]*ms\\b"]
+        },
+        {
+          "id": "quorum-budget-40ms",
+          "fixture": "corpus/docs/aurora_capacity_plan.md",
+          "sourceExcerpt": "The quorum tier commit path has a stricter internal\nbudget of 40 ms.",
+          "sourceSha256": "b86a83c7d001b691c1fff5a543b932185b210d005a9242046afcf860c53be4c8",
+          "requiredAll": ["quorum", "internal"],
+          "requiredAny": [],
+          "requiredRegexAny": ["\\b40\\s*[*_`]*ms\\b"]
+        }
+      ],
+      "mandatoryCaveats": [
+        {
+          "id": "latency-measured-at-edge",
+          "fixture": "corpus/docs/aurora_capacity_plan.md",
+          "sourceExcerpt": "measured at the edge",
+          "sourceSha256": "b86a83c7d001b691c1fff5a543b932185b210d005a9242046afcf860c53be4c8",
+          "requiredAll": [],
+          "requiredAny": ["at the edge", "at edge"],
+          "requiredRegexAny": []
+        }
+      ],
       "question": "What is the end-to-end latency budget for synchronous requests on Aurora, and what is the stricter internal budget of the quorum commit path?",
       "searchQuery": "Aurora latency budget synchronous quorum commit",
       "expectedDocumentsContains": [
@@ -140,6 +193,28 @@
     },
     {
       "id": "gateway_replication_cidr",
+      "expectedFacts": [
+        {
+          "id": "replication-endpoint",
+          "fixture": "corpus/docs/gateway_endpoints_matrix.md",
+          "sourceExcerpt": "The replication feed on\nrelay-2.internal:7601 accepts connections only from the address block\n10.32.0.0/19.",
+          "sourceSha256": "a72f972c4ac1ce74937e621dde2bb46681f0c76d05cf7401529147441e3b145e",
+          "requiredAll": ["relay-2.internal:7601"],
+          "requiredAny": [],
+          "requiredRegexAny": []
+        }
+      ],
+      "mandatoryCaveats": [
+        {
+          "id": "replication-cidr-only",
+          "fixture": "corpus/docs/gateway_endpoints_matrix.md",
+          "sourceExcerpt": "accepts connections only from the address block\n10.32.0.0/19",
+          "sourceSha256": "a72f972c4ac1ce74937e621dde2bb46681f0c76d05cf7401529147441e3b145e",
+          "requiredAll": [],
+          "requiredAny": [],
+          "requiredRegexAny": ["\\bonly\\s+from\\s+(?:the\\s+address\\s+block\\s+)?[*_`]*10\\.32\\.0\\.0/19\\b", "\\brestricted\\s+to\\s+[*_`]*10\\.32\\.0\\.0/19\\b"]
+        }
+      ],
       "question": "Which endpoint carries the Beacon replication feed and from which address block does it accept connections?",
       "searchQuery": "replication feed endpoint address block",
       "expectedDocumentsContains": [
@@ -188,6 +263,26 @@
     },
     {
       "id": "train_canary_owner_and_predecessor",
+      "expectedFacts": [
+        {
+          "id": "canary-owner-traffic-stewards",
+          "fixture": "corpus/docs/release_train_owners.md",
+          "sourceExcerpt": "| Stage | Owning team | Escalation window |\n|---|---|---|\n| compile-and-gate | Build Systems | 30 minutes |\n| sealed-rehearsal | Replay Guild | 2 hours |\n| canary-slice | Traffic Stewards | 45 minutes |",
+          "sourceSha256": "f28c59161b2dad0f087b5dfac7ceb3ab2d7e204df015aef71aabf3da57b0d6e4",
+          "requiredAll": ["canary-slice", "Traffic Stewards"],
+          "requiredAny": [],
+          "requiredRegexAny": ["Traffic Stewards (?:own|owns) (?:the )?canary-slice", "canary-slice(?: stage)? (?:is owned by|belongs to) (?:the )?Traffic Stewards"]
+        },
+        {
+          "id": "canary-predecessor-sealed-rehearsal",
+          "fixture": "corpus/docs/release_train_stages.md",
+          "sourceExcerpt": "Only after\nsealed-rehearsal succeeds does the train enter the canary-slice stage",
+          "sourceSha256": "aa3f1d028f4f327a0d08dc1f93d1b24e63ff098417b736cf7b3d7f1329865875",
+          "requiredAll": ["sealed-rehearsal", "canary-slice"],
+          "requiredAny": [],
+          "requiredRegexAny": ["sealed-rehearsal\\s+(?:must\\s+)?succeed(?:s)?\\s+(?:immediately\\s+)?before\\s+(?:entering\\s+)?canary-slice", "only after sealed-rehearsal succeeds", "canary-slice stage\\. immediately before it, sealed-rehearsal must succeed"]
+        }
+      ],
       "question": "Which team owns the canary-slice stage of the Orbita release train, and which stage must succeed immediately before it?",
       "searchQuery": "canary-slice stage owner preceding stage",
       "expectedDocumentsContains": [
@@ -259,6 +354,17 @@
     },
     {
       "id": "beacon_config_listen_port",
+      "expectedFacts": [
+        {
+          "id": "beacon-active-listener-8443",
+          "fixture": "corpus/fixtures/beacon_gateway.yaml",
+          "sourceExcerpt": "listener:\n  listen_port: 8443",
+          "sourceSha256": "64930950aca5f275d63d455807de335294338f7ed7ba0929f35b8188933ac046",
+          "requiredAll": [],
+          "requiredAny": [],
+          "requiredRegexAny": ["\\b8443\\b"]
+        }
+      ],
       "question": "On which port does the Beacon gateway listener actually listen according to its runtime configuration?",
       "searchQuery": "beacon gateway listen_port configuration",
       "expectedDocumentsContains": [
@@ -349,6 +455,28 @@
     },
     {
       "id": "orbita_ru_confirmation_deadline",
+      "expectedFacts": [
+        {
+          "id": "orbita-confirmation-within-90-seconds",
+          "fixture": "corpus/docs/orbita_runbook_ru.md",
+          "sourceExcerpt": "2. Дождаться, пока оркестратор подтвердит остановку — подтверждение\n   обязано прийти в течение 90 секунд.",
+          "sourceSha256": "48ab714bb3deebcf4fc00dc90ac10ebe67b81943a0d93a217ff010f75eba2bfd",
+          "requiredAll": [],
+          "requiredAny": [],
+          "requiredRegexAny": ["(?:подтвердить остановку|подтверждение остановки)[^.!?]{0,50}(?:в течение|не позднее чем через|не более)\\s+90\\s*секунд"]
+        }
+      ],
+      "mandatoryCaveats": [
+        {
+          "id": "orbita-missing-confirmation-forbids-restart",
+          "fixture": "corpus/docs/orbita_runbook_ru.md",
+          "sourceExcerpt": "Если подтверждение остановки не пришло за 90 секунд, перезапуск запрещён:",
+          "sourceSha256": "48ab714bb3deebcf4fc00dc90ac10ebe67b81943a0d93a217ff010f75eba2bfd",
+          "requiredAll": [],
+          "requiredAny": [],
+          "requiredRegexAny": ["если подтверждение остановки не (?:пришло|получено) за 90 секунд,?\\s*перезапуск (?:запрещ[её]н|недопустим)", "без подтверждения остановки[^.!?]{0,40}перезапуск (?:запрещ[её]н|недопустим)", "подтвердить остановку в течение 90 секунд\\. если подтверждение не пришло за это время, перезапуск запрещ[её]н"]
+        }
+      ],
       "question": "Сколько времени даётся оркестратору на подтверждение остановки при перезапуске службы Orbita?",
       "searchQuery": "Orbita перезапуск подтверждение остановки оркестратор",
       "expectedDocumentsContains": [
@@ -373,6 +501,28 @@
     },
     {
       "id": "orbita_crosslang_forbidden_stage",
+      "expectedFacts": [
+        {
+          "id": "orbita-restricted-stage-canary-slice",
+          "fixture": "corpus/docs/orbita_runbook_ru.md",
+          "sourceExcerpt": "Во время стадии\ncanary-slice перезапуск запрещён без исключения, подписанного командой\nTraffic Stewards.",
+          "sourceSha256": "48ab714bb3deebcf4fc00dc90ac10ebe67b81943a0d93a217ff010f75eba2bfd",
+          "requiredAll": ["canary-slice"],
+          "requiredAny": [],
+          "requiredRegexAny": []
+        }
+      ],
+      "mandatoryCaveats": [
+        {
+          "id": "orbita-restart-needs-signed-stewards-exception",
+          "fixture": "corpus/docs/orbita_runbook_ru.md",
+          "sourceExcerpt": "canary-slice перезапуск запрещён без исключения, подписанного командой\nTraffic Stewards.",
+          "sourceSha256": "48ab714bb3deebcf4fc00dc90ac10ebe67b81943a0d93a217ff010f75eba2bfd",
+          "requiredAll": [],
+          "requiredAny": [],
+          "requiredRegexAny": ["restart(?:ing)?(?: Orbita)? (?:is )?(?:forbidden|prohibited|not allowed) (?:during canary-slice )?without (?:an? )?(?:exception signed by (?:the )?Traffic Stewards|signed exception from (?:the )?Traffic Stewards)", "canary-slice перезапуск запрещ[её]н без исключения, подписанного командой Traffic Stewards", "restarting the orbita service is forbidden during canary-slice unless the traffic stewards sign an exception"]
+        }
+      ],
       "question": "During which release train stage is restarting the Orbita service forbidden without a signed exception?",
       "searchQuery": "Orbita restart forbidden stage signed exception",
       "expectedDocumentsContains": [
@@ -444,6 +594,26 @@
     },
     {
       "id": "relay_latency_sensitive_choice",
+      "expectedFacts": [
+        {
+          "id": "relay-latency-sensitive-extended-profile",
+          "fixture": "corpus/docs/relay_twin_extended.md",
+          "sourceExcerpt": "The extended interconnect profile, registered as RLY-EXT-517, is the relay\nconfiguration for rings dedicated to latency-sensitive tenants.",
+          "sourceSha256": "b7a112ded153c15f268a9f900b692c24632a6078ec12b28f66222eaa82ae62b2",
+          "requiredAll": ["RLY-EXT-517"],
+          "requiredAny": [],
+          "requiredRegexAny": []
+        },
+        {
+          "id": "relay-extended-window-16-frames",
+          "fixture": "corpus/docs/relay_twin_extended.md",
+          "sourceExcerpt": "- Registration id: RLY-EXT-517\n- Frame window: 16 frames",
+          "sourceSha256": "b7a112ded153c15f268a9f900b692c24632a6078ec12b28f66222eaa82ae62b2",
+          "requiredAll": ["RLY-EXT-517"],
+          "requiredAny": [],
+          "requiredRegexAny": ["\\b16[*_`]*\\s+[*_`]*frames?\\b", "frame window[*_`]*[^.!?0-9]{0,24}16\\b"]
+        }
+      ],
       "question": "Which relay profile should rings with latency-sensitive tenants use, and what is its frame window?",
       "searchQuery": "latency-sensitive tenants relay profile frame window",
       "expectedDocumentsContains": [
@@ -491,6 +661,28 @@
     },
     {
       "id": "ledger_export_raise_plans",
+      "expectedFacts": [
+        {
+          "id": "ledger-export-raise-eligible-plan-codes",
+          "fixture": "corpus/docs/ledger_quota_table.md",
+          "sourceExcerpt": "Only the LP-070 and\nLP-080 plans may request a temporary export size raise",
+          "sourceSha256": "5ab4d6d99078b252250c67723bba05ee190936f01ea425d9ff7abd1c1d887b62",
+          "requiredAll": ["LP-070", "LP-080", "export"],
+          "requiredAny": [],
+          "requiredRegexAny": ["only (?:the )?LP-070(?: \\(Biome\\))? and LP-080(?: \\(Sphere\\))?(?: plans)? may request"]
+        }
+      ],
+      "mandatoryCaveats": [
+        {
+          "id": "ledger-export-raise-once-per-billing-month",
+          "fixture": "corpus/docs/ledger_quota_table.md",
+          "sourceExcerpt": "may request a temporary export size raise, and only once per\nbilling month.",
+          "sourceSha256": "5ab4d6d99078b252250c67723bba05ee190936f01ea425d9ff7abd1c1d887b62",
+          "requiredAll": [],
+          "requiredAny": [],
+          "requiredRegexAny": ["(?:^|only |at most |,\\s*)once per billing month"]
+        }
+      ],
       "question": "Which ledger plans may request a temporary export size raise, and how often?",
       "searchQuery": "plans temporary export size raise",
       "expectedDocumentsContains": [
@@ -591,6 +783,28 @@
     },
     {
       "id": "lattice_scheduler_no_split",
+      "expectedFacts": [
+        {
+          "id": "lattice-scheduler-assigns-replay-workers",
+          "fixture": "corpus/code/lattice_pipeline_utils.py",
+          "sourceExcerpt": "class LatticeScheduler:\n    \"\"\"Assigns spool segments to replay workers without splitting a window.",
+          "sourceSha256": "94fc0889cb79afdb24f7179d80ff15e2a19bf56ebd986d64a21f5e51b1ea56a4",
+          "requiredAll": ["LatticeScheduler", "workers"],
+          "requiredAny": [],
+          "requiredRegexAny": []
+        }
+      ],
+      "mandatoryCaveats": [
+        {
+          "id": "lattice-never-splits-coalesced-window",
+          "fixture": "corpus/code/lattice_pipeline_utils.py",
+          "sourceExcerpt": "it never splits a coalesced window across workers, because a\n    window replays as one transaction.",
+          "sourceSha256": "94fc0889cb79afdb24f7179d80ff15e2a19bf56ebd986d64a21f5e51b1ea56a4",
+          "requiredAll": [],
+          "requiredAny": [],
+          "requiredRegexAny": ["(?:never splits|must not split|does not split|cannot split) (?:a |any )?coalesced windows? across workers", "coalesced windows? (?:must never|must not|cannot) be split across workers"]
+        }
+      ],
       "question": "Which class assigns spool segment windows to replay workers, and what does it never split across workers?",
       "searchQuery": "class assigns spool segments replay workers never splits",
       "expectedDocumentsContains": [

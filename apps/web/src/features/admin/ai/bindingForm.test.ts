@@ -18,11 +18,11 @@ describe('binding request tuning', () => {
     const json = withRequestTuning('{"seed": 7}', 'serviceTier', 'flex')
     expect(JSON.parse(json)).toEqual({ seed: 7, service_tier: 'flex' })
     expect(requestTuningValue(json, 'serviceTier')).toBe('flex')
-    expect(requestTuningValue(json, 'reasoningEffort')).toBe('')
+    expect(requestTuningValue('{"seed": 7}', 'serviceTier')).toBe('')
   })
 
   it('removes the key for the provider default and empties an empty object', () => {
-    const json = withRequestTuning('{"reasoning_effort": "none"}', 'reasoningEffort', '')
+    const json = withRequestTuning('{"service_tier": "flex"}', 'serviceTier', '')
     expect(json).toBe('')
   })
 
@@ -31,7 +31,7 @@ describe('binding request tuning', () => {
     expect(requestTuningValue('{oops', 'serviceTier')).toBeNull()
   })
 
-  it('shows only the owned keys on a binding card', () => {
+  it('shows service tier and historical raw reasoning on a binding card', () => {
     expect(
       bindingRequestTuning({ service_tier: 'flex', reasoning_effort: 'none', seed: 7 }),
     ).toEqual({ serviceTier: 'flex', reasoningEffort: 'none' })

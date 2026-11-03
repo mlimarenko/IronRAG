@@ -1,4 +1,5 @@
 mod provider_calls;
+pub(crate) mod provider_reservation;
 mod reads;
 mod usage;
 
@@ -397,48 +398,30 @@ impl BillingService {
         execution_id: Uuid,
     ) -> Result<BillingExecutionScope, ApiError> {
         match execution_kind {
-            BillingExecutionOwnerKind::QueryExecution => {
-                let execution = query_repository::get_execution_by_id(
+            BillingExecutionOwnerKind::KnowledgeSearch => {
+                let search = billing_repository::get_knowledge_search(
                     &state.persistence.postgres,
                     execution_id,
                 )
                 .await
-                .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
-                if let Some(execution) = execution {
-                    return Ok(BillingExecutionScope {
-                        workspace_id: execution.workspace_id,
-                        library_id: execution.library_id,
-                        knowledge_document_id: None,
-                    });
-                }
-
-                // MCP conversation retention intentionally cascades completed
-                // query executions while preserving tracked provider-call
-                // and charge history. A durable rollup cursor owns the
-                // immutable workspace/library attribution needed to reconcile
-                // that retained billing history. Falling back to it prevents
-                // a migration-created dirty generation from retrying forever
-                // and blocking every library cost read after its conversation
-                // has been evicted.
-                let retained_scope = billing_repository::get_execution_cost_rollup_state(
-                    &state.persistence.postgres,
-                    execution_owner_kind_key(execution_kind),
-                    execution_id,
-                )
-                .await
-                .map_err(|e| ApiError::internal_with_log(e, "internal"))?
-                .ok_or_else(|| ApiError::resource_not_found("query_execution", execution_id))?;
-                tracing::debug!(
-                    %execution_id,
-                    workspace_id = %retained_scope.workspace_id,
-                    library_id = %retained_scope.library_id,
-                    "resolving retained query billing from its durable rollup scope",
-                );
+                .map_err(|error| {
+                    ApiError::internal_with_log(
+                        error,
+                        "knowledge search billing scope lookup failed",
+                    )
+                })?
+                .ok_or_else(|| ApiError::resource_not_found("knowledge_search", execution_id))?;
                 Ok(BillingExecutionScope {
-                    workspace_id: retained_scope.workspace_id,
-                    library_id: retained_scope.library_id,
+                    workspace_id: search.workspace_id,
+                    library_id: search.library_id,
                     knowledge_document_id: None,
                 })
+            }
+            BillingExecutionOwnerKind::McpDocumentRead => {
+                resolve_document_read_scope(state, execution_id).await
+            }
+            BillingExecutionOwnerKind::QueryExecution => {
+                resolve_query_execution_scope(state, execution_id).await
             }
             BillingExecutionOwnerKind::GraphExtractionAttempt => {
                 let extraction = repositories::runtime_graph_repository::get_runtime_graph_extraction_record_by_id(
@@ -486,6 +469,62 @@ impl BillingService {
             }
         }
     }
+}
+
+async fn resolve_document_read_scope(
+    state: &AppState,
+    execution_id: Uuid,
+) -> Result<BillingExecutionScope, ApiError> {
+    let read = billing_repository::get_document_read(&state.persistence.postgres, execution_id)
+        .await
+        .map_err(|error| {
+            ApiError::internal_with_log(error, "document read billing scope lookup failed")
+        })?
+        .ok_or_else(|| ApiError::resource_not_found("mcp_document_read", execution_id))?;
+    Ok(BillingExecutionScope {
+        workspace_id: read.workspace_id,
+        library_id: read.library_id,
+        knowledge_document_id: Some(read.document_id),
+    })
+}
+
+async fn resolve_query_execution_scope(
+    state: &AppState,
+    execution_id: Uuid,
+) -> Result<BillingExecutionScope, ApiError> {
+    let execution =
+        query_repository::get_execution_by_id(&state.persistence.postgres, execution_id)
+            .await
+            .map_err(|error| ApiError::internal_with_log(error, "internal"))?;
+    if let Some(execution) = execution {
+        return Ok(BillingExecutionScope {
+            workspace_id: execution.workspace_id,
+            library_id: execution.library_id,
+            knowledge_document_id: None,
+        });
+    }
+
+    // Conversation retention removes completed queries but preserves their
+    // billing history. The durable rollup cursor retains the original scope.
+    let retained_scope = billing_repository::get_execution_cost_rollup_state(
+        &state.persistence.postgres,
+        execution_owner_kind_key(BillingExecutionOwnerKind::QueryExecution),
+        execution_id,
+    )
+    .await
+    .map_err(|error| ApiError::internal_with_log(error, "internal"))?
+    .ok_or_else(|| ApiError::resource_not_found("query_execution", execution_id))?;
+    tracing::debug!(
+        %execution_id,
+        workspace_id = %retained_scope.workspace_id,
+        library_id = %retained_scope.library_id,
+        "resolving retained query billing from its durable rollup scope",
+    );
+    Ok(BillingExecutionScope {
+        workspace_id: retained_scope.workspace_id,
+        library_id: retained_scope.library_id,
+        knowledge_document_id: None,
+    })
 }
 
 fn invalid_execution_owner_kind(value: &str) -> ApiError {
@@ -588,6 +627,8 @@ fn parse_execution_owner_kind(value: &str) -> Option<BillingExecutionOwnerKind> 
         "query_execution" => Some(BillingExecutionOwnerKind::QueryExecution),
         "graph_extraction_attempt" => Some(BillingExecutionOwnerKind::GraphExtractionAttempt),
         "ingest_attempt" => Some(BillingExecutionOwnerKind::IngestAttempt),
+        "mcp_document_read" => Some(BillingExecutionOwnerKind::McpDocumentRead),
+        "knowledge_search" => Some(BillingExecutionOwnerKind::KnowledgeSearch),
         _ => None,
     }
 }

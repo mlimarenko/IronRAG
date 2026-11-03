@@ -60,10 +60,11 @@ pub struct VectorShardEntry {
 /// manifest shape or on-disk layout changes in a backwards-incompatible
 /// way.
 ///
-/// Version 4 preserves revision admission identities of both origins and the
-/// readable revision pointer independently of operational mutation/attempt history.
-/// Older archives cannot prove this closure and are refused, not reconstructed.
-pub const SNAPSHOT_SCHEMA_VERSION: u32 = 4;
+/// Version 6 requires singleton Vision current recognition policies while
+/// retaining opaque historical extraction provenance and revision admissions.
+/// Older archives require their immutable creator runtime in isolation, followed
+/// by the guarded native schema transitions and a fresh version 6 export.
+pub const SNAPSHOT_SCHEMA_VERSION: u32 = 6;
 
 /// Scope of a library snapshot.
 ///

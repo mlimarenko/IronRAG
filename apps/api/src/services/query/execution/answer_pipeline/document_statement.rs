@@ -17,10 +17,14 @@ use super::{
 pub(super) async fn finalize_deterministic_document_statement(
     state: &AppState,
     execution_id: Uuid,
+    question: &str,
     answer: &str,
     query_ir: &QueryIR,
 ) -> anyhow::Result<()> {
     let verification = RuntimeAnswerVerification {
+        semantic_verification: Some(super::super::semantic_verification::nonfactual_report(
+            question, answer,
+        )),
         state: QueryVerificationState::NotRun,
         warnings: Vec::new(),
         unsupported_literals: Vec::new(),

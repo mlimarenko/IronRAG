@@ -605,17 +605,11 @@ mib_to_gib_str() {
 }
 
 # ─── Resource sizing ────────────────────────────────────────────────────────
-# Discrete profiles calibrated to two known-good points: the docker-compose.yml
-# defaults are the 4 GiB-VM baseline (`micro`), and the .env.example worked
-# example is a 16 GiB host (`medium`). Thresholds sit at 8/16/32 GiB so each
-# profile's steady-state memory sum fits the low end of its range with > 0.5 GiB
-# free. Per-role CPU is the profile value clamped to the detected core count.
-# docling / heavy-pipeline parallelism stay `auto`: the backend derives them
-# from these caps at runtime (auto_docling_max_concurrency_for_limits), so we
-# never duplicate that formula in shell.
+# Profiles size native parsing/rendering and workers, not local OCR models.
+# Image text recognition uses the configured extract_text Vision binding.
 recommend_profile() {
   local mem_mib="$1"
-  if   [ "$mem_mib" -lt 8192 ];  then printf 'micro\n'
+  if [ "$mem_mib" -lt 8192 ]; then printf 'micro\n'
   elif [ "$mem_mib" -lt 16384 ]; then printf 'small\n'
   elif [ "$mem_mib" -lt 32768 ]; then printf 'medium\n'
   else printf 'large\n'
@@ -649,11 +643,11 @@ compute_plan() {
       db_cc=200;   be_cc=400;   wk_cc=400;   ca_cc=100;   fe_cc=50
       dbconn=25; embed=12; graph=16; provider_max=12; provider_reserve=3; redis=320;  shm=512 ;;
     medium)
-      db_mem=4096; be_mem=3584; wk_mem=3072; ca_mem=768;  fe_mem=256
+      db_mem=2048; be_mem=1792; wk_mem=3072; ca_mem=384; fe_mem=192
       db_cc=200;   be_cc=600;   wk_cc=600;   ca_cc=100;   fe_cc=100
       dbconn=30; embed=16; graph=16; provider_max=16; provider_reserve=4; redis=640;  shm=1024 ;;
     large)
-      db_mem=8192; be_mem=6144; wk_mem=6144; ca_mem=1536; fe_mem=512
+      db_mem=8192; be_mem=6144; wk_mem=5120; ca_mem=1536; fe_mem=512
       db_cc=400;   be_cc=800;   wk_cc=800;   ca_cc=200;   fe_cc=100
       dbconn=32; embed=24; graph=24; provider_max=24; provider_reserve=6; redis=1280; shm=2048 ;;
     *) err "unknown profile: $profile"; exit 1 ;;
@@ -675,8 +669,7 @@ compute_plan() {
   REC_POSTGRES_SHM=$shm
 
   REC_STEADY_MIB=$(( db_mem + be_mem + wk_mem + ca_mem + fe_mem ))
-  # Reserve max(512 MiB, 12% of RAM) for the kernel + host — matches the repo's
-  # own 4 GiB-VM baseline (check-mem-budget.sh ceiling = 4096 - 512).
+  # Reserve max(512 MiB, 12% of RAM) for the kernel and host.
   local pct=$(( mem_mib * 12 / 100 ))
   REC_HEADROOM_MIB=$(( pct > 512 ? pct : 512 ))
   if [ "$REC_STEADY_MIB" -le $(( mem_mib - REC_HEADROOM_MIB )) ]; then
@@ -850,7 +843,7 @@ Flags:
   -y, --yes, --non-interactive   Never prompt; use flags / env / existing .env / defaults.
       --interactive              Force the wizard even if no TTY is detected.
       --port <p>                 Published HTTP port (default: 19000 or IRONRAG_PORT).
-      --profile <name>           Resource profile: micro | small | medium | large
+      --profile <name>           micro|small|medium|large (native parsing + remote Vision)
                                  (default: auto-detected from host RAM).
       --admin-login <name>       Bootstrap admin login (default: create it in the UI).
       --admin-email <address>    Bootstrap admin email; the API requires the

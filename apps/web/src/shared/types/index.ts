@@ -5,6 +5,7 @@ import type {
   DocumentStatus as GeneratedDocumentStatus,
   GraphStatus as GeneratedGraphStatus,
   ProviderCapabilities as GeneratedProviderCapabilities,
+  SemanticVerificationReport,
 } from '@/shared/api/generated'
 import type { DocumentFailureNotice } from '@/shared/lib/document-processing'
 
@@ -179,6 +180,7 @@ export interface AssistantMessage {
 }
 
 export interface EvidenceBundle {
+  semanticVerification?: SemanticVerificationReport
   segmentRefs: SegmentReference[]
   factRefs: FactReference[]
   entityRefs: EntityReference[]

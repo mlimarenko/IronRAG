@@ -769,49 +769,143 @@ pub async fn get_runtime_graph_extraction_record_by_id(
     .await
 }
 
-/// Lists graph extraction records for one library.
-///
-/// # Errors
-/// Returns any `SQLx` error raised while querying graph extraction records.
-pub async fn list_runtime_graph_extraction_records_by_library(
-    pool: &PgPool,
-    library_id: Uuid,
-    extraction_version: &str,
-) -> Result<Vec<RuntimeGraphExtractionRecordRow>, sqlx::Error> {
-    list_runtime_graph_extraction_records_by_library_with_executor(
-        pool,
-        library_id,
-        extraction_version,
-    )
-    .await
+/// Rebuild input excludes provider payloads; only recovery metadata is needed.
+#[derive(Debug, FromRow)]
+pub struct RuntimeGraphRebuildExtractionRow {
+    pub id: Uuid,
+    pub library_id: Uuid,
+    pub document_id: Uuid,
+    pub chunk_id: Uuid,
+    pub status: String,
+    pub lifecycle: Option<serde_json::Value>,
+    pub recovery_summary: Option<serde_json::Value>,
+    pub normalized_output_json: serde_json::Value,
 }
 
-/// Lists graph extraction records for one library using the supplied database
-/// executor so callers can keep the read inside a wider transaction snapshot.
-///
-/// # Errors
-/// Returns any `SQLx` error raised while querying graph extraction records.
-pub async fn list_runtime_graph_extraction_records_by_library_with_executor<'e, E>(
-    executor: E,
-    library_id: Uuid,
-    extraction_version: &str,
-) -> Result<Vec<RuntimeGraphExtractionRecordRow>, sqlx::Error>
-where
-    E: Executor<'e, Database = Postgres>,
-{
-    sqlx::query_as::<_, RuntimeGraphExtractionRecordRow>(
-        "select id, runtime_execution_id, library_id, document_id, chunk_id, provider_kind,
-            model_name, extraction_version, prompt_hash, status, raw_output_json,
-            normalized_output_json, glean_pass_count, error_message, created_at
+/// Connection-scoped cursor owned by the rebuild transaction. Fetch completes
+/// before returning so the same connection can merge each record. Rollback (or
+/// closing the dedicated session on cancellation) also closes this cursor.
+pub struct RuntimeGraphRebuildExtractionCursor;
+
+impl RuntimeGraphRebuildExtractionCursor {
+    /// # Errors
+    /// Returns database errors, including use outside a transaction.
+    pub async fn open(
+        connection: &mut sqlx::PgConnection,
+        library_id: Uuid,
+        extraction_version: &str,
+    ) -> Result<Self, sqlx::Error> {
+        sqlx::query(
+            "declare runtime_graph_rebuild_extractions no scroll cursor without hold for
+         select id, library_id, document_id, chunk_id, status,
+            raw_output_json->'lifecycle' as lifecycle,
+            raw_output_json->'recovery_summary' as recovery_summary,
+            normalized_output_json
          from runtime_graph_extraction
          where library_id = $1
            and extraction_version = $2
          order by created_at asc, id asc",
+        )
+        .bind(library_id)
+        .bind(extraction_version)
+        .execute(connection)
+        .await?;
+        Ok(Self)
+    }
+
+    /// # Errors
+    /// Returns database or row-decoding errors. No record is skipped on error.
+    pub async fn next_batch(
+        &mut self,
+        connection: &mut sqlx::PgConnection,
+    ) -> Result<Vec<RuntimeGraphRebuildExtractionRow>, sqlx::Error> {
+        sqlx::query_as("fetch forward 64 from runtime_graph_rebuild_extractions")
+            .fetch_all(connection)
+            .await
+    }
+
+    /// # Errors
+    /// Returns database errors while closing the cursor after full consumption.
+    pub async fn close(self, connection: &mut sqlx::PgConnection) -> Result<(), sqlx::Error> {
+        sqlx::query("close runtime_graph_rebuild_extractions").execute(connection).await?;
+        Ok(())
+    }
+}
+
+/// Source identities for one bounded rebuild batch, read on the rebuild connection.
+pub struct RuntimeGraphRebuildIdentities {
+    pub documents: std::collections::BTreeMap<
+        Uuid,
+        super::super::content_document_repository::ContentDocumentRow,
+    >,
+    pub heads: std::collections::BTreeMap<
+        Uuid,
+        super::super::content_document_head_repository::ContentDocumentHeadRow,
+    >,
+    pub revisions: std::collections::BTreeMap<
+        Uuid,
+        super::super::content_revision_repository::ContentRevisionRow,
+    >,
+    pub chunks:
+        std::collections::BTreeMap<Uuid, super::super::content_chunk_repository::ContentChunkRow>,
+}
+
+/// Load source rows in four bounded queries under the caller's transaction snapshot.
+///
+/// # Errors
+/// Returns a database or row-decoding error without skipping a source row.
+pub async fn load_rebuild_identities(
+    connection: &mut sqlx::PgConnection,
+    document_ids: &[Uuid],
+    revision_ids: &[Uuid],
+    chunk_ids: &[Uuid],
+) -> Result<RuntimeGraphRebuildIdentities, sqlx::Error> {
+    use super::super::{
+        content_chunk_repository::ContentChunkRow,
+        content_document_head_repository::ContentDocumentHeadRow,
+        content_document_repository::ContentDocumentRow,
+        content_revision_repository::ContentRevisionRow,
+    };
+
+    let documents = sqlx::query_as::<_, ContentDocumentRow>(
+        "select id, workspace_id, library_id, external_key, document_state::text as document_state,
+         created_by_principal_id, created_at, deleted_at, parent_document_id, parent_external_key,
+         document_role from content_document where id = any($1)",
     )
-    .bind(library_id)
-    .bind(extraction_version)
-    .fetch_all(executor)
-    .await
+    .bind(document_ids)
+    .fetch_all(&mut *connection)
+    .await?;
+    let heads = sqlx::query_as::<_, ContentDocumentHeadRow>(
+        "select document_id, visibility_intent_id, active_revision_id, readable_revision_id,
+         latest_mutation_id, latest_successful_attempt_id, head_updated_at, document_summary
+         from content_document_head where document_id = any($1)",
+    )
+    .bind(document_ids)
+    .fetch_all(&mut *connection)
+    .await?;
+    let revisions = sqlx::query_as::<_, ContentRevisionRow>(
+        "select id, document_id, workspace_id, library_id, revision_number, parent_revision_id,
+         content_source_kind::text as content_source_kind, checksum, mime_type, byte_size, title,
+         language_code, source_uri, document_hint, storage_key, created_by_principal_id, created_at
+         from content_revision where id = any($1)",
+    )
+    .bind(revision_ids)
+    .fetch_all(&mut *connection)
+    .await?;
+    let chunks = sqlx::query_as::<_, ContentChunkRow>(
+        "select id, revision_id, chunk_index, start_offset, end_offset, token_count,
+         normalized_text, text_checksum, occurred_at, occurred_until
+         from content_chunk where id = any($1)",
+    )
+    .bind(chunk_ids)
+    .fetch_all(&mut *connection)
+    .await?;
+    Ok(RuntimeGraphRebuildIdentities {
+        documents: documents.into_iter().map(|row| (row.id, row)).collect(),
+        heads: heads.into_iter().map(|row| (row.document_id, row)).collect(),
+        revisions: revisions.into_iter().map(|row| (row.id, row)).collect(),
+        chunks: chunks.into_iter().map(|row| (row.id, row)).collect(),
+    })
 }
 
 #[cfg(test)]

@@ -1,6 +1,8 @@
 use std::collections::HashMap;
 use std::sync::Mutex;
 
+use crate::services::ops::billing::provider_reservation::ProviderCallReservation;
+
 use anyhow::Context;
 use sha2::{Digest, Sha256};
 
@@ -12,7 +14,7 @@ use crate::{
         ai_catalog_service::ResolvedRuntimeBinding,
         query::{
             error::QueryServiceError,
-            provider_billing::{QueryProviderCallReservation, QueryProviderExecutionContext},
+            provider_billing::QueryProviderExecutionContext,
             vector_dimensions::{
                 validate_active_embedding_profile_key, validate_embedding_vector_dimensions,
             },
@@ -144,7 +146,7 @@ pub(super) async fn embed_question(
         return Ok(QuestionEmbeddingResult { embedding: cached_embedding, embedding_profile_key });
     }
 
-    let mut provider_call = QueryProviderCallReservation::reserve(
+    let mut provider_call = ProviderCallReservation::reserve(
         state,
         execution_context,
         &embedding_binding,

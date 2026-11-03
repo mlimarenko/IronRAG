@@ -202,7 +202,34 @@ pub struct UpdateLibraryWebIngestPolicyRequest {
 #[serde(rename_all = "camelCase")]
 #[serde(deny_unknown_fields)]
 pub struct UpdateLibraryRecognitionPolicyRequest {
-    pub raster_image_engine: crate::domains::recognition::RecognitionEngine,
+    pub raster_image_engine: crate::domains::recognition::RasterImageEngine,
+}
+
+#[cfg(test)]
+mod recognition_policy_tests {
+    use super::UpdateLibraryRecognitionPolicyRequest;
+
+    #[test]
+    fn policy_request_accepts_only_exact_vision_shape() {
+        let request: UpdateLibraryRecognitionPolicyRequest =
+            serde_json::from_value(serde_json::json!({"rasterImageEngine":"vision"}))
+                .expect("Vision request");
+        assert_eq!(
+            request.raster_image_engine,
+            crate::domains::recognition::RasterImageEngine::Vision
+        );
+        for invalid in [
+            serde_json::json!({"rasterImageEngine":"xberg"}),
+            serde_json::json!({"rasterImageEngine":"native"}),
+            serde_json::json!({"rasterImageEngine":"docling"}),
+            serde_json::json!({"rasterImageEngine":"vision","ignored":true}),
+            serde_json::json!({}),
+        ] {
+            assert!(
+                serde_json::from_value::<UpdateLibraryRecognitionPolicyRequest>(invalid).is_err()
+            );
+        }
+    }
 }
 
 /// Request body for replacing a library's declarative retrieval configuration.

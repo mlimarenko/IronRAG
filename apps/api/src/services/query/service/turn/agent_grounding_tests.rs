@@ -72,14 +72,17 @@ fn grounded_answer_outcome_preserves_nonfactual_child_outcomes() {
     };
     for outcome in [
         AgentGroundedAnswerOutcome {
+            source_execution_id: None,
             disposition: QueryAnswerDisposition::FactualReady,
             clarification: QueryClarification::default(),
         },
         AgentGroundedAnswerOutcome {
+            source_execution_id: None,
             disposition: QueryAnswerDisposition::SafeFallback,
             clarification: QueryClarification::default(),
         },
         AgentGroundedAnswerOutcome {
+            source_execution_id: None,
             disposition: QueryAnswerDisposition::Clarification,
             clarification: clarification.clone(),
         },
@@ -96,10 +99,49 @@ fn grounded_answer_outcome_preserves_nonfactual_child_outcomes() {
 }
 
 #[test]
+fn exact_passthrough_selects_only_the_actual_winning_child() {
+    let earlier = Uuid::from_u128(11);
+    let selected = Uuid::from_u128(22);
+    let mut outcome = AgentGroundedAnswerOutcome {
+        source_execution_id: Some(selected),
+        disposition: QueryAnswerDisposition::FactualReady,
+        clarification: QueryClarification::default(),
+    };
+    assert_eq!(
+        super::agent_grounding::selected_agent_child_execution_ids(
+            AgentAnswerProvenance::GroundedAnswerPassthrough,
+            Some(&outcome),
+            &[earlier, selected]
+        )
+        .expect("selected observed child"),
+        vec![selected]
+    );
+    assert_eq!(
+        super::agent_grounding::selected_agent_child_execution_ids(
+            AgentAnswerProvenance::Composed,
+            None,
+            &[earlier, selected]
+        )
+        .expect("composed evidence"),
+        vec![earlier, selected]
+    );
+    outcome.source_execution_id = Some(Uuid::from_u128(99));
+    assert!(
+        super::agent_grounding::selected_agent_child_execution_ids(
+            AgentAnswerProvenance::GroundedAnswerPassthrough,
+            Some(&outcome),
+            &[earlier, selected]
+        )
+        .is_err()
+    );
+}
+
+#[test]
 fn parent_verification_downgrades_factual_grounded_answer_passthrough() {
     let selected = finalized_agent_answer_outcome(
         AgentAnswerProvenance::GroundedAnswerPassthrough,
         Some(&AgentGroundedAnswerOutcome {
+            source_execution_id: None,
             disposition: QueryAnswerDisposition::FactualReady,
             clarification: QueryClarification::default(),
         }),
@@ -133,6 +175,7 @@ fn composed_answer_is_parent_finalized_and_outcome_mismatches_fail_closed() {
         finalized_agent_answer_outcome(
             AgentAnswerProvenance::Composed,
             Some(&AgentGroundedAnswerOutcome {
+                source_execution_id: None,
                 disposition: QueryAnswerDisposition::FactualReady,
                 clarification: QueryClarification::default(),
             }),

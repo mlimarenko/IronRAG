@@ -575,6 +575,7 @@ impl QueryService {
             graph_edge_references: detail.graph_edge_references,
             verification_state: detail.verification_state,
             verification_warnings: detail.verification_warnings,
+            semantic_verification: detail.semantic_verification,
             answer_disposition: detail.answer_disposition,
             query_ir: Some(query_ir),
             clarification: detail.clarification,

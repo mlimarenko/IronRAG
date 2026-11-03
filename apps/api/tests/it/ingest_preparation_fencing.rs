@@ -185,7 +185,7 @@ async fn create_leased_content_mutation_job(
         "preparation fixture revision scope mismatch"
     );
     let request_identity = serde_json::json!({
-        "workspaceId":workspace_id,"libraryId":library_id,"operationKind":"upload","sourceIdentity":null,
+        "workspaceId":workspace_id,"libraryId":library_id,"operationKind":"upload","sourceIdentity":null,"materializationToken":null,
         "target":{"kind":"existing","documentId":document_id},
         "revision":{"contentSourceKind":revision.content_source_kind,"baseRevisionId":null,"visibilityIntentId":null},
         "replacement":{"checksum":revision.checksum,"byteSize":revision.byte_size,"mimeType":revision.mime_type,"fileName":file_name,

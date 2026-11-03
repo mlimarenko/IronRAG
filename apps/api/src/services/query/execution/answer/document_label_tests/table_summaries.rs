@@ -1,11 +1,11 @@
 use super::*;
+use crate::shared::extraction::table_markdown::SemanticTableContext;
 
 #[test]
 fn build_table_summary_grounded_answer_reports_most_frequent_values() {
     let document_id = Uuid::now_v7();
     let summaries = build_table_column_summaries(
-        Some("organizations-100"),
-        None,
+        SemanticTableContext { sheet_name: Some("organizations-100"), ..Default::default() },
         &["Country".to_string(), "Industry".to_string()],
         &[
             vec!["Sweden".to_string(), "Plastics".to_string()],
@@ -47,8 +47,7 @@ fn build_table_summary_grounded_answer_reports_most_frequent_values() {
 fn build_table_summary_grounded_answer_reports_no_single_most_frequent_value() {
     let document_id = Uuid::now_v7();
     let summaries = build_table_column_summaries(
-        Some("records-b"),
-        None,
+        SemanticTableContext { sheet_name: Some("records-b"), ..Default::default() },
         &["City".to_string()],
         &[vec!["Moscow".to_string()], vec!["London".to_string()], vec!["Berlin".to_string()]],
     );
@@ -84,8 +83,7 @@ fn build_table_summary_grounded_answer_reports_no_single_most_frequent_value() {
 fn build_table_summary_grounded_answer_reports_average_values() {
     let document_id = Uuid::now_v7();
     let summaries = build_table_column_summaries(
-        Some("products-100"),
-        None,
+        SemanticTableContext { sheet_name: Some("products-100"), ..Default::default() },
         &["Stock".to_string()],
         &[vec!["100".to_string()], vec!["200".to_string()], vec!["300".to_string()]],
     );
@@ -119,8 +117,7 @@ fn build_table_summary_grounded_answer_reports_average_values() {
 fn build_table_summary_grounded_answer_reports_average_number_of_employees() {
     let document_id = Uuid::now_v7();
     let summaries = build_table_column_summaries(
-        Some("organizations-100"),
-        None,
+        SemanticTableContext { sheet_name: Some("organizations-100"), ..Default::default() },
         &["Number of Employees".to_string()],
         &[vec!["10".to_string()], vec!["20".to_string()]],
     );

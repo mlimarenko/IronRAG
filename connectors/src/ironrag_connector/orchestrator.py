@@ -668,9 +668,7 @@ class Orchestrator:
         if head.visibility_intent_id != attempt.receipt.visibility_intent_id:
             self._state.transition_materialization_attempt(attempt, phase="intent_superseded")
             return "visibility intent is no longer current; refetch required"
-        if library_id != route.library_id and (
-            head.readable_revision_id is not None or head.readable_mutation_item_id is not None
-        ):
+        if library_id != route.library_id and (head.readable_revision_id is not None):
             raise IronRagError("historical route copy is readable despite its retirement intent")
         return None
 
@@ -777,7 +775,6 @@ class Orchestrator:
             if (
                 retired.visibility_intent_id != historical.receipt.visibility_intent_id
                 or retired.readable_revision_id is not None
-                or retired.readable_mutation_item_id is not None
             ):
                 raise IronRagError("historical-copy retirement no longer denies public reads")
         snapshot = await self._discover_exact_targets(item.ref, route)
@@ -1443,7 +1440,6 @@ class Orchestrator:
             or status.status is not OperationStatusValue.READY
             or head is None
             or head.readable_revision_id != handle.result_revision_id
-            or head.readable_mutation_item_id != handle.mutation_item_id
             or head.visibility_intent_id != handle.visibility_intent_id
             or handle.result_checksum != item.payload_checksum
         ):
@@ -1793,7 +1789,6 @@ class Orchestrator:
         if head is None or (
             head.visibility_intent_id != handle.visibility_intent_id
             or head.readable_revision_id != handle.result_revision_id
-            or head.readable_mutation_item_id != handle.mutation_item_id
         ):
             return _outcome(
                 item.ref,

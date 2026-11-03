@@ -262,7 +262,7 @@ fn detects_rust_function_boundaries() {
 }
 
 #[test]
-fn computes_sentence_context_without_reordering_existing_semantics() {
+fn sentence_context_preserves_order_within_preceding_chunk() {
     let mut chunks = vec![
         make_chunk(0, "First alpha. First beta."),
         make_chunk(1, "Core sentence."),
@@ -273,8 +273,103 @@ fn computes_sentence_context_without_reordering_existing_semantics() {
 
     assert_eq!(
         chunks[1].window_text.as_deref(),
-        Some("First beta. First alpha.\n\nCore sentence.\n\nLast alpha. Last beta.")
+        Some("First alpha. First beta.\n\nCore sentence.\n\nLast alpha. Last beta.")
     );
+}
+
+#[test]
+fn sentence_context_preserves_order_across_preceding_chunks() {
+    let mut chunks = vec![
+        make_chunk(0, "Too far away. Сначала подготовьте запрос."),
+        make_chunk(1, ""),
+        make_chunk(2, "Затем получите подтверждение."),
+        make_chunk(3, "Теперь выполните запрос."),
+        make_chunk(4, "First follow-up. Second follow-up. Too far ahead."),
+    ];
+    let original_core = chunks[3].clone();
+
+    compute_window_text_pass(&mut chunks);
+
+    assert_eq!(
+        chunks[3].window_text.as_deref(),
+        Some(
+            "Сначала подготовьте запрос. Затем получите подтверждение.\n\nТеперь выполните запрос.\n\nFirst follow-up. Second follow-up."
+        )
+    );
+    assert_eq!(chunks[3].content_text, original_core.content_text);
+    assert_eq!(chunks[3].normalized_text, original_core.normalized_text);
+    assert_eq!(chunks[3].support_block_ids, original_core.support_block_ids);
+    assert_eq!(chunks[3].chunk_index, original_core.chunk_index);
+}
+
+#[test]
+fn sentence_context_preserves_order_at_document_boundaries() {
+    let mut chunks = vec![
+        make_chunk(0, "First sentence."),
+        make_chunk(1, "Middle alpha. Middle beta."),
+        make_chunk(2, "Last sentence."),
+    ];
+
+    compute_window_text_pass(&mut chunks);
+
+    assert_eq!(
+        chunks[0].window_text.as_deref(),
+        Some("First sentence.\n\nMiddle alpha. Middle beta.")
+    );
+    assert_eq!(
+        chunks[2].window_text.as_deref(),
+        Some("Middle alpha. Middle beta.\n\nLast sentence.")
+    );
+}
+
+#[test]
+fn sentence_window_reserves_core_before_adding_neighbors() {
+    let core = "Основной фрагмент сохраняется целиком.";
+    let mut chunks = vec![
+        make_chunk(0, &format!("{}.", "Long preceding text ".repeat(600))),
+        make_chunk(1, core),
+        make_chunk(2, "Следующее условие остаётся доступным."),
+    ];
+
+    compute_window_text_pass(&mut chunks);
+
+    let window = chunks[1].window_text.as_deref().unwrap();
+    assert_eq!(window, format!("{core}\n\nСледующее условие остаётся доступным."));
+    assert!(window.split_whitespace().count() <= 1_500);
+    assert_eq!(chunks[1].content_text, core);
+}
+
+#[test]
+fn sentence_window_adds_only_complete_neighbors_within_remaining_budget() {
+    let core = "Core ".repeat(1_496);
+    let mut chunks = vec![
+        make_chunk(0, "First preceding. Nearest preceding."),
+        make_chunk(1, &core),
+        make_chunk(2, "Following condition."),
+    ];
+
+    compute_window_text_pass(&mut chunks);
+
+    assert_eq!(
+        chunks[1].window_text.as_deref(),
+        Some(format!("First preceding. Nearest preceding.\n\n{core}").as_str())
+    );
+    assert_eq!(chunks[1].window_text.as_ref().unwrap().split_whitespace().count(), 1_500);
+    assert_eq!(chunks[1].content_text, core);
+}
+
+#[test]
+fn sentence_window_does_not_expand_core_at_or_above_token_limit() {
+    for core_tokens in [1_500, 1_501, 2_000] {
+        let core = "Core ".repeat(core_tokens);
+        let mut chunks =
+            vec![make_chunk(0, "Before."), make_chunk(1, &core), make_chunk(2, "After.")];
+
+        compute_window_text_pass(&mut chunks);
+
+        assert!(chunks[1].window_text.is_none(), "core_tokens={core_tokens}");
+        assert_eq!(chunks[1].content_text, core);
+    }
 }
 
 #[test]

@@ -137,7 +137,7 @@ pub(super) fn validate_snapshot_schema_version(
         return Err(SnapshotImportRejection::new(
             SnapshotImportFailureKind::UnsupportedSchemaVersion,
             format!(
-                "{archive_kind} schema_version {schema_version} is not supported by this build (supported {SNAPSHOT_SCHEMA_VERSION}). Older archives lack exact visibility-intent closure and cannot be converted. Re-export the library from a deployment running this version, or re-ingest its sources."
+                "{archive_kind} schema_version {schema_version} is not supported by this build (supported {SNAPSHOT_SCHEMA_VERSION}). Preserve the original archive and its immutable creator runtime. Restore in isolation using that runtime, run the guarded native baseline transitions including vision-recognition-schema, then export schema 6 using the current runtime. This reader does not convert older archives."
             ),
         )
         .into_error());

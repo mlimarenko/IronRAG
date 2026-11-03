@@ -1,0 +1,17 @@
+@font-face {
+  font-family: "Medeo Sans";
+  src: url("./fonts/medeo-sans/MedeoSansVariable.woff2") format("woff2");
+  font-weight: 100 900;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: "Medeo Sans";
+  src: url("./fonts/medeo-sans/MedeoSansVariable-Italic.woff2") format("woff2");
+  font-weight: 100 900;
+  font-style: italic;
+  font-display: swap;
+}
+:root {
+  --font-medeo-sans: "Medeo Sans", ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+}

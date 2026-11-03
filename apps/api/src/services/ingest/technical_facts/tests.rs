@@ -6,6 +6,42 @@ use crate::shared::extraction::{
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
+#[test]
+fn native_table_consumer_technical_facts_exclude_only_pre_row_metadata() {
+    use crate::shared::extraction::table_markdown::{
+        SemanticTableContext, build_semantic_table_row_text,
+    };
+    let source = build_semantic_table_row_text(
+        SemanticTableContext {
+            sheet_name: Some("source namespace"),
+            table_ref: Some(7),
+            ..Default::default()
+        },
+        0,
+        &["Table Ref".into(), "Endpoint".into()],
+        &["actual field".into(), "GET /api/items".into()],
+    );
+    let block = StructuredBlockData {
+        block_id: Uuid::now_v7(),
+        ordinal: 1,
+        block_kind: StructuredBlockKind::TableRow,
+        text: String::new(),
+        normalized_text: source,
+        heading_trail: vec![],
+        section_path: vec![],
+        page_number: None,
+        source_span: None,
+        parent_block_id: None,
+        table_coordinates: None,
+        code_language: None,
+        is_boilerplate: false,
+    };
+    assert_eq!(
+        super::preferred_block_text(&block),
+        "Table Ref: actual field | Endpoint: GET /api/items"
+    );
+}
+
 // extracts_branded_identifiers_from_catalog_link_list_items — REMOVED.
 // Branded identifier heuristic was the noisiest extractor and is now
 // delegated to the LLM's entity extraction pipeline.

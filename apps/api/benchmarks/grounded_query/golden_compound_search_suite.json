@@ -1,0 +1,119 @@
+{
+  "suiteId": "golden_compound_search",
+  "description": "Bounded multi-source and conversation comparison over explicit synthetic graph fixtures. Search evidence, grounded answers and outer-agent behavior are distinct measurements.",
+  "strictBlocking": false,
+  "documents": [
+    "corpus/graph/alpha_relay_topology.md",
+    "corpus/graph/alpha_relay_operations.md",
+    "corpus/graph/beacon_transition_topology.md",
+    "corpus/graph/beacon_transition_controls.md",
+    "corpus/graph/needle_disambiguation_topology.md"
+  ],
+  "cases": [
+    {
+      "id": "compound_route_retention_and_rollout",
+      "question": "Trace the route from Alpha Relay to its final endpoint, naming both connecting links. Who must approve extending that endpoint's retention, who approves route rollout, and how recent must its passing restore drill be?",
+      "searchQuery": "Trace the route from Alpha Relay to its final endpoint, naming both connecting links. Who must approve extending that endpoint's retention, who approves route rollout, and how recent must its passing restore drill be?",
+      "expectedDocumentsContains": ["alpha_relay_topology", "alpha_relay_operations"],
+      "searchRequiredAll": ["Alpha Bridge Link", "Bridge Gamma Route", "Gamma Endpoint", "Privacy Board", "Platform North", "48 hours"],
+      "answerRequiredAll": ["Alpha Bridge Link", "Bridge Gamma Route", "Gamma Endpoint", "Privacy Board", "Platform North", "48"],
+      "minChunkReferenceCount": 2,
+      "minPreparedSegmentReferenceCount": 1,
+      "minEntityReferenceCount": 0,
+      "minRelationReferenceCount": 0,
+      "allowedVerificationStates": ["verified", "partially_verified", "unverified"],
+      "expectedFacts": [
+        {"id": "indirect_route", "fixture": "corpus/graph/alpha_relay_topology.md", "sourceExcerpt": "Alpha Relay connects to Bridge Junction through the Alpha Bridge Link.\nBridge Junction routes to Gamma Endpoint through the Bridge Gamma Route.", "sourceSha256": "77ec62209510c79ae0b0d5829d765840591de1ba5a44b149328fb1e1198b5cab", "requiredAll": ["Alpha Bridge Link", "Bridge Gamma Route", "Gamma Endpoint"], "requiredAny": [], "requiredRegexAny": []},
+        {"id": "retention_approver", "fixture": "corpus/graph/alpha_relay_operations.md", "sourceExcerpt": "Extending Gamma Endpoint retention requires Privacy Board approval.", "sourceSha256": "f694c9c0b6142237aec3a82470ea424659bcff7df6bf523d0796f4c12d9ced48", "requiredAll": ["Privacy Board"], "requiredAny": [], "requiredRegexAny": []},
+        {"id": "rollout_approver", "fixture": "corpus/graph/alpha_relay_operations.md", "sourceExcerpt": "Platform North owns Bridge Junction and approves rollout of the Alpha Relay route.", "sourceSha256": "f694c9c0b6142237aec3a82470ea424659bcff7df6bf523d0796f4c12d9ced48", "requiredAll": ["Platform North"], "requiredAny": [], "requiredRegexAny": []},
+        {"id": "restore_window", "fixture": "corpus/graph/alpha_relay_operations.md", "sourceExcerpt": "Before that rollout, Gamma Endpoint must have a passing restore drill completed within the preceding 48 hours.", "sourceSha256": "f694c9c0b6142237aec3a82470ea424659bcff7df6bf523d0796f4c12d9ced48", "requiredAll": ["48"], "requiredAny": ["hour", "hours"], "requiredRegexAny": []}
+      ],
+      "mandatoryCaveats": [
+        {"id": "drill_must_pass", "fixture": "corpus/graph/alpha_relay_operations.md", "sourceExcerpt": "Before that rollout, Gamma Endpoint must have a passing restore drill completed within the preceding 48 hours.", "sourceSha256": "f694c9c0b6142237aec3a82470ea424659bcff7df6bf523d0796f4c12d9ced48", "requiredAll": [], "requiredAny": ["passing", "passed", "successful"], "requiredRegexAny": []}
+      ]
+    },
+    {
+      "id": "compound_transition_archive_approvals",
+      "question": "Which transition joins Beacon Node and Harbor Delta, where is its authoritative record, and whose approvals are required to correct that record?",
+      "searchQuery": "Which transition joins Beacon Node and Harbor Delta, where is its authoritative record, and whose approvals are required to correct that record?",
+      "expectedDocumentsContains": ["beacon_transition_topology", "beacon_transition_controls"],
+      "searchRequiredAll": ["Beacon Harbor Transition", "Delta Archive", "Transition Coordinator", "independent reviewer"],
+      "answerRequiredAll": ["Beacon Harbor Transition", "Delta Archive", "Transition Coordinator", "independent reviewer"],
+      "minChunkReferenceCount": 2,
+      "minPreparedSegmentReferenceCount": 1,
+      "minEntityReferenceCount": 0,
+      "minRelationReferenceCount": 0,
+      "allowedVerificationStates": ["verified", "partially_verified", "unverified"],
+      "expectedFacts": [
+        {"id": "transition_identity", "fixture": "corpus/graph/beacon_transition_topology.md", "sourceExcerpt": "Beacon Node emits the Beacon Harbor Transition.", "sourceSha256": "0c04c62e632382eda741f49b7907f6190234363d1f63481d2f25dd3fbf43b679", "requiredAll": ["Beacon Harbor Transition"], "requiredAny": [], "requiredRegexAny": []},
+        {"id": "record_identity", "fixture": "corpus/graph/beacon_transition_topology.md", "sourceExcerpt": "Delta Archive records the Beacon Harbor Transition as the authoritative transition record.", "sourceSha256": "0c04c62e632382eda741f49b7907f6190234363d1f63481d2f25dd3fbf43b679", "requiredAll": ["Delta Archive"], "requiredAny": [], "requiredRegexAny": []},
+        {"id": "joint_approval", "fixture": "corpus/graph/beacon_transition_controls.md", "sourceExcerpt": "Correcting the archived Beacon Harbor Transition record requires both the Transition Coordinator and an independent reviewer to approve the correction.", "sourceSha256": "149fda9c56c87303c14ab39b4c6960a42ad96b9ffe53f7a94d01d74141906890", "requiredAll": ["Transition Coordinator", "independent reviewer"], "requiredAny": [], "requiredRegexAny": []}
+      ]
+    },
+    {
+      "id": "relationship_disambiguation",
+      "question": "Which artifact does Router Hub select through the guarded needle route, and which artifact is merely ordinary noise?",
+      "searchQuery": "Which artifact does Router Hub select through the guarded needle route, and which artifact is merely ordinary noise?",
+      "expectedDocumentsContains": ["needle_disambiguation_topology"],
+      "searchRequiredAll": ["Needle Artifact", "Ordinary Artifact", "guarded needle route"],
+      "answerRequiredAll": ["Needle Artifact", "Ordinary Artifact"],
+      "answerForbiddenAny": ["Ordinary Artifact is selected"],
+      "minChunkReferenceCount": 1,
+      "minPreparedSegmentReferenceCount": 1,
+      "minEntityReferenceCount": 0,
+      "minRelationReferenceCount": 0,
+      "allowedVerificationStates": ["verified", "partially_verified", "unverified"]
+    },
+    {
+      "id": "ambiguous_route_clarification",
+      "expectedClarification": true,
+      "question": "Which route should I use?",
+      "searchQuery": "Which route should I use?",
+      "expectedDocumentsContains": [],
+      "searchRequiredAll": [],
+      "answerRequiredAny": ["which", "specify", "clarify", "route", "context"],
+      "minChunkReferenceCount": 0,
+      "minPreparedSegmentReferenceCount": 0,
+      "minEntityReferenceCount": 0,
+      "minRelationReferenceCount": 0,
+      "allowedVerificationStates": ["verified", "partially_verified", "unverified", "not_required"],
+      "answerForbiddenAny": ["You should use the Bridge Gamma Route", "You should use the guarded needle route"]
+    },
+    {
+      "id": "missing_named_human_approver",
+      "question": "What is the personal name of the human who approves Gamma Endpoint retention extensions? Do not substitute a team name for a person.",
+      "searchQuery": "What is the personal name of the human who approves Gamma Endpoint retention extensions? Do not substitute a team name for a person.",
+      "expectedDocumentsContains": ["alpha_relay_operations"],
+      "searchRequiredAll": ["does not identify a named human approver"],
+      "answerRequiredAny": ["not identify", "not specified", "not provided", "not name", "not available", "no named", "unknown"],
+      "minChunkReferenceCount": 0,
+      "minPreparedSegmentReferenceCount": 0,
+      "minEntityReferenceCount": 0,
+      "minRelationReferenceCount": 0,
+      "allowedVerificationStates": ["verified", "partially_verified", "unverified", "not_required"]
+    },
+    {
+      "id": "followup_endpoint_conditions",
+      "question": "Who approves extending its retention, and how recent must its passing restore drill be for route rollout?",
+      "searchQuery": "Who approves extending its retention, and how recent must its passing restore drill be for route rollout?",
+      "precedingTurns": [
+        {
+          "id": "establish_endpoint",
+          "question": "What is the final endpoint reached from Alpha Relay, and what intermediate node must the route traverse?",
+          "answerRequiredAll": ["Gamma Endpoint", "Bridge Junction"]
+        }
+      ],
+      "expectedDocumentsContains": ["alpha_relay_operations"],
+      "searchRequiredAll": ["Privacy Board", "48 hours"],
+      "answerRequiredAll": ["Privacy Board", "48"],
+      "minChunkReferenceCount": 1,
+      "minPreparedSegmentReferenceCount": 1,
+      "minEntityReferenceCount": 0,
+      "minRelationReferenceCount": 0,
+      "allowedVerificationStates": ["verified", "partially_verified", "unverified"],
+      "mandatoryCaveats": [
+        {"id": "passing_within_window", "fixture": "corpus/graph/alpha_relay_operations.md", "sourceExcerpt": "Before that rollout, Gamma Endpoint must have a passing restore drill completed within the preceding 48 hours.", "sourceSha256": "f694c9c0b6142237aec3a82470ea424659bcff7df6bf523d0796f4c12d9ced48", "requiredAll": [], "requiredAny": ["passing", "passed", "successful"], "requiredRegexAny": []}
+      ]
+    }
+  ]
+}

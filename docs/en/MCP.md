@@ -73,6 +73,24 @@ Tool text is self-sufficient: `content[].text` carries the full result payload (
 
 Response shape: tool text contains the answer. The default `compact` structured output carries bounded references, warnings, typed verifier/readiness/completion state, repair policy, and trace identifiers without duplicating the diagnostic execution object. Request `responseProfile: "full"` only when an operational client needs `executionDetail` with chunk, prepared-segment, technical-fact, graph-entity, graph-relation, runtime, request, and response fields. Top-level `runtimeExecutionId`, `executionId`, and `conversationId` remain shortcuts for trace lookup in both profiles. The built-in UI assistant is itself a tool-using agent over this MCP answer surface: it may call `grounded_answer`, inspect raw search/read tools, or answer directly when no library lookup is needed. External MCP clients get the same tool vocabulary, schemas, and grounded-answer result contract.
 
+When a semantic report exists, `full` retains it at `executionDetail.semanticVerification`.
+It binds the exact question, checked candidate and authorized evidence manifest.
+`visibleAnswerSha256` identifies the final displayed body; when it differs from
+`checkedAnswerSha256`, the findings concern the candidate, not the replacement
+fallback. Completed judgment, claim support, completeness and refusal
+classification are distinct from answer readiness. A failed/not-run check is
+not semantic support, and a correct source-bounded abstention does not verify
+the unavailable requested fact. Historical executions without a report do not
+acquire a fabricated judgment.
+
+The compact `semanticVerification` is explicitly marked `projection: "summary"`.
+It preserves exact identity hashes and aggregate outcomes, returns at most eight
+unit/caveat findings and the requested bounded source count, and reports totals
+and truncation separately. Source text and evidence quotes are omitted; bounded
+finding text is marked when shortened. This projection is not a canonical
+report or sufficient provenance for reusing a verdict. Use the authorized full
+execution detail when exact checked text and validated quotes are required.
+
 **Clarification and answer candidates** — when the pipeline determines that the query is ambiguous across multiple distinct subjects, the response includes two top-level fields in `structuredContent`:
 
 - `answerCandidates` — array of objects, each with:
@@ -108,6 +126,13 @@ On unambiguous answers `clarification.required` is `false`, `clarification.quest
 | `read_document` | Read one document in full or as an excerpt. | `documentId` |
 | `view_document_image` | Fetch the original image bytes (PNG/JPEG/etc.) backing an image-attachment document so a vision-capable model can inspect it directly. Only advertised when the active Agent binding points at a multimodal model. | `documentId` |
 | `list_documents` | List documents in a library, optionally filtered by processing status. | `library` (optional) |
+
+`read_document.content` is an exact window of the published canonical revision
+text. `sliceStartOffset`, `sliceEndOffset` and `totalContentLength` count Unicode
+characters in that same text, including whitespace. Image descriptions remain
+in the separate `visualDescription` field; they do not extend the document's
+coordinate space. `mode: "full"` proves a complete read only when the returned
+window starts at zero, ends at the total length and has no continuation.
 
 ### Diagnostics-only mutations
 

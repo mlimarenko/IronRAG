@@ -2,7 +2,7 @@
 
 [Обзор](./README.md) | [IAM](./IAM.md) | [MCP](./MCP.md)
 
-Инструмент командной строки для административных операций IronRAG. Подключается напрямую к PostgreSQL.
+Инструмент командной строки для администрирования IronRAG и локальных HTTP-проб. Команды работы с БД подключаются напрямую к PostgreSQL.
 
 ## Сборка
 
@@ -14,8 +14,8 @@ cargo build --release -p ironrag-backend --bin ironrag-cli
 
 ## Конфигурация
 
-CLI использует те же переменные окружения, что и сервер. Обязательная
-переменная — `DATABASE_URL`.
+Команды работы с БД читают конфигурацию сервера, включая `IRONRAG_DATABASE_URL`.
+Команды `version` и `probe` не загружают runtime-конфигурацию и не подключаются к PostgreSQL.
 
 ## Команды
 
@@ -26,6 +26,24 @@ ironrag-cli version
 ```
 
 Выводит версию сборки CLI (совпадает с версией крейта `ironrag-backend`).
+
+### Проверка локального health или readiness
+
+```bash
+ironrag-cli probe --endpoint health
+ironrag-cli probe --endpoint ready --port 8080
+```
+
+Проба подключается только к `127.0.0.1`. Значение `health` выбирает `/v1/health`
+и используется по умолчанию; `ready` выбирает `/v1/ready`. Порт по умолчанию - `8080`.
+
+Код 0 требует успешного HTTP-статуса и полного тела ответа размером не более
+64 KiB в пределах двух секунд. Redirect, ошибка транспорта, некорректный или
+слишком большой ответ и таймаут дают ненулевой код. Проба не использует proxy
+и не печатает тело ответа.
+
+Healthcheck образа использует `health`; проверки API и worker в Compose - `ready`.
+HTTP-пробы Kubernetes не меняются. Команде не нужны credentials базы данных.
 
 ### Список пользователей
 
@@ -135,13 +153,170 @@ cargo build --release -p ironrag-backend --bin ironrag-maintenance
 ## Конфигурация
 
 Использует те же переменные окружения, что и backend. Обязательная
-database-настройка — `DATABASE_URL`.
+database-настройка - `IRONRAG_DATABASE_URL`.
 
 ## Развёртывание схемы
 
-0.6.0 создаёт базу с нуля из одного baseline, `apps/api/migrations/0001_init.sql`. Базу 0.5.x нельзя обновить на месте: пересоздайте её и заново загрузите источники. SQLx проверяет контрольную сумму применённого baseline при старте, поэтому правка этого файла не переносит живую базу. `make migration-check` сравнивает исходный файл с `scripts/ops/baseline-checksum.txt` и ничего не меняет.
+Новая база IronRAG создаётся из одного файла
+`apps/api/migrations/0001_init.sql`. Базу версии 0.5.x нельзя обновить на месте
+до 0.6.0: её нужно пересоздать и повторно загрузить источники. При запуске
+SQLx проверяет контрольную сумму уже применённой миграции, поэтому правка
+baseline не обновляет работающую базу. `make migration-check` сверяет файл с
+`scripts/ops/baseline-checksum.txt`, но не меняет базу.
 
-Проверенный операторский переход на существующей базе запускается как `ironrag-maintenance migrate <transition>`. Без `--apply` команда только показывает предусловия; `--apply` запускайте после резервной копии и с новым бинарём. Команда применяет свой DDL и обновляет записанную контрольную сумму. Не запускайте её SQL напрямую и не меняйте контрольную сумму вручную. Шаги, которым нужен `psql`, например `scripts/ops/apply-knowledge-structured-block-fk-indexes.sql`, остаются отдельными действиями оператора.
+Для последующих правок baseline существующей базы сначала установите её
+записанную ревизию и точного предшественника нужного операторского перехода.
+Если проверенного перехода нет, пересоздайте базу. Команды
+`ironrag-maintenance migrate <transition>` без `--apply` проверяют условия
+своего перехода; `--apply` запускайте только после проверки предусловий,
+резервных копий, нового бинаря и release gates. Каждая команда проверяет
+объекты предшественника, применяет собственный DDL и условно обновляет SQLx
+checksum миграции 1. Не запускайте её SQL-файл напрямую и не меняйте checksum
+вручную. Исторические шаги с индексами, требующие `psql`, включая
+`scripts/ops/apply-knowledge-structured-block-fk-indexes.sql`, остаются
+отдельными действиями оператора: maintenance CLI их не выполняет. Перед
+следующим переходом проверьте условия и целевую ревизию в его SQL-файле или
+реализации. Для ручного шага с FK-индексами проверьте определения всех трёх
+индексов, затем используйте шаблон compare-and-set из SQL-файла с независимо
+проверенными SHA-384 предшественника и цели; обновиться должна ровно одна
+строка истории миграций.
+
+Переход revision admission требует проверенного сертификата импорта для каждой
+readable revision предшественника. Для dry run нужны manifest, независимо
+проверенный SHA-256 его исходных байтов, принятый recovery snapshot ID,
+SHA-384 исходного baseline и идентификатор оператора. Схему меняет только та
+же команда с `--apply`. Не выводите filename и source identity из изменяемых
+меток документа и не запускайте переход при работающих старых lifecycle
+writers. JSON manifest содержит `recoverySnapshotId`,
+`sourceBaselineSha384`, `admittedBy` и `revisions`. Для каждой revision нужны
+`revisionId`, `documentId`, `workspaceId`, `libraryId`, `storageKey` и объект
+`replacement` с точными `checksum`, `byteSize`, `mimeType`, `fileName` и
+явными nullable `title`, `languageCode`, `sourceUri`, `documentHint`.
+`storageKey` обязателен, но допускает null. Каждая строка также содержит
+явный `sourceEvidence`:
+
+- `{"kind":"source_blob"}` требует сохранённый storage key revision и
+  проверяет размер и SHA-256 реальных исходных bytes.
+- `{"kind":"snapshot_revision","knowledgeRevisionPresent":true,
+  "normalizedTextSha256":"<lowercase SHA-256>","textChecksum":"<retained checksum>",
+  "textState":"text_readable","textReadableAt":"<retained RFC3339 timestamp>"}` связывает сохранённую
+  knowledge row и SHA-256 её normalized text в UTF-8, когда исходный storage
+  отсутствует. Для отсутствующих metadata используются явные null. Если самой
+  knowledge row нет, `knowledgeRevisionPresent:false`, а остальные четыре поля
+  равны null. Это сохраняет исторические head metadata, но не выдумывает
+  projection и не подтверждает недоступные исходные bytes.
+
+Оба варианта требуют точного scope и replacement descriptor, явного import
+filename, независимо принятого snapshot и raw hash сертификата. Недостающие
+или лишние readable revisions отклоняются. Если readable revisions нет,
+сертификат можно не передавать.
+
+```bash
+ironrag-maintenance migrate content-visibility-intent-schema \
+  --import-admission-manifest /path/to/reviewed-admission.json \
+  --import-admission-sha256 '<reviewed raw certificate SHA-256>' \
+  --accepted-recovery-snapshot-id '<accepted snapshot ID>' \
+  --source-baseline-sha384 '<reviewed source baseline SHA-384>' \
+  --admitted-by '<reviewed operator identity>' --json
+```
+
+Проверьте результат dry run; повторяйте ту же команду с `--apply` только
+после разрешения согласованного rollout.
+
+### `migrate vision-recognition-schema`
+
+Команда переводит текущие raster policies с Xberg на singleton Vision.
+Допустим только точный frozen predecessor
+`eb822d7bf07c194659bf092841341e850995fc4b487486a2a112baeb59dc43d6a799afd3930f8e63e18a831ea3e4c4e8`.
+Для более ранней установки сначала выполните применимые native hops, включая
+неизменяемый переход `migrate xberg-recognition-schema`.
+
+На время смены бинаря остановите и дренируйте API, workers, importers и
+maintenance writers. Сохраните исходное хранилище, публикации и историю,
+credentials, vectors и существующие архивы. Сброс данных, ручная правка ledger
+и дополнительная backup/restore-кампания не входят в этот переход.
+
+```bash
+ironrag-maintenance migrate vision-recognition-schema --json
+# После проверки dry-run и разрешения окна:
+ironrag-maintenance migrate vision-recognition-schema --apply --json
+```
+
+Оба режима используют общий advisory lock, пятисекундный lock timeout и
+точный сертификат predecessor. Блокируется только владелец catalog library.
+Пользовательские UPDATE triggers, способные сработать при обновлении policy,
+rules и inheritance вызывают отказ. Построчный сертификат разрешает только
+замену policy `xberg` на `vision`; остальные поля, включая timestamps,
+обязаны остаться неизменными. Apply проверяет число изменённых строк,
+singleton constraint/default и выполняет CAS-stamp baseline в одной транзакции.
+JSON остаётся `{"rasterImageEngine":"vision"}`. Строки с Vision не обновляются;
+`policiesChanged` равен нулю, если все политики уже используют Vision.
+Исторический extraction provenance не переписывается.
+
+Dry-run откатывает транзакцию без постоянных записей. Неизвестные revisions,
+malformed policies, partial/pre-applied constraints и неожиданные эффекты UPDATE
+вызывают отказ без stamp. Повтор на текущей ревизии проверяет readiness и
+возвращает `alreadyCurrent`. Не обходите отказ сбросом данных или правкой
+SQLx checksum. `IRONRAG_RECOGNITION_DEFAULT_RASTER_IMAGE_ENGINE` принимает только `vision`.
+
+Snapshot writer/reader поддерживают только schema 6. Сохраняйте schema-5 и
+более старые архивы неизменными, даже если их текущие policies уже используют
+Vision. Восстановите старый архив в изоляции его immutable creator runtime,
+выполните применимые guarded native baseline transitions, включая
+`vision-recognition-schema`, затем экспортируйте schema 6 текущим runtime.
+Не меняйте version архива и не подключайте старый runtime к текущему deployment.
+Reader не конвертирует архивы и не подменяет текущую Xberg policy.
+
+### `migrate billing-document-read-schema`
+
+Добавляет attribution provider-вызовов native `read_document` в существующий
+billing ledger. Точный predecessor - Vision baseline
+`52d2734052d7ebbbfa4a239935387d385cc0a6c89c85f7ed06ad39e7e3502351df7083b3b9cd82a478c17ac61e653215`.
+Более ранняя установка сначала проходит применимые guarded transitions.
+
+```bash
+ironrag-maintenance migrate billing-document-read-schema --json
+# Только после проверки dry-run и разрешения окна смены runtime:
+ironrag-maintenance migrate billing-document-read-schema --apply --json
+```
+
+Перед сменой runtime остановите и дренируйте API, workers и maintenance writers.
+Переход добавляет enum value, таблицу attribution и индекс tenant scope; он не
+обновляет прежние calls, usage, charges, credentials или source revisions.
+Source document/revision IDs сохраняются после удаления revision bytes; FK
+проверяет пару library/workspace и удаляет attribution при удалении библиотеки.
+
+Общий transaction owner проверяет predecessor objects, отсутствие даже частичного
+DDL, создаёт объекты, проверяет их типы, ключи и индекс и только затем делает
+CAS-stamp checksum. Dry-run ничего не записывает. Неизвестный checksum,
+pre-applied DDL и повреждённый current certificate вызывают отказ без stamp.
+Повтор на текущей ревизии проверяет объекты и возвращает `alreadyCurrent`.
+Не обходите отказ сбросом БД или ручной правкой SQLx ledger. Наличие команды
+не является разрешением применить её к существующей установке.
+
+### `migrate billing-knowledge-search-schema`
+
+Добавляет durable owner самостоятельного knowledge search в существующий billing
+ledger. Сохраняет workspace/library и время создания, без raw query text или
+выдуманных query/runtime IDs. Точный predecessor - native document-read baseline
+`464d53698e9b4a52de78c3972e387aa69d35a4f0ebd63c8381f97cfe3b1a35faff1638daa2cd70e2007c172b5d317984`.
+Сначала пройдите все применимые более ранние guarded hops.
+
+```bash
+ironrag-maintenance migrate billing-knowledge-search-schema --json
+# Только после проверки dry-run и разрешения окна смены runtime:
+ironrag-maintenance migrate billing-knowledge-search-schema --apply --json
+```
+
+Перед сменой runtime остановите и дренируйте API, workers и maintenance writers.
+Additive hop сохраняет прежние calls, usage, charges, document-read owners и
+source history. FK проверяет пару library/workspace и удаляет attribution при
+удалении библиотеки. Exact column/PK, enum, FK и index certificates проверяются
+до checksum CAS. Dry-run откатывается без persistent writes; неизвестный checksum,
+partial/pre-applied DDL и current drift вызывают отказ без stamp. Повторы прежних
+команд проверяют certificates записанной ревизии, а не устаревший predecessor
+enum. Не обходите отказ сбросом данных или правкой SQLx ledger. Наличие команды
+не является разрешением применить её к существующей установке.
 
 ## `audit` — проверка без изменений
 
@@ -427,16 +602,27 @@ repair восстанавливает проекцию в `active` с NULL в `d
 **Границы.** Не меняет content, головы, readiness или chunks; не создаёт отсутствующие
 проекции и не удаляет orphan-строки. Нет вызовов провайдера и планового backfill.
 Применение использует существующую блокировку жизненного цикла library и повышает
-source-truth generation только при изменении строк. `--dry-run` считает подходящие
-расхождения без записи; повторный проход без новых расхождений сообщает ноль изменений.
+source-truth generation только при изменении строк. `--dry-run --json` без записи
+показывает точные ID документов и ревизий, имена изменяемых колонок и SHA-256 плана.
+Digest связывает полные значения метаданных до изменения и в источнике; сами
+значения не выводятся. Поле `dry_run` отличает preview от примененного плана.
+
+Для применения нужны одна `--library` и проверенный `plans[].sha256` в
+`--expected-plan`. План проверяется повторно под блокировками строк в транзакции
+repeatable-read; запись ограничена согласованными ID. Изменившиеся значения,
+состав строк или конкурентное lifecycle-изменение приводят к отказу без
+автоматического повтора. После отказа получите и проверьте новый preview.
+Свежий пустой план применяется как no-op; digest до исправления не разрешает
+изменять другой набор строк.
 
 ```bash
 ironrag-maintenance repair knowledge-projection-metadata --library <uuid> --dry-run --json
-ironrag-maintenance repair knowledge-projection-metadata --library <uuid> --json
+ironrag-maintenance repair knowledge-projection-metadata --library <uuid> --expected-plan <reviewed-sha256> --json
 ironrag-maintenance repair knowledge-projection-metadata --library <uuid> --dry-run --json
 ```
 
-Без `--library` обрабатываются все библиотеки.
+Без `--library` доступен только preview всех библиотек без записи. Применение без
+точной библиотеки запрещено.
 
 ---
 

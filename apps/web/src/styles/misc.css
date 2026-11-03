@@ -402,9 +402,6 @@
   color: var(--muted);
   font-size: 0.8rem;
 }
-.update-badge {
-  text-decoration: none;
-}
 @media (max-width: 768px) {
   .scope-switcher {
     grid-template-columns: 1fr;

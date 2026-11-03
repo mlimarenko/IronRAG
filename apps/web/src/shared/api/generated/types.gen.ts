@@ -644,6 +644,7 @@ export type AssistantEvidenceBundle = {
      * Agent-runtime state associated with the answer.
      */
     runtimeSummary: AssistantRuntimeSummary;
+    semanticVerification?: null | SemanticVerificationReport;
     /**
      * Typed facts selected from the evidence plane for this answer.
      */
@@ -771,6 +772,7 @@ export type AssistantExecutionDetail = {
      * Agent-runtime state associated with the execution.
      */
     runtimeSummary: AssistantRuntimeSummary;
+    semanticVerification?: null | SemanticVerificationReport;
     /**
      * Typed fact citations persisted with this execution record.
      */
@@ -1400,7 +1402,7 @@ export type BillingExecutionCost = {
     updatedAt: string;
 };
 
-export type BillingExecutionOwnerKind = 'query_execution' | 'graph_extraction_attempt' | 'ingest_attempt';
+export type BillingExecutionOwnerKind = 'query_execution' | 'graph_extraction_attempt' | 'ingest_attempt' | 'mcp_document_read' | 'knowledge_search';
 
 export type BillingProviderCall = {
     bindingId?: string | null;
@@ -1736,9 +1738,8 @@ export type ContentDocumentListItem = {
     documentState: string;
     /**
      * Persisted connector identity (`content_document.external_key`).
-     * Connectors look this up via list to decide whether to upload or
-     * replace; exposed so a paginated list pass is sufficient instead
-     * of a per-document detail roundtrip.
+     * Connectors use the exact external-key lookup to decide whether to
+     * upload or replace.
      */
     externalKey: string;
     failureCode?: string | null;
@@ -1812,15 +1813,14 @@ export type ContentMutationDetailResponse = {
     items: Array<ContentMutationItem>;
     jobId?: string | null;
     mutation: ContentMutation;
-    /**
-     * Durable admission visibility policy of this mutation. Always emitted so
-     * a client can never treat the field as absent and silently assume
-     * readability; unknown values are a decode error, not a default.
-     */
     operationStatus?: string | null;
     requestFingerprint?: string | null;
     resultChecksum?: string | null;
     resultRevisionId?: string | null;
+    /**
+     * Immutable result revision binding. Explicit null denotes unbound work.
+     */
+    visibilityIntentId: string | null;
 };
 
 export type ContentMutationItem = {
@@ -3458,7 +3458,7 @@ export type LibraryDocumentMetrics = {
 };
 
 export type LibraryRecognitionPolicy = {
-    rasterImageEngine: RecognitionEngine;
+    rasterImageEngine: RasterImageEngine;
 };
 
 /**
@@ -4188,7 +4188,10 @@ export type QueryTurnListResponse = {
     total: number;
 };
 
-export type RecognitionEngine = 'native' | 'docling' | 'vision';
+/**
+ * Current raster policy. Extraction provenance uses `RecognitionEngine` instead.
+ */
+export type RasterImageEngine = 'vision';
 
 export type ReleaseUpdateResponse = {
     checkedAt: string;
@@ -4467,6 +4470,282 @@ export type RuntimeStageState = 'pending' | 'running' | 'completed' | 'recovered
 export type RuntimeSurfaceKind = 'ui' | 'rest' | 'mcp' | 'worker' | 'internal';
 
 export type RuntimeTaskKind = 'query_compile' | 'query_plan' | 'query_rerank' | 'query_answer' | 'query_verify' | 'graph_extract' | 'structured_prepare' | 'technical_fact_extract';
+
+/**
+ * Exhaustive answer block assigned by the server, not by the verifier.
+ */
+export type SemanticAnswerUnit = {
+    /**
+     * Position in the exact checked answer.
+     */
+    span: SemanticByteSpan;
+    /**
+     * Exact text at that position.
+     */
+    text: string;
+    /**
+     * Stable opaque identifier within this checked answer.
+     */
+    unitId: string;
+};
+
+/**
+ * Validated semantic result; it does not encode formal guards or readiness.
+ */
+export type SemanticAssessment = {
+    /**
+     * Aggregate derived by the server from all unit verdicts.
+     */
+    claimSupport: SemanticClaimSupport;
+    /**
+     * Completeness independent of the support aggregate.
+     */
+    completeness: SemanticCompleteness;
+    /**
+     * Source-grounded omissions; nonempty exactly when essential caveats are missing.
+     */
+    missingCaveats: Array<SemanticMissingCaveat>;
+    /**
+     * Candidate response/refusal classification.
+     */
+    responseClassification: SemanticResponseClassification;
+    /**
+     * Exhaustive, server-ordered unit verdicts.
+     */
+    units: Array<SemanticUnitVerdict>;
+};
+
+/**
+ * Exact half-open UTF-8 byte range, never character offsets.
+ */
+export type SemanticByteSpan = {
+    /**
+     * Exclusive byte offset.
+     */
+    end: number;
+    /**
+     * Inclusive byte offset.
+     */
+    start: number;
+};
+
+/**
+ * Support of all assertions within a unit, or the server-derived aggregate.
+ */
+export type SemanticClaimSupport = 'supported' | 'contradicted' | 'insufficient_evidence' | 'mixed' | 'no_factual_claims';
+
+/**
+ * Completeness for the question, independent of claim support.
+ */
+export type SemanticCompleteness = 'complete' | 'missing_essential_caveats' | 'undetermined';
+
+/**
+ * A verifier-proposed quote validated against an authorized source entry.
+ */
+export type SemanticEvidenceLink = {
+    /**
+     * Exact text at the quoted range.
+     */
+    quote: string;
+    /**
+     * Opaque identifier of a selected source, not a document UUID.
+     */
+    sourceId: string;
+    /**
+     * Server-derived half-open UTF-8 byte range of a unique exact quote within
+     * the selected text. Provider-supplied spans are not accepted.
+     */
+    span: SemanticByteSpan;
+};
+
+/**
+ * Evidence authority established upstream; selected excerpts cannot prove absence.
+ */
+export type SemanticEvidenceScope = 'selected_excerpt' | 'complete_document';
+
+/**
+ * Operational failures never imply semantic support.
+ */
+export type SemanticFailureCode = 'timeout' | 'provider_refusal' | 'provider_error' | 'invalid_response' | 'invalid_provenance';
+
+/**
+ * An omitted essential qualification with its source basis.
+ */
+export type SemanticMissingCaveat = {
+    /**
+     * Bounded explanation of the omission, not executable instructions.
+     */
+    description: string;
+    /**
+     * Exact source basis for the qualification.
+     */
+    evidence: Array<SemanticEvidenceLink>;
+};
+
+/**
+ * Why no semantic verifier invocation was attempted.
+ */
+export type SemanticNotRunReason = 'non_factual_response' | 'disabled' | 'binding_unavailable' | 'no_evidence' | 'empty_answer' | 'input_limit_exceeded' | 'unsupported_structured_transport';
+
+/**
+ * Candidate-answer classification, not the operational status of the verifier.
+ */
+export type SemanticResponseClassification = 'factual_answer' | 'correct_source_bounded_abstention' | 'false_refusal' | 'unresolved_refusal';
+
+/**
+ * Server-retained source manifest entry. Never accept these identities from a model.
+ */
+export type SemanticSourceEntry = {
+    /**
+     * Authorized document identity.
+     */
+    documentId: string;
+    /**
+     * Immutable document revision used by the evidence owner.
+     */
+    documentRevisionId: string;
+    /**
+     * Typed position of the selected source.
+     */
+    locator: SemanticSourceLocator;
+    /**
+     * Extent of the proven source coverage.
+     */
+    scope: SemanticEvidenceScope;
+    /**
+     * Opaque reference exposed to the verifier.
+     */
+    sourceId: string;
+    /**
+     * Only canonical source text, without metadata or tool wrappers.
+     */
+    text: string;
+    /**
+     * SHA-256 of exactly `text`, encoded as lowercase hexadecimal.
+     */
+    textSha256: string;
+};
+
+/**
+ * Provenance locator supplied only by the authorized server-side evidence owner.
+ */
+export type SemanticSourceLocator = {
+    /**
+     * Authoritative chunk identity.
+     */
+    chunk_id: string;
+    kind: 'chunk';
+} | {
+    kind: 'segment';
+    /**
+     * Authoritative segment identity.
+     */
+    segment_id: string;
+} | {
+    /**
+     * Exclusive document byte offset.
+     */
+    end: number;
+    kind: 'document_slice';
+    /**
+     * Inclusive document byte offset.
+     */
+    start: number;
+};
+
+/**
+ * One verdict covers every assertion in the corresponding server-defined block.
+ */
+export type SemanticUnitVerdict = {
+    /**
+     * Whether this unit asserts document-wide absence of a fact.
+     */
+    assertsDocumentAbsence: boolean;
+    /**
+     * Supporting or contradicting exact source quotes.
+     */
+    evidence: Array<SemanticEvidenceLink>;
+    /**
+     * Independent factual support assessment.
+     */
+    support: SemanticClaimSupport;
+    /**
+     * Identifier of exactly one prepared answer unit.
+     */
+    unitId: string;
+};
+
+/**
+ * Mutually exclusive semantic and operational outcomes.
+ */
+export type SemanticVerificationOutcome = {
+    /**
+     * Validated judgment.
+     */
+    assessment: SemanticAssessment;
+    status: 'completed';
+} | {
+    /**
+     * Explicit reason for not running.
+     */
+    reason: SemanticNotRunReason;
+    status: 'not_run';
+} | {
+    /**
+     * Operational failure category.
+     */
+    code: SemanticFailureCode;
+    status: 'failed';
+};
+
+/**
+ * A report bound to the exact answer and authorized evidence used by the server.
+ */
+export type SemanticVerificationReport = {
+    /**
+     * Exhaustive server-defined blocks of the raw checked candidate, never a
+     * later visible fallback. Verdict IDs resolve only against these units.
+     */
+    answerUnits: Array<SemanticAnswerUnit>;
+    /**
+     * SHA-256 of the exact checked answer bytes.
+     */
+    checkedAnswerSha256: string;
+    /**
+     * Server-measured elapsed time in milliseconds.
+     */
+    elapsedMs: number;
+    /**
+     * Canonical SHA-256 including source identities, scope and exact text.
+     */
+    evidenceManifestSha256: string;
+    /**
+     * Semantic or operational result.
+     */
+    outcome: SemanticVerificationOutcome;
+    /**
+     * Version of the preparation and validation protocol.
+     */
+    protocolVersion: number;
+    /**
+     * Server-owned provider-call identity, if a call was made.
+     */
+    providerCallId?: string | null;
+    /**
+     * SHA-256 of the exact question bytes used to judge completeness and refusal.
+     */
+    questionSha256: string;
+    /**
+     * Exact authorized manifest. Opaque quote references resolve only against
+     * these server-owned identities, scopes and source texts.
+     */
+    sources: Array<SemanticSourceEntry>;
+    /**
+     * Hash of the final visible body, assigned only by the server finalizer.
+     * This never replaces the identity of the checked raw candidate.
+     */
+    visibleAnswerSha256?: string | null;
+};
 
 export type ServiceIdentityCredentialResponse = {
     credential: string;
@@ -4950,7 +5229,7 @@ export type UpdateCatalogWorkspaceRequest = {
 };
 
 export type UpdateLibraryRecognitionPolicyRequest = {
-    rasterImageEngine: RecognitionEngine;
+    rasterImageEngine: RasterImageEngine;
 };
 
 export type UpdateLibraryWebIngestPolicyRequest = {
@@ -7999,6 +8278,41 @@ export type CreateContentDocumentResponses = {
 };
 
 export type CreateContentDocumentResponse = CreateContentDocumentResponses[keyof CreateContentDocumentResponses];
+
+export type GetContentDocumentByExternalKeyData = {
+    body?: never;
+    path: {
+        libraryId: string;
+    };
+    query: {
+        externalKey: string;
+    };
+    url: '/v1/content/libraries/{libraryId}/documents/by-external-key';
+};
+
+export type GetContentDocumentByExternalKeyErrors = {
+    /**
+     * Invalid external key
+     */
+    400: unknown;
+    /**
+     * Caller is not authenticated or authorized for the library
+     */
+    401: unknown;
+    /**
+     * Document not found
+     */
+    404: unknown;
+};
+
+export type GetContentDocumentByExternalKeyResponses = {
+    /**
+     * Document list item
+     */
+    200: ContentDocumentListItem;
+};
+
+export type GetContentDocumentByExternalKeyResponse = GetContentDocumentByExternalKeyResponses[keyof GetContentDocumentByExternalKeyResponses];
 
 export type ListContentDocumentFacetsData = {
     body?: never;

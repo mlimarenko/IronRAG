@@ -1,3 +1,5 @@
+mod comparison;
+
 use std::collections::HashSet;
 
 use chrono::Utc;
@@ -13,6 +15,225 @@ use crate::shared::extraction::{
     record_jsonl::{StructuredRecordHint, extract_record_jsonl, normalize_structured_records},
     structured_document::StructuredBlockKind,
 };
+
+fn native_pdf_plan(pages: &[&str]) -> crate::shared::extraction::file_extract::FileExtractionPlan {
+    use crate::integrations::{
+        extraction_protocol::{Extraction, Limits, Operation, Request, Response, Unit},
+        xberg::{XbergSource, project_native, validate_response},
+    };
+    use crate::shared::extraction::file_extract::build_xberg_pdf_extraction_plan;
+
+    let count = u32::try_from(pages.len()).unwrap();
+    let mut request = Request {
+        path: "/var/tmp/source.pdf".into(),
+        operation: Operation::Extract,
+        mime: "application/pdf".into(),
+        source_sha256: "a".repeat(64),
+        limits: Limits::default(),
+        start: Some(1),
+        end: Some(count),
+    };
+    request.limits.text_bytes = 1024 * 1024;
+    let native = Extraction {
+        source_sha256: "a".repeat(64),
+        text_byte_limit: request.limits.text_bytes,
+        source_unit_count: count,
+        unit_kind: "page".into(),
+        selected_start: 1,
+        selected_end: count,
+        content: pages.join("\n\n"),
+        units: pages
+            .iter()
+            .enumerate()
+            .map(|(index, content)| Unit {
+                ordinal: u32::try_from(index + 1).unwrap(),
+                sheet_name: None,
+                content: (*content).into(),
+                tables: serde_json::json!([]),
+            })
+            .collect(),
+        visual_inputs: vec![],
+        warnings: vec![],
+    };
+    let native =
+        validate_response(Response::new(Ok(native), std::time::Duration::ZERO, None), &request)
+            .expect("validated native response");
+    let extracted = project_native(
+        native,
+        XbergSource {
+            file_name: Some("source.pdf"),
+            mime_type: Some("application/pdf"),
+            source_format: "pdf",
+        },
+    )
+    .expect("native projection");
+    build_xberg_pdf_extraction_plan(extracted)
+}
+
+fn prepare_native_pdf_plan(
+    plan: crate::shared::extraction::file_extract::FileExtractionPlan,
+) -> super::PreparedStructuredRevision {
+    prepare_extracted_content(
+        plan.source_format_metadata.source_format,
+        plan.normalization_profile,
+        plan.source_text.unwrap(),
+        plan.normalized_text.unwrap(),
+        plan.structure_hints,
+        StructuredPreparationService::default(),
+    )
+}
+
+#[test]
+fn native_pdf_page_leading_rows_are_not_promoted_to_headers() {
+    let first = "## Orders\n\n| Column | Type | Constraints | Description |\n| --- | --- | --- | --- |\n| id | UUID | PRIMARY KEY | Identifier |";
+    let second = "| currency | CHAR(3) | NOT NULL, DEFAULT 'USD' | ISO 4217 currency code |\n| --- | --- | --- | --- |\n| shipping_address_json | JSONB | NOT NULL | Structured address |\n| created_at | TIMESTAMPTZ | NOT NULL, DEFAULT now() | Order placement timestamp |";
+    let plan = native_pdf_plan(&[first, second]);
+    for text in [plan.source_text.as_deref().unwrap(), plan.normalized_text.as_deref().unwrap()] {
+        assert_unknown_pdf_header_policy(text);
+    }
+    let prepared = prepare_native_pdf_plan(plan);
+    let rows = prepared
+        .ordered_blocks
+        .iter()
+        .filter(|block| {
+            block.block_kind == StructuredBlockKind::TableRow && block.page_number == Some(2)
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(rows.len(), 3, "the first actual data row must survive as a row");
+    assert!(rows[0].normalized_text.contains("col_1: currency"));
+    assert!(rows[0].normalized_text.contains("col_2: CHAR(3)"));
+    assert!(rows[1].normalized_text.contains("col_1: shipping_address_json"));
+    assert!(rows[1].normalized_text.contains("col_2: JSONB"));
+    assert!(rows[2].normalized_text.contains("col_1: created_at"));
+    for row in rows {
+        assert!(!row.normalized_text.contains("currency: shipping_address_json"));
+        assert!(row.parent_block_id.is_some());
+        assert!(row.source_span.is_some());
+        assert_eq!(row.heading_trail, ["Orders"]);
+    }
+    assert!(
+        !prepared
+            .ordered_blocks
+            .iter()
+            .any(|block| block.block_kind == StructuredBlockKind::MetadataBlock
+                && block.parent_block_id.is_some()),
+        "unknown source roles do not justify column statistics"
+    );
+}
+
+fn assert_unknown_pdf_header_policy(text: &str) {
+    assert!(text.contains("data-irg-header-policy=\"unknown\""));
+    assert!(
+        !text.contains("| currency | CHAR(3)"),
+        "full document must not declare the data row a Markdown header"
+    );
+    assert!(text.contains("shipping_address_json"));
+}
+
+#[test]
+fn native_pdf_nonleading_independent_tables_keep_every_row_and_separate_parents() {
+    let page = "Running page text.\n\n| key | amount |\n| --- | --- |\n| first | 5 |\n\n| other | state |\n| --- | --- |\n| second | ready |";
+    let prepared = prepare_native_pdf_plan(native_pdf_plan(&[page]));
+    let rows = prepared
+        .ordered_blocks
+        .iter()
+        .filter(|block| block.block_kind == StructuredBlockKind::TableRow)
+        .collect::<Vec<_>>();
+    assert_eq!(rows.len(), 4);
+    assert_eq!(rows[0].parent_block_id, rows[1].parent_block_id);
+    assert_eq!(rows[2].parent_block_id, rows[3].parent_block_id);
+    assert_ne!(rows[1].parent_block_id, rows[2].parent_block_id);
+    assert!(rows[2].normalized_text.contains("col_1: other"));
+    assert!(rows[3].normalized_text.contains("col_2: ready"));
+}
+
+#[test]
+fn native_pdf_repeated_possible_header_rows_are_retained_without_inheritance() {
+    let first = "| key | amount |\n| --- | --- |\n| first | 5 |";
+    let second = "| key | amount |\n| --- | --- |\n| second | 9 |";
+    let prepared = prepare_native_pdf_plan(native_pdf_plan(&[first, second]));
+    let rows = prepared
+        .ordered_blocks
+        .iter()
+        .filter(|block| block.block_kind == StructuredBlockKind::TableRow)
+        .collect::<Vec<_>>();
+    assert_eq!(rows.len(), 4);
+    assert!(rows[2].normalized_text.contains("col_1: key"));
+    assert!(rows[3].normalized_text.contains("col_1: second"));
+    assert_ne!(rows[0].parent_block_id, rows[2].parent_block_id);
+    assert_eq!(rows[3].page_number, Some(2));
+}
+
+#[test]
+fn native_pdf_literal_cells_separator_data_and_unicode_source_spans_survive_preparation() {
+    use crate::shared::extraction::table_markdown::{
+        split_semantic_key_value, split_semantic_segments, unescape_semantic_segment,
+    };
+    let first = "Preface 🦀\n\n| key | value |\n| --- | --- |\n| literal | \\<br\\> |\n| entity | \\&amp; |\n| - | - |\n| : | --- |\n| \\- | \\- |\n| ключ | café 🦀 |";
+    let second = "Continuation ü.\n\n| tail | café |\n| --- | --- |\n| lone |";
+    let plan = native_pdf_plan(&[first, second]);
+    let source = plan.source_text.as_ref().unwrap().clone();
+    let normalized = plan.normalized_text.as_ref().unwrap().clone();
+    assert!(source.contains("&lt;br&gt;"));
+    assert!(source.contains("&amp;amp;"));
+    let source_rows = plan
+        .structure_hints
+        .lines
+        .iter()
+        .filter(|line| line.text.starts_with("<tr>"))
+        .cloned()
+        .collect::<Vec<_>>();
+    let prepared = prepare_native_pdf_plan(plan);
+    let rows = prepared
+        .ordered_blocks
+        .iter()
+        .filter(|block| block.block_kind == StructuredBlockKind::TableRow)
+        .collect::<Vec<_>>();
+    assert_eq!(rows.len(), 9);
+    assert_eq!(source_rows.len(), rows.len());
+    assert_eq!(rows.iter().filter(|row| row.page_number == Some(1)).count(), 7);
+    assert_eq!(rows.iter().filter(|row| row.page_number == Some(2)).count(), 2);
+    let values = rows
+        .iter()
+        .map(|row| {
+            split_semantic_segments(&row.normalized_text)
+                .into_iter()
+                .filter_map(split_semantic_key_value)
+                .filter(|(key, _)| key.starts_with("col_"))
+                .map(|(_, value)| unescape_semantic_segment(value))
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(values[1], ["literal", "<br>"]);
+    assert_eq!(values[2], ["entity", "&amp;"]);
+    assert_eq!(values[3], ["-", "-"]);
+    assert_eq!(values[4], [":", "---"]);
+    assert_eq!(values[5], ["-", "-"]);
+    assert_eq!(values[6], ["ключ", "café 🦀"]);
+    assert_eq!(values[8], ["lone"]);
+    assert_pdf_row_source_spans(&rows, &source_rows, &normalized);
+    assert_ne!(rows[0].parent_block_id, rows[8].parent_block_id);
+}
+
+fn assert_pdf_row_source_spans(
+    rows: &[&super::StructuredBlockData],
+    source_rows: &[ExtractionLineHint],
+    normalized: &str,
+) {
+    for (row, line) in rows.iter().zip(source_rows) {
+        let span = row.source_span.as_ref().unwrap();
+        assert_eq!(Some(span.start_offset), line.start_offset);
+        assert_eq!(Some(span.end_offset), line.end_offset);
+        assert_eq!(row.page_number, line.page_number);
+        let actual = normalized
+            .chars()
+            .skip(usize::try_from(span.start_offset).unwrap())
+            .take(usize::try_from(span.end_offset - span.start_offset).unwrap())
+            .collect::<String>();
+        assert_eq!(actual, line.text);
+        assert!(row.parent_block_id.is_some());
+    }
+}
 
 fn prepare_page_lines(entries: &[(i32, &str)]) -> super::PreparedStructuredRevision {
     let lines = entries
@@ -107,6 +328,69 @@ fn prepare_local_file_extraction(
         extracted.structure_hints,
         service,
     )
+}
+
+fn prepared_profile_chunks(service: StructuredPreparationService) -> Vec<String> {
+    let text = (0..8)
+        .map(|index| format!("Segment {index}: {}.", "alpha ".repeat(110)))
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    prepare_extracted_content(
+        "txt".to_string(),
+        "default".to_string(),
+        text.clone(),
+        text,
+        ExtractionStructureHints::default(),
+        service,
+    )
+    .chunk_windows
+    .into_iter()
+    .map(|chunk| chunk.normalized_text)
+    .collect()
+}
+
+#[test]
+fn default_preparation_uses_the_library_naive_template() {
+    use crate::domains::catalog::ChunkingTemplate;
+
+    let canonical = prepared_profile_chunks(StructuredPreparationService::with_template(
+        ChunkingTemplate::Naive,
+    ));
+    assert!(!canonical.is_empty());
+    assert_eq!(prepared_profile_chunks(StructuredPreparationService::new()), canonical);
+    assert_eq!(prepared_profile_chunks(StructuredPreparationService::default()), canonical);
+}
+
+#[test]
+fn library_templates_drive_prepared_chunk_boundaries() {
+    use crate::domains::catalog::ChunkingTemplate;
+
+    for template in [
+        ChunkingTemplate::Naive,
+        ChunkingTemplate::Structured,
+        ChunkingTemplate::Tabular,
+        ChunkingTemplate::Qa,
+        ChunkingTemplate::Code,
+        ChunkingTemplate::Paper,
+    ] {
+        let (max_chars, overlap_chars) = template.chunking_params();
+        assert_eq!(
+            prepared_profile_chunks(StructuredPreparationService::with_template(template)),
+            prepared_profile_chunks(StructuredPreparationService::with_chunking(
+                max_chars,
+                overlap_chars,
+            )),
+            "template {template:?} must select its own preparation profile"
+        );
+    }
+    assert!(
+        prepared_profile_chunks(StructuredPreparationService::with_template(ChunkingTemplate::Qa))
+            .len()
+            > prepared_profile_chunks(StructuredPreparationService::with_template(
+                ChunkingTemplate::Naive,
+            ))
+            .len()
+    );
 }
 
 #[test]
@@ -312,9 +596,18 @@ fn prepare_revision_builds_semantic_table_row_text_and_preserves_raw_row_text() 
         .expect("table row block");
 
     assert_eq!(row_block.text, "| Alice | alice@example.com |");
+    let parent = prepared
+        .ordered_blocks
+        .iter()
+        .find(|block| Some(block.block_id) == row_block.parent_block_id)
+        .expect("source Table parent");
+    assert_eq!(parent.block_kind, StructuredBlockKind::Table);
     assert_eq!(
         row_block.normalized_text,
-        "Sheet: people | Row 1 | Name: Alice | Email: alice@example.com"
+        format!(
+            "Sheet: people | Table Ref: {} | Row 1 | Name: Alice | Email: alice@example.com",
+            parent.ordinal
+        )
     );
     assert!(
         prepared
@@ -367,7 +660,16 @@ fn prepare_revision_keeps_single_column_markdown_tables_as_table_blocks() {
         .find(|block| block.block_kind == StructuredBlockKind::TableRow)
         .expect("table row block");
     assert_eq!(row_block.text, "| test1 |");
-    assert_eq!(row_block.normalized_text, "Sheet: test1 | Row 1 | col_1: test1");
+    let parent = prepared
+        .ordered_blocks
+        .iter()
+        .find(|block| Some(block.block_id) == row_block.parent_block_id)
+        .expect("source Table parent");
+    assert_eq!(parent.block_kind, StructuredBlockKind::Table);
+    assert_eq!(
+        row_block.normalized_text,
+        format!("Sheet: test1 | Table Ref: {} | Row 1 | col_1: test1", parent.ordinal)
+    );
 }
 
 #[test]

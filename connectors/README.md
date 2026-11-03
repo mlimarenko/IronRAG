@@ -12,7 +12,7 @@ Connectors live in the IronRAG repository and release on the IronRAG version.
 You implement one [`SourceAdapter`](src/ironrag_connector/source.py) and the
 framework handles the rest:
 
-- the IronRAG HTTP client (`upload` / `replace` / `delete` / `find_by_external_key`)
+- the IronRAG HTTP client (`upload` / `replace` / `delete` / `find_document`)
 - YAML routing: adapter-emitted facts → `workspace-slug/library-slug`
 - per-`kind` policies (`on_new` / `on_changed` / `on_missing` / `on_duplicate_content` /
   `include_comments`), hot-reloaded from `routing.yaml` and rejected for kinds the
@@ -165,8 +165,10 @@ Complete replacements synchronize title and citation-hint metadata as well as
 the indexed bytes. Optional fields are normalized from the complete replacement,
 never inherited from an older revision. Synchronization requires the fixed
 `contentVisibilityContract: "visibility-intent/1"` capability before source
-enumeration. REQUIRED success requires matching READY/current revision, mutation
-item and intent, together with public denial of every historical route copy.
+enumeration. REQUIRED success requires a matching READY operation, current
+readable revision and intent, together with public denial of every historical
+route copy. Mutation-item identity records immutable admission lineage, not
+continued readability.
 
 ## Developing
 

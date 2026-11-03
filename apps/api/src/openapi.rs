@@ -306,6 +306,7 @@ const OPERATION_ID_USAGES: &[(&str, &str)] = &[
         crate::interfaces::http::knowledge::get_relation,
         crate::interfaces::http::knowledge::search::search_library,
         crate::interfaces::http::content::list_documents,
+        crate::interfaces::http::content::get_document_by_external_key,
         crate::interfaces::http::content::list_document_facets,
         crate::interfaces::http::content::list_chunks,
         crate::interfaces::http::content::create_document,

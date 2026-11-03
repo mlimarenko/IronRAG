@@ -2,29 +2,6 @@ use encoding_rs::{Encoding, UTF_8};
 
 use super::{DecodedHtml, HTML_CHARSET_SCAN_BYTES};
 
-/// Finds a safe byte index at or just before `target_bytes` that lands on a
-/// UTF-8 character boundary and, where possible, at a `<` tag boundary so the
-/// truncated fragment is still well-structured for the HTML parser to recover.
-pub(super) fn safe_html_truncation_boundary(source: &str, target_bytes: usize) -> usize {
-    if source.len() <= target_bytes {
-        return source.len();
-    }
-    let mut boundary = target_bytes;
-    while boundary > 0 && !source.is_char_boundary(boundary) {
-        boundary -= 1;
-    }
-    // Walk back up to 4 KiB looking for a `<` so we cut between elements
-    // rather than mid-attribute. Keeps the truncated fragment parse-friendly.
-    let window_start = boundary.saturating_sub(4096);
-    if let Some(offset) = source[window_start..boundary].rfind('<').map(|rel| window_start + rel) {
-        boundary = offset;
-        while boundary > 0 && !source.is_char_boundary(boundary) {
-            boundary -= 1;
-        }
-    }
-    boundary
-}
-
 pub(super) fn decode_html(file_bytes: &[u8], mime_type: Option<&str>) -> DecodedHtml {
     let encoding = charset_from_mime_type(mime_type)
         .or_else(|| sniff_charset_from_html(file_bytes))

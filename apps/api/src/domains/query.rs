@@ -527,6 +527,10 @@ pub struct QueryExecutionDetail {
     pub graph_edge_references: Vec<QueryGraphEdgeReference>,
     pub verification_state: QueryVerificationState,
     pub verification_warnings: Vec<QueryVerificationWarning>,
+    /// Persisted semantic assessment of the exact checked candidate, when run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub semantic_verification:
+        Option<ironrag_contracts::assistant::semantic_verification::SemanticVerificationReport>,
     /// Persisted finalizer-owned disposition of the public response body.
     #[serde(default)]
     pub answer_disposition: QueryAnswerDisposition,

@@ -1,10 +1,9 @@
 use super::answer_snapshot::AnswerSnapshotContext;
-use super::literal_revision::finalize_verified_answer;
 use super::output_boundary::{
     build_update_procedure_answer_with_source_context_fallback, selected_runtime_answer_chunks,
     selected_runtime_grounding_evidence,
 };
-use super::preflight::persist_llm_context_snapshot;
+use super::selected_answer::{SelectedAnswerContext, finish_selected_answer};
 use super::single_shot::generate_answer_query_inner;
 use super::verification::verify_generated_answer;
 use super::{
@@ -21,6 +20,8 @@ use super::{
 /// lets [`DeterministicAnswerContext::finish`] own that tail exactly once.
 struct DeterministicAnswerContext<'a> {
     state: &'a AppState,
+    execution: crate::services::query::provider_billing::QueryProviderExecutionContext,
+    provider_calls: &'a mut Vec<crate::agent_runtime::tasks::query_answer::QueryProviderCall>,
     effective_question: &'a str,
     prepared: &'a PreparedAnswerQueryResult,
     snapshot_context: &'a AnswerSnapshotContext,
@@ -30,12 +31,12 @@ impl DeterministicAnswerContext<'_> {
     /// Verify a selected deterministic answer, apply the literal-revision
     /// policy, persist the LLM context snapshot and build the runtime result.
     ///
-    /// Deterministic answers carry no provider calls by construction: nothing
-    /// on this path talks to a model. The snapshot is built from
+    /// Deterministic construction is free; its selected factual candidate uses
+    /// the same semantic boundary as generated prose. The snapshot is built from
     /// [`AnswerSnapshotContext`] so retrieval spans survive a later write of
     /// the same row.
     async fn finish(
-        &self,
+        &mut self,
         answer: String,
         primary_answer_chunks: Vec<RuntimeMatchedChunk>,
         usage_json: serde_json::Value,
@@ -64,12 +65,17 @@ impl DeterministicAnswerContext<'_> {
             },
         )
         .await?;
-        let verification_stage =
-            finalize_verified_answer(self.state, execution_id, verification_stage).await?;
-        let final_answer = verification_stage.generation.answer.clone();
-        persist_llm_context_snapshot(self.state, self.snapshot_context.snapshot(&final_answer))
-            .await?;
-        Ok(RuntimeAnswerQueryResult { answer: final_answer, provider_calls: Vec::new() })
+        finish_selected_answer(
+            SelectedAnswerContext {
+                state: self.state,
+                execution: self.execution,
+                question: self.effective_question,
+                snapshot: self.snapshot_context,
+            },
+            verification_stage,
+            self.provider_calls,
+        )
+        .await
     }
 }
 
@@ -84,22 +90,28 @@ pub(crate) async fn generate_answer_query(
 }
 
 pub(super) async fn try_deterministic_answer(
-    state: &AppState,
-    effective_question: &str,
+    request: &super::single_shot::AnswerQueryRequest<'_>,
     generation_question: &str,
     prepared: &PreparedAnswerQueryResult,
     snapshot_context: &AnswerSnapshotContext,
     requires_remediation_synthesis: bool,
+    provider_calls: &mut Vec<crate::agent_runtime::tasks::query_answer::QueryProviderCall>,
 ) -> anyhow::Result<Option<RuntimeAnswerQueryResult>> {
-    let context =
-        DeterministicAnswerContext { state, effective_question, prepared, snapshot_context };
+    let mut context = DeterministicAnswerContext {
+        state: request.state,
+        execution: request.execution_context,
+        effective_question: request.effective_question,
+        provider_calls,
+        prepared,
+        snapshot_context,
+    };
     if let Some(result) =
-        try_summary_deterministic_answer(&context, requires_remediation_synthesis).await?
+        try_summary_deterministic_answer(&mut context, requires_remediation_synthesis).await?
     {
         return Ok(Some(result));
     }
     try_procedural_deterministic_answer(
-        &context,
+        &mut context,
         generation_question,
         requires_remediation_synthesis,
     )
@@ -109,7 +121,7 @@ pub(super) async fn try_deterministic_answer(
 /// Deterministic answers that replace the whole answer outright: the
 /// exact-version change summary and the ordered source slice.
 async fn try_summary_deterministic_answer(
-    context: &DeterministicAnswerContext<'_>,
+    context: &mut DeterministicAnswerContext<'_>,
     requires_remediation_synthesis: bool,
 ) -> anyhow::Result<Option<RuntimeAnswerQueryResult>> {
     let prepared = context.prepared;
@@ -168,7 +180,7 @@ async fn try_summary_deterministic_answer(
 /// evidence: the update-procedure sequence, the setup-configuration anchor and
 /// the structural identifier mapping.
 async fn try_procedural_deterministic_answer(
-    context: &DeterministicAnswerContext<'_>,
+    context: &mut DeterministicAnswerContext<'_>,
     generation_question: &str,
     requires_remediation_synthesis: bool,
 ) -> anyhow::Result<Option<RuntimeAnswerQueryResult>> {

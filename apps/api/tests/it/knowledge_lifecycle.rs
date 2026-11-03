@@ -1477,8 +1477,11 @@ async fn create_sweep_candidate_mutation(
         source_uri: revision.source_uri,
         document_hint: revision.document_hint,
     };
-    let identity = serde_json::json!({"operationKind":"replace", "documentId":document_id,
-        "sourceIdentity":null, "replacement":replacement});
+    let identity = serde_json::json!({"workspaceId":fixture.workspace_id,"libraryId":fixture.library_id,
+        "operationKind":"replace","sourceIdentity":null,"materializationToken":null,
+        "target":{"kind":"existing","documentId":document_id},
+        "revision":{"contentSourceKind":revision.content_source_kind,"visibilityIntentId":null,"baseRevisionId":revision.parent_revision_id},
+        "replacement":replacement});
     Ok(content_mutation_repository::create_mutation(
         &fixture.state.persistence.postgres,
         &content_mutation_repository::NewContentMutation {

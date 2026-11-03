@@ -18,7 +18,7 @@ const baseLibrary = {
   },
   lifecycleState: 'active',
   recognitionPolicy: {
-    rasterImageEngine: 'disabled',
+    rasterImageEngine: 'vision',
   },
   webIngestPolicy: {
     crawlFilter: {

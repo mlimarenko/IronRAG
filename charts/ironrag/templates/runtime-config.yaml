@@ -17,10 +17,10 @@ data:
   IRONRAG_INGESTION_MAX_PARALLEL_JOBS_GLOBAL: {{ .Values.app.ingestion.maxParallelJobsGlobal | quote }}
   IRONRAG_INGESTION_MAX_PARALLEL_JOBS_PER_WORKSPACE: {{ .Values.app.ingestion.maxParallelJobsPerWorkspace | quote }}
   IRONRAG_INGESTION_MAX_PARALLEL_JOBS_PER_LIBRARY: {{ .Values.app.ingestion.maxParallelJobsPerLibrary | quote }}
-  IRONRAG_DOCLING_PAGE_BATCH_SIZE: {{ .Values.app.ingestion.doclingPageBatchSize | quote }}
-  IRONRAG_DOCLING_PAGE_STREAM_WINDOW_PAGES: {{ .Values.app.ingestion.doclingPageStreamWindowPages | quote }}
-  IRONRAG_DOCLING_MAX_CONCURRENCY: {{ .Values.app.ingestion.doclingMaxConcurrency | quote }}
-  IRONRAG_DOCLING_ACQUIRE_TIMEOUT_SECS: {{ .Values.app.ingestion.doclingAcquireTimeoutSecs | quote }}
+  IRONRAG_XBERG_EXTRACT_BIN: {{ .Values.app.ingestion.xbergExtractBin | quote }}
+  IRONRAG_XBERG_PAGE_BATCH_SIZE: {{ .Values.app.ingestion.xbergPageBatchSize | quote }}
+  IRONRAG_XBERG_TIMEOUT_SECS: {{ .Values.app.ingestion.xbergTimeoutSecs | quote }}
+  IRONRAG_XBERG_ACQUIRE_TIMEOUT_SECS: {{ .Values.app.ingestion.xbergAcquireTimeoutSecs | quote }}
   IRONRAG_INGESTION_HEAVY_PIPELINE_PARALLELISM: {{ .Values.app.ingestion.heavyPipelineParallelism | quote }}
   IRONRAG_INGESTION_HEAVY_ACQUIRE_TIMEOUT_SECS: {{ .Values.app.ingestion.heavyAcquireTimeoutSecs | quote }}
   IRONRAG_INGESTION_EMBEDDING_PARALLELISM: {{ .Values.app.ingestion.embeddingParallelism | quote }}

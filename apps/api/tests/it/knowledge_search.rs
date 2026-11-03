@@ -52,6 +52,9 @@ use ironrag_backend::{
 const SEARCH_WAIT_TIMEOUT: Duration = Duration::from_secs(15);
 const SEARCH_POLL_INTERVAL: Duration = Duration::from_millis(250);
 
+mod embedding_accounting;
+mod lexical_intent;
+
 fn synthetic_embedding_profile_key(seed: Uuid) -> String {
     format!("embedding-profile:v1:{0}{0}", seed.simple())
 }
@@ -2767,6 +2770,10 @@ struct KnowledgeSearchHttpFixture {
 
 impl KnowledgeSearchHttpFixture {
     async fn create() -> Result<Self> {
+        Box::pin(Self::create_with_sources(true)).await
+    }
+
+    async fn create_with_sources(seed_sources: bool) -> Result<Self> {
         let (temp_postgres, mut state, workspace_id, library_id) =
             bootstrap_knowledge_search_fixture().await?;
         state.llm_gateway = Arc::new(FakeEmbeddingGateway { embedding: vec![0.9, 0.8, 0.7] });
@@ -2844,18 +2851,20 @@ impl KnowledgeSearchHttpFixture {
         let ids = SearchSeedIds::new();
         let now = Utc::now();
 
-        seed_search_document_chunk(&state, workspace_id, library_id, &ids, now).await?;
-        seed_search_technical_fact(&state, workspace_id, library_id, &ids, now).await?;
-        seed_search_graph_anchors(&state, workspace_id, library_id, &ids, now).await?;
-        seed_search_vectors_and_evidence(
-            &state,
-            workspace_id,
-            library_id,
-            &ids,
-            &embedding_profile_key,
-            now,
-        )
-        .await?;
+        if seed_sources {
+            seed_search_document_chunk(&state, workspace_id, library_id, &ids, now).await?;
+            seed_search_technical_fact(&state, workspace_id, library_id, &ids, now).await?;
+            seed_search_graph_anchors(&state, workspace_id, library_id, &ids, now).await?;
+            seed_search_vectors_and_evidence(
+                &state,
+                workspace_id,
+                library_id,
+                &ids,
+                &embedding_profile_key,
+                now,
+            )
+            .await?;
+        }
 
         Ok(Self {
             temp_postgres,
@@ -3918,7 +3927,7 @@ async fn lexical_chunk_search_stays_library_scoped() -> Result<()> {
                 library_id: target_library_id,
                 external_key: "lexical-target".to_string(),
                 file_name: None,
-                title: Some("Target".to_string()),
+                title: Some("Orion lexical anchor".to_string()),
                 source_uri: None,
                 document_hint: None,
                 document_state: "active".to_string(),
@@ -3948,7 +3957,7 @@ async fn lexical_chunk_search_stays_library_scoped() -> Result<()> {
                 document_hint: None,
                 mime_type: "text/plain".to_string(),
                 checksum: crate::content_lifecycle_support::fixture_checksum("target-checksum"),
-                title: Some("Target".to_string()),
+                title: Some("Orion lexical anchor".to_string()),
                 byte_size: 32,
                 normalized_text: Some("orion lexical anchor".to_string()),
                 text_checksum: Some("target-text-checksum".to_string()),
@@ -4123,6 +4132,44 @@ async fn lexical_chunk_search_stays_library_scoped() -> Result<()> {
             .ok_or_else(|| anyhow!("target chunk vanished before ancestry assertion"))?;
         assert_eq!(target_chunk.section_path, vec!["intro".to_string()]);
         assert_eq!(target_chunk.heading_trail, vec!["Intro".to_string()]);
+
+        // The same chunk matches text and title-identity lanes. Their
+        // scores compete; they must not consume separate diversification slots.
+        let sibling_chunk_id = Uuid::now_v7();
+        let mut sibling = target_chunk.clone();
+        sibling.chunk_id = sibling_chunk_id;
+        sibling.chunk_index = 1;
+        fixture.document_store.upsert_chunk(&sibling).await?;
+        seed_prepared_structured_revision(
+            &fixture.document_store,
+            PreparedStructuredRevisionSeed {
+                workspace_id,
+                library_id: target_library_id,
+                document_id: target_document_id,
+                revision_id: target_revision_id,
+                source_text: "orion lexical anchor",
+                chunk_count: 2,
+            },
+        )
+        .await?;
+        let hits = fixture
+            .search_store
+            .search_chunks(ChunkLexicalQuery {
+                library_id: target_library_id,
+                query: "orion lexical anchor",
+                query_origin: LexicalQueryOrigin::UserQuery,
+                limit: 2,
+                temporal_start: None,
+                temporal_end: None,
+                text_search_config: None,
+            })
+            .await?;
+        assert_eq!(
+            hits.iter().map(|hit| hit.chunk_id).collect::<Vec<_>>(),
+            vec![target_chunk_id, sibling_chunk_id],
+        );
+        assert_eq!(hits[0].score, 1_000_000.0);
+        assert_eq!(hits[1].score, 999_999.0);
         Ok(())
     }
     .await;
@@ -4335,13 +4382,12 @@ async fn lexical_chunk_search_hydrates_only_the_temporally_matching_readable_rev
             .await
             .context("failed to search the current revision at its temporal boundary")?;
         anyhow::ensure!(
-            hits.len() == 2,
-            "the text and title-identity lanes must both survive; got {} rows",
+            hits.len() == 1,
+            "overlapping text and title lanes must yield one current chunk; got {} rows",
             hits.len()
         );
         anyhow::ensure!(hits[0].chunk_id == current_chunk_id);
-        anyhow::ensure!(hits[1].chunk_id == current_chunk_id);
-        anyhow::ensure!(hits[0].score > hits[1].score);
+        anyhow::ensure!(hits[0].score == 1_000_000.0 * f64::from(current_quality));
         anyhow::ensure!(!hits.iter().any(|hit| hit.chunk_id == stale_chunk_id));
         for hit in &hits {
             anyhow::ensure!(hit.workspace_id == workspace_id);

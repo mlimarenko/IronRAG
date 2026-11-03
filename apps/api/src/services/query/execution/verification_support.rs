@@ -104,11 +104,40 @@ pub(super) fn build_exact_relationship_verification_corpus(
 
 fn push_exact_relationship_records(corpus: &mut Vec<String>, value: &str) {
     for line in value.lines() {
-        let normalized = normalize_verification_literal(line);
+        let normalized = normalize_relationship_literal(line);
         if !normalized.is_empty() {
             corpus.push(normalized);
         }
     }
+}
+
+fn normalize_relationship_literal(value: &str) -> String {
+    // Formatting around the assignment separator is optional; word boundaries are not.
+    normalize_boundary_verification_text(value)
+        .split('=')
+        .map(str::trim)
+        .collect::<Vec<_>>()
+        .join("=")
+}
+
+fn contains_exact_assignment(candidate: &str, literal: &str) -> bool {
+    candidate.char_indices().any(|(start, _)| {
+        if !candidate[start..].starts_with(literal) {
+            return false;
+        }
+        let before = candidate[..start].chars().next_back();
+        let mut after = candidate[start + literal.len()..].chars();
+        let adjacent = after.next();
+        let starts_inside_key = before.is_some_and(|ch| {
+            ch.is_alphanumeric() || matches!(ch, '_' | '.' | ':' | '/' | '\\' | '-' | '+' | '=')
+        });
+        let ends_inside_value = adjacent.is_some_and(|ch| {
+            ch.is_alphanumeric()
+                || matches!(ch, '_' | '/' | '\\' | '-' | '+' | '%' | '?' | '#' | '=')
+        }) || (adjacent.is_some_and(|ch| matches!(ch, '.' | ':'))
+            && after.next().is_some_and(|ch| ch.is_alphanumeric() || ch == '_'));
+        !starts_inside_key && !ends_inside_value
+    })
 }
 
 fn build_verification_corpus_with(
@@ -157,6 +186,7 @@ fn build_verification_corpus_with(
 pub(super) fn literal_is_supported_by_evidence_corpus(
     literal: &str,
     corpus: &[String],
+    boundary_corpus: &[String],
     grounding_corpus: &[String],
     exact_relationship_corpus: &[String],
 ) -> bool {
@@ -165,9 +195,18 @@ pub(super) fn literal_is_supported_by_evidence_corpus(
         return true;
     }
     if literal.split_once('=').is_some() {
+        let assignment = normalize_relationship_literal(literal);
         return exact_relationship_corpus
             .iter()
-            .any(|candidate| candidate.contains(&normalized_literal));
+            .any(|candidate| contains_exact_assignment(candidate, &assignment));
+    }
+    if literal.chars().all(|ch| ch.is_alphanumeric() || ch == '_')
+        && literal.chars().any(|ch| ch.is_alphabetic() || ch == '_')
+    {
+        let identifier = normalize_boundary_verification_text(literal);
+        return boundary_corpus
+            .iter()
+            .any(|candidate| contains_verbatim_answer(candidate, &identifier));
     }
     if corpus.iter().any(|candidate| candidate.contains(&normalized_literal)) {
         return true;
@@ -199,13 +238,28 @@ pub(super) fn literal_is_supported_by_evidence_corpus(
 pub(super) fn answer_is_verbatim_supported_by_corpus(answer: &str, corpus: &[String]) -> bool {
     let normalized_answer = normalize_verbatim_answer(answer);
     !normalized_answer.is_empty()
-        && corpus
-            .iter()
-            .any(|candidate| normalize_verbatim_answer(candidate).contains(&normalized_answer))
+        && corpus.iter().any(|candidate| {
+            contains_verbatim_answer(&normalize_verbatim_answer(candidate), &normalized_answer)
+        })
+}
+
+fn contains_verbatim_answer(candidate: &str, answer: &str) -> bool {
+    let is_word_char = |ch: char| ch.is_alphanumeric() || ch == '_';
+    candidate.char_indices().any(|(start, _)| {
+        if !candidate[start..].starts_with(answer) {
+            return false;
+        }
+        let end = start + answer.len();
+        let starts_inside_word = answer.chars().next().is_some_and(is_word_char)
+            && candidate[..start].chars().next_back().is_some_and(is_word_char);
+        let ends_inside_word = answer.chars().next_back().is_some_and(is_word_char)
+            && candidate[end..].chars().next().is_some_and(is_word_char);
+        !starts_inside_word && !ends_inside_word
+    })
 }
 
 fn normalize_verbatim_answer(value: &str) -> String {
-    normalize_verification_literal(value).replace('`', "")
+    normalize_boundary_verification_text(value).replace('`', "")
 }
 
 pub(super) fn formal_exact_claim_is_supported_by_corpus(

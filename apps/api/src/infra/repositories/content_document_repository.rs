@@ -143,6 +143,21 @@ pub async fn get_document_by_external_key(
     .await
 }
 
+/// Resolves the unique active identity; unlike the lifecycle lookup, excludes tombstones.
+pub async fn get_active_document_id_by_external_key(
+    postgres: &PgPool,
+    library_id: Uuid,
+    external_key: &str,
+) -> Result<Option<Uuid>, sqlx::Error> {
+    sqlx::query_scalar(
+        "select id from content_document where library_id = $1 and external_key = $2 and document_state = 'active'",
+    )
+    .bind(library_id)
+    .bind(external_key)
+    .fetch_optional(postgres)
+    .await
+}
+
 /// Lists the non-deleted child documents that resolve to `parent_document_id`
 /// in `library_id`. Used by the delete-cascade lifecycle to act on a parent's
 /// children. Multi-parent occurrence attribution is out of scope: a child has

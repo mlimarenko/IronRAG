@@ -17,8 +17,47 @@ struct BlockDecoration {
 struct TableBlockContext<'a> {
     heading_stack: &'a [String],
     table_block_id: Uuid,
-    sheet_name: Option<&'a str>,
-    table_name: Option<&'a str>,
+    semantic: SemanticTableContext<'a>,
+}
+
+/// Code/record splitting may renumber a Table after its derived text is built.
+/// Bind every row/summary to the final parent, before chunks/checksums exist.
+pub(super) fn finalize_table_references(
+    blocks: &mut [StructuredBlockData],
+    cancellation_token: &tokio_util::sync::CancellationToken,
+) -> Result<(), StructuredPreparationError> {
+    use crate::shared::extraction::{
+        table_markdown::rebind_semantic_table_ref, table_summary::is_table_summary_text,
+    };
+    let ordinals = blocks
+        .iter()
+        .filter(|block| block.block_kind == StructuredBlockKind::Table)
+        .map(|block| (block.block_id, block.ordinal))
+        .collect::<BTreeMap<_, _>>();
+    for block in blocks {
+        ensure_not_cancelled(cancellation_token)?;
+        if block.block_kind != StructuredBlockKind::TableRow
+            && !(block.block_kind == StructuredBlockKind::MetadataBlock
+                // Only generated summaries have no source text. A literal
+                // "Table Summary: notes" scalar is not a derived table block.
+                && block.text.is_empty()
+                && is_table_summary_text(&block.normalized_text))
+        {
+            continue;
+        }
+        let reference = block
+            .parent_block_id
+            .and_then(|parent| ordinals.get(&parent))
+            .copied()
+            .ok_or(TableLayoutError::InvalidSourceReference)?;
+        if let std::borrow::Cow::Owned(rebound) =
+            rebind_semantic_table_ref(&block.normalized_text, reference)
+                .ok_or(TableLayoutError::InvalidSourceReference)?
+        {
+            block.normalized_text = rebound;
+        }
+    }
+    Ok(())
 }
 
 pub(super) fn build_structured_blocks(
@@ -147,9 +186,23 @@ fn append_table_blocks(
     cancellation_token: &CancellationToken,
 ) -> Result<(), StructuredPreparationError> {
     let start = *index;
-    while *index < lines.len() && is_table_row_line(&lines[*index]) {
-        ensure_not_cancelled(cancellation_token)?;
-        *index += 1;
+    let canonical = is_canonical_table_start(&lines[start].text);
+    if canonical {
+        while *index < lines.len() {
+            ensure_not_cancelled(cancellation_token)?;
+            *index += 1;
+            if lines[*index - 1].text.trim() == "</table>" {
+                break;
+            }
+        }
+    } else {
+        while *index < lines.len()
+            && is_table_row_line(&lines[*index])
+            && !is_canonical_table_start(&lines[*index].text)
+        {
+            ensure_not_cancelled(cancellation_token)?;
+            *index += 1;
+        }
     }
     let row_lines = &lines[start..*index];
     let table_block = build_block(
@@ -160,46 +213,80 @@ fn append_table_blocks(
         BlockDecoration::default(),
     );
     let table_block_id = table_block.block_id;
+    let table_ref = table_block.ordinal;
     blocks.push(table_block);
     *ordinal += 1;
-    let header_cells =
-        row_lines.first().map(|row| parse_markdown_table_row(&row.text)).unwrap_or_default();
-    let (sheet_name, table_name) = table_context_from_heading_stack(heading_stack);
-    let context = TableBlockContext { heading_stack, table_block_id, sheet_name, table_name };
-    let data_rows =
-        append_table_row_blocks(row_lines, *ordinal, &context, blocks, cancellation_token)?;
-    *ordinal += i32::try_from(data_rows.len()).unwrap_or(i32::MAX);
-    append_table_summary_blocks(
-        &header_cells,
-        &data_rows,
+
+    let (table, source_rows) = if canonical {
+        let raw_lines = row_lines.iter().map(|line| line.text.as_str()).collect::<Vec<_>>();
+        let table = LogicalTable::parse_canonical_lines(&raw_lines)?;
+        let rows = row_lines
+            .get(1..row_lines.len().saturating_sub(1))
+            .map(|rows| rows.to_vec())
+            .unwrap_or_default();
+        (table, rows)
+    } else {
+        let mut parsed_rows = Vec::<Vec<String>>::new();
+        let mut source_rows = Vec::<ExtractionLineHint>::new();
+        for (row_index, line) in row_lines.iter().enumerate() {
+            if is_markdown_table_delimiter(row_index, &line.text) {
+                continue;
+            }
+            let cells = parse_markdown_table_row(&line.text);
+            if cells.is_empty() {
+                continue;
+            }
+            parsed_rows.push(cells);
+            source_rows.push(line.clone());
+        }
+        if parsed_rows.is_empty() {
+            return Ok(());
+        }
+        (LogicalTable::from_markdown_rows(&parsed_rows)?, source_rows)
+    };
+
+    // Canonical logical tables have no source sheet/table-name metadata. An
+    // adjacent caption may remain heading context, but is not a row field.
+    let (sheet_name, table_name) =
+        if canonical { (None, None) } else { table_context_from_heading_stack(heading_stack) };
+    let semantic = SemanticTableContext { sheet_name, table_name, table_ref: Some(table_ref) };
+    let projection = table.project(semantic)?;
+    let context = TableBlockContext { heading_stack, table_block_id, semantic };
+    let data_row_count = append_table_row_blocks(
+        &projection,
+        &source_rows,
+        *ordinal,
         &context,
-        ordinal,
         blocks,
         cancellation_token,
-    )
+    )?;
+    *ordinal += i32::try_from(data_row_count).unwrap_or(i32::MAX);
+    append_table_summary_blocks(&projection, &context, ordinal, blocks, cancellation_token)
 }
 
 fn append_table_row_blocks(
-    row_lines: &[ExtractionLineHint],
+    projection: &TableProjection,
+    source_rows: &[ExtractionLineHint],
     first_ordinal: i32,
     context: &TableBlockContext<'_>,
     blocks: &mut Vec<StructuredBlockData>,
     cancellation_token: &CancellationToken,
-) -> Result<Vec<Vec<String>>, StructuredPreparationError> {
-    let header_cells =
-        row_lines.first().map(|row| parse_markdown_table_row(&row.text)).unwrap_or_default();
-    let mut data_rows = Vec::new();
-    for row_line in row_lines.iter().skip(1) {
+) -> Result<usize, StructuredPreparationError> {
+    let header_labels =
+        projection.header.paths.iter().map(|path| path.display.clone()).collect::<Vec<_>>();
+    for (row_index, row_cells) in projection.body_rows.iter().enumerate() {
         ensure_not_cancelled(cancellation_token)?;
-        let row_cells = parse_markdown_table_row(&row_line.text);
-        if row_cells.is_empty() || is_markdown_separator_row(&row_cells) {
-            continue;
-        }
-        let row_index = data_rows.len();
+        let source_line =
+            source_rows.get(projection.header_row_count + row_index).ok_or_else(|| {
+                TableLayoutError::MalformedMarkup {
+                    line: projection.header_row_count + row_index + 1,
+                    detail: "table row is missing its source line".to_string(),
+                }
+            })?;
         blocks.push(build_block(
             first_ordinal.saturating_add(i32::try_from(row_index).unwrap_or(i32::MAX)),
             StructuredBlockKind::TableRow,
-            std::slice::from_ref(row_line),
+            std::slice::from_ref(source_line),
             context.heading_stack,
             BlockDecoration {
                 parent_block_id: Some(context.table_block_id),
@@ -210,34 +297,35 @@ fn append_table_row_blocks(
                     column_span: 1,
                 }),
                 normalized_text_override: Some(build_semantic_table_row_text(
-                    context.sheet_name,
-                    context.table_name,
+                    context.semantic,
                     row_index,
-                    &header_cells,
-                    &row_cells,
+                    &header_labels,
+                    row_cells,
                 )),
                 ..Default::default()
             },
         ));
-        data_rows.push(row_cells);
     }
-    Ok(data_rows)
+    Ok(projection.body_rows.len())
 }
 
 fn append_table_summary_blocks(
-    header_cells: &[String],
-    data_rows: &[Vec<String>],
+    projection: &TableProjection,
     context: &TableBlockContext<'_>,
     ordinal: &mut i32,
     blocks: &mut Vec<StructuredBlockData>,
     cancellation_token: &CancellationToken,
 ) -> Result<(), StructuredPreparationError> {
-    for summary in build_table_column_summaries(
-        context.sheet_name,
-        context.table_name,
-        header_cells,
-        data_rows,
-    ) {
+    // Unknown-role fragments retain possible header rows as observations. They
+    // cannot support column statistics without first resolving those roles.
+    if projection.header.origin == TableHeaderOrigin::Unknown {
+        return Ok(());
+    }
+    let header_labels =
+        projection.header.paths.iter().map(|path| path.display.clone()).collect::<Vec<_>>();
+    for summary in
+        build_table_column_summaries(context.semantic, &header_labels, &projection.body_rows)
+    {
         ensure_not_cancelled(cancellation_token)?;
         blocks.push(build_block(
             *ordinal,

@@ -4,6 +4,9 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+/// Semantic verification protocol and report vocabulary.
+pub mod semantic_verification;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
 /// Author role assigned to a conversation turn.
@@ -425,6 +428,10 @@ pub struct AssistantEvidenceBundle {
     pub verification_state: AssistantVerificationState,
     /// Structured verification limitations safe to present to the user.
     pub verification_warnings: Vec<AssistantVerificationWarning>,
+    /// Semantic findings for the checked candidate. The report separately
+    /// identifies the final visible body; historical executions may have none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub semantic_verification: Option<semantic_verification::SemanticVerificationReport>,
     #[serde(default)]
     /// Finalizer-owned outcome of the public answer body.
     pub answer_disposition: AssistantAnswerDisposition,
@@ -523,6 +530,9 @@ pub struct AssistantExecutionDetail {
     pub verification_state: AssistantVerificationState,
     /// Structured verification limitations stored with the execution.
     pub verification_warnings: Vec<AssistantVerificationWarning>,
+    /// Persisted semantic findings, with checked and visible body identities.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub semantic_verification: Option<semantic_verification::SemanticVerificationReport>,
     /// Finalizer-owned typed outcome. Historical rows created before this
     /// field existed deserialize conservatively as `non_terminal`.
     #[serde(default)]

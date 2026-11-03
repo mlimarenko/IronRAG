@@ -1,4 +1,4 @@
-import { render, screen, within } from '@testing-library/react'
+import { fireEvent, render, screen, within } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import type { AdminLibraryRow } from '@/features/admin/libraries/model/librariesAdapter'
@@ -24,9 +24,8 @@ const mocks = vi.hoisted(() => {
     'admin.libraries.settings.chunkingTemplates.structured': 'Структурированный',
     'admin.libraries.settings.chunkingTemplates.tabular': 'Табличный',
     'admin.libraries.settings.lifecycle': 'Жизненный цикл',
-    'admin.libraries.settings.rasterImageEngine': 'Движок растровых изображений',
-    'admin.libraries.settings.recognitionEngines.docling': 'Docling',
-    'admin.libraries.settings.recognitionEngines.vision': 'Модель компьютерного зрения',
+    'admin.libraries.settings.visionRequired': 'Для OCR изображений нужен Vision',
+    'admin.libraries.settings.configureExtractText': 'Настроить привязку extract_text',
     'admin.libraries.snapshot.connectorId': 'ID коннектора',
     'common.notAvailable': 'Нет данных',
   }
@@ -96,7 +95,7 @@ const row: AdminLibraryRow = {
   workspace: { displayName: 'Пространство', id: 'workspace-1', slug: 'workspace' },
 }
 
-function renderInspector() {
+function renderInspector(onConfigureAi = vi.fn()) {
   return render(
     <LibraryInspector
       row={row}
@@ -105,7 +104,7 @@ function renderInspector() {
       deleting={false}
       onOpenChange={vi.fn()}
       onOpenDocuments={vi.fn(async () => undefined)}
-      onConfigureAi={vi.fn()}
+      onConfigureAi={onConfigureAi}
       onBackup={vi.fn()}
       onRestore={vi.fn()}
       onDelete={vi.fn(async () => undefined)}
@@ -138,17 +137,19 @@ describe('LibraryInspector', () => {
 
     const lifecycle = screen.getByRole('combobox', { name: 'Жизненный цикл' })
     const chunking = screen.getByRole('combobox', { name: /^Шаблон чанкинга/ })
-    const recognition = screen.getByRole('combobox', {
-      name: 'Движок растровых изображений',
-    })
 
     expect(within(lifecycle).getByRole('option', { name: 'Активна' })).toBeInTheDocument()
     expect(within(chunking).getByRole('option', { name: 'Базовый' })).toBeInTheDocument()
-    expect(
-      within(recognition).getByRole('option', { name: 'Модель компьютерного зрения' }),
-    ).toBeInTheDocument()
     expect(within(chunking).queryByRole('option', { name: 'naive' })).not.toBeInTheDocument()
-    expect(within(recognition).queryByRole('option', { name: 'vision' })).not.toBeInTheDocument()
+    expect(screen.getByText('Для OCR изображений нужен Vision')).toBeInTheDocument()
+    expect(screen.queryByRole('option', { name: 'Xberg' })).not.toBeInTheDocument()
+  })
+
+  it('opens binding configuration from the fixed Vision requirement', () => {
+    const configure = vi.fn()
+    renderInspector(configure)
+    fireEvent.click(screen.getByRole('button', { name: 'Настроить привязку extract_text' }))
+    expect(configure).toHaveBeenCalledWith(row)
   })
 
   it('humanizes an unknown health state instead of hiding it behind a generic label', () => {

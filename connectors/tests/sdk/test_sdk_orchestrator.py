@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import sqlite3
 from collections.abc import AsyncIterator, Callable
 from dataclasses import replace
@@ -21,6 +22,7 @@ from sdk_dependent_fixtures import (
     revision_request_identity,
     seed_document,
 )
+from test_sdk_ironrag_client import _client as wire_client
 
 from ironrag_connector.config import BaseConnectorSettings
 from ironrag_connector.ironrag import (
@@ -230,7 +232,6 @@ class FakeIronRag:
                     update={
                         "visibility_intent_id": item_id,
                         "readable_revision_id": None,
-                        "readable_mutation_item_id": None,
                     }
                 )
         return receipt
@@ -304,7 +305,6 @@ class FakeIronRag:
             update={
                 "admission": admission,
                 "readable_revision_id": admission.result_revision_id,
-                "readable_mutation_item_id": admission.mutation_item_id,
             }
         )
         self.documents[(library_id, external_key)] = doc
@@ -411,7 +411,6 @@ class FakeIronRag:
                         self.documents[key] = doc.model_copy(
                             update={
                                 "readable_revision_id": handle.result_revision_id,
-                                "readable_mutation_item_id": handle.mutation_item_id,
                             }
                         )
         return status
@@ -421,7 +420,6 @@ class FakeIronRag:
         library_id: UUID,
         *,
         search: str | None = None,
-        external_key: str | None = None,
         status: Any = (),
         include_deleted: bool = False,
         limit: int = 200,
@@ -429,7 +427,7 @@ class FakeIronRag:
         for (lib, key), doc in list(self.documents.items()):
             if lib != library_id:
                 continue
-            if external_key and key != external_key:
+            if search and search not in key:
                 continue
             yield doc
 
@@ -4065,7 +4063,7 @@ async def test_visibility_contract_required_busy_has_accepted_denial(tmp_path: P
 @pytest.mark.asyncio
 @pytest.mark.parametrize("lost_phase", ["intent", "payload"])
 async def test_visibility_contract_lost_receipt_reopens_exact_episode(
-    tmp_path: Path, lost_phase: str
+    tmp_path: Path, lost_phase: str, native_content_receipts: dict[str, bytes]
 ) -> None:
     class LoseOnce(FakeIronRag):
         lost = False
@@ -4084,7 +4082,7 @@ async def test_visibility_contract_lost_receipt_reopens_exact_episode(
             if lost_phase == "payload" and not self.lost:
                 self.lost = True
                 raise IronRagError("lost payload receipt")
-            return handle
+            return await _parse_native_payload_handle(handle, native_content_receipts)
 
     ref = _required_page_ref("v2")
     state = _state(tmp_path)
@@ -4111,6 +4109,8 @@ async def test_visibility_contract_lost_receipt_reopens_exact_episode(
     assert after.receipt == original_receipt
     assert after.receipt.revision_floor == original_receipt.revision_floor
     assert after.payload_receipt is not None
+    assert after.payload_receipt == next(iter(ironrag._payload_handles.values()))
+    assert len(ironrag._payload_handles) == 1
     assert len(ironrag.visibility_intents) == 1
     if lost_phase == "payload":
         assert ironrag.revisions[0]["idempotency_key"] == ironrag.revisions[1]["idempotency_key"]
@@ -4208,7 +4208,7 @@ async def test_visibility_contract_rejects_payload_receipt_mismatch(
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "wrong_field",
-    ["readable_revision_id", "readable_mutation_item_id", "visibility_intent_id", "operation_id"],
+    ["readable_revision_id", "visibility_intent_id", "operation_id"],
 )
 async def test_visibility_contract_ready_is_not_current_head_proof(
     tmp_path: Path, wrong_field: str
@@ -4718,7 +4718,6 @@ async def test_visibility_contract_superseded_copy_does_not_starve_later_denial(
         update={
             "visibility_intent_id": _doc_id(9001),
             "readable_revision_id": _doc_id(9002),
-            "readable_mutation_item_id": _doc_id(9003),
         }
     )
     ironrag.documents[(LIB, ref.external_key)] = foreign
@@ -4727,7 +4726,6 @@ async def test_visibility_contract_superseded_copy_does_not_starve_later_denial(
     ).model_copy(
         update={
             "readable_revision_id": _doc_id(9010),
-            "readable_mutation_item_id": _doc_id(9011),
         }
     )
     state.record_document_location(
@@ -4744,7 +4742,6 @@ async def test_visibility_contract_superseded_copy_does_not_starve_later_denial(
         "superseded first copy starved later readable A denial"
     )
     assert retired.readable_revision_id is None
-    assert retired.readable_mutation_item_id is None
     assert ironrag.documents[(LIB, ref.external_key)] == foreign
     assert len(ironrag.visibility_intents) == 2
     assert len(state.materialization_attempts_for_document(str(DOC_PRE))) == 1
@@ -4911,7 +4908,9 @@ async def test_policy_complete_body_change_gets_durable_key(
 
 
 @pytest.mark.asyncio
-async def test_policy_unknown_send_reopen_replays_exact_body_and_key(tmp_path: Path) -> None:
+async def test_policy_unknown_send_reopen_replays_exact_body_and_key(
+    tmp_path: Path, native_content_receipts: dict[str, bytes]
+) -> None:
     class UnknownSend(FakeIronRag):
         unknown = True
 
@@ -4920,7 +4919,7 @@ async def test_policy_unknown_send_reopen_replays_exact_body_and_key(tmp_path: P
             if self.unknown:
                 self.unknown = False
                 raise httpx.ReadTimeout("receipt lost after admission")
-            return handle
+            return await _parse_native_payload_handle(handle, native_content_receipts)
 
     ref = _page_ref("B")
     state, server = _state(tmp_path), UnknownSend()
@@ -4941,8 +4940,42 @@ async def test_policy_unknown_send_reopen_replays_exact_body_and_key(tmp_path: P
     assert server.revisions[-1]["idempotency_key"] == attempt.payload_key
     assert server._payload_bodies[attempt.payload_key] == body
     assert len(server._payload_handles) == 1
+    restored = reopened.materialization_attempts_for_document(str(DOC_PRE))[0]
+    assert restored.payload_receipt == next(iter(server._payload_handles.values()))
     assert reopened.get(ref.kind, ref.item_id).change_token == "B"
     assert not server.visibility_requests
+
+
+async def _parse_native_payload_handle(
+    handle: OperationHandle, native_content_receipts: dict[str, bytes]
+) -> OperationHandle:
+    """Pass fake server lineage through the native DTO shape and real HTTP client."""
+    body = json.loads(native_content_receipts["ordinary"])
+    body.update(
+        asyncOperationId=str(handle.operation_id),
+        visibilityIntentId=None
+        if handle.visibility_intent_id is None
+        else str(handle.visibility_intent_id),
+        resultRevisionId=str(handle.result_revision_id),
+        resultChecksum=handle.result_checksum,
+        requestFingerprint=handle.request_fingerprint,
+    )
+    body["items"][0].update(
+        id=str(handle.mutation_item_id),
+        document_id=str(handle.document_id),
+        result_revision_id=str(handle.result_revision_id),
+    )
+    client = wire_client(httpx.MockTransport(lambda request: httpx.Response(202, json=body)))
+    try:
+        return await client.create_revision(
+            handle.document_id,
+            mode="replace",
+            markdown="safe",
+            idempotency_key="wire-replay",
+            visibility_intent_id=handle.visibility_intent_id,
+        )
+    finally:
+        await client.aclose()
 
 
 @pytest.mark.asyncio

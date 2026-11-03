@@ -115,7 +115,7 @@ async fn workspace_prevalidation_rejects_corrupt_second_archive_before_provision
         )
     };
     let part_path = "postgres/catalog_library/part-000001.ndjson";
-    let part = br#"{"id":"00000000-0000-0000-0000-000000000000"}
+    let part = br#"{"id":"00000000-0000-0000-0000-000000000000","recognition_policy":{"rasterImageEngine":"vision"}}
 "#;
     let summary = SnapshotSummary {
         inventory: SnapshotInventory {

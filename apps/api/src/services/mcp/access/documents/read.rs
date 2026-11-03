@@ -75,21 +75,20 @@ pub(crate) async fn read_document(
 
     let published_revision_id = latest_revision_id
         .ok_or_else(|| ApiError::resource_not_found("document", state_view.document_id))?;
-    let content = merge_visual_description_into_content(
-        state_view.content.as_deref(),
-        visual_description.as_deref(),
-    );
-    let total_content_length = content.chars().count();
-    let slice_start_offset = effective_read_start_offset(
+    // Offsets identify the immutable canonical text. Visual descriptions have
+    // their own response field and must not shift or extend that coordinate space.
+    let CanonicalReadWindow {
+        content: slice,
+        start: slice_start_offset,
+        end: slice_end_offset,
+        total: total_content_length,
+        has_more,
+    } = canonical_read_window(
+        state_view.content.as_deref().unwrap_or_default(),
         &normalized.read_mode,
         normalized.start_offset,
-        total_content_length,
         normalized.window_chars,
     );
-    let slice = char_slice(&content, slice_start_offset, normalized.window_chars);
-    let slice_len = slice.chars().count();
-    let slice_end_offset = slice_start_offset.saturating_add(slice_len);
-    let has_more = slice_end_offset < total_content_length;
     let continuation_token = has_more.then(|| {
         encode_continuation_token(
             auth,
@@ -396,22 +395,25 @@ fn map_source_access(
     }
 }
 
-pub(super) fn merge_visual_description_into_content(
-    content: Option<&str>,
-    visual_description: Option<&str>,
-) -> String {
-    let content = content.unwrap_or("").trim();
-    let visual_description = visual_description.unwrap_or("").trim();
-    if visual_description.is_empty() {
-        return content.to_string();
-    }
-    if content.is_empty() {
-        return format!("## Source Image Description\n{visual_description}");
-    }
-    if content.contains(visual_description) {
-        return content.to_string();
-    }
-    format!("{content}\n\n## Source Image Description\n{visual_description}")
+pub(super) struct CanonicalReadWindow {
+    pub(super) content: String,
+    pub(super) start: usize,
+    pub(super) end: usize,
+    pub(super) total: usize,
+    pub(super) has_more: bool,
+}
+
+pub(super) fn canonical_read_window(
+    content: &str,
+    mode: &McpReadMode,
+    requested_start: usize,
+    window_chars: usize,
+) -> CanonicalReadWindow {
+    let total = content.chars().count();
+    let start = effective_read_start_offset(mode, requested_start, total, window_chars);
+    let content = char_slice(content, start, window_chars);
+    let end = start.saturating_add(content.chars().count());
+    CanonicalReadWindow { content, start, end, total, has_more: end < total }
 }
 
 async fn load_source_visual_description(
@@ -454,25 +456,57 @@ async fn load_source_visual_description(
             return Ok(None);
         }
     };
-    match crate::shared::extraction::image::describe_image_with_provider(
-        state.llm_gateway.as_ref(),
-        crate::shared::extraction::image::VisionProviderInput {
-            provider_kind: &binding.provider_kind,
-            model_name: &binding.model_name,
-            api_key: binding.api_key.as_deref().unwrap_or_default(),
-            base_url: binding.provider_base_url.as_deref(),
-            extra_parameters_json: &binding.extra_parameters_json,
+    describe_source_image(state, state_view, latest_revision_id, &binding, mime_type, &file_bytes)
+        .await
+}
+
+async fn describe_source_image(
+    state: &AppState,
+    state_view: &ResolvedDocumentState,
+    latest_revision_id: Uuid,
+    binding: &crate::services::ai_catalog_service::ResolvedRuntimeBinding,
+    mime_type: &str,
+    file_bytes: &[u8],
+) -> Result<Option<String>, ApiError> {
+    let mut provider_call = crate::services::ops::billing::provider_reservation::ProviderCallReservation::reserve_document_read(
+        state,
+        crate::infra::repositories::billing_repository::BillingDocumentReadRow {
+            id: Uuid::now_v7(),
+            workspace_id: state_view.library.workspace_id,
+            library_id: state_view.library.id,
+            document_id: state_view.document_id,
+            revision_id: latest_revision_id,
         },
-        mime_type,
-        &file_bytes,
+        binding,
+    ).await?;
+    match crate::integrations::retry::with_single_provider_attempt(
+        crate::observability::with_provider_call_id(
+            provider_call.provider_call_id(),
+            crate::shared::extraction::image::describe_image_with_provider(
+                state.llm_gateway.as_ref(),
+                crate::shared::extraction::image::VisionProviderInput {
+                    provider_kind: &binding.provider_kind,
+                    model_name: &binding.model_name,
+                    api_key: binding.api_key.as_deref().unwrap_or_default(),
+                    base_url: binding.provider_base_url.as_deref(),
+                    extra_parameters_json: &binding.extra_parameters_json,
+                },
+                mime_type,
+                file_bytes,
+            ),
+        ),
     )
     .await
     {
         Ok(result) => {
+            provider_call.complete(&result.usage_json).await?;
             let text = result.text.trim().to_string();
             Ok((!text.is_empty()).then_some(text))
         }
         Err(error) => {
+            // Description is optional, but its attempted spend is not. Only a
+            // durably failed call may fall back to the canonical text alone.
+            provider_call.fail().await?;
             warn!(
                 document_id = %state_view.document_id,
                 revision_id = %latest_revision_id,

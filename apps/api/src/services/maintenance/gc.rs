@@ -1089,7 +1089,16 @@ async fn rebuild_graph_after_historical_projection(
     library_id: Uuid,
     report: &mut HistoricalProjectionRetentionGcReport,
 ) {
-    match state.application_services.graph.rebuild_library_graph(state, library_id).await {
+    match state
+        .application_services
+        .graph
+        .rebuild_library_graph(
+            state,
+            library_id,
+            crate::services::graph::service::GraphRebuildRecovery::AdmitReextraction,
+        )
+        .await
+    {
         Ok(_) => report.graph_rebuilds_completed += 1,
         Err(error) => {
             report.graph_rebuilds_skipped += 1;

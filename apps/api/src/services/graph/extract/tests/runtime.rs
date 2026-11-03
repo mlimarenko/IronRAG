@@ -101,6 +101,7 @@ async fn retries_after_terminal_parse_failure_and_aggregates_usage() {
     let gateway = FakeGateway {
         responses: Mutex::new(vec![
             Ok(ChatResponse {
+                completion_status: crate::integrations::llm::ChatCompletionStatus::Complete,
                 provider_kind: "provider-alpha".to_string(),
                 model_name: "alpha-chat-mini".to_string(),
                 output_text: "this is not json".to_string(),
@@ -111,6 +112,7 @@ async fn retries_after_terminal_parse_failure_and_aggregates_usage() {
                 }),
             }),
             Ok(ChatResponse {
+                completion_status: crate::integrations::llm::ChatCompletionStatus::Complete,
                 provider_kind: "provider-alpha".to_string(),
                 model_name: "alpha-chat-mini".to_string(),
                 output_text: r#"{"entities":["Provider Alpha"],"relations":[]}"#.to_string(),
@@ -169,6 +171,7 @@ async fn retries_upstream_protocol_failures_as_transient_provider_errors() {
             Err(anyhow::Error::new(ProviderCallError::json("opaque", source))
                 .context("provider boundary")),
             Ok(ChatResponse {
+                completion_status: crate::integrations::llm::ChatCompletionStatus::Complete,
                 provider_kind: "provider-alpha".to_string(),
                 model_name: "alpha-chat-mini".to_string(),
                 output_text: r#"{"entities":["Provider Alpha"],"relations":[]}"#.to_string(),
@@ -207,6 +210,7 @@ async fn retries_transient_upstream_rejections_as_provider_errors() {
                 "opaque",
             ))),
             Ok(ChatResponse {
+                completion_status: crate::integrations::llm::ChatCompletionStatus::Complete,
                 provider_kind: "provider-alpha".to_string(),
                 model_name: "alpha-chat-mini".to_string(),
                 output_text: r#"{"entities":["Provider Alpha"],"relations":[]}"#.to_string(),
@@ -240,6 +244,7 @@ async fn misleading_untyped_provider_text_is_terminal_without_retry() {
         responses: Mutex::new(vec![
             Err(anyhow::anyhow!("provider request failed status=503 timeout connection reset")),
             Ok(ChatResponse {
+                completion_status: crate::integrations::llm::ChatCompletionStatus::Complete,
                 provider_kind: "provider-alpha".to_string(),
                 model_name: "alpha-chat-mini".to_string(),
                 output_text: r#"{"entities":["Provider Alpha"],"relations":[]}"#.to_string(),
@@ -261,12 +266,14 @@ async fn fails_after_retry_exhaustion_with_recovery_trace() {
     let gateway = FakeGateway {
         responses: Mutex::new(vec![
             Ok(ChatResponse {
+                completion_status: crate::integrations::llm::ChatCompletionStatus::Complete,
                 provider_kind: "provider-alpha".to_string(),
                 model_name: "alpha-chat-mini".to_string(),
                 output_text: "broken payload".to_string(),
                 usage_json: serde_json::json!({ "prompt_tokens": 5 }),
             }),
             Ok(ChatResponse {
+                completion_status: crate::integrations::llm::ChatCompletionStatus::Complete,
                 provider_kind: "provider-alpha".to_string(),
                 model_name: "alpha-chat-mini".to_string(),
                 output_text: "still broken".to_string(),

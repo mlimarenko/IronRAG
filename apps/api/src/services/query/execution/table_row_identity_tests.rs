@@ -7,6 +7,7 @@ fn identity_row(document_id: Uuid, row_number: usize, fields: &[(&str, &str)]) -
         document_id,
         sheet_name: "sheet_01".to_string(),
         table_name: Some("status_table".to_string()),
+        table_ref: None,
         row_number,
         fields: fields
             .iter()

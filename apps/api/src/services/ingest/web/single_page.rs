@@ -517,25 +517,20 @@ pub(super) async fn materialize_snapshot_resource(
 
     let file_name =
         source_file_name_from_url(&resource.final_url, resource.content_type.as_deref());
-    let extraction_plan = state
-        .application_services
-        .content
-        .build_runtime_extraction_plan(
-            state,
-            run.library_id,
-            &file_name,
-            resource.content_type.as_deref(),
-            &resource.payload_bytes,
+    let extraction_plan = super::support::inspect_web_resource(
+        &file_name,
+        resource.content_type.as_deref(),
+        &resource.payload_bytes,
+    )
+    .await
+    .map_err(|rejection| {
+        WebRunFailure::from_extraction_rejection(
+            &rejection,
+            Some(resource.final_url.clone()),
+            resource.content_type.clone(),
+            Some(resource.http_status),
         )
-        .await
-        .map_err(|rejection| {
-            WebRunFailure::from_extraction_rejection(
-                &rejection,
-                Some(resource.final_url.clone()),
-                resource.content_type.clone(),
-                Some(resource.http_status),
-            )
-        })?;
+    })?;
 
     let checksum = format!("sha256:{}", hex::encode(sha2::Sha256::digest(&resource.payload_bytes)));
     let content_type = resolved_web_mime_type(resource.content_type.as_deref(), &extraction_plan);

@@ -122,6 +122,7 @@ pub(super) fn deterministic_clarification_question(
 
 pub(super) fn clarification_not_answer_verification() -> RuntimeAnswerVerification {
     RuntimeAnswerVerification {
+        semantic_verification: None,
         state: QueryVerificationState::NotRun,
         warnings: vec![QueryVerificationWarning {
             code: "clarification_not_answer".to_string(),
@@ -137,11 +138,14 @@ pub(super) fn clarification_not_answer_verification() -> RuntimeAnswerVerificati
 pub(super) async fn finalize_typed_clarification_verification(
     state: &AppState,
     execution_id: Uuid,
+    question: &str,
     answer: &str,
     query_ir: &QueryIR,
     clarification: &QueryClarification,
 ) -> anyhow::Result<()> {
-    let verification = clarification_not_answer_verification();
+    let mut verification = clarification_not_answer_verification();
+    verification.semantic_verification =
+        Some(super::super::semantic_verification::nonfactual_report(question, answer));
     let finalized = super::super::verification_policy::finalize_answer_visibility(
         query_ir.verification_level(),
         verification.state,

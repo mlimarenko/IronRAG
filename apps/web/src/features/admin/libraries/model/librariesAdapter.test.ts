@@ -30,6 +30,26 @@ const library: CatalogLibraryResponse = {
 }
 
 describe('libraries adapter', () => {
+  it('refuses Xberg instead of silently converting a stale server policy', () => {
+    const xbergLibrary: CatalogLibraryResponse = {
+      ...library,
+      recognitionPolicy: { rasterImageEngine: 'xberg' },
+    } as unknown as CatalogLibraryResponse
+    expect(() => adaptLibrarySettings(xbergLibrary, library.retrievalConfig)).toThrow(
+      'Unsupported raster image recognition engine: xberg',
+    )
+  })
+
+  it('refuses a native raster engine instead of silently replacing the policy', () => {
+    const nativeLibrary: CatalogLibraryResponse = {
+      ...library,
+      recognitionPolicy: { rasterImageEngine: 'native' },
+    } as unknown as CatalogLibraryResponse
+    expect(() => adaptLibrarySettings(nativeLibrary, library.retrievalConfig)).toThrow(
+      'Unsupported raster image recognition engine: native',
+    )
+  })
+
   it('maps list rows without inventing absent costs', () => {
     const response: AdminLibraryPageResponse = {
       items: [
@@ -79,7 +99,7 @@ describe('libraries adapter', () => {
       library.webIngestPolicy.crawlFilter,
     )
 
-    expect(draft.recognitionEngine).toBe('vision')
+    expect(draft).not.toHaveProperty('recognitionEngine')
     expect(draft.chunkingTemplate).toBe('naive')
     expect(filter.allowPatterns[0]?.source).toBe('import')
   })

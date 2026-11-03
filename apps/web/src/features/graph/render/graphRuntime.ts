@@ -137,6 +137,9 @@ export class GraphRuntime {
 
     this.attachPointerHandlers()
     this.attachWindowHandlers()
+    document.fonts?.addEventListener('loadingdone', this.handleFontsLoaded)
+    // Canvas text does not itself initiate font loading.
+    void document.fonts?.load(this.labelFont()).then(this.handleFontsLoaded, this.handleFontsLoaded)
   }
 
   // ------------------------------------------------------------------ sizing
@@ -303,7 +306,18 @@ export class GraphRuntime {
     if (this.frameHandle != null) cancelAnimationFrame(this.frameHandle)
     this.detachPointerHandlers()
     this.detachWindowHandlers()
+    document.fonts?.removeEventListener('loadingdone', this.handleFontsLoaded)
     this.renderer.dispose()
+  }
+
+  private readonly handleFontsLoaded = (): void => {
+    if (this.disposed) return
+    this.labelsDirty = true
+    this.invalidate()
+  }
+
+  private labelFont(): string {
+    return '11px ' + (getComputedStyle(this.labelCanvas).fontFamily || 'sans-serif')
   }
 
   // ----------------------------------------------------------------- private
@@ -575,7 +589,7 @@ export class GraphRuntime {
     context.clearRect(0, 0, this.viewport.width, this.viewport.height)
     if (tweenActive) return
     const style = getComputedStyle(this.labelCanvas)
-    context.font = '11px ' + (style.fontFamily || 'sans-serif')
+    context.font = this.labelFont()
     context.textBaseline = 'middle'
     const fill = style.color || '#1e293b'
     const positions = this.renderer.targetPositions

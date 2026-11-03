@@ -11,6 +11,38 @@ use super::*;
 )]
 pub(super) async fn run_migrate(state: &AppState, command: MigrateCommand) -> Result<()> {
     match command {
+        MigrateCommand::BillingKnowledgeSearchSchema { apply, json } => {
+            let report = billing_knowledge_search_schema::migrate_billing_knowledge_search_schema(
+                &state.persistence.postgres,
+                apply,
+            )
+            .await?;
+            emit_schema_migration("migrate.billing-knowledge-search-schema", json, &report)
+        }
+        MigrateCommand::BillingDocumentReadSchema { apply, json } => {
+            let report = billing_document_read_schema::migrate_billing_document_read_schema(
+                &state.persistence.postgres,
+                apply,
+            )
+            .await?;
+            emit_schema_migration("migrate.billing-document-read-schema", json, &report)
+        }
+        MigrateCommand::VisionRecognitionSchema { apply, json } => {
+            let report = vision_recognition_schema::migrate_vision_recognition_schema(
+                &state.persistence.postgres,
+                apply,
+            )
+            .await?;
+            emit_schema_migration("migrate.vision-recognition-schema", json, &report)
+        }
+        MigrateCommand::XbergRecognitionSchema { apply, json } => {
+            let report = xberg_recognition_schema::migrate_xberg_recognition_schema(
+                &state.persistence.postgres,
+                apply,
+            )
+            .await?;
+            emit_schema_migration("migrate.xberg-recognition-schema", json, &report)
+        }
         MigrateCommand::ContentVisibilityIntentSchema {
             import_admission_manifest,
             import_admission_sha256,
@@ -20,24 +52,14 @@ pub(super) async fn run_migrate(state: &AppState, command: MigrateCommand) -> Re
             apply,
             json,
         } => {
-            let admission = if let Some(path) = import_admission_manifest {
-                Some(
-                    content_visibility_intent_schema::CertifiedImportAdmission::from_file(
-                        &path,
-                        import_admission_sha256
-                            .as_deref()
-                            .context("missing certificate SHA-256 pin")?,
-                        accepted_recovery_snapshot_id
-                            .as_deref()
-                            .context("missing accepted recovery snapshot pin")?,
-                        source_baseline_sha384.as_deref().context("missing source baseline pin")?,
-                        admitted_by.as_deref().context("missing admitting operator")?,
-                    )
-                    .await?,
-                )
-            } else {
-                None
-            };
+            let admission = load_import_admission(
+                import_admission_manifest.as_deref(),
+                import_admission_sha256.as_deref(),
+                accepted_recovery_snapshot_id.as_deref(),
+                source_baseline_sha384.as_deref(),
+                admitted_by.as_deref(),
+            )
+            .await?;
             let report =
                 content_visibility_intent_schema::migrate_content_visibility_intent_schema(
                     &state.persistence.postgres,
@@ -86,12 +108,91 @@ pub(super) async fn run_migrate(state: &AppState, command: MigrateCommand) -> Re
     }
 }
 
+async fn load_import_admission(
+    path: Option<&std::path::Path>,
+    sha256: Option<&str>,
+    recovery_snapshot_id: Option<&str>,
+    source_baseline_sha384: Option<&str>,
+    admitted_by: Option<&str>,
+) -> Result<Option<content_visibility_intent_schema::CertifiedImportAdmission>> {
+    if let Some(path) = path {
+        Ok(Some(
+            content_visibility_intent_schema::CertifiedImportAdmission::from_file(
+                path,
+                sha256.context("missing certificate SHA-256 pin")?,
+                recovery_snapshot_id.context("missing accepted recovery snapshot pin")?,
+                source_baseline_sha384.context("missing source baseline pin")?,
+                admitted_by.context("missing admitting operator")?,
+            )
+            .await?,
+        ))
+    } else {
+        Ok(None)
+    }
+}
+
 /// The counters every additive schema migration reports, so the shared
 /// `emit_schema_migration` printer owns the one textual shape.
 trait SchemaMigrationReport {
     fn apply(&self) -> bool;
     fn already_current(&self) -> bool;
     fn schema_applied(&self) -> bool;
+}
+
+impl SchemaMigrationReport
+    for billing_knowledge_search_schema::BillingKnowledgeSearchSchemaMigrationReport
+{
+    fn apply(&self) -> bool {
+        self.apply
+    }
+
+    fn already_current(&self) -> bool {
+        self.already_current
+    }
+
+    fn schema_applied(&self) -> bool {
+        self.schema_applied
+    }
+}
+
+impl SchemaMigrationReport
+    for billing_document_read_schema::BillingDocumentReadSchemaMigrationReport
+{
+    fn apply(&self) -> bool {
+        self.apply
+    }
+
+    fn already_current(&self) -> bool {
+        self.already_current
+    }
+
+    fn schema_applied(&self) -> bool {
+        self.schema_applied
+    }
+}
+
+impl SchemaMigrationReport for vision_recognition_schema::VisionRecognitionSchemaMigrationReport {
+    fn apply(&self) -> bool {
+        self.apply
+    }
+    fn already_current(&self) -> bool {
+        self.already_current
+    }
+    fn schema_applied(&self) -> bool {
+        self.schema_applied
+    }
+}
+
+impl SchemaMigrationReport for xberg_recognition_schema::XbergRecognitionSchemaMigrationReport {
+    fn apply(&self) -> bool {
+        self.apply
+    }
+    fn already_current(&self) -> bool {
+        self.already_current
+    }
+    fn schema_applied(&self) -> bool {
+        self.schema_applied
+    }
 }
 
 impl SchemaMigrationReport

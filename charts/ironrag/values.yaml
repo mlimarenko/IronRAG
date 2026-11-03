@@ -46,10 +46,8 @@ resourcePresets:
       cpu: "2"
       memory: 4096Mi
       ephemeral-storage: 4Gi
-  # Ingest worker. Mirrors x-ironrag-resources-worker. 3 GiB is the configured
-  # docling containment: auto_docling_max_concurrency_for_limits resolves a
-  # 3 GiB limit to docling concurrency = 1, so a docling/python spike cgroup-
-  # OOMs the worker pod (job retries) instead of starving co-scheduled pods.
+  # Native parsing/rendering plus worker headroom; image text uses remote Vision.
+  # Verify peak memory with the target workload before raising concurrency.
   worker: &ironrag-resources-worker
     requests:
       cpu: "1"
@@ -57,9 +55,9 @@ resourcePresets:
       ephemeral-storage: 1Gi
     limits:
       cpu: "4"
-      memory: 3072Mi
+      memory: 3Gi
       ephemeral-storage: 4Gi
-  # API backend (answer path; no docling spawned here). Mirrors
+  # API backend (answer path; no extractor spawned here). Mirrors
   # x-ironrag-resources-backend. 3.5 GiB covers concurrent grounded-answer
   # turns with margin.
   backend: &ironrag-resources-backend
@@ -133,17 +131,13 @@ app:
     maxParallelJobsGlobal: 4
     maxParallelJobsPerWorkspace: 2
     maxParallelJobsPerLibrary: 1
-    doclingPageBatchSize: 10
-    doclingPageStreamWindowPages: 40
-    doclingMaxConcurrency: auto
-    # Bounded wait, in seconds, for one Docling extraction slot before the
-    # waiter refuses. The default covers a full queue of maximum-length
-    # extractions (waiters per process × extractor timeout).
-    doclingAcquireTimeoutSecs: 1800
+    xbergExtractBin: ironrag-extract
+    xbergPageBatchSize: 10
+    xbergTimeoutSecs: 300
+    xbergAcquireTimeoutSecs: 600
     heavyPipelineParallelism: auto
     # Bounded wait, in seconds, for one heavy-revision pipeline slot. The
-    # default matches Docling because one pipeline slot is backed by one
-    # Docling queue.
+    # Covers several bounded native extraction queue waits.
     heavyAcquireTimeoutSecs: 1800
     embeddingParallelism: 8
     graphExtractParallelismPerDocument: 16
@@ -360,9 +354,9 @@ worker:
   # Number of ingest workers — the single k8s scale knob. Scale-out is safe:
   # jobs are claimed with `for update skip locked` under concurrency caps, so
   # replicas never double-process a job. The Docker Compose baseline defaults to
-  # 1 worker (IRONRAG_WORKER_REPLICAS); this k8s default is 2. Raise for faster
+  # 1 worker (IRONRAG_WORKER_REPLICAS); this k8s default is also 1. Raise for faster
   # ingest; size nodes for replicaCount × the worker memory limit.
-  replicaCount: 2
+  replicaCount: 1
   image:
     repository: pipingspace/ironrag-backend
     # Empty means use Chart.appVersion.

@@ -10,6 +10,8 @@ use crate::shared::extraction::table_summary::is_table_summary_text;
 
 mod code_boundaries;
 mod code_splitting;
+#[cfg(test)]
+pub(crate) mod comparison;
 mod quality;
 #[cfg(test)]
 mod tests;
@@ -20,12 +22,6 @@ pub use code_splitting::split_large_code_blocks;
 pub struct StructuredChunkingProfile {
     pub max_chars: usize,
     pub overlap_chars: usize,
-}
-
-impl Default for StructuredChunkingProfile {
-    fn default() -> Self {
-        Self { max_chars: 2_800, overlap_chars: 280 }
-    }
 }
 
 #[must_use]
@@ -210,7 +206,18 @@ fn push_structured_chunk_window(
         blocks.iter().map(|block| block.normalized_text.trim()).collect::<Vec<_>>().join("\n\n");
     let literal_digest =
         format!("sha256:{}", hex::encode(Sha256::digest(normalized_text.as_bytes())));
-    let support_block_ids = blocks.iter().map(|block| block.block_id).collect::<Vec<_>>();
+    let mut support_block_ids = blocks.iter().map(|block| block.block_id).collect::<Vec<_>>();
+    for block in blocks {
+        if (block.block_kind == StructuredBlockKind::TableRow
+            || is_table_summary_text(&block.normalized_text))
+            && let Some(parent) = block.parent_block_id
+            && !support_block_ids.contains(&parent)
+        {
+            // Keep the original source anchor/span resolvable without copying
+            // the entire table into each derived row or summary chunk.
+            support_block_ids.push(parent);
+        }
+    }
     let heading_trail = blocks
         .iter()
         .rev()
@@ -281,7 +288,7 @@ fn collect_preceding_sentences(sentences_per_chunk: &[Vec<String>], index: usize
         chunk_index -= 1;
         let sentences = &sentences_per_chunk[chunk_index];
         let take = remaining.min(sentences.len());
-        before.extend(sentences[sentences.len() - take..].iter().map(String::as_str));
+        before.extend(sentences[sentences.len() - take..].iter().rev().map(String::as_str));
         remaining = remaining.saturating_sub(take);
         if remaining == 0 {
             break;
@@ -312,11 +319,34 @@ fn collect_following_sentences(sentences_per_chunk: &[Vec<String>], index: usize
 }
 
 fn build_window_text(core: &str, before: &[&str], after: &[&str]) -> Option<String> {
+    let mut remaining = WINDOW_TEXT_MAX_TOKENS.checked_sub(core.split_whitespace().count())?;
+    let mut preceding = take_window_sentences(before.iter().rev().copied(), &mut remaining);
+    preceding.reverse();
+    let following = take_window_sentences(after.iter().copied(), &mut remaining);
+    if preceding.is_empty() && following.is_empty() {
+        return None;
+    }
     let prefix =
-        if before.is_empty() { String::new() } else { format!("{}\n\n", before.join(" ")) };
-    let suffix = if after.is_empty() { String::new() } else { format!("\n\n{}", after.join(" ")) };
-    let trimmed = trim_to_tokens(&format!("{prefix}{core}{suffix}"), WINDOW_TEXT_MAX_TOKENS);
-    (trimmed.len() > core.len()).then_some(trimmed)
+        if preceding.is_empty() { String::new() } else { format!("{}\n\n", preceding.join(" ")) };
+    let suffix =
+        if following.is_empty() { String::new() } else { format!("\n\n{}", following.join(" ")) };
+    Some(format!("{prefix}{core}{suffix}"))
+}
+
+fn take_window_sentences<'a>(
+    sentences: impl Iterator<Item = &'a str>,
+    remaining: &mut usize,
+) -> Vec<&'a str> {
+    let mut selected = Vec::new();
+    for sentence in sentences {
+        let tokens = sentence.split_whitespace().count();
+        if tokens > *remaining {
+            break;
+        }
+        selected.push(sentence);
+        *remaining -= tokens;
+    }
+    selected
 }
 
 /// Naively splits text into sentences at `.`, `!`, `?` boundaries.
@@ -338,15 +368,6 @@ fn split_into_sentences(text: &str) -> Vec<String> {
         sentences.push(trimmed);
     }
     sentences
-}
-
-/// Truncates `text` to at most `max_tokens` whitespace-split words.
-fn trim_to_tokens(text: &str, max_tokens: usize) -> String {
-    let words: Vec<&str> = text.split_whitespace().collect();
-    if words.len() <= max_tokens {
-        return text.to_string();
-    }
-    words[..max_tokens].join(" ")
 }
 
 fn dominant_chunk_kind(blocks: &[StructuredBlockData]) -> StructuredBlockKind {

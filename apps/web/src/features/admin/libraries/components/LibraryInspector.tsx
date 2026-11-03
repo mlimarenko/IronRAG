@@ -132,11 +132,13 @@ function SettingsForm({
   library,
   retrieval,
   onSave,
+  onConfigureAi,
 }: Readonly<{
   formId: string
   library: CatalogLibraryResponse
   retrieval: RetrievalConfig
   onSave: (draft: LibrarySettingsDraft) => Promise<void>
+  onConfigureAi: () => void
 }>) {
   const { t } = useTranslation()
   const [draft, setDraft] = useState<LibrarySettingsDraft>(() =>
@@ -239,23 +241,14 @@ function SettingsForm({
       <div className="form-section">
         <h3>{t('admin.libraries.settings.processingTitle')}</h3>
         <div className="field-grid">
-          <label className="field">
-            <span>{t('admin.libraries.settings.rasterImageEngine')}</span>
-            <select
-              className="input"
-              value={draft.recognitionEngine}
-              onChange={(event) =>
-                patchDraft('recognitionEngine', event.target.value as 'docling' | 'vision')
-              }
-            >
-              <option value="docling">
-                {t('admin.libraries.settings.recognitionEngines.docling')}
-              </option>
-              <option value="vision">
-                {t('admin.libraries.settings.recognitionEngines.vision')}
-              </option>
-            </select>
-          </label>
+          <div className="field">
+            <strong>{t('admin.libraries.settings.visionRequired')}</strong>
+            <p className="text-muted-foreground">{t('admin.libraries.settings.visionHelp')}</p>
+            <Button type="button" variant="ghost" onClick={onConfigureAi}>
+              <Settings2 size={16} />
+              {t('admin.libraries.settings.configureExtractText')}
+            </Button>
+          </div>
           <label className="field">
             <span>{t('admin.libraries.settings.textSearchConfig')}</span>
             <input
@@ -415,6 +408,7 @@ export function LibraryInspector({
           library={queries.library.data}
           retrieval={queries.retrieval.data}
           onSave={save}
+          onConfigureAi={() => onConfigureAi(row)}
         />
       )}
     </Modal>

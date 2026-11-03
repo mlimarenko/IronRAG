@@ -339,53 +339,6 @@ pub(super) async fn system_statement_kind_from_child_executions(
     Ok(None)
 }
 
-/// Persist the parent agent execution as a verbatim passthrough of a child's
-/// deterministic system statement.
-///
-/// The parent body is the child's statement about the library, not a
-/// corpus-grounded claim, so parent verification neither applies nor may attach
-/// warnings or retrieval sources. The bundle is created neutral first because
-/// persistence reads it; `answerKind` is what makes read-side consumers hide
-/// the parent's retrieval references.
-pub(super) async fn finalize_agent_system_statement(
-    state: &AppState,
-    execution: &query_repository::QueryExecutionRow,
-    context_bundle_id: Uuid,
-    assistant_grounding: &AssistantGroundingEvidence,
-    kind: AnswerKind,
-) -> anyhow::Result<()> {
-    ensure_agent_tool_context_bundle(
-        state,
-        execution,
-        context_bundle_id,
-        assistant_grounding,
-        QueryVerificationState::NotRun,
-        serde_json::json!([]),
-    )
-    .await?;
-    let verification = RuntimeAnswerVerification {
-        state: QueryVerificationState::NotRun,
-        warnings: Vec::new(),
-        unsupported_literals: Vec::new(),
-    };
-    persist_query_verification(QueryVerificationPersistence {
-        state,
-        execution_id: execution.id,
-        verification: &verification,
-        answer_disposition: QueryAnswerDisposition::SafeFallback,
-        clarification: &QueryClarification::default(),
-        authoritative_evidence: &AuthoritativeAnswerEvidence {
-            bundle: None,
-            chunk_rows: Vec::new(),
-            structured_blocks: Vec::new(),
-            technical_facts: Vec::new(),
-        },
-        assistant_grounding,
-        answer_kind: Some(kind),
-    })
-    .await
-}
-
 /// Whether a parent agent answer is the verbatim passthrough of a child's
 /// deterministic system statement.
 pub(super) fn is_system_statement_passthrough(
@@ -396,6 +349,31 @@ pub(super) fn is_system_statement_passthrough(
         && child_answer_kind == Some(AnswerKind::MissingExplicitDocument)
 }
 
+/// Exact passthrough selects the actual winning child, not a union of every
+/// earlier tool call. Composed answers retain their multi-child evidence set.
+pub(super) fn selected_agent_child_execution_ids(
+    provenance: AgentAnswerProvenance,
+    outcome: Option<&AgentGroundedAnswerOutcome>,
+    observed: &[Uuid],
+) -> anyhow::Result<Vec<Uuid>> {
+    if provenance == AgentAnswerProvenance::Composed {
+        anyhow::ensure!(outcome.is_none(), "composed answer carries a child outcome");
+        return Ok(observed.to_vec());
+    }
+    let source = outcome.and_then(|outcome| outcome.source_execution_id);
+    if let Some(source) = source {
+        anyhow::ensure!(
+            observed.contains(&source),
+            "passthrough source was not observed in actual tool results"
+        );
+        Ok(vec![source])
+    } else {
+        // No identity means no receipt reuse. Existing evidence may still be
+        // independently checked by the selected-candidate semantic owner.
+        Ok(observed.to_vec())
+    }
+}
+
 /// Evidence inputs for verifying an agent answer against the tool evidence
 /// gathered during the agent loop.
 pub(super) struct AgentAnswerVerificationRequest<'a> {
@@ -404,21 +382,25 @@ pub(super) struct AgentAnswerVerificationRequest<'a> {
     pub(super) context_bundle_id: Uuid,
     pub(super) answer_text: &'a str,
     pub(super) assistant_grounding: &'a AssistantGroundingEvidence,
-    pub(super) answer_provenance: AgentAnswerProvenance,
-    pub(super) grounded_answer_outcome: Option<&'a AgentGroundedAnswerOutcome>,
 }
 
 pub(super) async fn verify_agent_answer_against_tool_evidence(
     request: AgentAnswerVerificationRequest<'_>,
 ) -> anyhow::Result<RuntimeAnswerVerification> {
+    Ok(prepare_agent_verification_stage(request).await?.verification)
+}
+
+/// Draft-only formal checks. Child outcome and semantic execution belong to
+/// the selected parent finalizer, never to this repeatable revision probe.
+pub(super) async fn prepare_agent_verification_stage(
+    request: AgentAnswerVerificationRequest<'_>,
+) -> anyhow::Result<crate::services::query::execution::AnswerVerificationStage> {
     let AgentAnswerVerificationRequest {
         state,
         execution,
         context_bundle_id,
         answer_text,
         assistant_grounding,
-        answer_provenance,
-        grounded_answer_outcome,
     } = request;
     ensure_agent_tool_context_bundle(
         state,
@@ -454,31 +436,23 @@ pub(super) async fn verify_agent_answer_against_tool_evidence(
         prompt_context: &prompt_context,
         assistant_grounding,
     });
-    let finalized = finalize_answer_visibility(
-        VerificationLevel::Moderate,
-        verification.state,
-        &verification.warnings,
-        QueryLanguage::Auto,
-        answer_text,
-        AnswerVisibilityKind::FactualCandidate,
-    );
-    let (answer_disposition, clarification) = finalized_agent_answer_outcome(
-        answer_provenance,
-        grounded_answer_outcome,
-        finalized.disposition,
-    )?;
-    persist_query_verification(QueryVerificationPersistence {
-        state,
-        execution_id: execution.id,
-        verification: &verification,
-        answer_disposition,
-        clarification: &clarification,
-        authoritative_evidence: &authoritative_evidence,
-        assistant_grounding,
-        answer_kind: None,
+    Ok(crate::services::query::execution::AnswerVerificationStage {
+        verification,
+        generation: crate::services::query::execution::AnswerGenerationStage {
+            intent_profile,
+            primary_answer_chunks: Vec::new(),
+            authoritative_evidence,
+            assistant_grounding: assistant_grounding.clone(),
+            answer: answer_text.to_owned(),
+            usage_json: serde_json::Value::Null,
+            prompt_context,
+            query_ir: query_ir.unwrap_or_else(|| {
+                crate::services::query::compiler::provider_free_fallback_query_ir(
+                    &execution.query_text,
+                )
+            }),
+        },
     })
-    .await?;
-    Ok(verification)
 }
 
 pub(super) fn finalized_agent_answer_outcome(

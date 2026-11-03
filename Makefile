@@ -22,10 +22,10 @@ LOCAL_DOCKER_STEADY_SERVICES = $(filter-out startup,$(LOCAL_DOCKER_RUNTIME_SERVI
 LOCAL_DOCKER_ALL_SERVICES ?= postgres redis startup backend worker frontend
 export IRONRAG_BACKEND_MEMORY_LIMIT
 export IRONRAG_WORKER_MEMORY_LIMIT
-IRONRAG_BENCHMARK_BASE_URL ?= http://127.0.0.1:19000/v1
+IRONRAG_BENCHMARK_BASE_URL ?=
 # The single self-contained benchmark registry: every suite lives under the
 # golden_ prefix and every corpus file is referenced by at least one suite.
-IRONRAG_GOLDEN_SUITES ?= apps/api/benchmarks/grounded_query/golden_programming_suite.json apps/api/benchmarks/grounded_query/golden_infrastructure_suite.json apps/api/benchmarks/grounded_query/golden_protocols_suite.json apps/api/benchmarks/grounded_query/golden_code_suite.json apps/api/benchmarks/grounded_query/golden_multiformat_suite.json apps/api/benchmarks/grounded_query/golden_hardening_suite.json apps/api/benchmarks/grounded_query/golden_api_baseline_suite.json apps/api/benchmarks/grounded_query/golden_workflow_strict_suite.json apps/api/benchmarks/grounded_query/golden_layout_noise_suite.json apps/api/benchmarks/grounded_query/golden_graph_multihop_suite.json apps/api/benchmarks/grounded_query/golden_upload_surface_suite.json apps/api/benchmarks/grounded_query/golden_technical_contract_suite.json
+IRONRAG_GOLDEN_SUITES ?= $(sort $(wildcard apps/api/benchmarks/grounded_query/golden_*_suite.json))
 IRONRAG_BENCHMARK_SUITES ?= $(IRONRAG_GOLDEN_SUITES)
 IRONRAG_GOLDEN_OUTPUT_DIR ?= tmp-golden-benchmarks
 IRONRAG_BENCHMARK_OUTPUT_DIR ?= tmp-grounded-benchmarks
@@ -36,6 +36,8 @@ IRONRAG_BENCHMARK_BASELINE_DIR ?=
 IRONRAG_BENCHMARK_CANDIDATE_DIR ?=
 IRONRAG_BENCHMARK_MAX_LATENCY_REGRESSION_PERCENT ?= 10
 BACKEND_CARGO_TARGET_DIR ?= $(CURDIR)/.cargo-target/api
+BACKEND_NATIVE_TEST_ENV = IRONRAG_XBERG_EXTRACT_BIN="$(abspath $(BACKEND_CARGO_TARGET_DIR))/debug/ironrag-extract"
+BACKEND_LIB_TEST_FILTER ?=
 GITLEAKS ?= gitleaks
 GITLEAKS_LOG_OPTS ?=
 
@@ -56,7 +58,6 @@ GITLEAKS_LOG_OPTS ?=
 	backend-deny \
 	backend-unused-deps \
 	backend-audit-strict \
-	ops-selftest \
 	ci-backend-gates \
 	ci-backend-functional \
 	ci-python-functional \
@@ -122,10 +123,32 @@ backend-fmt:
 backend-fmt-check:
 	cargo fmt --all --check
 
+.PHONY: backend-extractor-dependency-check
+backend-extractor-dependency-check:
+	CARGO_TARGET_DIR="$(BACKEND_CARGO_TARGET_DIR)" cargo check --locked -p xberg
+
+.PHONY: backend-extractor-check backend-extractor-build backend-extractor-test
+backend-extractor-check:
+	CARGO_TARGET_DIR="$(BACKEND_CARGO_TARGET_DIR)" cargo check --locked -p ironrag-backend --bin ironrag-extract
+
+backend-extractor-build:
+	CARGO_TARGET_DIR="$(BACKEND_CARGO_TARGET_DIR)" cargo build --locked --release -p ironrag-backend --bin ironrag-extract
+
+backend-extractor-test:
+	CARGO_TARGET_DIR="$(BACKEND_CARGO_TARGET_DIR)" cargo test --locked -p ironrag-backend --bin ironrag-extract
+
 # Library tests need no Postgres or Redis. Database suites run separately in
 # the local integration gate.
-backend-test-lib:
-	CARGO_TARGET_DIR="$(BACKEND_CARGO_TARGET_DIR)" cargo test --lib --all-features -p ironrag-backend
+.PHONY: backend-native-test-runtime
+backend-native-test-runtime:
+	CARGO_TARGET_DIR="$(BACKEND_CARGO_TARGET_DIR)" cargo build --locked --profile test --all-features -p ironrag-backend --bin ironrag-extract
+
+.PHONY: backend-content-receipt-fixture
+backend-content-receipt-fixture:
+	@CARGO_TARGET_DIR="$(BACKEND_CARGO_TARGET_DIR)" cargo run --locked --quiet --profile test --all-features -p ironrag-backend --example content_receipt_fixture
+
+backend-test-lib: backend-native-test-runtime
+	$(BACKEND_NATIVE_TEST_ENV) CARGO_TARGET_DIR="$(BACKEND_CARGO_TARGET_DIR)" cargo test --lib --all-features -p ironrag-backend $(if $(BACKEND_LIB_TEST_FILTER),"$(BACKEND_LIB_TEST_FILTER)")
 
 # The lib's database cases are `#[ignore]`d like the integration crate's, but
 # they live in the unit-test binary because they exercise private items. A
@@ -144,13 +167,14 @@ BACKEND_LIB_IGNORED_SUITES ?= \
   services::query::result_cache::tests:2 \
   services::query::search::tests:1
 
-backend-test-lib-ignored:
+backend-test-lib-ignored: backend-native-test-runtime
 	@log="$$(mktemp)"; \
-	if DATABASE_URL="$$IRONRAG_DATABASE_URL" CARGO_TARGET_DIR="$(BACKEND_CARGO_TARGET_DIR)" cargo test --locked --color never \
+	if $(BACKEND_NATIVE_TEST_ENV) DATABASE_URL="$$IRONRAG_DATABASE_URL" CARGO_TARGET_DIR="$(BACKEND_CARGO_TARGET_DIR)" cargo test --locked --color never \
 	  -p ironrag-backend --lib --all-features -- --ignored --test-threads=1 \
 	  --skip services::graph::extract::entity_type::bench:: \
 	  --skip services::graph::extract::extraction_bench_tests:: \
 	  --skip services::query::execution::semantic_rerank::rerank_bench_tests:: \
+	  --skip services::ingest::structured_preparation::tests::comparison:: \
 	  >"$$log" 2>&1; then \
 	  cargo_status=0; \
 	else \
@@ -187,24 +211,24 @@ backend-doc:
 #   cargo test -p ironrag-backend --all-features --test it 2>&1 | tail -1
 BACKEND_FAST_TEST_COUNT ?= 43
 
-BACKEND_INTEGRATION_SUITES ?= governance_auth:13 greenfield_bootstrap:36 \
-  ai_catalog_repository:3 ai_catalog_service:6 ai_config_generation_fencing:4 atomic_admission:33 canonical_read_visibility:4 graph_visibility_race:1 mcp_public_writers:3 \
+BACKEND_INTEGRATION_SUITES ?= governance_auth:13 greenfield_bootstrap:45 \
+  ai_catalog_repository:3 ai_catalog_service:6 ai_config_generation_fencing:4 atomic_admission:33 canonical_read_visibility:6 graph_visibility_race:2 mcp_public_writers:3 \
   billing_rollups:16 bootstrap_stack:3 cancellation_class:8 catalog_repository:16 credential_encryption:1 \
-  iam_user_repository:2 incremental_graph_reconcile:2 knowledge_lifecycle:21 knowledge_search:24 login_rate_limit:3 \
+  iam_user_repository:2 incremental_graph_reconcile:2 knowledge_lifecycle:21 knowledge_search:37 login_rate_limit:3 \
   mcp_knowledge:3 \
-  mcp_memory_contracts:6 mcp_memory_permissions:5 mcp_memory_reads:8 mcp_memory_search:11 \
-  query_grounding:23 content_lifecycle:19 ingest_repository:18 ingest_attempts:6 \
+  mcp_memory_contracts:6 mcp_memory_permissions:5 mcp_memory_reads:12 mcp_memory_search:11 \
+  query_grounding:24 content_lifecycle:19 ingest_repository:18 ingest_attempts:6 \
   ingest_cancellation:2 ingest_preparation_fencing:3 ingest_unit_fencing:1 ingest_publication:16 \
   webhook_delivery:15 webhook_outbound:15 runtime_graph_extraction_repository:8 \
   runtime_graph_node_hints:1 runtime_orphan_reconcile:18 \
-  audit_events:17 content_repository:21 content_document_graph_coverage:7 \
+  audit_events:17 content_repository:22 content_document_graph_coverage:7 \
   structured_block_repository:1 content_revision_lineage:1 extract_graph:1 \
-  extract_repository:1 graph_projection_repository:2 graph_atomicity_fencing:9 \
-  graph_rebuild_guard_lifecycle:1 graph_reextract_repository:14 graph_snapshot_fencing:4 \
-  graph_summary_executor_fencing:1 knowledge_revision_states:1 ops_state:6 \
+  extract_repository:1 graph_projection_repository:3 graph_atomicity_fencing:12 \
+   graph_rebuild_guard_lifecycle:1 graph_reextract_repository:19 graph_snapshot_fencing:4 \
+  graph_summary_executor_fencing:5 knowledge_revision_states:1 ops_state:6 \
   provider_batch_resolution:1 web_ingest_repository:8 web_ingest_recursive_crawl:5 \
-  web_ingest_single_page:6 web_ingest_visibility:2 document_external_key_reclaim:3 \
-  revision_prefix_fetch:1 snapshot_transfer:29 oidc_sso:9 \
+  web_ingest_single_page:6 web_ingest_visibility:2 document_external_key_reclaim:4 \
+    revision_prefix_fetch:1 snapshot_transfer:30 oidc_sso:9 \
   terminal_graph_state_repair:6 \
   stranded_fan_out_repair:9 \
   workspace_restore_atomicity:3
@@ -241,9 +265,9 @@ BACKEND_INTEGRATION_SUITES ?= governance_auth:13 greenfield_bootstrap:36 \
 # its own Cargo binary section, so unrelated unit/binary totals cannot mask it.
 # Merge Cargo's streams before the guard captures them: Cargo writes the binary
 # headings to stderr and libtest writes the matching results to stdout.
-backend-test-fast:
+backend-test-fast: backend-native-test-runtime
 	@log="$$(mktemp)"; \
-	if CARGO_TARGET_DIR="$(BACKEND_CARGO_TARGET_DIR)" sh -c 'exec "$$@" 2>&1' cargo-test \
+	if $(BACKEND_NATIVE_TEST_ENV) CARGO_TARGET_DIR="$(BACKEND_CARGO_TARGET_DIR)" sh -c 'exec "$$@" 2>&1' cargo-test \
 	  cargo test --locked --color never --workspace --all-features --lib --bins --tests >"$$log" 2>&1; then \
 	  cargo_status=0; \
 	else \
@@ -257,9 +281,9 @@ backend-test-fast:
 	rm -f "$$log"; \
 	exit $$status
 
-backend-test-integration:
+backend-test-integration: backend-native-test-runtime
 	@log="$$(mktemp)"; \
-	if CARGO_TARGET_DIR="$(BACKEND_CARGO_TARGET_DIR)" cargo test --locked --color never -p ironrag-backend \
+	if $(BACKEND_NATIVE_TEST_ENV) CARGO_TARGET_DIR="$(BACKEND_CARGO_TARGET_DIR)" cargo test --locked --color never -p ironrag-backend \
 	  --all-features --test it -- --ignored --test-threads=1 \
 	  --skip query_compiler_openai_smoke:: \
 	  >"$$log" 2>&1; then \
@@ -322,6 +346,47 @@ backend-bench-semantic-rerank:
 	  -p ironrag-backend --lib --all-features -- --ignored --exact \
 	  services::query::execution::semantic_rerank::rerank_bench_tests::semantic_rerank_model_benchmark
 
+.PHONY: backend-bench-semantic-rerank-export backend-bench-semantic-rerank-replay
+.PHONY: backend-bench-chunking-profile-export
+.PHONY: backend-bench-chunking-input backend-bench-chunking-treatments backend-bench-chunking-retrieval
+.PHONY: backend-bench-atomic-assertion-input
+# Pinned native extraction/projection and existing profile preparation; no model calls.
+backend-bench-chunking-profile-export:
+	CARGO_TARGET_DIR="$(BACKEND_CARGO_TARGET_DIR)" cargo test --locked --color never \
+	  -p ironrag-backend --lib --all-features -- --ignored --exact \
+	  services::ingest::structured_preparation::tests::comparison::native_category_profile_export
+
+backend-bench-chunking-input:
+	CARGO_TARGET_DIR="$(BACKEND_CARGO_TARGET_DIR)" cargo test --locked --color never \
+	  -p ironrag-backend --lib --all-features -- --ignored --exact \
+	  services::ingest::structured_preparation::tests::comparison::native_category_treatment_input
+
+backend-bench-chunking-treatments:
+	CARGO_TARGET_DIR="$(BACKEND_CARGO_TARGET_DIR)" cargo test --locked --color never \
+	  -p ironrag-backend --lib --all-features -- --ignored --exact \
+	  services::ingest::structured_preparation::tests::comparison::native_category_treatment_export
+
+backend-bench-chunking-retrieval:
+	CARGO_TARGET_DIR="$(BACKEND_CARGO_TARGET_DIR)" cargo test --locked --color never \
+	  -p ironrag-backend --lib --all-features -- --ignored --exact \
+	  services::ingest::structured_preparation::tests::comparison::retrieval::native_category_retrieval_replay
+
+backend-bench-atomic-assertion-input:
+	CARGO_TARGET_DIR="$(BACKEND_CARGO_TARGET_DIR)" cargo test --locked --color never \
+	  -p ironrag-backend --lib --all-features -- --ignored --exact \
+	  services::ingest::structured_preparation::tests::comparison::assertions::native_atomic_assertion_input_export
+
+# Offline native preparation and metric replay. No provider dispatch or runtime services.
+backend-bench-semantic-rerank-export:
+	CARGO_TARGET_DIR="$(BACKEND_CARGO_TARGET_DIR)" cargo test --locked --color never \
+	  -p ironrag-backend --lib --all-features -- --ignored --exact \
+	  services::query::execution::semantic_rerank::rerank_bench_tests::comparison::semantic_rerank_comparison_export
+
+backend-bench-semantic-rerank-replay:
+	CARGO_TARGET_DIR="$(BACKEND_CARGO_TARGET_DIR)" cargo test --locked --color never \
+	  -p ironrag-backend --lib --all-features -- --ignored --exact \
+	  services::query::execution::semantic_rerank::rerank_bench_tests::comparison::semantic_rerank_comparison_replay
+
 backend-change-gate:
 	cargo fmt --all --check
 	CARGO_TARGET_DIR="$(BACKEND_CARGO_TARGET_DIR)" cargo check -q --workspace --all-targets --all-features
@@ -337,9 +402,6 @@ backend-unused-deps:
 	cargo machete --with-metadata
 
 backend-audit-strict: backend-audit backend-deny backend-unused-deps
-
-ops-selftest:
-	python3 -m unittest discover -s scripts/ops -p 'test_*.py'
 
 # CI supplies an immutable commit range. Local runs inspect the current Git
 # diff. The complete tracked/non-ignored worktree is always scanned as well, so
@@ -521,14 +583,14 @@ ci-backend-gates: backend-lint backend-test-fast migration-check openapi-check o
 # Fast CI path: run each functional suite once without LLVM instrumentation.
 ci-backend-functional: backend-test-fast backend-test-lib-ignored backend-test-integration migration-check openapi-check openapi-public-check
 
-ci-python-functional: connectors-sync connectors-test ops-selftest
+ci-python-functional: connectors-sync connectors-test
 
 ci-frontend-gates: frontend-lint frontend-typecheck frontend-i18n-audit frontend-coverage frontend-color-gate frontend-deadcode frontend-swagger-check frontend-sdk-check
 
 ci-ops-gates:
 	$(MAKE) backend-unused-deps compose-check helm-chart-check mem-budget-check install-script-check mcp-consumer-contract-check benchmark-contract-test
 
-static-max: ops-selftest backend-unused-deps frontend-format-check frontend-deadcode connectors-gates
+static-max: backend-unused-deps frontend-format-check frontend-deadcode connectors-gates
 
 # Parse the public example instead of the secret-bearing local `.env`.
 compose-check:
@@ -555,7 +617,7 @@ helm-chart-check:
 	scripts/minikube/render-all.sh
 
 # Guard the docker-compose memory budget: fail if the steady-state sum of
-# `memory` LIMITS exceeds the swapless 16 GiB host ceiling (see the script
+# `memory` LIMITS exceeds the swapless 8 GiB host ceiling (see the script
 # and the "Memory containment" header in docker-compose.yml). Keeps a future
 # edit from silently re-oversubscribing the host.
 mem-budget-check:
@@ -587,6 +649,7 @@ enterprise-validate:
 audit: backend-audit-strict
 
 benchmark-grounded:
+	@test -n "$(IRONRAG_BENCHMARK_BASE_URL)" || (echo "IRONRAG_BENCHMARK_BASE_URL is required (canonical HTTPS /v1 endpoint)" && exit 1)
 	@test -n "$$IRONRAG_SESSION_COOKIE" || (echo "IRONRAG_SESSION_COOKIE is required" && exit 1)
 	@test -n "$(IRONRAG_BENCHMARK_WORKSPACE_ID)" || (echo "IRONRAG_BENCHMARK_WORKSPACE_ID is required" && exit 1)
 	@mkdir -p "$(IRONRAG_BENCHMARK_OUTPUT_DIR)"
@@ -607,6 +670,7 @@ benchmark-grounded:
 	python3 apps/api/benchmarks/grounded_query/run_live_benchmark.py "$$@"
 
 benchmark-grounded-seed:
+	@test -n "$(IRONRAG_BENCHMARK_BASE_URL)" || (echo "IRONRAG_BENCHMARK_BASE_URL is required (canonical HTTPS /v1 endpoint)" && exit 1)
 	@test -n "$$IRONRAG_SESSION_COOKIE" || (echo "IRONRAG_SESSION_COOKIE is required" && exit 1)
 	@test -n "$(IRONRAG_BENCHMARK_WORKSPACE_ID)" || (echo "IRONRAG_BENCHMARK_WORKSPACE_ID is required" && exit 1)
 	@mkdir -p "$(IRONRAG_BENCHMARK_OUTPUT_DIR)"
@@ -648,7 +712,6 @@ benchmark-golden-seed:
 
 benchmark-contract-test:
 	python3 -m unittest discover -s apps/api/benchmarks/grounded_query -p 'test_*.py'
-	python3 -m unittest discover -s scripts/bench -p 'test_*.py'
 
 benchmark-regression:
 	@test -n "$(IRONRAG_BENCHMARK_BASELINE_DIR)" || (echo "IRONRAG_BENCHMARK_BASELINE_DIR is required" && exit 1)

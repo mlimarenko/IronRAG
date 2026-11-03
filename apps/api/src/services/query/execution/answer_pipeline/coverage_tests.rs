@@ -113,6 +113,7 @@ fn structural_coverage_rejects_a_paraphrased_enum_variant_target() {
     ));
 
     let mut verification = RuntimeAnswerVerification {
+        semantic_verification: None,
         state: QueryVerificationState::Verified,
         warnings: Vec::new(),
         unsupported_literals: Vec::new(),
@@ -197,6 +198,7 @@ fn structural_anchor_coverage_uses_token_boundaries_for_single_token_anchors() {
 fn broad_procedure_uses_variant_coverage_instead_of_generic_structural_guard() {
     let ir = sample_ir_with_act(QueryAct::ConfigureHow, 0.9, None);
     let mut verification = RuntimeAnswerVerification {
+        semantic_verification: None,
         state: QueryVerificationState::PartiallySupported,
         warnings: vec![crate::domains::query::QueryVerificationWarning {
             code: "semantic_verification_partial".to_string(),
@@ -228,6 +230,7 @@ fn focused_procedure_keeps_generic_structural_coverage_guard() {
     let mut ir = sample_ir_with_act(QueryAct::ConfigureHow, 0.9, None);
     ir.document_focus = Some(DocumentHint { hint: "workflow module Alpha".to_string() });
     let mut verification = RuntimeAnswerVerification {
+        semantic_verification: None,
         state: QueryVerificationState::Verified,
         warnings: Vec::new(),
         unsupported_literals: Vec::new(),
@@ -261,6 +264,7 @@ fn structural_anchor_coverage_warning_marks_verified_answer_partial() {
     ir.source_slice = None;
     ir.conversation_refs.clear();
     let mut verification = RuntimeAnswerVerification {
+        semantic_verification: None,
         state: QueryVerificationState::Verified,
         warnings: Vec::new(),
         unsupported_literals: Vec::new(),
@@ -296,6 +300,7 @@ fn structural_anchor_coverage_does_not_expand_issue_local_remediation_scope() {
         kind: LiteralKind::Other,
     }];
     let mut verification = RuntimeAnswerVerification {
+        semantic_verification: None,
         state: QueryVerificationState::Verified,
         warnings: Vec::new(),
         unsupported_literals: Vec::new(),
@@ -326,6 +331,7 @@ fn structural_anchor_coverage_preserves_deterministic_anchor_inventory_answers()
         QueryTargetKind::ConfigKey,
     ];
     let mut verification = RuntimeAnswerVerification {
+        semantic_verification: None,
         state: QueryVerificationState::Verified,
         warnings: Vec::new(),
         unsupported_literals: Vec::new(),

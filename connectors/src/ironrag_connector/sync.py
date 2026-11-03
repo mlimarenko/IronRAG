@@ -57,12 +57,15 @@ from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID
 
+import httpx
+
 from .ironrag import (
     IronRagClient,
     IronRagContentUnsupportedError,
     IronRagContentUnsupportedProblemError,
     IronRagError,
     IronRagNotFoundError,
+    IronRagProblemError,
 )
 from .observability import get_logger
 from .orchestrator import OrchestrationFailedError, OrchestrationOutcome, Orchestrator
@@ -80,6 +83,26 @@ from .source import (
 from .state import CursorRow, DocumentLocation, StateStore
 
 log = get_logger(__name__)
+
+
+def _item_error_context(exc: Exception) -> dict[str, str]:
+    context: dict[str, str] = {}
+    if isinstance(exc, httpx.ReadTimeout):
+        try:
+            request = exc.request
+        except RuntimeError:
+            # HTTPX permits transport exceptions without an attached request.
+            return context
+        if request.method:
+            context["request_method"] = request.method
+        if request.url.host:
+            context["request_host"] = request.url.host
+    elif isinstance(exc, IronRagProblemError):
+        if exc.problem.code:
+            context["problem_code"] = exc.problem.code
+        if exc.problem.request_id:
+            context["request_id"] = exc.problem.request_id
+    return context
 
 
 # A ref that keeps timing out still gets the full budget back this often, so a
@@ -358,6 +381,7 @@ class SyncManager:
                         external_key=ref.external_key,
                         error_type=type(exc).__name__,
                         error=str(exc) or repr(exc),
+                        **_item_error_context(exc),
                     )
                     report.errors += 1
                     return
@@ -883,15 +907,9 @@ class SyncManager:
     async def _list_by_prefix(self, library_id: UUID, prefix: str) -> list[tuple[str, str]]:
         """Every ``(externalKey, documentId)`` pair under ``prefix`` in a library.
 
-        Built on the single ``list_documents`` walk (plan S7.7: no
-        independent pagination reimplementation) narrowed server-side via
-        ``search`` -- the same ILIKE-substring narrowing
-        ``IronRagClient.find_document`` used to do by hand, now just a
-        client-side ``startswith`` filter over one search-narrowed walk
-        instead of a full unfiltered scan. There is no server-side prefix
-        filter on the list endpoint (plan S7.1's field list is cursor/
-        limit/search/externalKey/includeDeleted/status), so this is the
-        correct way to reconstruct prefix listing from that surface.
+        Use the canonical cursor walk with server-side substring search,
+        then filter exact prefixes locally. The collection has no prefix
+        filter; a known exact key uses ``IronRagClient.find_document``.
         """
         pairs: list[tuple[str, str]] = []
         async for document in self._ironrag.list_documents(library_id, search=prefix):

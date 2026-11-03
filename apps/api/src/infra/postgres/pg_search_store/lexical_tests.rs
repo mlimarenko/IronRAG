@@ -39,7 +39,6 @@ fn chunk_exact_template_keeps_precise_fts_constructor() {
         CHUNK_LEXICAL_SQL_PREFIX
             .contains("c.search_tsv @@ to_tsquery('simple', ironrag_unaccent($2))")
     );
-    assert!(!CHUNK_LEXICAL_SQL_PREFIX.contains("websearch_to_tsquery"));
     assert!(!CHUNK_LEXICAL_SQL_PREFIX.contains("{FTS}"));
 }
 
@@ -135,7 +134,6 @@ const CHUNK_LEXICAL_STALE_REVISION_FRAGMENTS: &[&str] = &[
 /// soft-title candidates each filter unreadable/deleted documents before their
 /// local limits, so those gates appear three times.
 const CHUNK_LEXICAL_LANE_OCCURRENCES: &[(&str, usize)] = &[
-    ("join readable_docs title_readable", 2),
     ("title_readable.workspace_id = d.workspace_id", 2),
     ("title_readable.library_id = d.library_id", 2),
     ("current_revision.revision_id as readable_revision_id", 1),

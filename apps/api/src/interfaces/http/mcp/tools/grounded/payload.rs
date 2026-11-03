@@ -268,7 +268,7 @@ fn grounded_answer_compact_structured_content(
         .take(GROUNDED_ANSWER_COMPACT_CANDIDATE_LIMIT)
         .collect::<Vec<_>>();
 
-    json!({
+    let mut payload = json!({
         "answerBody": answer_text,
         "responseProfile": "compact",
         "finalAnswerReady": envelope.final_answer_ready,
@@ -311,7 +311,12 @@ fn grounded_answer_compact_structured_content(
         "libraryId": execution_detail.execution.library_id,
         "workspaceId": execution_detail.execution.workspace_id,
         "lifecycleState": execution_detail.execution.lifecycle_state,
-    })
+    });
+    if let Some(report) = execution_detail.semantic_verification.as_ref() {
+        payload["semanticVerification"] =
+            super::semantic_projection::compact_semantic_verification(report, reference_limit);
+    }
+    payload
 }
 
 fn grounded_answer_compact_references(
@@ -409,7 +414,7 @@ fn grounded_answer_compact_references(
     (total_count, ranked.into_iter().take(limit).map(|(_, _, reference)| reference).collect())
 }
 
-fn grounded_answer_compact_text(value: &str) -> String {
+pub(super) fn grounded_answer_compact_text(value: &str) -> String {
     let mut chars = value.trim().chars();
     let mut compact =
         chars.by_ref().take(GROUNDED_ANSWER_COMPACT_TEXT_MAX_CHARS).collect::<String>();

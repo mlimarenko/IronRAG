@@ -39,7 +39,6 @@ use crate::{
         ingest::extract::ExtractService,
         ingest::extraction_recovery::ExtractionRecoveryService,
         ingest::service::IngestService,
-        ingest::structured_preparation::StructuredPreparationService,
         ingest::technical_facts::TechnicalFactService,
         ingest::web::WebIngestService,
         knowledge::service::KnowledgeService,
@@ -235,7 +234,6 @@ pub struct ApplicationServices {
     pub content: ContentService,
     pub ingest: IngestService,
     pub extract: ExtractService,
-    pub structured_preparation: StructuredPreparationService,
     pub technical_facts: TechnicalFactService,
     pub web_ingest: WebIngestService,
     pub graph: GraphService,
@@ -491,10 +489,6 @@ impl AppState {
             content: ContentService::new(),
             ingest: IngestService::new(),
             extract: ExtractService::new(),
-            structured_preparation: StructuredPreparationService::with_chunking(
-                settings.chunking_max_chars,
-                settings.chunking_overlap_chars,
-            ),
             technical_facts: TechnicalFactService::new(),
             web_ingest: WebIngestService::new(
                 crate::services::ingest::web::WebIngestRuntimeSettings {

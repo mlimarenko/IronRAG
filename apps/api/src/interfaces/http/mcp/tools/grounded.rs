@@ -19,6 +19,7 @@
 mod args;
 mod payload;
 mod preserve_spans;
+mod semantic_projection;
 
 use args::*;
 pub use payload::*;

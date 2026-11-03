@@ -3,6 +3,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use uuid::Uuid;
 
 use crate::domains::query_ir::{QueryAct, QueryIR, QueryTargetKind};
+use crate::shared::extraction::table_markdown::SemanticTableContext;
 use crate::shared::extraction::table_summary::{
     TableColumnSummary, TableSummaryValueKind, build_table_column_summaries, format_numeric_value,
     parse_table_column_summary, render_table_column_summary,
@@ -18,6 +19,7 @@ use super::{
 
 #[derive(Debug, Clone)]
 struct ScoredTableSummary {
+    document_id: Uuid,
     summary: TableColumnSummary,
     score: f32,
     searchable_text: String,
@@ -78,6 +80,7 @@ fn collect_scored_table_summaries(
         .iter()
         .filter_map(|chunk| {
             parse_table_column_summary(&chunk.source_text).map(|summary| ScoredTableSummary {
+                document_id: chunk.document_id,
                 searchable_text: build_table_summary_searchable_text(&summary),
                 source_text: chunk.source_text.clone(),
                 summary,
@@ -87,11 +90,11 @@ fn collect_scored_table_summaries(
         .collect::<Vec<_>>();
     let mut seen = summaries
         .iter()
-        .map(|entry| table_summary_identity_key(&entry.summary))
+        .map(|entry| (entry.document_id, table_summary_identity_key(&entry.summary)))
         .collect::<HashSet<_>>();
 
     for derived in derive_scored_table_summaries_from_rows(&scoped_chunks) {
-        if seen.insert(table_summary_identity_key(&derived.summary)) {
+        if seen.insert((derived.document_id, table_summary_identity_key(&derived.summary))) {
             summaries.push(derived);
         }
     }
@@ -109,9 +112,10 @@ fn derive_scored_table_summaries_from_rows(
         best_score: f32,
     }
 
-    let mut groups = HashMap::<(Uuid, String, Option<String>), RowGroup>::new();
+    let mut groups = HashMap::<(Uuid, Option<i32>, String, Option<String>), RowGroup>::new();
     for row in chunks.iter().filter_map(|chunk| parse_table_row_chunk(chunk)) {
-        let group_key = (row.document_id, row.sheet_name.clone(), row.table_name.clone());
+        let group_key =
+            (row.document_id, row.table_ref, row.sheet_name.clone(), row.table_name.clone());
         let group = groups.entry(group_key).or_default();
         group.best_score = group.best_score.max(row.score);
         let values = group.row_values.entry(row.row_number).or_default();
@@ -129,7 +133,7 @@ fn derive_scored_table_summaries_from_rows(
     }
 
     let mut summaries = Vec::new();
-    for ((_, sheet_name, table_name), group) in groups {
+    for ((document_id, table_ref, sheet_name, table_name), group) in groups {
         if group.headers.is_empty() || group.row_values.len() < 2 {
             continue;
         }
@@ -147,13 +151,17 @@ fn derive_scored_table_summaries_from_rows(
             })
             .collect::<Vec<_>>();
         for summary in build_table_column_summaries(
-            Some(sheet_name.as_str()),
-            table_name.as_deref(),
+            SemanticTableContext {
+                sheet_name: Some(sheet_name.as_str()),
+                table_name: table_name.as_deref(),
+                table_ref,
+            },
             &group.headers,
             &rows,
         ) {
             let source_text = render_table_column_summary(&summary);
             summaries.push(ScoredTableSummary {
+                document_id,
                 searchable_text: build_table_summary_searchable_text(&summary),
                 score: group.best_score,
                 summary,
@@ -165,13 +173,15 @@ fn derive_scored_table_summaries_from_rows(
     summaries
 }
 
-fn table_summary_identity_key(summary: &TableColumnSummary) -> String {
-    format!(
-        "{}|{}|{}|{}",
-        summary.sheet_name.as_deref().unwrap_or_default(),
-        summary.table_name.as_deref().unwrap_or_default(),
-        summary.column_name,
-        summary.value_kind.as_str(),
+fn table_summary_identity_key(
+    summary: &TableColumnSummary,
+) -> (Option<i32>, Option<String>, Option<String>, String, String) {
+    (
+        summary.table_ref,
+        summary.sheet_name.clone(),
+        summary.table_name.clone(),
+        summary.column_name.clone(),
+        summary.value_kind.as_str().to_string(),
     )
 }
 
@@ -356,4 +366,36 @@ pub(crate) fn summary_matches_requested_aggregation(
             && summary.most_frequent_count > 0;
     }
     false
+}
+
+#[cfg(test)]
+mod identity_tests {
+    use super::*;
+
+    #[test]
+    fn native_table_consumer_summary_identity_preserves_literal_boundaries() {
+        let headers = vec!["Stock".to_string()];
+        let rows = vec![vec!["7".to_string()], vec!["19".to_string()]];
+        let first = build_table_column_summaries(
+            SemanticTableContext {
+                sheet_name: Some("A|B"),
+                table_name: Some("C"),
+                table_ref: None,
+            },
+            &headers,
+            &rows,
+        )
+        .remove(0);
+        let second = build_table_column_summaries(
+            SemanticTableContext {
+                sheet_name: Some("A"),
+                table_name: Some("B|C"),
+                table_ref: None,
+            },
+            &headers,
+            &rows,
+        )
+        .remove(0);
+        assert_ne!(table_summary_identity_key(&first), table_summary_identity_key(&second));
+    }
 }

@@ -15,10 +15,52 @@ struct DropSignal {
     dropped: Arc<tokio::sync::Notify>,
 }
 
+#[tokio::test]
+async fn single_provider_attempt_does_not_replay_under_an_enclosing_retry_deadline() {
+    let attempts = AtomicU32::new(0);
+    let result = with_provider_retry_execution(
+        Duration::from_secs(30),
+        with_single_provider_attempt(with_retry(
+            || async {
+                attempts.fetch_add(1, Ordering::SeqCst);
+                Err::<(), _>(ProviderCallError::http_status(
+                    "synthetic",
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    &HeaderMap::new(),
+                    "synthetic unavailable",
+                ))
+            },
+            RetryPolicy::idempotent_provider_call(3, Duration::ZERO, Duration::ZERO),
+        )),
+    )
+    .await;
+    assert!(result.is_err());
+    assert_eq!(attempts.load(Ordering::SeqCst), 1);
+}
+
 impl Drop for DropSignal {
     fn drop(&mut self) {
         self.dropped.notify_one();
     }
+}
+
+#[tokio::test]
+async fn execution_deadline_does_not_override_max_attempts() {
+    let attempts = AtomicU32::new(0);
+    let result = with_provider_retry_execution(
+        Duration::from_secs(30),
+        with_retry(
+            || {
+                let attempt = attempts.fetch_add(1, Ordering::SeqCst) + 1;
+                std::future::ready(if attempt <= 3 { Err(attempt) } else { Ok(()) })
+            },
+            RetryPolicy::new(3, Duration::ZERO, Duration::ZERO, false, |_| RetryDecision::Retry),
+        ),
+    )
+    .await;
+
+    assert_eq!(result, Err(3));
+    assert_eq!(attempts.load(Ordering::SeqCst), 3);
 }
 
 #[tokio::test]
@@ -48,7 +90,7 @@ async fn fake_provider_429s_until_it_succeeds_within_the_execution_deadline() {
                 }
             },
             RetryPolicy {
-                max_attempts: 1,
+                max_attempts: RATE_LIMITS_BEFORE_SUCCESS + 1,
                 initial_backoff: Duration::ZERO,
                 max_backoff: Duration::ZERO,
                 jitter: false,

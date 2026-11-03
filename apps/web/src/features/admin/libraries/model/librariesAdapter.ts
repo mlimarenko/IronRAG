@@ -4,7 +4,6 @@ import type {
   AdminLibraryPageResponse,
   AdminLibraryWorkspaceSummary,
   CatalogLibraryResponse,
-  RecognitionEngine,
   RetrievalConfig,
   WebIngestPattern,
   WebIngestUrlFilter,
@@ -13,7 +12,6 @@ import type {
 export const CHUNKING_TEMPLATES = ['naive', 'structured', 'tabular', 'qa', 'code', 'paper'] as const
 
 type ChunkingTemplate = (typeof CHUNKING_TEMPLATES)[number]
-type EditableRecognitionEngine = Extract<RecognitionEngine, 'docling' | 'vision'>
 
 export type AdminLibraryRow = {
   id: string
@@ -49,7 +47,6 @@ export type LibrarySettingsDraft = {
   lifecycleState: 'active' | 'archived'
   extractionPrompt: string
   includeDocumentHintInMcpAnswers: boolean
-  recognitionEngine: EditableRecognitionEngine
   textSearchConfig: string
   chunkingTemplate: ChunkingTemplate
   crawlAllowPatterns: string
@@ -89,6 +86,10 @@ export function adaptLibrarySettings(
   library: CatalogLibraryResponse,
   retrievalConfig: RetrievalConfig,
 ): LibrarySettingsDraft {
+  const recognitionEngine = library.recognitionPolicy.rasterImageEngine
+  if (recognitionEngine !== 'vision') {
+    throw new Error(`Unsupported raster image recognition engine: ${recognitionEngine}`)
+  }
   return {
     displayName: library.displayName,
     slug: library.slug,
@@ -96,8 +97,6 @@ export function adaptLibrarySettings(
     lifecycleState: library.lifecycleState === 'active' ? 'active' : 'archived',
     extractionPrompt: library.extractionPrompt ?? '',
     includeDocumentHintInMcpAnswers: library.includeDocumentHintInMcpAnswers,
-    recognitionEngine:
-      library.recognitionPolicy.rasterImageEngine === 'vision' ? 'vision' : 'docling',
     textSearchConfig: retrievalConfig.lexical.textSearchConfig,
     // The public catalog DTO currently omits this persisted field. Keep the
     // product-approved enum visible without pretending the value can be saved.

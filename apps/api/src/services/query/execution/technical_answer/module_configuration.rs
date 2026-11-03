@@ -5,6 +5,9 @@ use super::{
     transport_config::{CONFIG_ASSIGNMENT_REGEX, clean_config_assignment_value},
 };
 use crate::services::query::execution::document_target::focused_answer_document_id;
+use crate::shared::extraction::table_markdown::{
+    split_semantic_key_value, split_semantic_segments, unescape_semantic_segment,
+};
 
 static MARKDOWN_TABLE_FIRST_CELL_REGEX: LazyLock<regex::Regex> = LazyLock::new(|| {
     #[allow(clippy::expect_used, reason = "the static regex literal is compile-time owned")]
@@ -364,34 +367,48 @@ fn parse_markdown_parameter_row(line: &str) -> Option<VisibleParameterRow> {
 }
 
 fn parse_structured_table_parameter_row(line: &str) -> Option<VisibleParameterRow> {
-    let cells =
-        line.split(" | ").map(str::trim).filter(|cell| !cell.is_empty()).collect::<Vec<_>>();
+    let cells = split_semantic_segments(line)
+        .into_iter()
+        .map(str::trim)
+        .filter(|cell| !cell.is_empty())
+        .collect::<Vec<_>>();
     let row_position = cells.iter().position(|cell| {
         cell.strip_prefix("Row ")
             .is_some_and(|suffix| suffix.chars().next().is_some_and(|ch| ch.is_ascii_digit()))
     })?;
     let first_data_cell = cells.get(row_position.saturating_add(1))?;
-    let parameter = first_data_cell
-        .split_once(':')
-        .map_or(*first_data_cell, |(_, value)| value)
-        .trim()
-        .trim_matches('`');
+    // Locate structural markers before decoding cell text, so escaped values
+    // cannot become row metadata or introduce another field separator.
+    let parameter = unescape_semantic_segment(
+        split_semantic_key_value(first_data_cell)
+            .map_or(*first_data_cell, |(_, value)| value)
+            .trim()
+            .trim_matches('`'),
+    );
     if parameter.is_empty() {
         return None;
     }
     let rest_cells = cells
         .iter()
         .skip(row_position.saturating_add(2))
-        .map(|cell| cell.trim_matches('`').trim())
+        .map(|cell| {
+            let cell = cell.trim_matches('`').trim();
+            if let Some((key, value)) = split_semantic_key_value(cell) {
+                format!("{}: {}", unescape_semantic_segment(key), unescape_semantic_segment(value))
+            } else {
+                unescape_semantic_segment(cell)
+            }
+        })
         .filter(|cell| !cell.is_empty())
         .collect::<Vec<_>>();
     let mut rendered_parts = Vec::new();
-    if let Some(value) = infer_boolean_assignment_value_from_cells(&rest_cells) {
+    let rest_cell_refs = rest_cells.iter().map(String::as_str).collect::<Vec<_>>();
+    if let Some(value) = infer_boolean_assignment_value_from_cells(&rest_cell_refs) {
         rendered_parts.push(format!("{parameter} = {value}"));
     } else {
         rendered_parts.push(parameter.to_string());
     }
-    rendered_parts.extend(rest_cells.iter().map(|cell| (*cell).to_string()));
+    rendered_parts.extend(rest_cells);
     let rendered = rendered_parts.join(" — ");
     Some(VisibleParameterRow { parameter_key: parameter.to_string(), rendered })
 }
@@ -497,4 +514,70 @@ fn render_parameter_bullet(row: &str) -> String {
 
 fn runtime_chunk_text(chunk: &RuntimeMatchedChunk) -> &str {
     if chunk.source_text.trim().is_empty() { &chunk.excerpt } else { &chunk.source_text }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{parse_structured_table_parameter_row, render_parameter_bullet};
+    use crate::shared::extraction::table_markdown::{
+        SemanticTableContext, build_semantic_table_row_text,
+    };
+
+    #[test]
+    fn native_table_consumer_configuration_decodes_parameter_and_default_once() {
+        let headers = vec!["Parameter".to_string(), "Default".to_string()];
+        for (parameter, default) in [
+            ("ns:key", "enabled"),
+            (r"ns\:key | mode", r"C:\cache | ns:key"),
+            (r"root\\branch\|name", r"literal\:value\\tail | enabled"),
+            ("ordinary_parameter", "enabled"),
+        ] {
+            let row = vec![parameter.to_string(), default.to_string()];
+            let text =
+                build_semantic_table_row_text(SemanticTableContext::default(), 0, &headers, &row);
+            let parsed = parse_structured_table_parameter_row(&text)
+                .unwrap_or_else(|| panic!("emitted configuration row must parse: {text}"));
+            assert_eq!(parsed.parameter_key, parameter);
+            assert_eq!(
+                render_parameter_bullet(&parsed.rendered),
+                format!("`{parameter}` — Default: {default}")
+            );
+        }
+    }
+
+    #[test]
+    fn native_table_consumer_configuration_keeps_metadata_out_of_parameter_cells() {
+        // Unknown header labels retain the existing first-data-cell rule.
+        let headers = vec!["Custom: parameter | label".to_string(), "Default: value".to_string()];
+        let row = vec!["ns:key".to_string(), r"C:\cache | enabled".to_string()];
+        let emitted = build_semantic_table_row_text(
+            SemanticTableContext {
+                sheet_name: Some("Sheet: one | settings"),
+                table_name: Some("Configuration | names"),
+                table_ref: Some(7),
+            },
+            0,
+            &headers,
+            &row,
+        );
+        let text = emitted;
+        let parsed = parse_structured_table_parameter_row(&text)
+            .unwrap_or_else(|| panic!("emitted configuration row must parse: {text}"));
+        assert_eq!(parsed.parameter_key, "ns:key");
+        assert_eq!(
+            render_parameter_bullet(&parsed.rendered),
+            r"`ns:key` — Default: value: C:\cache | enabled"
+        );
+    }
+
+    #[test]
+    fn native_table_consumer_configuration_preserves_raw_parameter_rules() {
+        let parsed = parse_structured_table_parameter_row("Row 1 | ordinary_parameter | enabled")
+            .unwrap_or_else(|| panic!("raw parameter row must parse"));
+        assert_eq!(parsed.parameter_key, "ordinary_parameter");
+        assert_eq!(render_parameter_bullet(&parsed.rendered), "`ordinary_parameter` — enabled");
+        assert!(
+            parse_structured_table_parameter_row("Table Ref: 7 | Parameter: ns\\:key").is_none()
+        );
+    }
 }

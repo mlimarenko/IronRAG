@@ -3,17 +3,21 @@
 IronRAG sizing is driven by **chunks**, graph density, embedding dimension, and
 ingest / vector-rebuild concurrency. Source document count alone is a weak
 predictor: many small libraries are cheaper to query than one very large
-library, and steady query serving needs much less RAM than OCR, graph
+library, and steady query serving needs much less RAM than native rendering, graph
 extraction, or vector index rebuilds.
 
-Trial deployments can be smaller, but the default Docker Compose stack
-targets a **16 GiB** host. On larger hosts, raise the per-role memory caps
-via env (no separate overlay file):
+The default Docker Compose stack budgets **5408 MiB** in steady-state memory
+limits on an **8 GiB** baseline host. The memory guard ceiling is **7208 MiB**
+(8 GiB less 12% host headroom). All profiles use the configured `extract_text`
+Vision binding for image text; none installs local OCR models. Native parsing,
+rendering and image encoding still consume bounded RAM. These are sizing defaults,
+not a universal capacity or quality guarantee. Raise per-role caps for larger
+workloads via env (no separate overlay file):
 
 ```bash
 IRONRAG_DB_MEMORY_LIMIT=6144M \
   IRONRAG_BACKEND_MEMORY_LIMIT=4096M \
-  IRONRAG_WORKER_MEMORY_LIMIT=4096M \
+  IRONRAG_WORKER_MEMORY_LIMIT=5120M \
   docker compose up -d
 ```
 
@@ -21,9 +25,15 @@ IRONRAG_DB_MEMORY_LIMIT=6144M \
 
 | Profile | Host | Corpus shape | Notes |
 | --- | --- | --- | --- |
-| Evaluation | 4 vCPU, 8–12 GiB RAM, 50+ GB disk | Largest library up to ~25k chunks | Good for trials and demos. Avoid large high-dimensional vector rebuilds on this tier. |
-| Standard | 4–8 vCPU, 16 GiB RAM, 100–150 GB disk | Largest library up to ~250k chunks; total corpus may be larger across many libraries | Matches the default Compose memory budget. Suitable for normal self-hosted use when rebuilds are occasional. |
-| Large | 8–16 vCPU, 24–32 GiB RAM, 250+ GB disk | Largest library ~250k–1M chunks, high ingest concurrency, or full vector rebuilds | Raise the `IRONRAG_*_MEMORY_LIMIT` caps (see above) or equivalent Helm resource overrides. |
+| Micro | Below 8 GiB RAM | Small trials; avoid large vector rebuilds | Worker 768 MiB; steady caps 3200 MiB. Must still fit host headroom. |
+| Small | 8 to below 16 GiB RAM | Evaluation workloads | Worker 1536 MiB; steady caps 5952 MiB. |
+| Medium | 16 to below 32 GiB RAM | Standard workloads; verify target corpus | Worker 3072 MiB; steady caps 7488 MiB. |
+| Large | At least 32 GiB RAM | Large graphs or vector rebuilds; verify target corpus | Worker 5120 MiB; steady caps 21504 MiB. |
+
+These are installer recommendations, not corpus-size guarantees. The installer
+reserves max(512 MiB, 12% of RAM) for the host and preserves existing caps unless
+`--recompute-resources` is requested. Configure a Vision-capable `extract_text`
+binding for images and scanned pages regardless of profile.
 
 ## Runtime graph prewarm
 
@@ -71,9 +81,33 @@ with the total corpus.
 
 ## Vector rebuild spikes
 
-Vector index rebuilds are the main memory spike. If you switch an embedding
+Vector index rebuilds can cause large database memory spikes. If you switch an embedding
 binding to a different dimension or rebuild a high-dimensional shard, run it in
 a maintenance window and raise the memory caps for million-row shards.
+
+## Graph rebuild memory and OOM diagnosis
+
+A library graph rebuild reads extraction records through a transaction-local
+PostgreSQL cursor in batches of up to 64 records. It does not
+collect the library's complete raw and normalized extraction JSON in memory.
+Validation and pruning use compact identities rather than a second copy of all
+node and edge payloads. The rebuild still retains document coverage and graph
+identity indexes; its memory use is not constant and depends on the batch
+payloads and graph, alongside concurrent worker jobs.
+
+Bounded reading does not cap the number of records processed or permit partial
+publication. Coverage checks and graph publication remain transactional: a
+failure leaves the previous published graph unchanged. Post-commit topology
+prewarm is a separate allocation phase and belongs in memory verification too.
+
+Free host RAM does not override a container's hard memory limit. When investigating
+an OOM, correlate kernel `CONSTRAINT_MEMCG` or host-wide OOM evidence with the
+container's limit, `OOMKilled` status, restart history, RSS and working set. A
+node-level OOM-kill counter also counts cgroup-triggered kills; it does not by
+itself prove that the host exhausted its RAM. Scrape intervals can miss a short
+allocation spike, so a low preceding sample does not contradict the kernel's
+victim RSS. Distinguish retained baseline growth from a transient peak before
+calling it a leak or increasing limits.
 
 ## Filtered HNSW query bounds
 
@@ -178,11 +212,11 @@ provider concurrency budget are raised together.
 
 Each worker keeps its own `IRONRAG_WORKER_MEMORY_LIMIT` budget, so size the
 host for `replicas × worker memory` on top of the database and backend.
-Docling-backed PDF, office, and OCR extraction also requires enough hard cgroup
-headroom for one local extractor process. If the worker cap is too small,
-ingestion fails the affected document with `docling_insufficient_memory` before
-spawning the extractor; raise `IRONRAG_WORKER_MEMORY_LIMIT` for extractor-heavy
-imports rather than relying on retries.
+Native extraction retains its page batching, 300-second timeout and process
+admission bounds. Image recognition runs through remote Vision. Helm defaults
+to one worker with request 768 MiB and limit 3 GiB; Compose defaults to 3072 MiB.
+Check scheduler reservations and observed peak RSS with representative documents
+before increasing concurrency. A reduced reservation is not an idle-RSS saving.
 `IRONRAG_DATABASE_MAX_CONNECTIONS` is a deployment-wide app connection budget;
 the runtime divides it across the expected API and worker processes and caps
 each worker's local claim loop to the DB slots it can service. Adding workers
@@ -227,8 +261,9 @@ The rules behind the table:
 
 - **`shared_buffers` ≈ 40–50 % of the container limit.** The rest of the
   cgroup holds each backend's private memory and the kernel page cache for
-  reads that miss the buffer pool (page cache is charged to the container's
-  cgroup too, but it is reclaimable, so it does not OOM the container).
+  reads that miss the buffer pool. Page cache is charged to the container's
+  cgroup too; reclaimability does not guarantee enough headroom for concurrent
+  private allocations.
 - **`work_mem` is charged per sort/hash node per backend**, so it multiplies
   by concurrency in a way `shared_buffers` does not. At
   `max_connections=300`, 32 MB puts the worst case far past a 6 GiB

@@ -34,6 +34,7 @@ export function mapAssistantTurnToEvidence(
   resp: AssistantEvidenceTransport,
 ): AssistantEvidenceView {
   return {
+    ...(resp.semanticVerification ? { semanticVerification: resp.semanticVerification } : {}),
     chunkRefs: resp.chunkReferences.map((reference) => ({
       chunkId: reference.chunkId,
       executionId: reference.executionId,

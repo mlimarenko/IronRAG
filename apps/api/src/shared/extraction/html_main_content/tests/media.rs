@@ -106,8 +106,15 @@ fn preserves_text_around_inline_images() {
     let output =
         extract_html_main_content(html.as_bytes(), Some("text/html")).expect("html extraction");
 
-    assert!(output.content_text.contains("Introductory context Closing context"));
+    // Native Markdown may keep a line break where the source's inline image
+    // was selected out. Both surrounding contexts must remain adjacent and ordered.
+    let text = output.content_text.split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(text.contains("Introductory context Closing context"));
     assert!(output.content_text.contains("![Inline flow](/docs/inline-flow.png)"));
+    assert_eq!(
+        output.source_map.get("outboundResources"),
+        Some(&serde_json::json!(["/docs/inline-flow.png"]))
+    );
 }
 
 #[test]

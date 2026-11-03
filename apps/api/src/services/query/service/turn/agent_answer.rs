@@ -103,11 +103,10 @@ async fn complete_agent_answer_stage(
         None,
         Some(answer_started),
     );
-    persist_agent_debug_snapshot(input, &agent_result, false).await;
+    // Retain the already-paid agent transcript before verification can block or
+    // be cancelled. It is not yet a finalized public answer.
+    persist_agent_debug_snapshot(input, &agent_result, None).await;
     let verification = verify_agent_result(input, &mut agent_result).await;
-    if verification.revised_answer {
-        persist_agent_debug_snapshot(input, &agent_result, true).await;
-    }
     if let Some(outcome) = verification.outcome {
         return outcome;
     }
@@ -116,7 +115,6 @@ async fn complete_agent_answer_stage(
 
 struct AgentVerificationStageResult {
     outcome: Option<RuntimeTerminalOutcome<QueryAnswerTaskSuccess, QueryAnswerTaskFailure>>,
-    revised_answer: bool,
 }
 
 async fn verify_agent_result(
@@ -133,6 +131,7 @@ async fn verify_agent_result(
         return run_agent_evidence_verification(input, agent_result).await;
     };
     let failure = begin_failure.with_provider_calls(agent_result.provider_calls.clone());
+    persist_agent_debug_snapshot(input, agent_result, None).await;
     record_query_runtime_stage(
         input.state.agent_runtime.executor(),
         input.runtime_session,
@@ -141,10 +140,7 @@ async fn verify_agent_result(
         Some(&failure),
         None,
     );
-    AgentVerificationStageResult {
-        outcome: Some(make_query_terminal_failure_outcome(failure)),
-        revised_answer: false,
-    }
+    AgentVerificationStageResult { outcome: Some(make_query_terminal_failure_outcome(failure)) }
 }
 
 async fn run_agent_evidence_verification(
@@ -152,9 +148,28 @@ async fn run_agent_evidence_verification(
     agent_result: &mut AgentTurnResult,
 ) -> AgentVerificationStageResult {
     let verify_started = Utc::now();
-    let result = verify_agent_evidence(input, agent_result).await;
+    let result = match verify_agent_evidence(input, agent_result).await {
+        Ok(revised) => super::agent_semantic::finalize_selected_agent_answer(
+            input.state,
+            input.execution,
+            agent_result,
+        )
+        .await
+        .map(|()| revised)
+        .map_err(|error| {
+            make_query_answer_failure(
+                "query_agent_semantic_finalize_failed",
+                format!("selected UI answer finalization failed: {error}"),
+            )
+        }),
+        Err(error) => Err(error),
+    };
+    // Final selected body and all paid iterations survive both success and
+    // post-provider failure. No earlier draft snapshot replaces this row.
+    let final_answer = result.as_ref().ok().map(|_| agent_result.answer.as_str());
+    persist_agent_debug_snapshot(input, agent_result, final_answer).await;
     match result {
-        Ok(revised_answer) => {
+        Ok(_) => {
             record_query_runtime_stage(
                 input.state.agent_runtime.executor(),
                 input.runtime_session,
@@ -163,7 +178,7 @@ async fn run_agent_evidence_verification(
                 None,
                 Some(verify_started),
             );
-            AgentVerificationStageResult { outcome: None, revised_answer }
+            AgentVerificationStageResult { outcome: None }
         }
         Err(failure) => {
             let failure = failure.with_provider_calls(agent_result.provider_calls.clone());
@@ -177,7 +192,6 @@ async fn run_agent_evidence_verification(
             );
             AgentVerificationStageResult {
                 outcome: Some(make_query_terminal_failure_outcome(failure)),
-                revised_answer: false,
             }
         }
     }
@@ -187,7 +201,14 @@ async fn verify_agent_evidence(
     input: &AgentAnswerStageInput<'_>,
     agent_result: &mut AgentTurnResult,
 ) -> Result<bool, QueryAnswerTaskFailure> {
-    let child_execution_ids = agent_result.child_query_execution_ids.clone();
+    let child_execution_ids = super::agent_grounding::selected_agent_child_execution_ids(
+        agent_result.answer_provenance,
+        agent_result.grounded_answer_outcome.as_ref(),
+        &agent_result.child_query_execution_ids,
+    )
+    .map_err(|error| {
+        make_query_answer_failure("query_agent_child_provenance_failed", error.to_string())
+    })?;
     if agent_result.answer_provenance == AgentAnswerProvenance::GroundedAnswerPassthrough {
         let child_answer_kind =
             system_statement_kind_from_child_executions(input.state, &child_execution_ids)
@@ -204,22 +225,8 @@ async fn verify_agent_evidence(
             // The parent body is the child's deterministic system statement
             // about the library, not a corpus-grounded claim: parent
             // verification neither applies nor may attach warnings or
-            // retrieval sources. Persist it neutral with the child's answer
-            // kind and skip model revision.
-            finalize_agent_system_statement(
-                input.state,
-                input.execution,
-                input.execution_context_bundle_id,
-                &agent_result.assistant_grounding,
-                AnswerKind::MissingExplicitDocument,
-            )
-            .await
-            .map_err(|error| {
-                make_query_answer_failure(
-                    "query_agent_verify_failed",
-                    format!("failed to finalize the UI agent system statement: {error}"),
-                )
-            })?;
+            // retrieval sources. Skip draft revision; the selected parent
+            // finalizer persists its explicit non-factual outcome.
             return Ok(false);
         }
     }
@@ -236,8 +243,6 @@ async fn verify_agent_evidence(
         context_bundle_id: input.execution_context_bundle_id,
         answer_text: &agent_result.answer,
         assistant_grounding: &agent_result.assistant_grounding,
-        answer_provenance: agent_result.answer_provenance,
-        grounded_answer_outcome: agent_result.grounded_answer_outcome.as_ref(),
     })
     .await
     .map_err(|error| {
@@ -534,14 +539,17 @@ async fn verify_and_accept_agent_revision(
     revision_kind: &str,
 ) -> bool {
     agent_result.provider_calls.append(&mut revision.provider_calls);
+    crate::services::query::agent_loop::merge_usage_into(
+        &mut agent_result.usage_json,
+        &revision.usage_json,
+    );
+    agent_result.debug_iterations.append(&mut revision.debug_iterations);
     let verification = verify_agent_answer_against_tool_evidence(AgentAnswerVerificationRequest {
         state: input.state,
         execution: input.execution,
         context_bundle_id: input.execution_context_bundle_id,
         answer_text: &revision.answer,
         assistant_grounding: &agent_result.assistant_grounding,
-        answer_provenance: agent_result.answer_provenance,
-        grounded_answer_outcome: agent_result.grounded_answer_outcome.as_ref(),
     })
     .await;
     match verification {
@@ -551,11 +559,6 @@ async fn verify_and_accept_agent_revision(
                 revision.answer.chars().count(),
                 revision_kind,
             );
-            crate::services::query::agent_loop::merge_usage_into(
-                &mut agent_result.usage_json,
-                &revision.usage_json,
-            );
-            agent_result.debug_iterations.extend(revision.debug_iterations);
             agent_result.answer = revision.answer;
             true
         }
@@ -656,28 +659,48 @@ async fn persist_agent_result_body(
 async fn persist_agent_debug_snapshot(
     input: &AgentAnswerStageInput<'_>,
     agent_result: &AgentTurnResult,
-    revised: bool,
+    final_answer: Option<&str>,
 ) {
     if let Err(error) = crate::services::query::llm_context_debug::upsert_snapshot(
         &input.state.persistence.postgres,
-        &crate::services::query::llm_context_debug::LlmContextSnapshot {
-            execution_id: input.execution.id,
-            library_id: input.library.id,
-            question: input.content_text.to_string(),
-            iterations: agent_result.debug_iterations.clone(),
-            total_iterations: agent_result.debug_iterations.len(),
-            final_answer: Some(agent_result.answer.clone()),
-            captured_at: Utc::now(),
-            query_ir: None,
-            agent_loop: agent_result.agent_loop.clone(),
-            spans: Vec::new(),
-        },
+        &agent_debug_snapshot(
+            input.execution.id,
+            input.library.id,
+            input.content_text,
+            agent_result,
+            final_answer,
+        ),
     )
     .await
     {
-        warn!(error = %error, execution_id = %input.execution.id, revised, "failed to persist UI agent LLM context snapshot");
+        warn!(error = %error, execution_id = %input.execution.id, finalized = final_answer.is_some(), "failed to persist UI agent LLM context snapshot");
     }
 }
+
+fn agent_debug_snapshot(
+    execution_id: Uuid,
+    library_id: Uuid,
+    question: &str,
+    agent_result: &AgentTurnResult,
+    final_answer: Option<&str>,
+) -> crate::services::query::llm_context_debug::LlmContextSnapshot {
+    crate::services::query::llm_context_debug::LlmContextSnapshot {
+        execution_id,
+        library_id,
+        question: question.to_owned(),
+        iterations: agent_result.debug_iterations.clone(),
+        total_iterations: agent_result.debug_iterations.len(),
+        final_answer: final_answer.map(str::to_owned),
+        captured_at: Utc::now(),
+        query_ir: None,
+        agent_loop: agent_result.agent_loop.clone(),
+        spans: Vec::new(),
+    }
+}
+
+#[cfg(test)]
+#[path = "agent_snapshot_tests.rs"]
+mod snapshot_tests;
 
 async fn fail_agent_answer_stage(
     input: &mut AgentAnswerStageInput<'_>,

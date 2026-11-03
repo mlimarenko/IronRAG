@@ -31,8 +31,15 @@ use super::{
     response::native_chat_response,
 };
 
+#[tokio::test]
+async fn semantic_verification_wire_controls_remain_machine_owned() -> anyhow::Result<()> {
+    let gateway =
+        test_gateway(ProviderBudgetConfig::unlimited(), ProviderBudgetRegistryOptions::default());
+    crate::services::query::execution::semantic_verification::assert_hostile_controls_cannot_override_gateway_body(&gateway).await
+}
+
 async fn native_chat_test_server(
-    response_body: &'static str,
+    response_body: &str,
 ) -> (String, tokio::task::JoinHandle<Vec<u8>>) {
     // Provider URLs that explicitly allow private networks intentionally rewrite
     // loopback to the Docker host gateway. Advertise this process's routable
@@ -49,6 +56,7 @@ async fn native_chat_test_server(
     let listener =
         TcpListener::bind((Ipv4Addr::UNSPECIFIED, 0)).await.expect("bind native chat server");
     let address = listener.local_addr().expect("native chat server address");
+    let response_body = response_body.to_string();
     let server = tokio::spawn(async move {
         let (mut socket, _) = listener.accept().await.expect("accept native chat request");
         let mut request = Vec::new();
@@ -173,6 +181,81 @@ async fn openai_stream_uses_exactly_one_concurrency_permit() {
     server.await.expect("stream server task");
     assert_eq!(response.output_text, "ok");
     assert_eq!(deltas, ["ok"]);
+    assert_eq!(response.completion_status, super::ChatCompletionStatus::Unknown);
+}
+
+#[tokio::test]
+async fn chat_gateway_preserves_paid_completion_outcomes_in_json_and_stream_responses() {
+    use super::ChatCompletionStatus;
+
+    let gateway =
+        test_gateway(ProviderBudgetConfig::unlimited(), ProviderBudgetRegistryOptions::default());
+    let usage = serde_json::json!({"prompt_tokens": 7, "completion_tokens": 2});
+    let expected_usage =
+        serde_json::json!({"prompt_tokens": 7, "completion_tokens": 2, "service_tier": "flex"});
+    for (reason, refusal, expected_status) in [
+        (Some("stop"), None, ChatCompletionStatus::Complete),
+        (Some("length"), None, ChatCompletionStatus::Truncated),
+        (Some("content_filter"), None, ChatCompletionStatus::Refused),
+        (Some("stop"), Some("declined"), ChatCompletionStatus::Refused),
+        (None, None, ChatCompletionStatus::Unknown),
+        (Some("future_reason"), None, ChatCompletionStatus::Unknown),
+    ] {
+        let content =
+            if refusal.is_some() { serde_json::Value::Null } else { serde_json::json!("{}") };
+        let expected_text = if refusal.is_some() { "" } else { "{}" };
+        let body = serde_json::json!({
+            "choices": [{"message": {"content": content, "refusal": refusal}, "finish_reason": reason}],
+            "usage": usage, "service_tier": "flex"
+        });
+        let (base_url, server) = native_chat_test_server(&body.to_string()).await;
+        let response = gateway
+            .generate(completion_test_request(base_url))
+            .await
+            .expect("paid response must return text, status and usage");
+        server.await.expect("JSON server task");
+        assert_eq!(response.output_text, expected_text);
+        assert_eq!(response.completion_status, expected_status);
+        assert_eq!(response.usage_json, expected_usage);
+
+        let delta =
+            serde_json::json!({"choices": [{"delta": {"content": content, "refusal": refusal}}]});
+        let finish = serde_json::json!({"choices": [{"delta": {}, "finish_reason": reason}]});
+        let counters = serde_json::json!({"choices": [], "usage": usage, "service_tier": "flex"});
+        // The unknown future reason also exercises EOF without a DONE marker
+        // and an unterminated final usage frame.
+        let ending = if reason == Some("future_reason") { "" } else { "\n\ndata: [DONE]\n\n" };
+        let stream = format!("data: {delta}\n\ndata: {finish}\n\ndata: {counters}{ending}");
+        let (base_url, server) = native_chat_test_server(&stream).await;
+        let mut emitted = String::new();
+        let response = gateway
+            .generate_stream(completion_test_request(base_url), &mut |delta| {
+                emitted.push_str(&delta)
+            })
+            .await
+            .expect("paid stream must retain completion outcome");
+        server.await.expect("stream server task");
+        assert_eq!(response.output_text, expected_text);
+        assert_eq!(emitted, expected_text);
+        assert_eq!(response.completion_status, expected_status);
+        assert_eq!(response.usage_json, expected_usage);
+    }
+}
+
+fn completion_test_request(base_url: String) -> ChatRequest {
+    ChatRequest {
+        provider_kind: "local-openai".to_string(),
+        model_name: "sample-model".to_string(),
+        prompt: "prompt".to_string(),
+        api_key_override: None,
+        base_url_override: Some(base_url),
+        system_prompt: None,
+        temperature: None,
+        top_p: None,
+        max_output_tokens_override: None,
+        response_format: None,
+        extra_parameters_json: local_openai_profile(),
+    }
 }
 
 #[tokio::test]
@@ -248,7 +331,7 @@ async fn native_anthropic_chat_executes_the_bounded_http_path() {
         score_criteria: Vec::new(),
     };
 
-    let (output, usage) = gateway
+    let (output, usage, _) = gateway
         .call_native_chat(NativeChatCall {
             provider_kind: "anthropic",
             runtime: &runtime,
@@ -294,13 +377,14 @@ fn serializes_anthropic_native_request_and_parses_usage() {
     assert_eq!(request["messages"][0]["role"], "user");
     assert_eq!(request["max_tokens"], 64);
 
-    let (output, usage) = native_chat_response(
+    let (output, usage, completion_status) = native_chat_response(
         ANTHROPIC_MESSAGES_RUNTIME_KIND,
         serde_json::json!({"content":[{"type":"text","text":"ok"}],"usage":{"input_tokens":2}}),
     )
     .expect("Anthropic response should parse");
     assert_eq!(output, "ok");
     assert_eq!(usage["input_tokens"], 2);
+    assert_eq!(completion_status, super::ChatCompletionStatus::Unknown);
 }
 
 #[test]
@@ -321,13 +405,14 @@ fn serializes_gemini_native_request_and_parses_usage() {
     assert_eq!(request["contents"][0]["parts"][0]["text"], "prompt");
     assert_eq!(request["generationConfig"]["maxOutputTokens"], 64);
 
-    let (output, usage) = native_chat_response(
+    let (output, usage, completion_status) = native_chat_response(
             GEMINI_GENERATE_CONTENT_RUNTIME_KIND,
             serde_json::json!({"candidates":[{"content":{"parts":[{"text":"ok"}]}}],"usageMetadata":{"promptTokenCount":2}}),
         )
         .expect("Gemini response should parse");
     assert_eq!(output, "ok");
     assert_eq!(usage["promptTokenCount"], 2);
+    assert_eq!(completion_status, super::ChatCompletionStatus::Unknown);
 }
 #[test]
 fn serializes_native_vision_requests_with_provider_specific_image_fields() {

@@ -416,6 +416,32 @@ describe('BindingsSection reasoning selector', () => {
     expect(within(dialog).queryByLabelText('Reasoning mode')).not.toBeInTheDocument()
   })
 
+  it('preserves historical raw reasoning while editing an unconfirmed binding', async () => {
+    const user = userEvent.setup()
+    renderSection({
+      availableAccounts: [chatAccount],
+      bindingsForScope: [
+        libraryBinding({ reasoning_effort: 'high', thinking: { type: 'enabled' } }),
+      ],
+    })
+    const dialog = await openAnswerDialog(user)
+    expect(within(dialog).queryByText('Reasoning')).not.toBeInTheDocument()
+    expect(within(dialog).queryByRole('combobox', { name: /^Reasoning\b/ })).not.toBeInTheDocument()
+    expect(within(dialog).queryByLabelText('Reasoning mode')).not.toBeInTheDocument()
+    await user.clear(within(dialog).getByLabelText('Temperature'))
+    await user.type(within(dialog).getByLabelText('Temperature'), '0.5')
+    await user.click(within(dialog).getByRole('button', { name: 'Save' }))
+    await waitFor(() =>
+      expect(mutations.bindingUpdate.mutateAsync).toHaveBeenCalledWith({
+        id: 'local-1',
+        body: expect.objectContaining({
+          temperature: 0.5,
+          extraParametersJson: { reasoning_effort: 'high', thinking: { type: 'enabled' } },
+        }),
+      }),
+    )
+  })
+
   it('revalidates a pending selection when the model changes and blocks until Unset', async () => {
     const user = userEvent.setup()
     renderSection({ models: [confirmedModel, secondModel], availableAccounts: [chatAccount] })

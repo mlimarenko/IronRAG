@@ -567,6 +567,7 @@ fn typed_clarification_is_terminal_exact_passthrough_without_retry() {
         result_text: Some(answer_body.to_string()),
         result_json: Some(debug_tool_result_json(&result)),
         grounding_text: None,
+        document_reference: None,
         grounded_answer_body: grounded_answer_verbatim_body(GROUNDED_ANSWER_TOOL_NAME, &result),
         grounded_answer_outcome,
         grounded_answer_ready: false,

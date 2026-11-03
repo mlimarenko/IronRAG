@@ -1,3 +1,4 @@
+use super::identity::web_request_identity;
 use sqlx::{Postgres, Transaction};
 use uuid::Uuid;
 
@@ -14,7 +15,7 @@ pub async fn admit_web_run_with_failpoint(
     request: &WebRunAdmissionRequest,
     failpoint: Option<AdmissionFailpoint>,
 ) -> Result<AdmissionOutcome<WebRunAdmissionBundle>, AdmissionError> {
-    let request_identity = web_request_identity(request);
+    let request_identity = web_request_identity(request)?;
     let request_fingerprint = fingerprint(&request_identity)?;
     let scope = idempotency_scope(request.workspace_id, request.requested_by_principal_id);
     let mut transaction = postgres.begin().await?;
@@ -32,9 +33,7 @@ pub async fn admit_web_run_with_failpoint(
     )
     .await?
     {
-        if existing.request_fingerprint.as_deref() != Some(request_fingerprint.as_str()) {
-            return Err(AdmissionError::IdempotencyConflict { mutation_id: existing.id });
-        }
+        existing.verify_replay(&request_identity)?;
         let mutation = existing.into_row();
         let bundle = load_web_bundle(&mut transaction, mutation).await?;
         transaction.commit().await?;
@@ -127,8 +126,8 @@ fn semantic_fingerprint_excludes_actor_surface_and_caller_key() -> Result<(), Ad
         boundary_policy: "same_host".to_owned(),
         max_depth: 0,
         max_pages: 1,
-        crawl_allow_patterns: serde_json::json!([]),
-        crawl_block_patterns: serde_json::json!([]),
+        crawl_allow_patterns: serde_json::json!([{"kind":"path_prefix","value":"/docs","source":"request"}]),
+        crawl_block_patterns: serde_json::json!([{"kind":"path_prefix","value":"/private"}]),
         materialization_allow_patterns: serde_json::json!([]),
         materialization_block_patterns: serde_json::json!([]),
         requested_by_principal_id: None,
@@ -136,34 +135,30 @@ fn semantic_fingerprint_excludes_actor_surface_and_caller_key() -> Result<(), Ad
         idempotency_key: Some("first-key".to_owned()),
         source_identity: Some("web-source".to_owned()),
     };
-    let original = fingerprint(&web_request_identity(&request))?;
+    let original = fingerprint(&web_request_identity(&request)?)?;
+    {
+        // Verify the complete semantic admission, including pattern objects.
+        let admitted_identity = serde_json::json!({
+            "workspaceId": request.workspace_id, "libraryId": request.library_id,
+            "operationKind": "web_capture", "sourceIdentity": request.source_identity,
+            "seedUrl": request.seed_url, "normalizedSeedUrl": request.normalized_seed_url,
+            "mode": request.mode, "boundaryPolicy": request.boundary_policy,
+            "maxDepth": request.max_depth, "maxPages": request.max_pages,
+            "crawlAllowPatterns": request.crawl_allow_patterns, "crawlBlockPatterns": request.crawl_block_patterns,
+            "materializationAllowPatterns": request.materialization_allow_patterns,
+            "materializationBlockPatterns": request.materialization_block_patterns,
+        });
+        assert_eq!(web_request_identity(&request)?, admitted_identity);
+        assert_eq!(original, fingerprint(&admitted_identity)?);
+    }
     request.requested_by_principal_id = Some(Uuid::now_v7());
     request.request_surface = "mcp".to_owned();
     request.idempotency_key = Some("another-key".to_owned());
-    assert_eq!(fingerprint(&web_request_identity(&request))?, original);
+    assert_eq!(fingerprint(&web_request_identity(&request)?)?, original);
     request.max_pages = 2;
-    assert_ne!(fingerprint(&web_request_identity(&request))?, original);
+    assert_ne!(fingerprint(&web_request_identity(&request)?)?, original);
     Ok(())
 }
-fn web_request_identity(request: &WebRunAdmissionRequest) -> serde_json::Value {
-    serde_json::json!({
-        "workspaceId": request.workspace_id,
-        "libraryId": request.library_id,
-        "operationKind": "web_capture",
-        "sourceIdentity": request.source_identity.as_deref().unwrap_or(&request.normalized_seed_url),
-        "seedUrl": request.seed_url,
-        "normalizedSeedUrl": request.normalized_seed_url,
-        "mode": request.mode,
-        "boundaryPolicy": request.boundary_policy,
-        "maxDepth": request.max_depth,
-        "maxPages": request.max_pages,
-        "crawlAllowPatterns": request.crawl_allow_patterns,
-        "crawlBlockPatterns": request.crawl_block_patterns,
-        "materializationAllowPatterns": request.materialization_allow_patterns,
-        "materializationBlockPatterns": request.materialization_block_patterns,
-    })
-}
-
 async fn insert_web_run(
     transaction: &mut Transaction<'_, Postgres>,
     request: &WebRunAdmissionRequest,

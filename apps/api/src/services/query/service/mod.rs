@@ -220,6 +220,8 @@ pub struct QueryTurnExecutionResult {
     pub graph_edge_references: Vec<QueryGraphEdgeReference>,
     pub verification_state: QueryVerificationState,
     pub verification_warnings: Vec<crate::domains::query::QueryVerificationWarning>,
+    pub semantic_verification:
+        Option<ironrag_contracts::assistant::semantic_verification::SemanticVerificationReport>,
     /// Persisted finalizer-owned answer disposition. Live and result-cache
     /// replay paths both read this from the execution context bundle.
     pub answer_disposition: crate::domains::query::QueryAnswerDisposition,

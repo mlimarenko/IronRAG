@@ -1,4 +1,5 @@
 use super::*;
+use crate::services::ops::billing::provider_reservation::ProviderCallReservation;
 
 pub(super) fn provider_call_attribution(
     binding: &ResolvedRuntimeBinding,
@@ -30,11 +31,11 @@ pub(super) async fn reserve_attributed_provider_call(
     execution_context: QueryProviderExecutionContext,
     binding: &ResolvedRuntimeBinding,
     call_kind: QueryProviderCallKind,
-) -> Result<(QueryProviderCallAttribution, QueryProviderCallReservation), QueryServiceError> {
+) -> Result<(QueryProviderCallAttribution, ProviderCallReservation), QueryServiceError> {
     // Purpose validation must happen before reservation and before provider
     // I/O; a misrouted binding is never represented as a billable call.
     let attribution = provider_call_attribution(binding, call_kind)?;
-    let reservation = QueryProviderCallReservation::reserve(
+    let reservation = ProviderCallReservation::reserve(
         state,
         execution_context,
         binding,
@@ -53,7 +54,7 @@ pub(super) async fn reserve_attributed_provider_call(
 
 pub(super) async fn complete_attributed_provider_call(
     attribution: &QueryProviderCallAttribution,
-    reservation: &mut QueryProviderCallReservation,
+    reservation: &mut ProviderCallReservation,
     usage_json: serde_json::Value,
 ) -> Result<QueryProviderCall, QueryServiceError> {
     let provider_call_id = reservation.provider_call_id();
@@ -65,7 +66,7 @@ pub(super) async fn complete_attributed_provider_call(
     Ok(attribution.record(provider_call_id, usage_json))
 }
 
-pub(super) async fn fail_provider_call(reservation: &mut QueryProviderCallReservation) {
+pub(super) async fn fail_provider_call(reservation: &mut ProviderCallReservation) {
     if let Err(error) = reservation.fail().await {
         tracing::error!(
             provider_call_id = %reservation.provider_call_id(),

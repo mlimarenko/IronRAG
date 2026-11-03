@@ -465,6 +465,16 @@ where
 /// `storage_key`/`checksum` pair into `blob_expectations` so prevalidation can
 /// later verify blob bytes. The line is parsed once for both purposes and the
 /// pair is never retained beyond this call.
+pub(super) fn validate_snapshot_recognition_policy(row: &serde_json::Value) -> anyhow::Result<()> {
+    let policy = row
+        .get("recognition_policy")
+        .context("snapshot schema 6 requires a current library recognition policy")?;
+    crate::domains::recognition::LibraryRecognitionPolicy::from_json(policy.clone())
+        .map_err(anyhow::Error::msg)
+        .context("snapshot schema 6 requires singleton Vision current recognition policy; restore older archives with their creator runtime in isolation, run vision-recognition-schema and re-export")?;
+    Ok(())
+}
+
 fn record_ndjson_line(
     line: &[u8],
     table: &str,
@@ -476,6 +486,9 @@ fn record_ndjson_line(
         return Ok(());
     };
     *rows = rows.checked_add(1).ok_or_else(|| anyhow!("ndjson row count overflow"))?;
+    if table == "catalog_library" {
+        validate_snapshot_recognition_policy(&value)?;
+    }
     content_closure.observe(table, &value)?;
     if table == "content_revision"
         && let (Some(storage_key), Some(checksum)) = (

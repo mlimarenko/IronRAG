@@ -9,6 +9,7 @@ import { useApp } from '@/shared/contexts/app-context'
 import { humanizeToken, technicalFactKindLabel } from '@/shared/lib/enumLabels'
 import { Badge, Button, Drawer, ScreenState } from '@/shared/ui'
 import type { EvidenceBundle } from '@/shared/types'
+import { SemanticVerificationDetails } from './SemanticVerificationDetails'
 
 type EvidenceDrawerProps = Readonly<{
   evidence: EvidenceBundle | null
@@ -131,6 +132,9 @@ export function EvidenceDrawer({ evidence, open, onOpenChange }: EvidenceDrawerP
 
   return (
     <Drawer open={open} onOpenChange={onOpenChange} title={`${t('assistant.sources')} · ${total}`}>
+      {view?.semanticVerification ? (
+        <SemanticVerificationDetails report={view.semanticVerification} />
+      ) : null}
       {items.length > 0 && (
         <div className="evidence-summary max-md:grid-cols-1!">
           {(Object.keys(counts) as Array<keyof typeof counts>).map((type) => (

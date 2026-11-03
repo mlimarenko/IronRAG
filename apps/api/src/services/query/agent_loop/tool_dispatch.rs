@@ -129,6 +129,8 @@ pub(super) struct CompletedToolPayload {
     pub(super) result_text: Option<String>,
     pub(super) result_json: Option<Value>,
     pub(super) grounding_text: Option<String>,
+    pub(super) document_reference:
+        Option<Box<super::super::assistant_grounding::AssistantGroundingDocumentReference>>,
     pub(super) grounded_answer_body: Option<String>,
     pub(super) grounded_answer_outcome: Option<AgentGroundedAnswerOutcome>,
     pub(super) grounded_answer_ready: bool,
@@ -274,6 +276,7 @@ pub(super) fn record_effective_tool_payload_outcome(
                 result_text: outcome.result_text.clone(),
                 result_json: outcome.result_json.clone(),
                 grounding_text: outcome.grounding_text.clone(),
+                document_reference: outcome.document_reference.clone(),
                 grounded_answer_body: outcome.grounded_answer_body.clone(),
                 grounded_answer_outcome: outcome.grounded_answer_outcome.clone(),
                 grounded_answer_ready: outcome.grounded_answer_ready,
@@ -314,6 +317,7 @@ pub(super) fn replayed_tool_execution_outcome(
         result_text: payload.result_text,
         result_json: payload.result_json,
         grounding_text: payload.grounding_text,
+        document_reference: payload.document_reference,
         grounded_answer_body: payload.grounded_answer_body,
         grounded_answer_outcome: payload.grounded_answer_outcome,
         grounded_answer_ready: payload.grounded_answer_ready,
@@ -399,6 +403,7 @@ pub(super) async fn execute_one_tool_call(
     let is_error = result.is_error;
     let message_content = tool_result_model_message(&call.name, &result);
     let grounding_text = tool_result_verification_text(&call.name, &result);
+    let document_reference = native_document_read_reference(&call.name, &result).map(Box::new);
     let grounded_answer_body = grounded_answer_verbatim_body(&call.name, &result);
     let grounded_answer_outcome = grounded_answer_typed_outcome(&call.name, &result);
     let grounded_answer_repair_reason =
@@ -425,6 +430,7 @@ pub(super) async fn execute_one_tool_call(
         result_text,
         result_json,
         grounding_text,
+        document_reference,
         grounded_answer_body,
         grounded_answer_outcome,
         grounded_answer_ready,

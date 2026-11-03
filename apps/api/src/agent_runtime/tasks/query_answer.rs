@@ -40,6 +40,7 @@ pub enum QueryProviderCallKind {
     QueryAnswer,
     QueryAnswerLiteralRevision,
     QueryAnswerInventoryRevision,
+    QueryAnswerSemanticVerification,
 }
 
 impl QueryProviderCallKind {
@@ -50,6 +51,7 @@ impl QueryProviderCallKind {
             Self::QueryAnswer => "query_answer",
             Self::QueryAnswerLiteralRevision => "query_answer_literal_revision",
             Self::QueryAnswerInventoryRevision => "query_answer_inventory_revision",
+            Self::QueryAnswerSemanticVerification => "query_answer_semantic_verification",
         }
     }
 
@@ -59,7 +61,8 @@ impl QueryProviderCallKind {
             Self::QueryAgent => AiBindingPurpose::Agent,
             Self::QueryAnswer
             | Self::QueryAnswerLiteralRevision
-            | Self::QueryAnswerInventoryRevision => AiBindingPurpose::QueryAnswer,
+            | Self::QueryAnswerInventoryRevision
+            | Self::QueryAnswerSemanticVerification => AiBindingPurpose::QueryAnswer,
         }
     }
 }

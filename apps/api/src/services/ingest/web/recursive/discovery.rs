@@ -572,8 +572,8 @@ async fn process_fetched_candidate(
 
 pub(in super::super) async fn discover_outbound_links(
     _service: &WebIngestService,
-    state: &AppState,
-    library_id: Uuid,
+    _state: &AppState,
+    _library_id: Uuid,
     resource: &FetchedWebResource,
 ) -> Result<Vec<String>, ApiError> {
     let looks_like_html = resource.content_type.as_deref().map_or_else(
@@ -586,18 +586,13 @@ pub(in super::super) async fn discover_outbound_links(
 
     let file_name =
         source_file_name_from_url(&resource.final_url, resource.content_type.as_deref());
-    let extraction_plan = state
-        .application_services
-        .content
-        .build_runtime_extraction_plan(
-            state,
-            library_id,
-            &file_name,
-            resource.content_type.as_deref(),
-            &resource.payload_bytes,
-        )
-        .await
-        .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
+    let extraction_plan = super::super::support::inspect_web_resource(
+        &file_name,
+        resource.content_type.as_deref(),
+        &resource.payload_bytes,
+    )
+    .await
+    .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
     let mut discovered = Vec::<String>::new();
     let mut seen = HashSet::<String>::new();
     for key in ["outboundLinks", "outboundResources"] {

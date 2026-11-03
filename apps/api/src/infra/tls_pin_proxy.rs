@@ -110,14 +110,20 @@ pub(super) async fn start_tls_pin_proxy(
     let certificate = CertificateDer::from(pinned_der.clone());
     let mut roots = RootCertStore::empty();
     roots.add(certificate).context("configured dependency leaf is not a valid trust anchor")?;
-    let chain_and_hostname = WebPkiServerVerifier::builder(Arc::new(roots))
-        .build()
-        .context("cannot construct dependency TLS verifier")?;
+    // Transitive clients also enable aws-lc-rs; the declared ring provider must
+    // not depend on an ambiguous process-global default.
+    let provider = Arc::new(rustls::crypto::ring::default_provider());
+    let chain_and_hostname =
+        WebPkiServerVerifier::builder_with_provider(Arc::new(roots), Arc::clone(&provider))
+            .build()
+            .context("cannot construct dependency TLS verifier")?;
     let verifier = ExactLeafVerifier {
         expected_sha256: Sha256::digest(&pinned_der).into(),
         chain_and_hostname,
     };
-    let mut client_config = ClientConfig::builder()
+    let mut client_config = ClientConfig::builder_with_provider(provider)
+        .with_safe_default_protocol_versions()
+        .context("cannot configure dependency TLS protocol versions")?
         .dangerous()
         .with_custom_certificate_verifier(Arc::new(verifier))
         .with_no_client_auth();
@@ -190,6 +196,29 @@ async fn proxy_connection(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use base64::{Engine as _, engine::general_purpose::STANDARD};
+
+    #[tokio::test]
+    async fn dependency_proxy_constructs_without_a_process_default_provider() -> anyhow::Result<()>
+    {
+        let pem = include_str!("../../tests/fixtures/tls/localhost.crt");
+        let encoded: String = pem.lines().filter(|line| !line.starts_with("-----")).collect();
+        let der = STANDARD.decode(encoded)?;
+
+        for (url, protocol) in [
+            ("postgresql://localhost:5432/test", UpstreamProtocol::Postgres),
+            ("rediss://localhost:6379/0", UpstreamProtocol::Redis),
+        ] {
+            let (local_url, proxy) = start_tls_pin_proxy(url, protocol, der.clone()).await?;
+            assert_eq!(local_url.host_str(), Some("127.0.0.1"));
+            assert!(local_url.port().is_some_and(|port| port != 0));
+            if matches!(protocol, UpstreamProtocol::Redis) {
+                assert_eq!(local_url.scheme(), "redis");
+            }
+            drop(proxy);
+        }
+        Ok(())
+    }
 
     #[test]
     fn exact_leaf_verifier_accepts_only_the_pinned_der() {

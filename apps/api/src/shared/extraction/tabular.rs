@@ -1,8 +1,7 @@
 use std::{ffi::OsStr, io::Cursor, path::Path};
 
 use anyhow::{Context, Result};
-use calamine::{Data, Range, Reader, Sheets, Table, open_workbook_auto_from_rs};
-use csv::{ReaderBuilder, StringRecord};
+use calamine::{Data, Range, Reader, Sheets, Table, Xlsx};
 use zip::ZipArchive;
 
 use crate::shared::extraction::{
@@ -107,14 +106,18 @@ pub fn extract_tabular(
     file_name: Option<&str>,
     mime_type: Option<&str>,
     file_bytes: &[u8],
+    native: Option<&crate::integrations::extraction_protocol::Extraction>,
 ) -> std::result::Result<ExtractionOutput, TabularExtractError> {
     let format = select_tabular_format(file_name, mime_type, file_bytes);
     let mut warnings = Vec::new();
-    let tables = if format.is_delimited() {
-        extract_delimited_tables(format, file_name, file_bytes)?
-    } else {
+    let tables = if format == TabularFormat::Xlsx {
         extract_workbook_tables(format, file_bytes, &mut warnings)
             .map_err(TabularExtractError::Workbook)?
+    } else {
+        let native = native.ok_or_else(|| {
+            TabularExtractError::Workbook(anyhow::anyhow!("child tabular extraction required"))
+        })?;
+        project_native_tables(format, file_name, native)?
     };
 
     let mut paragraph_lines = Vec::new();
@@ -200,9 +203,7 @@ fn select_tabular_format(
     file_bytes: &[u8],
 ) -> TabularFormat {
     if let Some(container) = workbook_container_format(file_bytes) {
-        return declared_extension_format(file_name)
-            .filter(|format| !format.is_delimited())
-            .unwrap_or(container);
+        return container;
     }
     if let Some(format) = declared_extension_format(file_name) {
         return format;
@@ -247,6 +248,24 @@ pub(crate) fn has_workbook_container_signature(file_bytes: &[u8]) -> bool {
 /// OOXML/ODF families; OLE2 is the legacy `.xls` compound file.
 fn workbook_container_format(file_bytes: &[u8]) -> Option<TabularFormat> {
     if file_bytes.starts_with(&ZIP_CONTAINER_MAGIC) {
+        // A corrupt central directory remains a container-level operational
+        // refusal in the XLSX owner; it must never be decoded as delimited text.
+        if let Ok(archive) = ZipArchive::new(Cursor::new(file_bytes)) {
+            let names = archive
+                .file_names()
+                .map(|name| name.map(|name| name.to_string()))
+                .collect::<std::result::Result<Vec<_>, _>>();
+            if let Ok(names) = names {
+                if names.iter().any(|name| name == "xl/workbook.bin") {
+                    return Some(TabularFormat::Xlsb);
+                }
+                if names.iter().any(|name| name == "content.xml")
+                    && !names.iter().any(|name| name == "xl/workbook.xml")
+                {
+                    return Some(TabularFormat::Ods);
+                }
+            }
+        }
         return Some(TabularFormat::Xlsx);
     }
     if file_bytes.starts_with(&OLE_CONTAINER_MAGIC) {
@@ -391,84 +410,75 @@ fn declared_mime_format(mime_type: Option<&str>) -> Option<TabularFormat> {
     }
 }
 
-fn extract_delimited_tables(
+/// The native child route; XLSX retains declared Tables and range semantics.
+pub fn native_tabular_mime(
+    file_name: Option<&str>,
+    mime_type: Option<&str>,
+    bytes: &[u8],
+) -> Option<&'static str> {
+    match select_tabular_format(file_name, mime_type, bytes) {
+        TabularFormat::Csv => Some("text/csv"),
+        TabularFormat::Tsv => Some("text/tab-separated-values"),
+        TabularFormat::Xls => Some("application/vnd.ms-excel"),
+        TabularFormat::Xlsb => Some("application/vnd.ms-excel.sheet.binary.macroEnabled.12"),
+        TabularFormat::Ods => Some("application/vnd.oasis.opendocument.spreadsheet"),
+        TabularFormat::Xlsx => None,
+    }
+}
+
+fn project_native_tables(
     format: TabularFormat,
     file_name: Option<&str>,
-    file_bytes: &[u8],
+    native: &crate::integrations::extraction_protocol::Extraction,
 ) -> std::result::Result<Vec<ExtractedTable>, TabularExtractError> {
-    let decoded = std::str::from_utf8(file_bytes)
-        .context("failed to decode tabular text as UTF-8")
-        .map_err(TabularExtractError::Decode)?;
-    let stripped = decoded.strip_prefix('\u{feff}').unwrap_or(decoded);
-    let delimiter = if format == TabularFormat::Tsv { b'\t' } else { detect_delimiter(stripped) };
-    let mut reader = ReaderBuilder::new()
-        .delimiter(delimiter)
-        .has_headers(false)
-        .flexible(true)
-        .from_reader(stripped.as_bytes());
-    let rows = reader
-        .records()
-        .collect::<std::result::Result<Vec<StringRecord>, csv::Error>>()
-        .context("failed to parse delimited table")
-        .map_err(TabularExtractError::Parse)?
-        .into_iter()
-        .map(|record| record.iter().map(std::string::ToString::to_string).collect::<Vec<_>>())
-        .filter(|row| row.iter().any(|cell| !cell.trim().is_empty()))
-        .collect::<Vec<_>>();
-    let inferred = infer_tabular_shape(&rows);
-    if inferred.headers.is_empty() {
-        return Ok(Vec::new());
-    }
-
-    let sheet_name = file_name
-        .and_then(|value| Path::new(value).file_stem())
-        .and_then(OsStr::to_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .unwrap_or("Sheet1")
-        .to_string();
-
-    Ok(vec![ExtractedTable {
-        sheet_name,
-        table_name: None,
-        caption: inferred.caption,
-        headers: inferred.headers,
-        rows: inferred.rows,
-        header_policy: inferred.header_policy,
-        source_kind: "delimited_text".to_string(),
-    }])
-}
-
-fn detect_delimiter(text: &str) -> u8 {
-    let candidates = *b",;\t|";
-    candidates.into_iter().max_by_key(|delimiter| score_delimiter(text, *delimiter)).unwrap_or(b',')
-}
-
-fn score_delimiter(text: &str, delimiter: u8) -> (usize, usize, usize) {
-    let mut reader = ReaderBuilder::new()
-        .delimiter(delimiter)
-        .has_headers(false)
-        .flexible(true)
-        .from_reader(text.as_bytes());
-    let mut non_empty_rows = 0usize;
-    let mut multi_column_rows = 0usize;
-    let mut repeated_width_rows = 0usize;
-    let mut previous_width = None::<usize>;
-    for record in reader.records().flatten().take(16) {
-        let width = record.len();
-        if width == 0 || record.iter().all(|cell| cell.trim().is_empty()) {
+    let mut output = Vec::new();
+    for unit in &native.units {
+        let sheet_name = unit.sheet_name.clone().unwrap_or_else(|| {
+            file_name
+                .and_then(|name| Path::new(name).file_stem())
+                .and_then(OsStr::to_str)
+                .unwrap_or("Sheet1")
+                .to_owned()
+        });
+        let tables: Vec<xberg::types::Table> = serde_json::from_value(unit.tables.clone())
+            .map_err(|error| TabularExtractError::Workbook(error.into()))?;
+        if tables.is_empty() && !format.is_delimited() {
+            // Keep empty sheets as real source units, not as missing sheets.
+            output.push(ExtractedTable {
+                sheet_name,
+                table_name: None,
+                caption: None,
+                headers: Vec::new(),
+                rows: Vec::new(),
+                header_policy: "empty_sheet".into(),
+                source_kind: "worksheet_range".into(),
+            });
             continue;
         }
-        non_empty_rows += 1;
-        if width > 1 {
-            multi_column_rows += 1;
+        for table in tables {
+            // Public cells include the first row regardless of upstream's header
+            // guess. The product alone owns the logical-table header policy.
+            let inferred = infer_tabular_shape(&table.cells);
+            if inferred.headers.is_empty() && format.is_delimited() {
+                continue;
+            }
+            output.push(ExtractedTable {
+                sheet_name: sheet_name.clone(),
+                table_name: None,
+                caption: inferred.caption,
+                headers: inferred.headers,
+                rows: inferred.rows,
+                header_policy: inferred.header_policy,
+                source_kind: if format.is_delimited() {
+                    "delimited_text"
+                } else {
+                    "worksheet_range"
+                }
+                .into(),
+            });
         }
-        if previous_width == Some(width) && width > 1 {
-            repeated_width_rows += 1;
-        }
-        previous_width = Some(width);
     }
-    (multi_column_rows, repeated_width_rows, non_empty_rows)
+    Ok(output)
 }
 
 fn extract_workbook_tables(
@@ -477,8 +487,10 @@ fn extract_workbook_tables(
     warnings: &mut Vec<String>,
 ) -> Result<Vec<ExtractedTable>> {
     guard_workbook_container(file_bytes)?;
-    let mut workbook = open_workbook_auto_from_rs(Cursor::new(file_bytes))
-        .context("failed to open spreadsheet workbook")?;
+    // Only XLSX has product-owned named Tables, declared headers and ranges.
+    // All other spreadsheet parsing is owned by the isolated native child.
+    let mut workbook =
+        Sheets::Xlsx(Xlsx::new(Cursor::new(file_bytes)).context("failed to open XLSX workbook")?);
     if let Sheets::Xlsx(xlsx) = &mut workbook
         && let Err(error) = xlsx.load_tables()
     {
@@ -758,7 +770,81 @@ mod tests {
 
     use zip::write::SimpleFileOptions;
 
-    use super::{declared_oversized_workbook_zip_bytes, detect_delimiter, extract_tabular};
+    use super::declared_oversized_workbook_zip_bytes;
+
+    fn extract_tabular(
+        file_name: Option<&str>,
+        mime: Option<&str>,
+        bytes: &[u8],
+    ) -> std::result::Result<crate::shared::extraction::ExtractionOutput, super::TabularExtractError>
+    {
+        let Some(native_mime) = super::native_tabular_mime(file_name, mime, bytes) else {
+            return super::extract_tabular(file_name, mime, bytes, None);
+        };
+        if matches!(native_mime, "text/csv" | "text/tab-separated-values") {
+            std::str::from_utf8(bytes)
+                .map_err(|error| super::TabularExtractError::Decode(error.into()))?;
+        }
+        let native = (|| -> anyhow::Result<_> {
+            let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
+            runtime.block_on(async {
+                let config = xberg::ExtractionConfig {
+                    use_cache: false,
+                    output_format: xberg::OutputFormat::Markdown,
+                    pages: Some(xberg::core::config::PageConfig {
+                        extract_pages: true,
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                };
+                let mut result = Box::pin(xberg::engine::Engine::new_default().extract(
+                    xberg::ExtractInput::from_bytes(bytes.to_vec(), native_mime, None),
+                    &config,
+                ))
+                .await?;
+                anyhow::ensure!(
+                    result.errors.is_empty() && result.results.len() == 1,
+                    "native table result"
+                );
+                let document =
+                    result.results.pop().ok_or_else(|| anyhow::anyhow!("native table missing"))?;
+                let units = if let Some(pages) = document.pages {
+                    pages
+                        .into_iter()
+                        .map(|page| {
+                            Ok(crate::integrations::extraction_protocol::Unit {
+                                ordinal: page.page_number,
+                                sheet_name: page.sheet_name,
+                                content: page.content,
+                                tables: serde_json::to_value(page.tables)?,
+                            })
+                        })
+                        .collect::<anyhow::Result<Vec<_>>>()?
+                } else {
+                    vec![crate::integrations::extraction_protocol::Unit {
+                        ordinal: 1,
+                        sheet_name: None,
+                        content: document.content,
+                        tables: serde_json::to_value(document.tables)?,
+                    }]
+                };
+                Ok(crate::integrations::extraction_protocol::Extraction {
+                    source_sha256: String::new(),
+                    text_byte_limit: crate::integrations::extraction_protocol::MAX_TEXT,
+                    source_unit_count: units.len() as u32,
+                    unit_kind: "document".into(),
+                    selected_start: 1,
+                    selected_end: units.len() as u32,
+                    content: String::new(),
+                    units,
+                    visual_inputs: Vec::new(),
+                    warnings: Vec::new(),
+                })
+            })
+        })()
+        .map_err(super::TabularExtractError::Parse)?;
+        super::extract_tabular(file_name, mime, bytes, Some(&native))
+    }
 
     #[test]
     fn refuses_a_container_declaring_more_than_the_workbook_limit() {
@@ -934,8 +1020,15 @@ mod tests {
 
     #[test]
     fn detects_pipe_and_tab_delimiters() {
-        assert_eq!(detect_delimiter("name|value\nacme|42\n"), b'|');
-        assert_eq!(detect_delimiter("name\tvalue\nacme\t42\n"), b'\t');
+        for (name, bytes) in [
+            ("data.csv", b"name|value\nacme|42\n".as_slice()),
+            ("data.tsv", b"name\tvalue\nacme\t42\n".as_slice()),
+        ] {
+            let output = extract_tabular(Some(name), None, bytes).expect("native delimited table");
+            assert!(output.content_text.contains("acme"));
+            assert!(output.content_text.contains("42"));
+            assert_eq!(output.source_map["tables"][0]["columnCount"], 2);
+        }
     }
 
     #[test]

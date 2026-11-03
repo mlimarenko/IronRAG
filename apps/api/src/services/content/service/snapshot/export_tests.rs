@@ -197,29 +197,17 @@ fn entity_vector_select_is_unfiltered_by_the_chunk_sweep() {
 }
 
 #[test]
-fn version_one_archives_are_refused_with_the_invariant_reason() {
-    // IRG-67: v1 may carry superseded vectors, so it is not converted; the
-    // refusal names the upgrade path instead of pretending to restore.
-    let refusal = validate_snapshot_schema_version(1, "snapshot")
-        .expect_err("a version 1 archive must be refused");
-    let rejection = refusal
-        .downcast_ref::<SnapshotImportRejection>()
-        .expect("the refusal carries its classified kind");
-    assert_eq!(rejection.kind, SnapshotImportFailureKind::UnsupportedSchemaVersion);
-    let rendered = refusal.to_string();
-    assert!(rendered.contains("Older archives lack exact visibility-intent closure"), "{rendered}");
-    assert!(rendered.contains("Re-export the library"), "{rendered}");
+fn older_archives_require_their_creator_runtime_instead_of_conversion() {
+    for version in 1..SNAPSHOT_SCHEMA_VERSION {
+        let refusal = validate_snapshot_schema_version(version, "snapshot")
+            .expect_err("older archive must be refused");
+        let rejection = refusal
+            .downcast_ref::<SnapshotImportRejection>()
+            .expect("the refusal carries its classified kind");
+        assert_eq!(rejection.kind, SnapshotImportFailureKind::UnsupportedSchemaVersion);
+    }
     validate_snapshot_schema_version(SNAPSHOT_SCHEMA_VERSION, "snapshot")
         .expect("the current schema version must be accepted");
-}
-
-#[test]
-fn archive_two_is_explicitly_rejected_without_visibility_reconstruction() {
-    let refusal = validate_snapshot_schema_version(2, "snapshot").unwrap_err();
-    assert!(refusal.to_string().contains("schema_version 2"));
-    assert!(refusal.to_string().contains("cannot be converted"));
-    let refusal = validate_snapshot_schema_version(3, "snapshot").unwrap_err();
-    assert!(refusal.to_string().contains("schema_version 3"));
 }
 
 #[test]

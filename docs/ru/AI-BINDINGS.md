@@ -49,7 +49,7 @@ Runtime резолвит **эффективную** привязку, обход
 | Понимание запроса         |           да | `query_compile`     | типизированный `QueryIR`, HyDE-развёртывание и консолидация запросов                                                                        |
 | Semantic rerank           |          нет | `query_rerank`      | provider-backed semantic reranking отобранных кандидатов, привязка отдельно от компиляции запроса                                           |
 | Типизация сущностей графа |          нет | `graph_entity_type` | типизированная классификация извлечённых сущностей до вычисления identity и рёбер; обслуживается эндпоинтом решений или быстрой чат-моделью |
-| Генерация ответов         |           да | `query_answer`      | grounded-ответ с цитатами                                                                                                                   |
+| Генерация ответов         |           да | `query_answer`      | grounded-генерация, bounded repair и структурная семантическая проверка выбранного ответа                                                   |
 | AI-ассистент              |           да | `agent`             | tool-calling host для UI и MCP                                                                                                              |
 | Понимание документов      |          нет | `extract_text`      | сложный текст/OCR/визуальный анализ после детерминированных парсеров                                                                        |
 
@@ -65,7 +65,7 @@ billing сохраняют собственную типизированную �
 | `embed_chunk`       | ingest и query: индексирование сегментов и эмбеддинг вопроса                            | один общий профиль и vector space                                                                                                                    |
 | `query_compile`     | query: компиляция типизированного `QueryIR`, HyDE-развёртывание и консолидация запросов | один профиль «Понимание запроса»                                                                                                                     |
 | `query_rerank`      | query: provider-backed semantic rerank отобранных кандидатов                            | один профиль «Semantic rerank»; отсутствие привязки деградирует к детерминированному lexical fallback, не к `query_compile`                          |
-| `query_answer`      | query: grounded ответ по retrieved bundle                                               | citation-aware длинная генерация; instruction following                                                                                              |
+| `query_answer`      | query: grounded-ответ и семантическая проверка выбранного ответа                         | генерация с цитатами и строгая структурная проверка; отдельной verifier binding нет                                                                   |
 | `agent`             | UI in-product agent + MCP host `grounded_answer`                                        | tool-calling chat-модель с хорошим instruction following                                                                                             |
 
 Допуск модели определяется типизированными capability/modality в каталоге. Он никогда
@@ -235,11 +235,17 @@ JSON escaping полное user message имеет отдельный жёстк
 
 ### `query_answer`
 
-- Длинная генерация с inline citations. Output доминирует в latency.
-- Streaming помогает; UI assistant и MCP grounded-answer tool оба
-  потребляют streamed-деltas.
-- Более качественная модель обычно отбивает разницу — это видимый
-  пользователю продукт.
+- Эта binding обслуживает grounded-генерацию, bounded repair и структурную
+  семантическую проверку выбранного ответа. Проверка не создаёт девятый
+  независимо резолвящийся purpose и не переключается на другую binding.
+- Семантическая проверка требует структурный JSON-schema или JSON-object output.
+  Prompt-only и неподдерживаемый structured transport не считаются выполненной
+  проверкой. Отказ провайдера, timeout и невалидный report отличаются от
+  неподтверждённого утверждения или пропущенной оговорки.
+- Генерация и семантическая проверка сохраняют отдельные provider-call identity и
+  usage. Формальные проверки evidence и итоговая готовность ответа остаются
+  отдельными от semantic report: корректный на вид JSON verdict сам по себе
+  не переводит ответ в verified.
 
 ### Векторные представления (один профиль для индекса и запросов)
 
@@ -501,9 +507,10 @@ LIMIT 1;
 Настраивайте только те, что нужны включённым workflow. Scope: instance /
 workspace / library.
 
-Raster-image engine `vision` использует активный multimodal `extract_text`.
-Переключите библиотеку на `docling`, чтобы OCR шёл локально без visual-model
-вызовов. Выбор `vision` без совместимого `extract_text` падает громко.
+Весь OCR изображений использует активную multimodal-привязку `extract_text`.
+Текущая raster policy фиксирована на `vision`; выбора локального OCR нет.
+Визуальная обработка без совместимой привязки завершается явной ошибкой.
+Для разбора нативного текста и структуры Vision-модель не нужна.
 
 Bootstrap ключей из `.env`: [INSTALL.md](./INSTALL.md).
 

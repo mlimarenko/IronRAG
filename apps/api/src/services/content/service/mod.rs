@@ -30,8 +30,8 @@ pub(crate) use readiness::{
     GRAPH_STATE_DEGRADED, derive_failed_revision_readiness, graph_extract_success_message,
     graph_extract_success_stage_details, graph_state_after_successful_extract,
 };
+pub(crate) use revision::PersistedRevisionSourceGuard;
 pub(crate) use revision::preparation_fence_text;
-pub(crate) use revision::{DoclingPdfExtractionPlanInput, PersistedRevisionSourceGuard};
 
 use chunking::{PendingChunkInsert, locate_chunk_offsets};
 use internal::{InlineMutationContext, PrefetchedDocumentSummaryData};

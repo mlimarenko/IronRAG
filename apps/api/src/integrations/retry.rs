@@ -78,6 +78,13 @@ struct ProviderRetryExecution {
 
 tokio::task_local! {
     static PROVIDER_RETRY_EXECUTION: ProviderRetryExecution;
+    static SINGLE_PROVIDER_ATTEMPT: ();
+}
+
+/// An admitted event with one receipt must not hide transport replays under its
+/// identity. This scope narrows even an enclosing deadline-based retry budget.
+pub(crate) async fn with_single_provider_attempt<F: Future>(future: F) -> F::Output {
+    SINGLE_PROVIDER_ATTEMPT.scope((), future).await
 }
 
 /// Runs provider work under the caller's remaining execution budget.
@@ -209,11 +216,13 @@ where
                 let (decision, used) =
                     apply_single_retry_budget((policy.classify)(&error), once_retry_used);
                 once_retry_used = used;
-                if matches!(decision, RetryDecision::Abort) {
+                if matches!(decision, RetryDecision::Abort)
+                    || SINGLE_PROVIDER_ATTEMPT.try_with(|_| ()).is_ok()
+                {
                     return Err(error);
                 }
                 let deadline = current_provider_retry_deadline();
-                if deadline.is_none() && attempt >= max_attempts {
+                if attempt >= max_attempts {
                     return Err(error);
                 }
                 let delay = retry_delay_for_decision(&policy, attempt, decision);

@@ -12,15 +12,18 @@ Endpoints
   ``{items, totalCount, offset, limit}`` page with ``search``/``offset``/
   ``limit`` query parameters. A library ref is therefore resolved by
   walking that page to exhaustion, never by reading the first page.
-* ``GET /v1/content/libraries/{libraryId}/documents`` — the single
-  read-collection interface: cursor pagination, ``search`` (a
-  case-insensitive substring/ILIKE filter on ``external_key`` only --
-  there is no dedicated exact-match filter), ``includeDeleted``,
-  ``status``. Backs both :meth:`IronRagClient.find_document` and
-  :meth:`IronRagClient.list_documents`; both reconstruct an exact-key
-  lookup by passing the key as ``search`` and filtering the (typically
-  single) page of matches client-side for an exact ``externalKey``
-  equality, since ``search`` narrows on the same column.
+* ``GET /v1/content/libraries/{libraryId}/documents/by-external-key`` —
+  the exact-key point lookup: exactly one request for one active
+  document, ``404`` when neither that document nor the library exists.
+  The key travels as the ``externalKey`` query parameter, never in the
+  path. Backs :meth:`IronRagClient.find_document` and is the only way
+  this client resolves connector identity to a document.
+* ``GET /v1/content/libraries/{libraryId}/documents`` — the read-collection
+  interface: cursor pagination, ``search`` (a case-insensitive
+  substring/ILIKE filter on ``external_key`` only), ``includeDeleted``,
+  ``status``. It is a collection walk, never an exact-key lookup: it backs
+  :meth:`IronRagClient.list_documents` and
+  :meth:`IronRagClient.walk_all_documents`.
 * ``POST /v1/content/libraries/{libraryId}/documents`` — content-negotiated
   create (``application/json`` for metadata/pointer documents,
   ``multipart/form-data`` for byte uploads). Synchronous: 201 + Location.
@@ -141,7 +144,7 @@ class DocumentResource(BaseModel):
     :func:`_extract_document_payload`) are genuinely different response
     shapes, not just naming drift: the list row carries a derived
     ``status`` bucket (``queued``/``processing``/``ready``/``failed``/
-    ``canceled``), while the detail/create row instead carries the raw
+    ``canceled``/``empty``), while the detail/create row instead carries the raw
     ``documentState`` lifecycle value (``active``/``deleted``) with no
     ``status`` field at all. ``status`` accepts either source key so one
     model can populate from both surfaces; a value from ``documentState``
@@ -163,9 +166,8 @@ class DocumentResource(BaseModel):
     file_name: str | None = Field(default=None, alias="fileName")
     document_hint: str | None = Field(default=None, alias="documentHint")
     uploaded_at: datetime | None = Field(default=None, alias="uploadedAt")
-    visibility_intent_id: UUID | None = Field(default=None, alias="visibilityIntentId")
-    readable_mutation_item_id: UUID | None = Field(default=None, alias="readableMutationItemId")
-    readable_revision_id: UUID | None = Field(default=None, alias="readableRevisionId")
+    visibility_intent_id: UUID | None = None
+    readable_revision_id: UUID | None = None
     admission: OperationHandle | None = Field(default=None, exclude=True)
 
 
@@ -245,15 +247,34 @@ class DocumentPage(BaseModel):
     total: int | None = None
 
 
-def _validate_collection_document_library(
+def _validate_document_library_identity(
     document: DocumentResource,
     requested_library_id: UUID,
 ) -> None:
-    """Reject a collection row that escaped its requested library scope."""
+    """Reject a document that escaped its requested library scope."""
     if document.library_id != requested_library_id:
         raise IronRagError(
-            "IronRAG document collection returned mismatched library identity: "
+            "IronRAG document read returned mismatched library identity: "
             f"requested={requested_library_id}, returned={document.library_id}"
+        )
+
+
+def _validate_exact_document_identity(
+    document: DocumentResource,
+    requested_library_id: UUID,
+    requested_external_key: str,
+) -> None:
+    """Fail closed when a point lookup answers with another resource.
+
+    The point endpoint is a single scalar answer, so there is no page to
+    filter: a row for another library or another key means the lookup
+    cannot be trusted, not that the document is absent.
+    """
+    _validate_document_library_identity(document, requested_library_id)
+    if document.external_key != requested_external_key:
+        raise IronRagError(
+            "IronRAG exact document lookup returned mismatched external key: "
+            f"requested={requested_external_key!r}, returned={document.external_key!r}"
         )
 
 
@@ -639,33 +660,34 @@ def _next_document_cursor(page: DocumentPage, seen: set[str]) -> str | None:
 
 
 def _extract_document_payload(payload: Mapping[str, Any]) -> Mapping[str, Any]:
-    """Unwrap the ``{"document": ...}`` envelope used by create/get responses.
-
-    Some server responses nest a canonical document object a second level
-    deep (detail responses wrap the storage row inside a richer envelope).
-    Handle one level of that nesting by merging the outer scalar fields
-    (which may carry ``externalKey``/``libraryId`` the inner row omits)
-    under the inner object.
-    """
-    doc = payload.get("document", payload)
-    if isinstance(doc, Mapping) and isinstance(doc.get("document"), Mapping):
-        inner = doc["document"]
-        merged = {**doc, **inner}
-        head = doc.get("head")
-        if isinstance(head, Mapping):
-            for field in ("visibilityIntentId", "readableMutationItemId", "readableRevisionId"):
-                merged[field] = head.get(field)
-        merged.pop("document", None)
-        return merged
-    if isinstance(doc, Mapping) and isinstance(payload.get("head"), Mapping):
-        return {
-            **doc,
-            **{
-                field: payload["head"].get(field)
-                for field in ("visibilityIntentId", "readableMutationItemId", "readableRevisionId")
-            },
-        }
-    return doc if isinstance(doc, Mapping) else payload
+    """Read the canonical detail envelope and its snake_case domain rows."""
+    if not isinstance(payload, Mapping):
+        raise IronRagError("IronRAG returned a malformed document")
+    detail = payload
+    if isinstance(payload.get("document"), Mapping) and "document" in payload["document"]:
+        detail = payload["document"]
+    doc = detail.get("document")
+    if not isinstance(doc, Mapping) or "head" not in detail:
+        raise IronRagError("IronRAG returned a malformed document")
+    merged = {**detail, **doc}
+    merged.pop("document", None)
+    # Only the canonical head may supply currentness, including explicit null.
+    merged["visibility_intent_id"] = None
+    merged["readable_revision_id"] = None
+    if "document_state" in doc:
+        merged["status"] = doc["document_state"]
+    head = detail.get("head")
+    if head is not None:
+        try:
+            if not isinstance(head, Mapping) or UUID(str(head["document_id"])) != UUID(
+                str(doc["id"])
+            ):
+                raise ValueError("head document ownership mismatch")
+            for field in ("visibility_intent_id", "readable_revision_id"):
+                merged[field] = _optional_uuid(head[field])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise IronRagError("IronRAG returned malformed document head identity") from exc
+    return merged
 
 
 def _operation_id_from_response(body: Mapping[str, Any]) -> UUID:
@@ -681,10 +703,15 @@ def _operation_id_from_response(body: Mapping[str, Any]) -> UUID:
     typed body field uniformly covers both without the caller needing to
     know which status/header combination a given mutation kind uses.
     """
+    if not isinstance(body, Mapping):
+        raise IronRagError("IronRAG returned a malformed mutation admission")
     raw = body.get("asyncOperationId")
     if raw is None:
         raise IronRagError("IronRAG accepted the mutation but returned no operation id")
-    return UUID(str(raw))
+    try:
+        return UUID(str(raw))
+    except (TypeError, ValueError) as exc:
+        raise IronRagError("IronRAG returned a malformed operation id") from exc
 
 
 def _optional_uuid(raw: Any) -> UUID | None:
@@ -692,25 +719,36 @@ def _optional_uuid(raw: Any) -> UUID | None:
 
 
 def _receipt_from_response(body: Mapping[str, Any]) -> dict[str, Any]:
-    """Typed admission receipt fields from ``ContentMutationDetailResponse``.
-
-    Missing keys stay ``None`` so a REQUIRED caller can fail closed on an older
-    server instead of silently assuming readability.
-    """
+    """Validate payload lineage at the native receipt boundary, before persistence."""
     items = body.get("items", [])
-    if not isinstance(items, list) or len(items) > 1:
+    if not isinstance(items, list) or len(items) != 1:
         raise IronRagError("IronRAG single-document admission returned invalid mutation items")
-    item = items[0] if items else {}
+    item = items[0]
     if not isinstance(item, Mapping):
         raise IronRagError("IronRAG single-document admission returned an invalid mutation item")
-    return {
-        "visibility_intent_id": _optional_uuid(item.get("visibilityIntentId")),
-        "mutation_item_id": _optional_uuid(item.get("id")),
-        "document_id": _optional_uuid(item.get("documentId")),
-        "result_revision_id": _optional_uuid(body.get("resultRevisionId")),
-        "result_checksum": body.get("resultChecksum"),
-        "request_fingerprint": body.get("requestFingerprint"),
-    }
+    try:
+        revision_id = UUID(str(body["resultRevisionId"]))
+        if UUID(str(item["result_revision_id"])) != revision_id:
+            raise ValueError("result revision mismatch")
+        checksum = body["resultChecksum"]
+        fingerprint = body["requestFingerprint"]
+        if (
+            not isinstance(checksum, str)
+            or not checksum
+            or not isinstance(fingerprint, str)
+            or not fingerprint
+        ):
+            raise ValueError("missing payload lineage")
+        return {
+            "visibility_intent_id": _optional_uuid(body["visibilityIntentId"]),
+            "mutation_item_id": UUID(str(item["id"])),
+            "document_id": UUID(str(item["document_id"])),
+            "result_revision_id": revision_id,
+            "result_checksum": checksum,
+            "request_fingerprint": fingerprint,
+        }
+    except (KeyError, TypeError, ValueError) as exc:
+        raise IronRagError("IronRAG returned malformed payload admission identity") from exc
 
 
 class WalkCheckpointStore(Protocol):
@@ -1006,64 +1044,54 @@ class IronRagClient:
     # -- documents -----------------------------------------------------------
 
     async def find_document(self, library_id: UUID, external_key: str) -> DocumentResource | None:
-        """Resolve a document by its exact external key.
+        """Resolve one active document by its exact external key.
 
-        There is no dedicated exact-match filter on the list endpoint --
-        only a ``search`` substring/ILIKE filter on ``external_key`` or the
-        rendered filename
-        (plan S7.1 describes an exact filter as an aspiration; the landed
-        API does not implement one). This narrows server-side via
-        ``search=external_key`` and returns the first page item whose
-        ``external_key`` equals the requested key exactly, which is still
-        a single bounded request rather than the old substring-ILIKE +
-        client filter + full-scan-fallback dance.
-
-        A library that no longer exists is treated the same as "no match"
-        here -- ``list_documents`` itself must not blur that distinction,
-        since callers like the reap sweep (sync.py) need the real signal to
-        self-heal a stale cursor row.
+        The key travels in the ``externalKey`` query parameter, encoded by
+        httpx, with no collection scan or fallback. A missing library or
+        active document returns ``None`` on 404. Access denials and other
+        HTTP errors keep their native problem exceptions. A successful
+        response must bind to both the requested library and exact key.
         """
-        try:
-            async for document in self.list_documents(
-                library_id, external_key=external_key, limit=50
-            ):
-                return document
-        except IronRagNotFoundError:
+        if not external_key:
+            raise ValueError("external_key must not be empty")
+        response = await self._client.get(
+            f"/v1/content/libraries/{library_id}/documents/by-external-key",
+            params={"externalKey": external_key},
+        )
+        if response.status_code == 404:
             return None
-        return None
+        if response.status_code >= 400:
+            _raise_for_problem(response)
+        try:
+            document = DocumentResource.model_validate(response.json())
+        except ValueError as exc:
+            raise IronRagError("IronRAG returned a malformed document lookup") from exc
+        _validate_exact_document_identity(document, library_id, external_key)
+        return document
 
     async def list_documents(
         self,
         library_id: UUID,
         *,
         search: str | None = None,
-        external_key: str | None = None,
         status: Sequence[str] = (),
         include_deleted: bool = False,
         limit: int = 200,
     ) -> AsyncIterator[DocumentResource]:
         """Walk every page of the library's document collection.
 
-        The only read-collection interface (plan S7.1) -- cursor pagination
-        to ``nextCursor is None``, never a ``total``-driven offset fallback.
-
-        ``external_key`` is not a server-side parameter (see
-        :meth:`find_document`): when set, it is sent as ``search`` to
-        narrow server-side, and every yielded item is additionally
-        filtered to an exact ``external_key`` match client-side, so this
-        behaves as an exact-key list (normally 0 or 1 result) rather than
-        a substring search. Passing both ``search`` and ``external_key``
-        is not supported -- they would need conflicting narrowing.
+        The read-collection interface (plan S7.1) -- cursor pagination to
+        ``nextCursor is None``, never a ``total``-driven offset fallback.
+        ``search`` is the server's case-insensitive substring filter, so a
+        walk is a collection read, not an exact-key lookup: use
+        :meth:`find_document` for one known connector identity.
         """
-        if search and external_key:
-            raise ValueError("list_documents accepts either search or external_key, not both")
-        server_search = external_key or search
         cursor: str | None = None
         seen_cursors: set[str] = set()
         while True:
             params: dict[str, Any] = {"limit": limit}
-            if server_search:
-                params["search"] = server_search
+            if search:
+                params["search"] = search
             if status:
                 params["status"] = ",".join(status)
             if include_deleted:
@@ -1078,9 +1106,7 @@ class IronRagClient:
                 _raise_for_problem(response)
             page = _parse_document_page(response)
             for item in page.items:
-                _validate_collection_document_library(item, library_id)
-                if external_key and item.external_key != external_key:
-                    continue
+                _validate_document_library_identity(item, library_id)
                 yield item
             cursor = _next_document_cursor(page, seen_cursors)
             if cursor is None:
@@ -1125,7 +1151,7 @@ class IronRagClient:
                 _raise_for_problem(response)
             page = _parse_document_page(response)
             for item in page.items:
-                _validate_collection_document_library(item, library_id)
+                _validate_document_library_identity(item, library_id)
                 yield item
             cursor = _next_document_cursor(page, seen_cursors)
             if checkpoint_store is not None:
@@ -1212,11 +1238,21 @@ class IronRagClient:
         payload = response.json()
         document = DocumentResource.model_validate(_extract_document_payload(payload))
         mutation = payload.get("mutation")
-        if isinstance(mutation, Mapping) and mutation.get("asyncOperationId") is not None:
+        if file_bytes is not None and (
+            not isinstance(mutation, Mapping) or mutation.get("asyncOperationId") is None
+        ):
+            raise IronRagError("IronRAG upload returned no complete payload admission")
+        if (
+            isinstance(mutation, Mapping)
+            and mutation.get("asyncOperationId") is not None
+            and (file_bytes is not None or "resultRevisionId" in mutation)
+        ):
             document.admission = OperationHandle(
                 operation_id=_operation_id_from_response(mutation),
                 **_receipt_from_response(mutation),
             )
+            if document.admission.document_id != document.id:
+                raise IronRagError("IronRAG create receipt returned mismatched document identity")
         log.info(
             "ironrag.create_document.created",
             external_key=external_key,
@@ -1318,6 +1354,8 @@ class IronRagClient:
         handle = OperationHandle(operation_id=operation_id, **_receipt_from_response(body))
         if handle.document_id is not None and handle.document_id != UUID(str(document_id)):
             raise IronRagError("IronRAG revision receipt returned mismatched document identity")
+        if handle.visibility_intent_id != _optional_uuid(visibility_intent_id):
+            raise IronRagError("IronRAG revision receipt returned mismatched visibility binding")
         return handle
 
     async def delete_document(

@@ -1,7 +1,9 @@
 use sqlx::{Executor, FromRow, PgPool, Postgres};
 use uuid::Uuid;
 
-use super::super::query_fragments::runtime_graph_edge_columns;
+use super::super::query_fragments::{
+    admitted_runtime_graph_edges_select_query, current_graph_target, runtime_graph_edge_columns,
+};
 use super::super::types::{RuntimeGraphEdgeRow, RuntimeGraphQueryEdgeRow};
 use super::scan_transaction::begin_topology_scan_tx;
 
@@ -32,16 +34,8 @@ pub async fn list_admitted_runtime_graph_edges_by_library_with_executor<'e, E>(
 where
     E: Executor<'e, Database = Postgres>,
 {
-    sqlx::query_as::<_, RuntimeGraphEdgeRow>(concat!(
-        "select ",
-        runtime_graph_edge_columns!(),
-        "
-         from runtime_graph_edge
-         where library_id = $1
-           and projection_version = $2
-           and btrim(relation_type) <> ''
-           and from_node_id <> to_node_id
-         order by relation_type asc, created_at asc, id asc"
+    sqlx::query_as::<_, RuntimeGraphEdgeRow>(sqlx::AssertSqlSafe(
+        admitted_runtime_graph_edges_select_query(runtime_graph_edge_columns!()),
     ))
     .bind(library_id)
     .bind(projection_version)
@@ -64,16 +58,18 @@ pub async fn list_admitted_runtime_graph_query_edges_by_library(
     library_id: Uuid,
     projection_version: i64,
 ) -> Result<Vec<RuntimeGraphQueryEdgeRow>, sqlx::Error> {
-    sqlx::query_as::<_, RuntimeGraphQueryEdgeRow>(
+    sqlx::query_as::<_, RuntimeGraphQueryEdgeRow>(concat!(
         "select id, library_id, from_node_id, to_node_id, relation_type,
             summary, weight, support_count, projection_version, created_at, updated_at
-         from runtime_graph_edge
+         from runtime_graph_edge as edge
          where library_id = $1
            and projection_version = $2
            and btrim(relation_type) <> ''
            and from_node_id <> to_node_id
-         order by relation_type asc, created_at asc, id asc",
-    )
+           and ",
+        current_graph_target!("edge", "edge"),
+        " order by relation_type asc, created_at asc, id asc"
+    ))
     .bind(library_id)
     .bind(projection_version)
     .fetch_all(pool)
@@ -98,15 +94,17 @@ pub async fn list_admitted_runtime_graph_edges_compact_by_library(
     projection_version: i64,
 ) -> Result<Vec<RuntimeGraphEdgeCompactRow>, sqlx::Error> {
     let mut tx = begin_topology_scan_tx(pool).await?;
-    let rows = sqlx::query_as::<_, RuntimeGraphEdgeCompactRow>(
+    let rows = sqlx::query_as::<_, RuntimeGraphEdgeCompactRow>(concat!(
         "select from_node_id, to_node_id, relation_type, support_count
-         from runtime_graph_edge
+         from runtime_graph_edge as edge
          where library_id = $1
            and projection_version = $2
            and btrim(relation_type) <> ''
            and from_node_id <> to_node_id
-         order by relation_type asc, support_count desc, from_node_id asc, to_node_id asc",
-    )
+           and ",
+        current_graph_target!("edge", "edge"),
+        " order by relation_type asc, support_count desc, from_node_id asc, to_node_id asc"
+    ))
     .bind(library_id)
     .bind(projection_version)
     .fetch_all(&mut *tx)
@@ -125,7 +123,7 @@ pub async fn count_admitted_runtime_graph_relations_by_library(
     library_id: Uuid,
     projection_version: i64,
 ) -> Result<i64, sqlx::Error> {
-    sqlx::query_scalar::<_, i64>(
+    sqlx::query_scalar::<_, i64>(concat!(
         "select count(*)::bigint
          from runtime_graph_edge as edge
          inner join runtime_graph_node as source
@@ -141,8 +139,14 @@ pub async fn count_admitted_runtime_graph_relations_by_library(
          where edge.library_id = $1
            and edge.projection_version = $2
            and btrim(edge.relation_type) <> ''
-           and edge.from_node_id <> edge.to_node_id",
-    )
+           and edge.from_node_id <> edge.to_node_id
+           and ",
+        current_graph_target!("edge", "edge"),
+        " and ",
+        current_graph_target!("source", "node"),
+        " and ",
+        current_graph_target!("target", "node")
+    ))
     .bind(library_id)
     .bind(projection_version)
     .fetch_one(pool)
@@ -160,7 +164,7 @@ pub async fn list_top_admitted_runtime_graph_relations_by_library(
     projection_version: i64,
     limit: usize,
 ) -> Result<Vec<RuntimeGraphEdgeRow>, sqlx::Error> {
-    sqlx::query_as::<_, RuntimeGraphEdgeRow>(
+    sqlx::query_as::<_, RuntimeGraphEdgeRow>(concat!(
         "select edge.id, edge.library_id, edge.from_node_id, edge.to_node_id, edge.relation_type,
             edge.\u{63}anonical_key, edge.summary, edge.weight, edge.support_count, edge.metadata_json,
             edge.projection_version, edge.created_at, edge.updated_at
@@ -179,9 +183,15 @@ pub async fn list_top_admitted_runtime_graph_relations_by_library(
            and edge.projection_version = $2
            and btrim(edge.relation_type) <> ''
            and edge.from_node_id <> edge.to_node_id
-         order by edge.support_count desc, edge.relation_type asc, edge.created_at asc, edge.id asc
-         limit $3",
-    )
+           and ",
+        current_graph_target!("edge", "edge"),
+        " and ",
+        current_graph_target!("source", "node"),
+        " and ",
+        current_graph_target!("target", "node"),
+        " order by edge.support_count desc, edge.relation_type asc, edge.created_at asc, edge.id asc
+         limit $3"
+    ))
     .bind(library_id)
     .bind(projection_version)
     .bind(limit as i64)
@@ -225,13 +235,15 @@ where
         "select ",
         runtime_graph_edge_columns!(),
         "
-         from runtime_graph_edge
+         from runtime_graph_edge as edge
          where library_id = $1
            and projection_version = $2
            and id = any($3)
            and btrim(relation_type) <> ''
            and from_node_id <> to_node_id
-         order by relation_type asc, created_at asc, id asc"
+           and ",
+        current_graph_target!("edge", "edge"),
+        " order by relation_type asc, created_at asc, id asc"
     ))
     .bind(library_id)
     .bind(projection_version)
@@ -276,13 +288,15 @@ where
         "select ",
         runtime_graph_edge_columns!(),
         "
-         from runtime_graph_edge
+         from runtime_graph_edge as edge
          where library_id = $1
            and projection_version = $2
            and (from_node_id = any($3) or to_node_id = any($3))
            and btrim(relation_type) <> ''
            and from_node_id <> to_node_id
-         order by relation_type asc, created_at asc, id asc"
+           and ",
+        current_graph_target!("edge", "edge"),
+        " order by relation_type asc, created_at asc, id asc"
     ))
     .bind(library_id)
     .bind(projection_version)

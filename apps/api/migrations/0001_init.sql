@@ -231,7 +231,9 @@ CREATE TYPE public.billing_owning_execution_kind AS ENUM (
     'ingest_attempt',
     'query_execution',
     'graph_extraction_attempt',
-    'binding_validation'
+    'binding_validation',
+    'mcp_document_read',
+    'knowledge_search'
 );
 
 
@@ -2199,6 +2201,34 @@ CREATE TABLE public.audit_event_subject (
 
 
 --
+-- Name: billing_document_read; Type: TABLE; Schema: public; Owner: -
+--
+
+-- Retain immutable source attribution after revision retention removes bytes.
+CREATE TABLE public.billing_document_read (
+    id uuid PRIMARY KEY,
+    workspace_id uuid NOT NULL,
+    library_id uuid NOT NULL,
+    document_id uuid NOT NULL,
+    revision_id uuid NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL
+);
+
+
+--
+-- Name: billing_knowledge_search; Type: TABLE; Schema: public; Owner: -
+--
+
+-- A standalone search owns its billing identity without retaining raw query text.
+CREATE TABLE public.billing_knowledge_search (
+    id uuid PRIMARY KEY,
+    workspace_id uuid NOT NULL,
+    library_id uuid NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL
+);
+
+
+--
 -- Name: billing_charge; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -2318,7 +2348,7 @@ CREATE TABLE public.catalog_library (
     include_document_hint_in_mcp_answers boolean DEFAULT true NOT NULL,
     retrieval_config jsonb DEFAULT '{"lexical": {"textSearchConfig": "simple"}}'::jsonb NOT NULL,
     CONSTRAINT catalog_library_recognition_policy_object_check CHECK ((jsonb_typeof(recognition_policy) = 'object'::text)),
-    CONSTRAINT catalog_library_recognition_policy_raster_engine_check CHECK (((recognition_policy ? 'rasterImageEngine'::text) AND ((recognition_policy ->> 'rasterImageEngine'::text) = ANY (ARRAY['docling'::text, 'vision'::text])) AND ((recognition_policy - 'rasterImageEngine'::text) = '{}'::jsonb))),
+    CONSTRAINT catalog_library_recognition_policy_raster_engine_check CHECK ((recognition_policy = '{"rasterImageEngine": "vision"}'::jsonb)),
     CONSTRAINT catalog_library_retrieval_config_object_check CHECK ((jsonb_typeof(retrieval_config) = 'object'::text)),
     CONSTRAINT catalog_library_slug_check CHECK ((slug ~ '^[a-z0-9]+(?:[-_][a-z0-9]+)*$'::text)),
     CONSTRAINT catalog_library_web_ingest_policy_object_check CHECK ((jsonb_typeof(web_ingest_policy) = 'object'::text))
@@ -5762,6 +5792,11 @@ CREATE INDEX idx_audit_event_request_id ON public.audit_event USING btree (reque
 
 CREATE INDEX idx_billing_charge_usage ON public.billing_charge USING btree (usage_id);
 
+-- Referencing-side lookup for library/workspace cascade and scope enforcement.
+CREATE INDEX idx_billing_document_read_library_scope ON public.billing_document_read USING btree (library_id, workspace_id);
+
+CREATE INDEX idx_billing_knowledge_search_library_scope ON public.billing_knowledge_search USING btree (library_id, workspace_id);
+
 
 --
 -- Name: idx_billing_execution_cost_library; Type: INDEX; Schema: public; Owner: -
@@ -7701,6 +7736,12 @@ ALTER TABLE ONLY public.audit_event_subject
 
 ALTER TABLE ONLY public.billing_charge
     ADD CONSTRAINT billing_charge_usage_id_fkey FOREIGN KEY (usage_id) REFERENCES public.billing_usage(id) ON DELETE CASCADE;
+
+ALTER TABLE ONLY public.billing_document_read
+    ADD CONSTRAINT billing_document_read_library_scope_fkey FOREIGN KEY (library_id, workspace_id) REFERENCES public.catalog_library(id, workspace_id) ON DELETE CASCADE;
+
+ALTER TABLE ONLY public.billing_knowledge_search
+    ADD CONSTRAINT billing_knowledge_search_library_scope_fkey FOREIGN KEY (library_id, workspace_id) REFERENCES public.catalog_library(id, workspace_id) ON DELETE CASCADE;
 
 
 --

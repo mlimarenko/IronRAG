@@ -169,7 +169,7 @@ if [ -f "$EXPECTED_PATH" ]; then
     recorded_checksum="$(tr -d '[:space:]' < "$CHECKSUM_PATH")"
     if [ "$actual_checksum" != "$recorded_checksum" ]; then
       record_failure "baseline_checksum" "0001_init.sql" \
-        "Baseline changed ($recorded_checksum -> $actual_checksum). Every database that already applied it will refuse to start; recreate them, or revert. Update $BASELINE_CHECKSUM_FILE in the same commit to acknowledge."
+        "Baseline changed ($recorded_checksum -> $actual_checksum). Existing databases require an approved guarded baseline transition; do not reset data or edit the applied migration ledger. Update $BASELINE_CHECKSUM_FILE in the same commit to acknowledge the source change."
     fi
   fi
 fi

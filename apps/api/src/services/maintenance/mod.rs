@@ -13,6 +13,8 @@
 pub mod admission_visibility_policy_schema;
 pub mod ai_binding_purpose_schema;
 pub mod baseline_delta;
+pub mod billing_document_read_schema;
+pub mod billing_knowledge_search_schema;
 pub mod content_visibility_intent_schema;
 pub mod credential_secrets;
 pub mod decision_catalog_schema;
@@ -31,4 +33,6 @@ pub mod vector_lifecycle_inventory;
 pub mod vector_lifecycle_metrics;
 pub mod vector_lifecycle_observability;
 pub mod vector_orphan_reconcile;
+pub mod vision_recognition_schema;
 pub mod webhook_outbox_ops;
+pub mod xberg_recognition_schema;

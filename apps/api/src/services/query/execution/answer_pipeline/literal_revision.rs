@@ -11,8 +11,7 @@ use super::preflight::structural_question_tokens;
 use super::verification::verify_generated_answer;
 use super::{
     AnswerVerificationStage, AppState, AssistantGroundingEvidence, ChatMessage, HashMap, HashSet,
-    KnowledgeDocumentRow, PreparedAnswerQueryResult, QueryClarification, QueryIR,
-    QueryVerificationPersistence, RuntimeMatchedChunk, Uuid,
+    KnowledgeDocumentRow, PreparedAnswerQueryResult, QueryIR, RuntimeMatchedChunk, Uuid,
 };
 use anyhow::Context as _;
 
@@ -396,49 +395,6 @@ pub(super) async fn hydrate_runtime_document_index(
         document_index.insert(document.document_id, document);
     }
     Ok(())
-}
-
-pub(super) async fn finalize_verified_answer(
-    state: &AppState,
-    execution_id: Uuid,
-    mut verification_stage: AnswerVerificationStage,
-) -> anyhow::Result<AnswerVerificationStage> {
-    let verification_level = verification_stage.generation.query_ir.verification_level();
-    let verification_state = verification_stage.verification.state;
-    let finalized = super::super::verification_policy::finalize_answer_visibility(
-        verification_level,
-        verification_state,
-        &verification_stage.verification.warnings,
-        verification_stage.generation.query_ir.language,
-        &verification_stage.generation.answer,
-        super::super::verification_policy::AnswerVisibilityKind::FactualCandidate,
-    );
-    let disposition = finalized.disposition;
-    let visible_answer = finalized.visible_answer.into_owned();
-    if visible_answer != verification_stage.generation.answer {
-        tracing::warn!(
-            %execution_id,
-            ?verification_level,
-            ?verification_state,
-            ?disposition,
-            warnings = verification_stage.verification.warnings.len(),
-            "strict verification suppressed a non-verified public answer"
-        );
-        verification_stage.generation.answer = visible_answer;
-    }
-    super::super::persist_query_verification(QueryVerificationPersistence {
-        state,
-        execution_id,
-        verification: &verification_stage.verification,
-        answer_disposition: disposition,
-        clarification: &QueryClarification::default(),
-        authoritative_evidence: &verification_stage.generation.authoritative_evidence,
-        assistant_grounding: &verification_stage.generation.assistant_grounding,
-        answer_kind: None,
-    })
-    .await?;
-
-    Ok(verification_stage)
 }
 
 pub(super) fn structural_literal_focus_keyword_is_eligible(keyword: &str) -> bool {

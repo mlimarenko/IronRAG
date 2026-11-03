@@ -20,7 +20,8 @@ pub enum AiBindingPurpose {
     /// Provider-backed semantic reranking of retrieved candidates, bound
     /// independently of query compilation.
     QueryRerank,
-    /// Evidence-grounded answer generation and bounded repair.
+    /// Evidence-grounded answer generation, bounded repair, and structured
+    /// semantic verification of the selected answer.
     QueryAnswer,
     /// Tool-capable assistant turns for the UI and MCP agent contour.
     Agent,

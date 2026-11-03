@@ -115,9 +115,12 @@ describe('cost-dependent list pending vs empty', () => {
       () => ({ ...reconciling, scopePending: false, totalCount: 7 }),
       'uploaded_at',
     )
-    await waitFor(() => expect(result.current.costReconciling).toBe(true))
-    expect(result.current.isScopePending).toBe(false)
-    expect(result.current.filteredTotal).toBe(7)
+    // Snapshot adoption can briefly keep the reconciling page as placeholder data.
+    await waitFor(() => {
+      expect(result.current.costReconciling).toBe(true)
+      expect(result.current.isScopePending).toBe(false)
+      expect(result.current.filteredTotal).toBe(7)
+    })
   })
   it('marks a reconciling cost sort pending instead of claiming no documents match', async () => {
     const { result } = mount(() => reconciling)
@@ -127,7 +130,8 @@ describe('cost-dependent list pending vs empty', () => {
 
   it('treats a current empty cost page as a real empty result', async () => {
     const { result } = mount(() => currentEmpty)
-    await waitFor(() => expect(result.current.costReconciling).toBe(false))
+    await waitFor(() => expect(result.current.isLoading).toBe(false))
+    expect(result.current.costReconciling).toBe(false)
     expect(result.current.isScopePending).toBe(false)
     expect(result.current.items).toHaveLength(0)
   })

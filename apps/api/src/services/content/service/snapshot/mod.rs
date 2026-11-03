@@ -19,7 +19,7 @@
 //! Import takes the raw request body as an async stream, wraps it in a
 //! zstd decoder, hands it to `async_tar::Archive`, and processes entries
 //! in their serialized order after spooling and validating the complete inventory
-//! and schema-4 revision admissions before any target mutation. Source-owned blobs
+//! and schema-5 revision admissions before any target mutation. Source-owned blobs
 //! include restricted and pending revisions; backup is not a public-read surface.
 //!
 //! The `include` query parameter on export selects which families of

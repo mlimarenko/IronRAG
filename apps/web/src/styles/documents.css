@@ -792,7 +792,7 @@
 .document-editor-surface--raw_text {
   background: var(--sidebar);
   color: var(--sidebar-text);
-  font-family: ui-monospace, monospace;
+  font-family: var(--font-medeo-mono);
   tab-size: 4;
 }
 .document-editor-surface--table {
@@ -800,7 +800,7 @@
     repeating-linear-gradient(to right, transparent 0, transparent 179px, var(--border) 180px),
     repeating-linear-gradient(to bottom, transparent 0, transparent 35px, var(--border) 36px),
     var(--surface);
-  font-family: ui-monospace, monospace;
+  font-family: var(--font-medeo-mono);
   line-height: 36px;
 }
 
@@ -961,7 +961,7 @@
 .web-filter-editor textarea {
   min-height: 105px;
   resize: vertical;
-  font-family: ui-monospace, monospace;
+  font-family: var(--font-medeo-mono);
   font-size: 0.8125rem;
 }
 .rule-tester > .input {

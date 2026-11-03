@@ -134,6 +134,15 @@ pub(crate) fn verification_warning_blocks_factual_readiness(code: &str) -> bool 
     matches!(
         code,
         "clarification_not_answer"
+            | "semantic_not_run"
+            | "semantic_contradiction"
+            | "semantic_unsupported"
+            | "semantic_mixed_support"
+            | "semantic_missing_caveat"
+            | "semantic_completeness_undetermined"
+            | "semantic_false_refusal"
+            | "semantic_nonfactual_response"
+            | "semantic_operational_failure"
             | "unsupported_literal"
             | "unsupported_\u{63}anonical_claim"
             | "no_\u{63}anonical_evidence"
@@ -141,6 +150,7 @@ pub(crate) fn verification_warning_blocks_factual_readiness(code: &str) -> bool 
             | "no_agent_tool_evidence"
             | "conflicting_evidence"
             | "partial_coverage"
+            | "enumeration_coverage_partial"
             | "intent_mismatch"
             | "variant_coverage_incomplete"
             | "empty_answer"

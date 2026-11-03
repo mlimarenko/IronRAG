@@ -2644,6 +2644,38 @@ paths:
           description: An active document with this external key already exists
         '415':
           description: Content-Type is neither application/json nor multipart/form-data
+  /v1/content/libraries/{libraryId}/documents/by-external-key:
+    get:
+      tags:
+      - content
+      summary: Look up one active document by its exact connector identity.
+      description: Manages document content and derived document views. These endpoints are used by document workspaces, upload flows, source viewers, revision history, and document-level diagnostics. Call it when the caller already has the resource identifier and needs the latest authorized server view.
+      operationId: getContentDocumentByExternalKey
+      parameters:
+      - name: libraryId
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+      - name: externalKey
+        in: query
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          description: Document list item
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ContentDocumentListItem'
+        '400':
+          description: Invalid external key
+        '401':
+          description: Caller is not authenticated or authorized for the library
+        '404':
+          description: Document not found
   /v1/content/libraries/{libraryId}/documents/facets:
     get:
       tags:
@@ -6469,6 +6501,13 @@ components:
         runtimeSummary:
           $ref: '#/components/schemas/AssistantRuntimeSummary'
           description: Agent-runtime state associated with the answer.
+        semanticVerification:
+          oneOf:
+          - type: 'null'
+          - $ref: '#/components/schemas/SemanticVerificationReport'
+            description: |-
+              Semantic findings for the checked candidate. The report separately
+              identifies the final visible body; historical executions may have none.
         technicalFactReferences:
           type: array
           items:
@@ -6636,6 +6675,11 @@ components:
         runtimeSummary:
           $ref: '#/components/schemas/AssistantRuntimeSummary'
           description: Agent-runtime state associated with the execution.
+        semanticVerification:
+          oneOf:
+          - type: 'null'
+          - $ref: '#/components/schemas/SemanticVerificationReport'
+            description: Persisted semantic findings, with checked and visible body identities.
         technicalFactReferences:
           type: array
           items:
@@ -7661,6 +7705,8 @@ components:
       - query_execution
       - graph_extraction_attempt
       - ingest_attempt
+      - mcp_document_read
+      - knowledge_search
     BillingProviderCall:
       type: object
       required:
@@ -8340,9 +8386,8 @@ components:
           type: string
           description: |-
             Persisted connector identity (`content_document.external_key`).
-            Connectors look this up via list to decide whether to upload or
-            replace; exposed so a paginated list pass is sufficient instead
-            of a per-document detail roundtrip.
+            Connectors use the exact external-key lookup to decide whether to
+            upload or replace.
         failureCode:
           type:
           - string
@@ -8552,6 +8597,7 @@ components:
       required:
       - mutation
       - items
+      - visibilityIntentId
       properties:
         asyncOperationId:
           type:
@@ -8573,10 +8619,6 @@ components:
           type:
           - string
           - 'null'
-          description: |-
-            Durable admission visibility policy of this mutation. Always emitted so
-            a client can never treat the field as absent and silently assume
-            readability; unknown values are a decode error, not a default.
         requestFingerprint:
           type:
           - string
@@ -8590,6 +8632,12 @@ components:
           - string
           - 'null'
           format: uuid
+        visibilityIntentId:
+          type:
+          - string
+          - 'null'
+          format: uuid
+          description: Immutable result revision binding. Explicit null denotes unbound work.
     ContentMutationItem:
       type: object
       required:
@@ -12546,7 +12594,7 @@ components:
       - rasterImageEngine
       properties:
         rasterImageEngine:
-          $ref: '#/components/schemas/RecognitionEngine'
+          $ref: '#/components/schemas/RasterImageEngine'
       additionalProperties: false
     LibrarySummary:
       type: object
@@ -13874,11 +13922,10 @@ components:
         total:
           type: integer
           format: int64
-    RecognitionEngine:
+    RasterImageEngine:
       type: string
+      description: Current raster policy. Extraction provenance uses `RecognitionEngine` instead.
       enum:
-      - native
-      - docling
       - vision
     ReleaseUpdateResponse:
       type: object
@@ -14589,6 +14636,371 @@ components:
       - graph_extract
       - structured_prepare
       - technical_fact_extract
+    SemanticAnswerUnit:
+      type: object
+      description: Exhaustive answer block assigned by the server, not by the verifier.
+      required:
+      - unitId
+      - span
+      - text
+      properties:
+        span:
+          $ref: '#/components/schemas/SemanticByteSpan'
+          description: Position in the exact checked answer.
+        text:
+          type: string
+          description: Exact text at that position.
+        unitId:
+          type: string
+          description: Stable opaque identifier within this checked answer.
+      additionalProperties: false
+    SemanticAssessment:
+      type: object
+      description: Validated semantic result; it does not encode formal guards or readiness.
+      required:
+      - claimSupport
+      - units
+      - completeness
+      - missingCaveats
+      - responseClassification
+      properties:
+        claimSupport:
+          $ref: '#/components/schemas/SemanticClaimSupport'
+          description: Aggregate derived by the server from all unit verdicts.
+        completeness:
+          $ref: '#/components/schemas/SemanticCompleteness'
+          description: Completeness independent of the support aggregate.
+        missingCaveats:
+          type: array
+          items:
+            $ref: '#/components/schemas/SemanticMissingCaveat'
+          description: Source-grounded omissions; nonempty exactly when essential caveats are missing.
+        responseClassification:
+          $ref: '#/components/schemas/SemanticResponseClassification'
+          description: Candidate response/refusal classification.
+        units:
+          type: array
+          items:
+            $ref: '#/components/schemas/SemanticUnitVerdict'
+          description: Exhaustive, server-ordered unit verdicts.
+      additionalProperties: false
+    SemanticByteSpan:
+      type: object
+      description: Exact half-open UTF-8 byte range, never character offsets.
+      required:
+      - start
+      - end
+      properties:
+        end:
+          type: integer
+          description: Exclusive byte offset.
+          minimum: 0
+        start:
+          type: integer
+          description: Inclusive byte offset.
+          minimum: 0
+      additionalProperties: false
+    SemanticClaimSupport:
+      type: string
+      description: Support of all assertions within a unit, or the server-derived aggregate.
+      enum:
+      - supported
+      - contradicted
+      - insufficient_evidence
+      - mixed
+      - no_factual_claims
+    SemanticCompleteness:
+      type: string
+      description: Completeness for the question, independent of claim support.
+      enum:
+      - complete
+      - missing_essential_caveats
+      - undetermined
+    SemanticEvidenceLink:
+      type: object
+      description: A verifier-proposed quote validated against an authorized source entry.
+      required:
+      - sourceId
+      - span
+      - quote
+      properties:
+        quote:
+          type: string
+          description: Exact text at the quoted range.
+        sourceId:
+          type: string
+          description: Opaque identifier of a selected source, not a document UUID.
+        span:
+          $ref: '#/components/schemas/SemanticByteSpan'
+          description: |-
+            Server-derived half-open UTF-8 byte range of a unique exact quote within
+            the selected text. Provider-supplied spans are not accepted.
+      additionalProperties: false
+    SemanticEvidenceScope:
+      type: string
+      description: Evidence authority established upstream; selected excerpts cannot prove absence.
+      enum:
+      - selected_excerpt
+      - complete_document
+    SemanticFailureCode:
+      type: string
+      description: Operational failures never imply semantic support.
+      enum:
+      - timeout
+      - provider_refusal
+      - provider_error
+      - invalid_response
+      - invalid_provenance
+    SemanticMissingCaveat:
+      type: object
+      description: An omitted essential qualification with its source basis.
+      required:
+      - description
+      - evidence
+      properties:
+        description:
+          type: string
+          description: Bounded explanation of the omission, not executable instructions.
+        evidence:
+          type: array
+          items:
+            $ref: '#/components/schemas/SemanticEvidenceLink'
+          description: Exact source basis for the qualification.
+      additionalProperties: false
+    SemanticNotRunReason:
+      type: string
+      description: Why no semantic verifier invocation was attempted.
+      enum:
+      - non_factual_response
+      - disabled
+      - binding_unavailable
+      - no_evidence
+      - empty_answer
+      - input_limit_exceeded
+      - unsupported_structured_transport
+    SemanticResponseClassification:
+      type: string
+      description: Candidate-answer classification, not the operational status of the verifier.
+      enum:
+      - factual_answer
+      - correct_source_bounded_abstention
+      - false_refusal
+      - unresolved_refusal
+    SemanticSourceEntry:
+      type: object
+      description: Server-retained source manifest entry. Never accept these identities from a model.
+      required:
+      - sourceId
+      - documentId
+      - documentRevisionId
+      - locator
+      - scope
+      - textSha256
+      - text
+      properties:
+        documentId:
+          type: string
+          format: uuid
+          description: Authorized document identity.
+        documentRevisionId:
+          type: string
+          format: uuid
+          description: Immutable document revision used by the evidence owner.
+        locator:
+          $ref: '#/components/schemas/SemanticSourceLocator'
+          description: Typed position of the selected source.
+        scope:
+          $ref: '#/components/schemas/SemanticEvidenceScope'
+          description: Extent of the proven source coverage.
+        sourceId:
+          type: string
+          description: Opaque reference exposed to the verifier.
+        text:
+          type: string
+          description: Only canonical source text, without metadata or tool wrappers.
+        textSha256:
+          type: string
+          description: SHA-256 of exactly `text`, encoded as lowercase hexadecimal.
+      additionalProperties: false
+    SemanticSourceLocator:
+      oneOf:
+      - type: object
+        description: A selected indexed chunk.
+        required:
+        - chunk_id
+        - kind
+        properties:
+          chunk_id:
+            type: string
+            format: uuid
+            description: Authoritative chunk identity.
+          kind:
+            type: string
+            enum:
+            - chunk
+      - type: object
+        description: A selected prepared document segment.
+        required:
+        - segment_id
+        - kind
+        properties:
+          kind:
+            type: string
+            enum:
+            - segment
+          segment_id:
+            type: string
+            format: uuid
+            description: Authoritative segment identity.
+      - type: object
+        description: An exact byte slice of the canonical document text.
+        required:
+        - start
+        - end
+        - kind
+        properties:
+          end:
+            type: integer
+            description: Exclusive document byte offset.
+            minimum: 0
+          kind:
+            type: string
+            enum:
+            - document_slice
+          start:
+            type: integer
+            description: Inclusive document byte offset.
+            minimum: 0
+      description: Provenance locator supplied only by the authorized server-side evidence owner.
+    SemanticUnitVerdict:
+      type: object
+      description: One verdict covers every assertion in the corresponding server-defined block.
+      required:
+      - unitId
+      - support
+      - assertsDocumentAbsence
+      - evidence
+      properties:
+        assertsDocumentAbsence:
+          type: boolean
+          description: Whether this unit asserts document-wide absence of a fact.
+        evidence:
+          type: array
+          items:
+            $ref: '#/components/schemas/SemanticEvidenceLink'
+          description: Supporting or contradicting exact source quotes.
+        support:
+          $ref: '#/components/schemas/SemanticClaimSupport'
+          description: Independent factual support assessment.
+        unitId:
+          type: string
+          description: Identifier of exactly one prepared answer unit.
+      additionalProperties: false
+    SemanticVerificationOutcome:
+      oneOf:
+      - type: object
+        description: A completed semantic judgment, not necessarily a supported answer.
+        required:
+        - assessment
+        - status
+        properties:
+          assessment:
+            $ref: '#/components/schemas/SemanticAssessment'
+            description: Validated judgment.
+          status:
+            type: string
+            enum:
+            - completed
+      - type: object
+        description: No verifier call was attempted.
+        required:
+        - reason
+        - status
+        properties:
+          reason:
+            $ref: '#/components/schemas/SemanticNotRunReason'
+            description: Explicit reason for not running.
+          status:
+            type: string
+            enum:
+            - not_run
+      - type: object
+        description: The verifier did not produce a valid semantic judgment.
+        required:
+        - code
+        - status
+        properties:
+          code:
+            $ref: '#/components/schemas/SemanticFailureCode'
+            description: Operational failure category.
+          status:
+            type: string
+            enum:
+            - failed
+      description: Mutually exclusive semantic and operational outcomes.
+    SemanticVerificationReport:
+      type: object
+      description: A report bound to the exact answer and authorized evidence used by the server.
+      required:
+      - protocolVersion
+      - questionSha256
+      - checkedAnswerSha256
+      - evidenceManifestSha256
+      - answerUnits
+      - sources
+      - elapsedMs
+      - outcome
+      properties:
+        answerUnits:
+          type: array
+          items:
+            $ref: '#/components/schemas/SemanticAnswerUnit'
+          description: |-
+            Exhaustive server-defined blocks of the raw checked candidate, never a
+            later visible fallback. Verdict IDs resolve only against these units.
+        checkedAnswerSha256:
+          type: string
+          description: SHA-256 of the exact checked answer bytes.
+        elapsedMs:
+          type: integer
+          format: int64
+          description: Server-measured elapsed time in milliseconds.
+          minimum: 0
+        evidenceManifestSha256:
+          type: string
+          description: Canonical SHA-256 including source identities, scope and exact text.
+        outcome:
+          $ref: '#/components/schemas/SemanticVerificationOutcome'
+          description: Semantic or operational result.
+        protocolVersion:
+          type: integer
+          format: int32
+          description: Version of the preparation and validation protocol.
+          minimum: 0
+        providerCallId:
+          type:
+          - string
+          - 'null'
+          format: uuid
+          description: Server-owned provider-call identity, if a call was made.
+        questionSha256:
+          type: string
+          description: SHA-256 of the exact question bytes used to judge completeness and refusal.
+        sources:
+          type: array
+          items:
+            $ref: '#/components/schemas/SemanticSourceEntry'
+          description: |-
+            Exact authorized manifest. Opaque quote references resolve only against
+            these server-owned identities, scopes and source texts.
+        visibleAnswerSha256:
+          type:
+          - string
+          - 'null'
+          description: |-
+            Hash of the final visible body, assigned only by the server finalizer.
+            This never replaces the identity of the checked raw candidate.
+      additionalProperties: false
     ServiceIdentityCredentialResponse:
       type: object
       required:
@@ -15587,7 +15999,7 @@ components:
       - rasterImageEngine
       properties:
         rasterImageEngine:
-          $ref: '#/components/schemas/RecognitionEngine'
+          $ref: '#/components/schemas/RasterImageEngine'
       additionalProperties: false
     UpdateLibraryWebIngestPolicyRequest:
       type: object

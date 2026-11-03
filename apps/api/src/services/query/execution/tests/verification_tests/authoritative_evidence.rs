@@ -1,6 +1,76 @@
 use super::*;
 
 #[test]
+fn verbatim_verification_rejects_partial_words_and_changed_word_boundaries() {
+    for (answer, source) in [
+        ("Data is unavailable.", "Metadata is unavailable."),
+        ("Данные недоступны.", "Метаданные недоступны."),
+        ("Ready", "Readying"),
+        ("active", "inactive"),
+        ("Status", "Status_extra"),
+        ("Now here.", "Nowhere."),
+        ("Nowhere.", "Now here."),
+    ] {
+        let verification =
+            verify_answer_against_authoritative_evidence(AnswerVerificationRequest {
+                question: "Which statement is documented?",
+                answer,
+                intent_profile: &QueryIntentProfile::default(),
+                evidence: &empty_authoritative_evidence(),
+                chunks: &[runtime_chunk(source)],
+                prompt_context: answer,
+                assistant_grounding: &AssistantGroundingEvidence::default(),
+            });
+
+        assert_eq!(
+            verification.state,
+            QueryVerificationState::NotRun,
+            "{answer:?} from {source:?}"
+        );
+        assert!(
+            verification
+                .warnings
+                .iter()
+                .any(|warning| warning.code == "semantic_verification_not_run")
+        );
+    }
+}
+
+#[test]
+fn verbatim_verification_preserves_exact_quotes_and_display_normalization() {
+    for (answer, source) in [
+        ("Data is unavailable.", "Data is unavailable."),
+        ("Data is unavailable.", "Before. Data is unavailable. After."),
+        ("Данные недоступны.", "Ранее. Данные недоступны. Далее."),
+        ("The feature is enabled.", "The feature is `enabled`."),
+        ("The feature is enabled.", "THE FEATURE\nIS\tENABLED."),
+        ("Alpha & Beta.", "Alpha &amp; Beta."),
+        ("Ready", "Status: Ready, now."),
+        ("Data is unavailable.", "Metadata is unavailable. Data is unavailable."),
+        ("ever ever", "Never ever ever"),
+        ("раз раз", "образ раз раз"),
+    ] {
+        let verification =
+            verify_answer_against_authoritative_evidence(AnswerVerificationRequest {
+                question: "Which statement is documented?",
+                answer,
+                intent_profile: &QueryIntentProfile::default(),
+                evidence: &empty_authoritative_evidence(),
+                chunks: &[runtime_chunk(source)],
+                prompt_context: "",
+                assistant_grounding: &AssistantGroundingEvidence::default(),
+            });
+
+        assert_eq!(
+            verification.state,
+            QueryVerificationState::Verified,
+            "{answer:?} from {source:?}"
+        );
+        assert!(verification.warnings.is_empty(), "{:?}", verification.warnings);
+    }
+}
+
+#[test]
 fn verify_answer_accepts_semantic_web_and_knowledge_graph_targets() {
     let document_id = Uuid::now_v7();
     let revision_id = Uuid::now_v7();

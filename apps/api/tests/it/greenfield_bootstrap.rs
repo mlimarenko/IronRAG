@@ -11,6 +11,8 @@
 //! ```
 
 use crate::{database_url, http_response_support};
+mod billing_document_read;
+mod billing_knowledge_search;
 use ironrag_backend::infra::persistence;
 
 use database_url::database_url_with_name;
@@ -129,6 +131,7 @@ struct FakeBootstrapGateway;
 impl LlmGateway for FakeBootstrapGateway {
     async fn generate(&self, mut request: ChatRequest) -> anyhow::Result<ChatResponse> {
         Ok(ChatResponse {
+            completion_status: ironrag_backend::integrations::llm::ChatCompletionStatus::Complete,
             provider_kind: std::mem::take(&mut request.provider_kind),
             model_name: std::mem::take(&mut request.model_name),
             output_text: "OK".to_string(),
@@ -1817,6 +1820,328 @@ fn visibility_policy_predecessor() -> &'static str {
     predecessor
 }
 
+mod vision_recognition {
+    use super::*;
+    use ironrag_backend::services::maintenance::{
+        baseline_delta, vision_recognition_schema::migrate_vision_recognition_schema,
+    };
+
+    fn frozen_predecessor() -> &'static str {
+        let sql = include_str!("../fixtures/schema/xberg_recognition.sql");
+        assert_eq!(
+            hex::encode(Sha384::digest(sql.as_bytes())),
+            baseline_delta::BASELINE_REVISION_XBERG_RECOGNITION_SHA384
+        );
+        sql
+    }
+
+    async fn catalog_rows(pool: &PgPool) -> Result<Vec<serde_json::Value>> {
+        Ok(sqlx::query_scalar("select to_jsonb(t) from catalog_library t order by id")
+            .fetch_all(pool)
+            .await?)
+    }
+
+    async fn refuses_without_writes(pool: &PgPool) -> Result<()> {
+        let before = catalog_rows(pool).await?;
+        let checksum = baseline_checksum(pool).await?;
+        for apply in [false, true] {
+            assert!(migrate_vision_recognition_schema(pool, apply).await.is_err());
+            assert_eq!(catalog_rows(pool).await?, before);
+            assert_eq!(baseline_checksum(pool).await?, checksum);
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[ignore = "requires local postgres service; uses an isolated disposable database"]
+    async fn fresh_vision_schema_accepts_only_the_singleton_policy() -> Result<()> {
+        let settings = Settings::from_env()?;
+        let database = TempDatabase::create(&settings.database_url).await?;
+        let pool = PgPoolOptions::new().max_connections(4).connect(&database.database_url).await?;
+        let result = async {
+            persistence::run_postgres_migrations(&pool).await?;
+            persistence::validate_baseline_objects_present(&pool).await?;
+            assert_eq!(
+                hex::encode(baseline_checksum(&pool).await?),
+                baseline_delta::BASELINE_REVISION_BILLING_KNOWLEDGE_SEARCH_SHA384
+            );
+            let workspace =
+                catalog_repository::create_workspace(&pool, "fresh-vision", "Fresh Vision", None)
+                    .await?;
+            let library = catalog_repository::create_library(
+                &pool,
+                workspace.id,
+                "vision",
+                "Vision",
+                None,
+                None,
+            )
+            .await?;
+            let before = catalog_rows(&pool).await?;
+            for policy in [
+                serde_json::json!({"rasterImageEngine":"xberg"}),
+                serde_json::json!({"rasterImageEngine":"native"}),
+                serde_json::json!({"rasterImageEngine":"vision","extra":true}),
+            ] {
+                assert!(
+                    sqlx::query("update catalog_library set recognition_policy=$1 where id=$2")
+                        .bind(policy)
+                        .bind(library.id)
+                        .execute(&pool)
+                        .await
+                        .is_err()
+                );
+                assert_eq!(catalog_rows(&pool).await?, before);
+            }
+            Ok(())
+        }
+        .await;
+        pool.close().await;
+        database.drop().await?;
+        result
+    }
+
+    #[tokio::test]
+    #[ignore = "requires local postgres service; uses an isolated disposable database"]
+    async fn vision_cutover_exact_predecessor_safety_zero_updates_and_idempotence() -> Result<()> {
+        let settings = Settings::from_env()?;
+        let database = TempDatabase::create(&settings.database_url).await?;
+        let pool = PgPoolOptions::new().max_connections(4).connect(&database.database_url).await?;
+        let result = async {
+            sqlx::raw_sql(frozen_predecessor()).execute(&pool).await?;
+            record_baseline_checksum(&pool, baseline_delta::BASELINE_REVISION_XBERG_RECOGNITION_SHA384).await?;
+            let workspace = catalog_repository::create_workspace(&pool, "vision-hop", "Vision hop", None).await?;
+            let library = catalog_repository::create_library(&pool, workspace.id, "vision", "Vision", None, None).await?;
+            let rows = catalog_rows(&pool).await?;
+            let checksum = baseline_checksum(&pool).await?;
+            let constraint: String = sqlx::query_scalar("select pg_get_constraintdef(oid) from pg_constraint where conrelid='catalog_library'::regclass and conname='catalog_library_recognition_policy_raster_engine_check'")
+                .fetch_one(&pool).await?;
+            let pending = migrate_vision_recognition_schema(&pool, false).await?;
+            assert!(!pending.already_current && !pending.schema_applied);
+            assert_eq!(pending.policies_changed, 0);
+            assert_eq!(catalog_rows(&pool).await?, rows);
+            assert_eq!(baseline_checksum(&pool).await?, checksum);
+
+            sqlx::query("update _sqlx_migrations set checksum=decode(repeat('00',48),'hex') where version=1").execute(&pool).await?;
+            refuses_without_writes(&pool).await?;
+            sqlx::query("update _sqlx_migrations set checksum=$1 where version=1").bind(&checksum).execute(&pool).await?;
+
+            // A pre-applied singleton constraint cannot be certified by the old ledger.
+            sqlx::raw_sql("alter table catalog_library drop constraint catalog_library_recognition_policy_raster_engine_check; alter table catalog_library add constraint catalog_library_recognition_policy_raster_engine_check check (recognition_policy = '{\"rasterImageEngine\":\"vision\"}'::jsonb)").execute(&pool).await?;
+            refuses_without_writes(&pool).await?;
+            sqlx::raw_sql(sqlx::AssertSqlSafe(format!("alter table catalog_library drop constraint catalog_library_recognition_policy_raster_engine_check; alter table catalog_library add constraint catalog_library_recognition_policy_raster_engine_check {constraint}"))).execute(&pool).await?;
+
+            // Missing or NOT VALID predecessor certificates are refused even when
+            // malformed rows exist; this path must not repair an unknown schema.
+            sqlx::raw_sql("alter table catalog_library drop constraint catalog_library_recognition_policy_raster_engine_check").execute(&pool).await?;
+            sqlx::query("update catalog_library set recognition_policy='{\"rasterImageEngine\":\"xberg\",\"extra\":true}' where id=$1").bind(library.id).execute(&pool).await?;
+            refuses_without_writes(&pool).await?;
+            sqlx::query("update catalog_library set recognition_policy='{\"rasterImageEngine\":\"vision\"}' where id=$1").bind(library.id).execute(&pool).await?;
+            sqlx::raw_sql(sqlx::AssertSqlSafe(format!("alter table catalog_library add constraint catalog_library_recognition_policy_raster_engine_check {constraint} not valid"))).execute(&pool).await?;
+            refuses_without_writes(&pool).await?;
+            sqlx::raw_sql("alter table catalog_library validate constraint catalog_library_recognition_policy_raster_engine_check").execute(&pool).await?;
+
+            // A trigger that would rewrite another field is refused before it runs.
+            sqlx::raw_sql("create function vision_policy_fault() returns trigger language plpgsql as $$ begin NEW.display_name='unexpected'; return NEW; end $$; create trigger vision_policy_fault before update of recognition_policy on catalog_library for each row execute function vision_policy_fault()").execute(&pool).await?;
+            refuses_without_writes(&pool).await?;
+            sqlx::raw_sql("drop trigger vision_policy_fault on catalog_library; drop function vision_policy_fault()").execute(&pool).await?;
+            sqlx::raw_sql("create rule vision_policy_fault as on update to catalog_library do also notify vision_policy_fault").execute(&pool).await?;
+            refuses_without_writes(&pool).await?;
+            sqlx::raw_sql("drop rule vision_policy_fault on catalog_library").execute(&pool).await?;
+
+            let before_apply = catalog_rows(&pool).await?;
+            let applied = migrate_vision_recognition_schema(&pool, true).await?;
+            assert!(applied.schema_applied && !applied.already_current);
+            assert_eq!(applied.policies_changed, 0, "all-Vision installations must update zero policies");
+            assert_eq!(catalog_rows(&pool).await?, before_apply);
+            assert_eq!(hex::encode(baseline_checksum(&pool).await?), baseline_delta::BASELINE_REVISION_VISION_RECOGNITION_SHA384);
+            assert!(persistence::validate_baseline_objects_present(&pool).await.is_err(), "Vision is a frozen predecessor, not current billing readiness");
+            assert!(sqlx::query("update catalog_library set recognition_policy='{\"rasterImageEngine\":\"xberg\"}' where id=$1").bind(library.id).execute(&pool).await.is_err());
+            for apply in [false, true] {
+                let current = migrate_vision_recognition_schema(&pool, apply).await?;
+                assert!(current.already_current && !current.schema_applied);
+                assert_eq!(current.policies_changed, 0);
+                assert_eq!(catalog_rows(&pool).await?, before_apply);
+            }
+            Ok(())
+        }.await;
+        pool.close().await;
+        database.drop().await?;
+        result
+    }
+}
+
+mod xberg_recognition {
+    use super::*;
+    use ironrag_backend::{
+        infra::{knowledge_plane::SearchStore, postgres::pg_search_store::PgSearchStore},
+        services::maintenance::{
+            baseline_delta, xberg_recognition_schema::migrate_xberg_recognition_schema,
+        },
+    };
+
+    async fn preserved_publication(pool: &PgPool) -> Result<serde_json::Value> {
+        Ok(sqlx::query_scalar("select jsonb_build_object(
+            'heads',(select jsonb_agg(to_jsonb(t) order by document_id) from content_document_head t),
+            'revisions',(select jsonb_agg(to_jsonb(t) order by id) from content_revision t),
+            'knowledge',(select jsonb_agg(to_jsonb(t) order by revision_id) from knowledge_revision t),
+            'mutations',(select jsonb_agg(to_jsonb(t) order by id) from content_mutation t),
+            'items',(select jsonb_agg(to_jsonb(t) order by id) from content_mutation_item t),
+            'attempts',(select jsonb_agg(to_jsonb(t) order by id) from ingest_attempt t),
+            'provenance',(select jsonb_agg(to_jsonb(t) order by revision_id) from knowledge_structured_revision t),
+            'chunks',(select jsonb_agg(to_jsonb(t) order by chunk_id) from knowledge_chunk t),
+            'credentials',(select jsonb_agg(jsonb_build_object('id',id,'fingerprint',md5(to_jsonb(t)::text)) order by id) from ai_account t),
+            'chunkVectors',(select jsonb_agg(jsonb_build_object('key',key,'embedding',embedding::text,'fingerprint',md5(to_jsonb(t)::text)) order by key) from knowledge_chunk_vector_d2 t),
+            'vectorTypes',(select jsonb_agg(format_type(a.atttypid,a.atttypmod) order by c.relname) from pg_class c join pg_attribute a on a.attrelid=c.oid where c.relnamespace='public'::regnamespace and c.relname in ('knowledge_chunk_vector_d2','knowledge_entity_vector_d3') and a.attname='embedding'))")
+            .fetch_one(pool).await?)
+    }
+
+    async fn seed_preservation_sentinels(
+        pool: &PgPool,
+        workspace: Uuid,
+        library: Uuid,
+        document: Uuid,
+        revision: Uuid,
+    ) -> Result<()> {
+        use ironrag_backend::shared::secret_encryption::CredentialCipher;
+
+        let provider = Uuid::now_v7();
+        let account = Uuid::now_v7();
+        let cipher = CredentialCipher::from_base64(&test_credential_master_key())?;
+        let plaintext = Uuid::now_v7().to_string();
+        let encrypted = cipher.encrypt(SecretPurpose::AiAccountApiKey, account, &plaintext)?;
+        sqlx::query("insert into ai_provider_catalog(id,provider_kind,display_name,api_style) values($1,'preservation-sentinel','Preservation sentinel',enum_first(null::ai_provider_api_style))")
+            .bind(provider).execute(pool).await?;
+        sqlx::query("insert into ai_account(id,workspace_id,library_id,provider_catalog_id,label,scope_kind,api_key) values($1,$2,$3,$4,'Preservation sentinel','library',$5)")
+            .bind(account).bind(workspace).bind(library).bind(provider).bind(encrypted.as_str())
+            .execute(pool).await?;
+        let chunk = Uuid::now_v7();
+        sqlx::query("insert into knowledge_chunk(chunk_id,workspace_id,library_id,document_id,revision_id,chunk_index,content_text,normalized_text,chunk_state) values($1,$2,$3,$4,$5,0,'historical fixture publication','historical fixture publication','ready')")
+            .bind(chunk).bind(workspace).bind(library).bind(document).bind(revision)
+            .execute(pool).await?;
+        sqlx::query("insert into knowledge_chunk_vector_d2(key,vector_id,workspace_id,library_id,chunk_id,revision_id,embedding_model_key,vector_kind,dimensions,embedding,freshness_generation,created_at) values('preservation-sentinel',$1,$2,$3,$4,$5,'preservation-sentinel','chunk',2,'[0.25,-0.75]'::vector,1,now())")
+            .bind(Uuid::now_v7()).bind(workspace).bind(library).bind(chunk).bind(revision)
+            .execute(pool).await?;
+        Ok(())
+    }
+
+    async fn source_digest(
+        storage: &ironrag_backend::services::content::storage::ContentStorageService,
+        key: &str,
+    ) -> Result<String> {
+        let bytes = storage.read_revision_source(key).await?;
+        anyhow::ensure!(bytes.len() <= 4096, "fixture bytes unexpectedly exceed bound");
+        Ok(hex::encode(sha2::Sha256::digest(bytes)))
+    }
+
+    #[tokio::test]
+    #[ignore = "requires local postgres service; uses an isolated disposable database"]
+    async fn xberg_cutover_dry_run_apply_refusals_rollback_and_preservation() -> Result<()> {
+        let settings = Settings::from_env()?;
+        let (_storage_root, storage) = visibility_migration_storage(&settings)?;
+        let database = TempDatabase::create(&settings.database_url).await?;
+        let pool = PgPoolOptions::new().max_connections(4).connect(&database.database_url).await?;
+        let result = async {
+            // Build the exact predecessor through its native transition, retaining
+            // a real readable publication, history and independently checked bytes.
+            sqlx::raw_sql(visibility_policy_predecessor()).execute(&pool).await?;
+            record_baseline_checksum(&pool, baseline_delta::BASELINE_REVISION_ADMISSION_VISIBILITY_POLICY_SHA384).await?;
+            let (document, _, _, admission) = seed_visibility_predecessor_publication(&pool, &storage).await?;
+            ironrag_backend::services::maintenance::content_visibility_intent_schema::migrate_content_visibility_intent_schema(&pool,true,&storage,Some(&admission)).await?;
+            let (workspace, library, revision, key): (Uuid, Uuid, Uuid, String) = sqlx::query_as(
+                "select workspace_id,library_id,id,storage_key from content_revision where document_id=$1"
+            ).bind(document).fetch_one(&pool).await?;
+            sqlx::query("update catalog_library set recognition_policy='{\"rasterImageEngine\":\"docling\"}' where id=$1")
+                .bind(library).execute(&pool).await?;
+            let vision_library = catalog_repository::create_library(&pool,workspace,"vision-retained","Vision retained",None,None).await?;
+            sqlx::query("insert into knowledge_structured_revision(revision_id,workspace_id,library_id,document_id,preparation_state,normalization_profile,source_format,block_count,chunk_count,typed_fact_count,outline_json,prepared_at,updated_at) values($1,$2,$3,$4,'ready','historical','docling_markdown',0,0,0,'{\"engine\":\"docling\",\"opaque\":true}',now(),now())")
+                .bind(revision).bind(workspace).bind(library).bind(document).execute(&pool).await?;
+            let vectors = PgSearchStore { pool: pool.clone() };
+            vectors.ensure_chunk_vector_shard(2).await?;
+            vectors.ensure_entity_vector_shard(3).await?;
+            seed_preservation_sentinels(&pool,workspace,library,document,revision).await?;
+            let before = preserved_publication(&pool).await?;
+            assert_eq!(before["vectorTypes"],serde_json::json!(["vector(2)","vector(3)"]));
+            assert_eq!(before["credentials"].as_array().map(Vec::len),Some(1));
+            assert_eq!(before["chunkVectors"][0]["embedding"],serde_json::json!("[0.25,-0.75]"));
+            let original_bytes = source_digest(&storage,&key).await?;
+            let predecessor_checksum = baseline_checksum(&pool).await?;
+            assert_eq!(hex::encode(&predecessor_checksum),baseline_delta::BASELINE_REVISION_CONTENT_VISIBILITY_INTENT_SHA384);
+            let catalog_before: Vec<serde_json::Value> = sqlx::query_scalar("select to_jsonb(t) from catalog_library t order by id").fetch_all(&pool).await?;
+            let pending = migrate_xberg_recognition_schema(&pool,false).await?;
+            assert!(!pending.already_current && !pending.schema_applied);
+            assert_eq!(baseline_checksum(&pool).await?,predecessor_checksum);
+            assert_eq!(preserved_publication(&pool).await?,before);
+            let catalog_after: Vec<serde_json::Value> = sqlx::query_scalar("select to_jsonb(t) from catalog_library t order by id").fetch_all(&pool).await?;
+            assert_eq!(catalog_before,catalog_after,"dry-run cannot update policy or timestamps");
+
+            // Unknown revision identity and active writers refuse in both modes.
+            sqlx::query("update _sqlx_migrations set checksum=decode(repeat('00',48),'hex') where version=1").execute(&pool).await?;
+            for apply in [false,true] { assert!(migrate_xberg_recognition_schema(&pool,apply).await.is_err()); }
+            sqlx::query("update _sqlx_migrations set checksum=$1 where version=1").bind(&predecessor_checksum).execute(&pool).await?;
+            sqlx::query("insert into _sqlx_migrations(version,description,success,checksum,execution_time) values(2,'unknown fixture migration',true,$1,0)").bind(&predecessor_checksum).execute(&pool).await?;
+            for apply in [false,true] { assert!(migrate_xberg_recognition_schema(&pool,apply).await.is_err()); }
+            sqlx::query("delete from _sqlx_migrations where version=2").execute(&pool).await?;
+            sqlx::query("update ingest_job set queue_state='queued'").execute(&pool).await?;
+            for apply in [false,true] { assert!(migrate_xberg_recognition_schema(&pool,apply).await.is_err()); }
+            sqlx::query("update ingest_job set queue_state='completed'").execute(&pool).await?;
+
+            // A same-shape constraint with different semantics cannot certify a predecessor.
+            sqlx::raw_sql("alter table catalog_library drop constraint catalog_library_recognition_policy_raster_engine_check; alter table catalog_library add constraint catalog_library_recognition_policy_raster_engine_check check (true)").execute(&pool).await?;
+            for apply in [false,true] { assert!(migrate_xberg_recognition_schema(&pool,apply).await.is_err()); }
+            sqlx::query("update catalog_library set recognition_policy='{\"rasterImageEngine\":\"unknown\"}' where id=$1").bind(library).execute(&pool).await?;
+            for apply in [false,true] { assert!(migrate_xberg_recognition_schema(&pool,apply).await.is_err()); }
+            sqlx::query("update catalog_library set recognition_policy='{\"rasterImageEngine\":\"docling\"}' where id=$1").bind(library).execute(&pool).await?;
+            sqlx::raw_sql("alter table catalog_library drop constraint catalog_library_recognition_policy_raster_engine_check; alter table catalog_library add constraint catalog_library_recognition_policy_raster_engine_check CHECK (((recognition_policy ? 'rasterImageEngine'::text) AND ((recognition_policy ->> 'rasterImageEngine'::text) = ANY (ARRAY['docling'::text, 'vision'::text])) AND ((recognition_policy - 'rasterImageEngine'::text) = '{}'::jsonb)))").execute(&pool).await?;
+
+            // Trigger-induced collateral loss must roll back both policy and data,
+            // before the native CAS can stamp the new checksum.
+            sqlx::raw_sql("create function recognition_preservation_fault() returns trigger language plpgsql as $$ begin update knowledge_revision set normalized_text='collateral loss'; return NEW; end $$; create trigger recognition_preservation_fault after update on catalog_library for each row execute function recognition_preservation_fault()").execute(&pool).await?;
+            let rejected = migrate_xberg_recognition_schema(&pool,true).await.expect_err("collateral mutation must roll back");
+            assert!(format!("{rejected:#}").contains("preservation inventory changed"));
+            assert_eq!(baseline_checksum(&pool).await?,predecessor_checksum);
+            assert_eq!(preserved_publication(&pool).await?,before);
+            sqlx::raw_sql("drop trigger recognition_preservation_fault on catalog_library; drop function recognition_preservation_fault()").execute(&pool).await?;
+
+            let applied = migrate_xberg_recognition_schema(&pool,true).await?;
+            assert!(applied.schema_applied && !applied.already_current);
+            assert_eq!(hex::encode(baseline_checksum(&pool).await?),baseline_delta::BASELINE_REVISION_XBERG_RECOGNITION_SHA384);
+            let engines: Vec<String> = sqlx::query_scalar("select recognition_policy->>'rasterImageEngine' from catalog_library where id=any($1) order by recognition_policy->>'rasterImageEngine'")
+                .bind(vec![library,vision_library.id]).fetch_all(&pool).await?;
+            assert_eq!(engines,vec!["vision","xberg"]);
+            assert_eq!(preserved_publication(&pool).await?,before);
+            assert_eq!(source_digest(&storage,&key).await?,original_bytes);
+            assert!(persistence::validate_baseline_objects_present(&pool).await.is_err(), "frozen Xberg target is not current readiness");
+            for apply in [false,true] {
+                let current = migrate_xberg_recognition_schema(&pool,apply).await?;
+                assert!(current.already_current && !current.schema_applied);
+            }
+            // Fully pre-applied under stale identity is not silently stamped.
+            sqlx::query("update _sqlx_migrations set checksum=$1 where version=1").bind(&predecessor_checksum).execute(&pool).await?;
+            for apply in [false,true] { assert!(migrate_xberg_recognition_schema(&pool,apply).await.is_err()); }
+            assert_eq!(baseline_checksum(&pool).await?,predecessor_checksum);
+            sqlx::query("update _sqlx_migrations set checksum=$1 where version=1")
+                .bind(hex::decode(baseline_delta::BASELINE_REVISION_XBERG_RECOGNITION_SHA384)?).execute(&pool).await?;
+            let vision = ironrag_backend::services::maintenance::vision_recognition_schema::migrate_vision_recognition_schema(&pool,true).await?;
+            assert!(vision.schema_applied && !vision.already_current);
+            assert_eq!(vision.policies_changed, 1);
+            assert_eq!(preserved_publication(&pool).await?,before);
+            assert_eq!(source_digest(&storage,&key).await?,original_bytes);
+            let billing = ironrag_backend::services::maintenance::billing_document_read_schema::migrate_billing_document_read_schema(&pool,true).await?;
+            assert!(billing.schema_applied && !billing.already_current);
+            let search = ironrag_backend::services::maintenance::billing_knowledge_search_schema::migrate_billing_knowledge_search_schema(&pool,true).await?;
+            assert!(search.schema_applied && !search.already_current);
+            assert_eq!(preserved_publication(&pool).await?,before);
+            assert_eq!(source_digest(&storage,&key).await?,original_bytes);
+            persistence::validate_baseline_objects_present(&pool).await?;
+            Ok(())
+        }.await;
+        pool.close().await;
+        database.drop().await?;
+        result
+    }
+}
+
 #[tokio::test]
 #[ignore = "requires local postgres service"]
 async fn visibility_contract_fresh_baseline_and_current_objects() -> Result<()> {
@@ -1961,7 +2286,9 @@ async fn visibility_contract_exact_predecessor_upgrade_and_refusals() -> Result<
         sqlx::query("alter table content_mutation add column visibility_policy admission_visibility_policy not null default 'readable'").execute(&pool).await?;
         let applied = migrate_content_visibility_intent_schema(&pool, true, &storage, Some(&admission)).await?;
         assert!(applied.schema_applied && !applied.already_current);
-        persistence::validate_baseline_objects_present(&pool).await?;
+        let certified = migrate_content_visibility_intent_schema(&pool, false, &storage, None).await?;
+        assert!(certified.already_current && !certified.schema_applied);
+        assert!(persistence::validate_baseline_objects_present(&pool).await.is_err(), "a frozen visibility revision is not current readiness");
         assert_retired_visibility_policy_absent(&pool).await?;
         let summary: Option<String> = sqlx::query_scalar("select document_summary from content_document_head where document_id=$1")
             .bind(document_id).fetch_one(&pool).await?;
@@ -2068,7 +2395,9 @@ async fn visibility_contract_mutation_reference_is_exclusive_and_reserves_histor
         };
         let denied = admission::admit_content_with_failpoint(&pool,&request,None).await.expect_err("historical namespace must reject before creating rows");
         assert!(matches!(denied,admission::AdmissionError::IdempotencyConflict{mutation_id} if mutation_id==historical));
-        let identity=serde_json::json!({"operationKind":"delete","workspaceId":workspace,"libraryId":library});
+        let identity=serde_json::json!({"workspaceId":workspace,"libraryId":library,"operationKind":"delete",
+            "sourceIdentity":null,"materializationToken":null,"target":{"kind":"existing","documentId":Uuid::nil()},
+            "revision":null,"replacement":null});
         let input=mutations::NewContentMutation {
             request_identity:&identity,workspace_id:workspace,library_id:library,operation_kind:"delete",
             requested_by_principal_id:None,request_surface:"rest",idempotency_key:Some("concurrent-key"),
@@ -2727,7 +3056,16 @@ async fn additive_baseline_chain_advances_irg75_to_shipped_revision() -> Result<
         let intent = ironrag_backend::services::maintenance::content_visibility_intent_schema::migrate_content_visibility_intent_schema(&pool,true, &storage, None).await?;
         assert!(intent.schema_applied && !intent.already_current);
         assert_retired_visibility_policy_absent(&pool).await?;
+        let xberg = ironrag_backend::services::maintenance::xberg_recognition_schema::migrate_xberg_recognition_schema(&pool,true).await?;
+        assert!(xberg.schema_applied && !xberg.already_current);
+        let vision = ironrag_backend::services::maintenance::vision_recognition_schema::migrate_vision_recognition_schema(&pool,true).await?;
+        assert!(vision.schema_applied && !vision.already_current);
+        let billing = ironrag_backend::services::maintenance::billing_document_read_schema::migrate_billing_document_read_schema(&pool,true).await?;
+        assert!(billing.schema_applied && !billing.already_current);
+        let search = ironrag_backend::services::maintenance::billing_knowledge_search_schema::migrate_billing_knowledge_search_schema(&pool,true).await?;
+        assert!(search.schema_applied && !search.already_current);
         assert_eq!(baseline_checksum(&pool).await?, shipped_checksum);
+        persistence::validate_baseline_objects_present(&pool).await?;
         Ok(())
     }
     .await;

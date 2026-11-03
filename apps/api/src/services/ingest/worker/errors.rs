@@ -379,7 +379,7 @@ impl ContentExtractionError {
     }
 
     /// A terminal extraction fault whose cause is storage or worker resources
-    /// (for example a docling OOM code), not a rejected content admission.
+    /// (for example a xberg OOM code), not a rejected content admission.
     pub(super) fn extraction_failed_terminal(
         failure_code: &str,
         message: impl std::fmt::Display,

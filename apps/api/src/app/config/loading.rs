@@ -22,6 +22,8 @@ impl Settings {
     /// Returns a [`config::ConfigError`] if configuration defaults cannot be built
     /// or environment values fail deserialization.
     pub fn from_env() -> Result<Self, config::ConfigError> {
+        reject_retired_extraction_environment(std::env::vars_os().map(|(key, _)| key))
+            .map_err(config::ConfigError::Message)?;
         let cfg =
             settings_config_builder()?.add_source(ironrag_environment_source(None)).build()?;
 
@@ -265,7 +267,7 @@ IRONRAG_OIDC_REDIRECT_URL and IRONRAG_OIDC_REQUIRED_GROUP must be configured tog
         )]
         let raster_image_engine = self
             .recognition_default_raster_image_engine
-            .parse::<RecognitionEngine>()
+            .parse::<RasterImageEngine>()
             .expect("recognition_default_raster_image_engine must be validated before use");
         LibraryRecognitionPolicy { raster_image_engine }
     }
@@ -496,6 +498,20 @@ fn validate_oidc_redirect_url(settings: &Settings, value: &str) -> Result<(), St
     Ok(())
 }
 
+pub(super) fn reject_retired_extraction_environment(
+    keys: impl IntoIterator<Item = std::ffi::OsString>,
+) -> Result<(), String> {
+    for key in keys {
+        if key.to_string_lossy().to_ascii_uppercase().starts_with("IRONRAG_DOCLING_") {
+            return Err(format!(
+                "retired extraction setting {}; remove it and configure the Xberg native extractor",
+                key.to_string_lossy()
+            ));
+        }
+    }
+    Ok(())
+}
+
 pub(super) fn ironrag_environment_source(
     source: Option<config::Map<String, String>>,
 ) -> config::Environment {
@@ -687,7 +703,5 @@ pub(super) fn settings_config_builder()
         .set_default("mcp_memory_default_search_limit", 10)?
         .set_default("mcp_memory_max_search_limit", 25)?
         .set_default("mcp_memory_idempotency_retention_hours", 72)?
-        .set_default("mcp_memory_audit_enabled", true)?
-        .set_default("chunking_max_chars", 2800)?
-        .set_default("chunking_overlap_chars", 280)
+        .set_default("mcp_memory_audit_enabled", true)
 }

@@ -1,6 +1,5 @@
-use crate::services::query::provider_billing::{
-    QueryProviderCallReservation, QueryProviderExecutionContext,
-};
+use crate::services::ops::billing::provider_reservation::ProviderCallReservation;
+use crate::services::query::provider_billing::QueryProviderExecutionContext;
 use crate::{app::state::AppState, domains::ai::AiBindingPurpose};
 
 use super::{HYDE_MAX_OUTPUT_TOKENS, HYDE_TEMPERATURE, HYDE_TIMEOUT};
@@ -37,7 +36,7 @@ pub(super) async fn generate_hyde_passage(
     seed.max_output_tokens_override = Some(HYDE_MAX_OUTPUT_TOKENS);
     let request = crate::integrations::llm::build_text_chat_request(seed, prompt);
 
-    let mut provider_call = QueryProviderCallReservation::reserve(
+    let mut provider_call = ProviderCallReservation::reserve(
         state,
         execution_context,
         &binding,

@@ -16,8 +16,8 @@ pub(super) async fn run_rebuild(state: &AppState, command: RebuildCommand) -> Re
             rebuild::vector_plane(state, source_library).await?;
             println!("rebuild.vector-plane completed for source library {source_library}");
         }
-        RebuildCommand::RuntimeGraph { library } => {
-            rebuild::runtime_graph(state, library).await?;
+        RebuildCommand::RuntimeGraph { library, fence_deadline, .. } => {
+            rebuild::runtime_graph(state, library, fence_deadline).await?;
             println!(
                 "rebuild.runtime-graph completed for {}",
                 library.map_or_else(|| "all libraries".to_string(), |id| id.to_string()),

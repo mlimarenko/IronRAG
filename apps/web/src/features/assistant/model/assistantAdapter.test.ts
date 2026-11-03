@@ -1,10 +1,62 @@
 import { describe, expect, it } from 'vitest'
 
-import type { AssistantConversationMessage, AssistantEvidenceBundle } from '@/shared/api/generated'
+import type {
+  AssistantConversationMessage,
+  AssistantEvidenceBundle,
+  AssistantExecutionDetail,
+  SemanticVerificationReport,
+} from '@/shared/api/generated'
 
 import { mapAssistantMessage, mapAssistantTurnToEvidence } from './assistantAdapter'
 
 describe('mapAssistantTurnToEvidence', () => {
+  it('preserves the exact semantic report across live detail and history without inventing missing history', () => {
+    const report: SemanticVerificationReport = {
+      protocolVersion: 1,
+      questionSha256: 'q'.repeat(64),
+      checkedAnswerSha256: 'a'.repeat(64),
+      visibleAnswerSha256: 'f'.repeat(64),
+      evidenceManifestSha256: 'e'.repeat(64),
+      answerUnits: [{ unitId: 'unit-1', text: 'Candidate', span: { start: 0, end: 9 } }],
+      sources: [],
+      elapsedMs: 5,
+      providerCallId: null,
+      outcome: { status: 'failed', code: 'invalid_response' },
+    }
+    const transport = {
+      semanticVerification: report,
+      chunkReferences: [],
+      preparedSegmentReferences: [],
+      technicalFactReferences: [],
+      entityReferences: [],
+      relationReferences: [],
+      verificationState: 'not_run',
+      verificationWarnings: [],
+      runtimeStageSummaries: [],
+      runtimeSummary: {},
+    }
+    const live = mapAssistantTurnToEvidence(transport as unknown as AssistantExecutionDetail)
+    expect(live.semanticVerification).toBe(report)
+    const message = {
+      id: 'message-1',
+      role: 'assistant',
+      content: 'Visible fallback',
+      timestamp: '2026-01-01T00:00:00Z',
+      evidence: transport,
+    } as unknown as AssistantConversationMessage
+    expect(mapAssistantMessage(message).evidence?.semanticVerification).toBe(report)
+    const { semanticVerification: omitted, ...historical } = transport
+    expect(omitted).toBe(report)
+    expect(
+      mapAssistantTurnToEvidence(historical as unknown as AssistantEvidenceBundle),
+    ).not.toHaveProperty('semanticVerification')
+    expect(
+      mapAssistantMessage({
+        ...message,
+        evidence: historical as unknown as AssistantEvidenceBundle,
+      }).evidence,
+    ).not.toHaveProperty('semanticVerification')
+  })
   it('preserves typed clarification disposition and candidates after history hydration', () => {
     const transport = {
       answerDisposition: 'clarification',

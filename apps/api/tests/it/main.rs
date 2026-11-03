@@ -9,6 +9,9 @@
 //!
 //! Add a test file by dropping it in this directory and declaring it below.
 
+// Query-handler futures need the same Send/Sync evaluation budget as the library.
+#![recursion_limit = "512"]
+
 // Shared helpers, compiled once instead of once per test file.
 #[path = "support/content_lifecycle_support.rs"]
 mod content_lifecycle_support;

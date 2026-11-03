@@ -23,7 +23,7 @@ use super::{
     types::{AuthoritativeAnswerEvidence, RuntimeAnswerVerification, RuntimeMatchedChunk},
     verification_claims::{
         extract_answer_literals, extract_formal_exact_claims, is_exact_numeric_literal,
-        normalize_verification_literal,
+        normalize_boundary_verification_text, normalize_verification_literal,
     },
     verification_support::{
         answer_is_verbatim_supported_by_corpus, build_boundary_verification_corpus,
@@ -86,7 +86,7 @@ pub(crate) fn verify_answer_against_authoritative_evidence(
         &mut result.warnings,
     );
     let answer_is_verbatim_grounded =
-        answer_is_verbatim_supported_by_corpus(answer, &corpora.grounding);
+        answer_is_verbatim_supported_by_corpus(answer, &corpora.boundary);
     let has_intent_mismatch = append_intent_warning(answer, intent_profile, &mut result.warnings);
     let has_variant_coverage_mismatch =
         append_variant_warning(answer, intent_profile, evidence, chunks, &mut result.warnings);
@@ -106,6 +106,7 @@ pub(crate) fn verify_answer_against_authoritative_evidence(
     append_semantic_verification_warning(&signals, &mut result.warnings);
     let state = final_verification_state(&signals);
     RuntimeAnswerVerification {
+        semantic_verification: None,
         state,
         warnings: result.warnings,
         unsupported_literals: result.unsupported_literals,
@@ -180,6 +181,7 @@ fn early_verification_result(
         return None;
     };
     Some(RuntimeAnswerVerification {
+        semantic_verification: None,
         state,
         warnings: vec![verification_warning(code, message.to_string())],
         unsupported_literals: Vec::new(),
@@ -216,7 +218,7 @@ fn verify_formatted_literals<'a>(
     result: &mut VerificationResult,
 ) {
     for literal in literals {
-        let normalized_literal = normalize_verification_literal(literal);
+        let normalized_literal = normalize_boundary_verification_text(literal);
         if normalized_literal.is_empty()
             || !result.seen_literals.insert(normalized_literal.clone())
             || literal_is_user_supplied_wildcard_scope(literal, question_wildcard_prefixes)
@@ -229,6 +231,7 @@ fn verify_formatted_literals<'a>(
             literal_is_supported_by_evidence_corpus(
                 literal,
                 &corpora.all,
+                &corpora.boundary,
                 &corpora.grounding,
                 &corpora.relationships,
             )
@@ -517,6 +520,10 @@ pub(crate) async fn persist_query_verification(
         clarification,
         answer_kind,
     )?;
+    let candidate_summary = super::semantic_verification::attach_semantic_verification(
+        candidate_summary,
+        verification.semantic_verification.as_ref(),
+    )?;
     let assembly_diagnostics = enrich_query_assembly_diagnostics(
         bundle.assembly_diagnostics.clone(),
         verification,
@@ -683,6 +690,10 @@ pub(crate) fn enrich_query_assembly_diagnostics(
     assistant_grounding: &AssistantGroundingEvidence,
 ) -> anyhow::Result<serde_json::Value> {
     let mut diagnostics = assembly_diagnostics;
+    anyhow::ensure!(
+        assistant_grounding.document_references.is_empty() || diagnostics.is_object(),
+        "selected assistant document references require object diagnostics"
+    );
     let warnings = serde_json::to_value(&verification.warnings)
         .context("failed to serialize verification warnings for assembly diagnostics")?;
     let Some(object) = diagnostics.as_object_mut() else {

@@ -112,7 +112,9 @@ Synchronization requires `contentVisibilityContract: "visibility-intent/1"`
 before source enumeration. Missing or mismatched capability fails without
 negotiating an older protocol. REQUIRED refs are completely refetched even when
 the opaque source token equals the applied token. Before recording success, the
-connector proves matching payload READY and current revision/item/intent lineage,
+connector proves the payload operation is READY and its revision and intent match
+the current public head. Mutation-item identity remains admission lineage,
+not current-head authority. The connector
 then revalidates every historical denial and discovers the exact-copy closure.
 An old successful receipt alone is not proof of the current public head.
 

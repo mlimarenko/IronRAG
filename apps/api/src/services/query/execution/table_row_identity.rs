@@ -115,11 +115,7 @@ pub(super) fn row_identifier_match_is_distinctive_within_table(
     }
 
     let mut table_rows = BTreeMap::<usize, &ParsedTableRow>::new();
-    for candidate in rows.iter().filter(|candidate| {
-        candidate.document_id == row.document_id
-            && candidate.sheet_name == row.sheet_name
-            && candidate.table_name == row.table_name
-    }) {
+    for candidate in rows.iter().filter(|candidate| candidate.same_table(row)) {
         table_rows.entry(candidate.row_number).or_insert(candidate);
     }
     let table_row_count = table_rows.len();
@@ -167,11 +163,7 @@ pub(super) fn selected_row_carries_query_focus(
     }
 
     let mut table_rows = BTreeMap::<usize, &ParsedTableRow>::new();
-    for row in rows.iter().filter(|row| {
-        row.document_id == selected_row.document_id
-            && row.sheet_name == selected_row.sheet_name
-            && row.table_name == selected_row.table_name
-    }) {
+    for row in rows.iter().filter(|row| row.same_table(selected_row)) {
         table_rows.entry(row.row_number).or_insert(row);
     }
     typed_focus_is_addressed(&typed_focus_tokens, selected_row, &table_rows)

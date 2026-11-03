@@ -54,7 +54,7 @@ Wizard details, non-interactive CI installs, provider keys, and telemetry:
 - **Typed knowledge graph** — entities, typed relations, and chunk-level citations; hybrid retrieval across vector, lexical, graph, and technical-fact lanes
 - **Native MCP server** — 23 tools for documents, graph, web ingest, and grounded `grounded_answer`; works with Claude Desktop / Code, Cursor, Codex, VS Code (Continue / Cline / Roo), Zed, OpenClaw, Hermes, and custom HTTP MCP clients
 - **Provider-agnostic AI** — OpenAI, DeepSeek, Qwen / DashScope, GPTunnel, OpenRouter, RouterAI, MiniMax, Ollama, LiteLLM / OpenAI-compatible gateways; eight binding purposes (`extract_text`, `extract_graph`, `graph_entity_type`, `embed_chunk`, `query_compile`, `query_rerank`, `query_answer`, `agent`) with per-currency cost rollups in the UI
-- **Code-aware + CPU-first ingest** — 15-language tree-sitter AST; JSON / YAML / TOML / CSV / XLSX parsers; technical facts (paths, endpoints, env vars, error codes); Docling CPU OCR for PDF / DOCX / PPTX without a GPU
+- **Code-aware document ingest** — 15-language tree-sitter AST; typed JSON / YAML / TOML records and named XLSX tables; native Xberg parsing for document text and structure, with LLM Vision for scanned pages and images
 - **Multi-tenant IAM** — principals, scoped tokens (system / workspace / library), permission groups, audit log
 - **Durable ops** — restart-safe document jobs with page-range checkpoints; durable assistant turns that recover after stream drops; streaming `tar.zst` backup / restore
 - **Pluggable connectors** — BookStack, Confluence, YouTrack, Git repos, or build your own; see [connectors/](./connectors/README.md). They live in this repository and ship on this version (poll + webhook intake)
@@ -171,14 +171,28 @@ degraded is not a release; a tool reachable only from the UI is a defect.
   checks and ops self-tests run in both. Protected default pushes build backend,
   frontend, Confluence, YouTrack and BookStack images; backend and BookStack
   have separate image security gates. Other local checks use the Make targets.
-- **Release publication is opt-in.** Set the pipeline input `release=true` and
-  run the manual `release` job on a protected default-branch push. It requires
-  the version, four deployed image producers, migration/ops checks and both image
-  security gates. `release-bump` selects patch (default), minor or major.
-  `release:promote` verifies reservation and source identity, promotes the four
-  deployed image digests and publishes the GitLab release; `deploy:gitops`
-  follows. BookStack is built separately from that four-image promotion set.
-  Schema-rollout fences guard release, promotion and GitOps deployment.
+- **Develop builds and deploys an RC automatically.** A protected `develop` push
+  resolves the next patch from the latest published GitHub Release, for example
+  `0.6.1` after `0.6.0`, and builds `0.6.1-rc.<CI_PIPELINE_ID>` into every image
+  through `APP_VERSION`. Images stay stored under their immutable `sha-*` build
+  tag. `release:bundle` records the four deployed digests; `release:promote`
+  then publishes the exact `0.6.1-rc.<CI_PIPELINE_ID>` aliases for backend,
+  frontend, Confluence, YouTrack and BookStack from those same digests.
+  `deploy:gitops` waits for both the bundle and promotion. BookStack is tagged but
+  not deployed. No GitLab tag, reservation, manual job or public bump is
+  consumed. `/v1/version` and the visible frontend version report the same
+  string; the native version contract marks it `is_release: false` and
+  `is_prerelease: true`.
+- **A public GitHub release is an explicit flow.** In a protected `develop` push
+  pipeline run the manual `public:publish` job. It selects the next stable
+  version at publication time (`release_bump` job input: patch by default, minor or major)
+  and appends the clean SemVer snapshot and GitHub Release.
+  It never publishes the RC version and creates no GitLab tag or GitLab release.
+  Prepare release notes in `CHANGELOG.md`, under `## Unreleased` or the exact
+  stable version. The publisher stamps `Unreleased` and uses that version's
+  section as the GitHub description. Published tags remain immutable; editorial
+  corrections to the release description are preserved on retry. Schema-rollout fences guard
+  GitOps deployment and public publication.
 - **A snapshot import answers `202`.** The terminal status lives in
   `GET /v1/ops/operations/{id}`; `curl --fail` is green on an operation that
   failed afterwards.

@@ -21,6 +21,7 @@ pub(super) struct AnswerSnapshotContext {
     question: String,
     query_ir: serde_json::Value,
     spans: Vec<TurnSpan>,
+    iterations: std::sync::Mutex<Vec<LlmIterationDebug>>,
 }
 
 impl AnswerSnapshotContext {
@@ -37,6 +38,7 @@ impl AnswerSnapshotContext {
             question: question.to_string(),
             query_ir,
             spans: prepared.retrieval_spans.clone(),
+            iterations: std::sync::Mutex::new(Vec::new()),
         }
     }
 
@@ -50,8 +52,39 @@ impl AnswerSnapshotContext {
 
     /// Snapshot for an answer produced without provider iterations
     /// (deterministic, clarification, preflight override).
-    pub(super) fn snapshot(&self, final_answer: &str) -> LlmContextSnapshot {
-        self.snapshot_with_iterations(final_answer, Vec::new(), 0)
+    pub(super) fn snapshot(&self, final_answer: &str) -> anyhow::Result<LlmContextSnapshot> {
+        let iterations = self
+            .iterations
+            .lock()
+            .map_err(|_| anyhow::anyhow!("answer debug transcript lock poisoned"))?
+            .clone();
+        let count = iterations.len();
+        Ok(self.snapshot_with_iterations(final_answer, iterations, count))
+    }
+
+    /// Retain every completed draft/revision response, including rejected
+    /// candidates. The selected finalizer drains this transcript exactly once.
+    pub(super) fn record_iterations(
+        &self,
+        iterations: Vec<LlmIterationDebug>,
+    ) -> anyhow::Result<()> {
+        let mut recorded = self
+            .iterations
+            .lock()
+            .map_err(|_| anyhow::anyhow!("answer debug transcript lock poisoned"))?;
+        for mut iteration in iterations {
+            iteration.iteration = recorded.len() + 1;
+            recorded.push(iteration);
+        }
+        Ok(())
+    }
+
+    pub(super) fn take_iterations(&self) -> anyhow::Result<Vec<LlmIterationDebug>> {
+        let mut recorded = self
+            .iterations
+            .lock()
+            .map_err(|_| anyhow::anyhow!("answer debug transcript lock poisoned"))?;
+        Ok(std::mem::take(&mut *recorded))
     }
 
     /// Snapshot for a provider-backed answer, carrying the exact wire payloads

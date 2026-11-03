@@ -10,7 +10,7 @@ use crate::{
             self, AdmissionError, ContentAdmissionRequest, ContentAdmissionTarget,
         },
         content_mutation_repository::{self, NewContentMutationItem},
-        ingest_repository,
+        content_revision_repository, ingest_repository,
     },
     interfaces::http::router_support::ApiError,
     services::ops::service::{CreateAsyncOperationCommand, UpdateAsyncOperationCommand},
@@ -122,21 +122,8 @@ impl ContentService {
         let replayed = matches!(outcome, admission_repository::AdmissionOutcome::Replayed(_));
         let bundle = outcome.into_bundle();
         let document_id = bundle.document.id;
-        let request_fingerprint = bundle.mutation.request_fingerprint.clone();
-        let operation_status = bundle.async_operation.status.clone();
-        let result_revision_id = bundle.revision.as_ref().map(|revision| revision.id);
-        let result_checksum = bundle.revision.as_ref().map(|revision| revision.checksum.clone());
-        let mutation = ContentMutationAdmission {
-            replayed,
-            mutation: map_mutation_row(bundle.mutation),
-            items: bundle.item.into_iter().map(map_mutation_item_row).collect(),
-            job_id: bundle.job.map(|job| job.id),
-            async_operation_id: Some(bundle.async_operation.id),
-            operation_status: Some(operation_status),
-            result_revision_id,
-            result_checksum,
-            request_fingerprint,
-        };
+        let mut mutation = self.get_mutation_admission(state, bundle.mutation.id).await?;
+        mutation.replayed = replayed;
         let document = self.get_document(state, document_id).await?;
         Ok(CreateDocumentAdmission { document, mutation })
     }
@@ -198,21 +185,9 @@ impl ContentService {
         .map_err(map_atomic_admission_error)?;
         let replayed = matches!(outcome, admission_repository::AdmissionOutcome::Replayed(_));
         let bundle = outcome.into_bundle();
-        let request_fingerprint = bundle.mutation.request_fingerprint.clone();
-        let operation_status = bundle.async_operation.status.clone();
-        let result_revision_id = bundle.revision.as_ref().map(|revision| revision.id);
-        let result_checksum = bundle.revision.as_ref().map(|revision| revision.checksum.clone());
-        Ok(ContentMutationAdmission {
-            replayed,
-            mutation: map_mutation_row(bundle.mutation),
-            items: bundle.item.into_iter().map(map_mutation_item_row).collect(),
-            job_id: bundle.job.map(|job| job.id),
-            async_operation_id: Some(bundle.async_operation.id),
-            operation_status: Some(operation_status),
-            result_revision_id,
-            result_checksum,
-            request_fingerprint,
-        })
+        let mut admission = self.get_mutation_admission(state, bundle.mutation.id).await?;
+        admission.replayed = replayed;
+        Ok(admission)
     }
 
     pub async fn settle_deleted_document_mutation(
@@ -325,6 +300,7 @@ impl ContentService {
                 operation_status: Some(bundle.async_operation.status),
                 result_revision_id: None,
                 result_checksum: None,
+                visibility_intent_id: None,
             });
         }
         let base_revision_id = bundle.item.as_ref().ok_or(ApiError::Internal)?.base_revision_id;

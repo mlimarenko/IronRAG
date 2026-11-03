@@ -98,10 +98,75 @@ fn overreported_cached_subset_is_clamped_to_total_input() {
         ProviderUsageSemantics::CachedSubsetOfInput,
     );
 
-    assert_eq!(quantity_for(&usage, "prompt_tokens"), None);
+    assert_eq!(quantity_for(&usage, "prompt_tokens"), Some(Decimal::ZERO));
     assert_eq!(quantity_for(&usage, "cached_input_tokens"), Some(Decimal::from(100)));
     assert_eq!(usage.context_input_tokens, Some(Decimal::from(100)));
     assert!(usage.cached_input_was_clamped);
+}
+
+#[test]
+fn explicitly_observed_zero_counters_remain_known_in_each_usage_policy() {
+    for (semantics, payload, row_count) in [
+        (
+            ProviderUsageSemantics::CachedSubsetOfInput,
+            serde_json::json!({"prompt_tokens":0,"completion_tokens":"0","prompt_tokens_details":{"cached_tokens":0}}),
+            3,
+        ),
+        (
+            ProviderUsageSemantics::AutoDetect,
+            serde_json::json!({"input_tokens":"0","output_tokens":0,"input_tokens_details":{"cached_tokens":"0"}}),
+            3,
+        ),
+        (
+            ProviderUsageSemantics::DisjointCacheCounters,
+            serde_json::json!({"input_tokens":0,"output_tokens":0,"cache_read_input_tokens":0,"cache_creation_input_tokens":"0"}),
+            4,
+        ),
+    ] {
+        let usage = normalize_token_usage(&payload, semantics);
+        assert_eq!(quantity_for(&usage, "prompt_tokens"), Some(Decimal::ZERO));
+        assert_eq!(quantity_for(&usage, "completion_tokens"), Some(Decimal::ZERO));
+        assert_eq!(quantity_for(&usage, "cached_input_tokens"), Some(Decimal::ZERO));
+        assert_eq!(usage.context_input_tokens, Some(Decimal::ZERO));
+        assert_eq!(usage.rows(uuid::Uuid::nil()).len(), row_count);
+    }
+}
+
+#[test]
+fn absent_or_invalid_usage_is_not_synthesized_as_zero() {
+    for semantics in [
+        ProviderUsageSemantics::AutoDetect,
+        ProviderUsageSemantics::CachedSubsetOfInput,
+        ProviderUsageSemantics::DisjointCacheCounters,
+    ] {
+        for payload in [
+            serde_json::json!({}),
+            serde_json::json!({"input_tokens":null,"output_tokens":null}),
+            serde_json::json!({"input_tokens":-1,"output_tokens":"-2"}),
+            serde_json::json!({"input_tokens":0.5,"output_tokens":"invalid"}),
+            serde_json::json!({"input_tokens":false,"output_tokens":[]}),
+        ] {
+            let usage = normalize_token_usage(&payload, semantics);
+            assert!(usage.rows(uuid::Uuid::nil()).is_empty());
+            assert_eq!(usage.context_input_tokens, None);
+        }
+    }
+}
+
+#[test]
+fn known_cached_subsets_preserve_zero_remainders_and_zero_output() {
+    for (cached, ordinary) in [(100, 0), (0, 100)] {
+        let usage = normalize_token_usage(
+            &serde_json::json!({"input_tokens":100,"output_tokens":0,"input_tokens_details":{"cached_tokens":cached}}),
+            ProviderUsageSemantics::CachedSubsetOfInput,
+        );
+        assert_eq!(quantity_for(&usage, "prompt_tokens"), Some(Decimal::from(ordinary)));
+        assert_eq!(quantity_for(&usage, "cached_input_tokens"), Some(Decimal::from(cached)));
+        assert_eq!(quantity_for(&usage, "completion_tokens"), Some(Decimal::ZERO));
+        assert_eq!(usage.context_input_tokens, Some(Decimal::from(100)));
+        assert!(!usage.cached_input_was_clamped);
+        assert_eq!(usage.rows(uuid::Uuid::nil()).len(), 3);
+    }
 }
 
 #[test]

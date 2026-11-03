@@ -136,6 +136,7 @@ fn evidence_bundle_with_references(
         reference_summary: None,
         verification_state: ironrag_contracts::assistant::AssistantVerificationState::Verified,
         verification_warnings: Vec::new(),
+        semantic_verification: None,
         answer_disposition: ironrag_contracts::assistant::AssistantAnswerDisposition::FactualReady,
         clarification: ironrag_contracts::assistant::AssistantClarification::default(),
         runtime_summary: assistant_runtime_summary(),
@@ -179,6 +180,7 @@ fn execution_detail_from_evidence(
         reference_summary: evidence.reference_summary,
         verification_state: evidence.verification_state,
         verification_warnings: evidence.verification_warnings,
+        semantic_verification: evidence.semantic_verification,
         answer_disposition: evidence.answer_disposition,
         clarification: evidence.clarification,
     }
@@ -227,6 +229,7 @@ fn query_execution_detail_with_chunks(count: usize) -> QueryExecutionDetail {
         graph_edge_references: Vec::new(),
         verification_state: QueryVerificationState::Verified,
         verification_warnings: Vec::new(),
+        semantic_verification: None,
         answer_disposition: crate::domains::query::QueryAnswerDisposition::FactualReady,
         clarification: QueryClarification::default(),
         query_ir: None,
@@ -401,6 +404,7 @@ fn map_turn_to_message_preserves_hydrated_evidence() {
         reference_summary: None,
         verification_state: ironrag_contracts::assistant::AssistantVerificationState::Verified,
         verification_warnings: Vec::new(),
+        semantic_verification: None,
         answer_disposition: ironrag_contracts::assistant::AssistantAnswerDisposition::FactualReady,
         clarification: ironrag_contracts::assistant::AssistantClarification::default(),
         runtime_summary: ironrag_contracts::assistant::AssistantRuntimeSummary {
@@ -566,6 +570,65 @@ fn ui_completion_and_hydration_serialize_bounded_reference_summaries() {
     let hydrated = serde_json::to_value(projected_evidence).expect("serialize hydration");
     assert_eq!(hydrated["referenceSummary"]["totalCount"], 13);
     assert_eq!(hydrated["referenceSummary"]["returnedCount"], 12);
+}
+
+#[test]
+fn semantic_report_survives_live_stream_history_and_reference_projection() {
+    use crate::services::query::execution::semantic_verification::{
+        AuthorizedSemanticSource, prepare,
+    };
+    use ironrag_contracts::assistant::semantic_verification::{
+        SemanticFailureCode, SemanticSourceLocator,
+    };
+    let prepared = prepare(
+        "Question",
+        "Raw candidate",
+        vec![AuthorizedSemanticSource {
+            document_id: Uuid::from_u128(10),
+            document_revision_id: Uuid::from_u128(11),
+            locator: SemanticSourceLocator::Chunk { chunk_id: Uuid::from_u128(12) },
+            text: "Authorized selected source".into(),
+            complete_document: None,
+        }],
+    )
+    .expect("valid preparation");
+    let mut report =
+        prepared.failed(SemanticFailureCode::ProviderRefusal, 17, Some(Uuid::from_u128(13)));
+    report.visible_answer_sha256 = Some("b".repeat(64));
+    let mut detail = query_execution_detail_with_chunks(13);
+    detail.semantic_verification = Some(report.clone());
+    let public = map_execution_detail(detail.clone());
+    assert_eq!(public.semantic_verification.as_ref(), Some(&report));
+    let live = project_ui_execution_detail(public);
+    let history = map_execution_detail_to_evidence(detail);
+    assert_eq!(live.semantic_verification, history.semantic_verification);
+    assert_eq!(live.semantic_verification.as_ref(), Some(&report));
+    assert!(live.reference_summary.as_ref().is_some_and(|summary| summary.truncated));
+    assert!(history.reference_summary.as_ref().is_some_and(|summary| summary.truncated));
+    let stream =
+        serde_json::to_value(AssistantTurnStreamEvent::Completed { detail: Box::new(live) })
+            .expect("stream projection");
+    assert_eq!(stream["detail"]["semanticVerification"], serde_json::json!(report));
+    assert_eq!(
+        serde_json::to_value(history).expect("history projection")["semanticVerification"],
+        stream["detail"]["semanticVerification"]
+    );
+}
+
+#[test]
+fn historical_execution_does_not_invent_a_semantic_assessment() {
+    let public = map_execution_detail(query_execution_detail_with_chunks(1));
+    assert!(public.semantic_verification.is_none());
+    let mut encoded = serde_json::to_value(&public).expect("serialize historical detail");
+    assert!(encoded.get("semanticVerification").is_none());
+    let decoded: ironrag_contracts::assistant::AssistantExecutionDetail =
+        serde_json::from_value(encoded.clone()).expect("historical detail remains readable");
+    assert!(decoded.semantic_verification.is_none());
+    encoded["semanticVerification"] = serde_json::json!({"outcome":{"status":"verified"}});
+    assert!(
+        serde_json::from_value::<ironrag_contracts::assistant::AssistantExecutionDetail>(encoded)
+            .is_err()
+    );
 }
 
 #[test]

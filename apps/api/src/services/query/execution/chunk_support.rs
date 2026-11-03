@@ -99,29 +99,26 @@ pub(super) fn chunk_answer_source_text(chunk: &KnowledgeChunkRow) -> String {
 fn merge_chunk_source_text_variants<const N: usize>(values: [Option<&str>; N]) -> String {
     const MAX_MERGED_CHUNK_SOURCE_CHARS: usize = 16_000;
 
-    let mut parts = Vec::new();
-    let mut seen = HashSet::new();
+    let mut parts = Vec::<(String, String)>::new();
     for value in values.into_iter().flatten() {
         let trimmed = value.trim();
         if trimmed.is_empty() {
             continue;
         }
-        let normalized = trimmed.split_whitespace().collect::<Vec<_>>().join(" ");
-        if seen.iter().any(|seen_value: &String| {
-            seen_value.contains(&normalized) || normalized.contains(seen_value)
-        }) {
+        // Compare only retained text: an oversized window must not evict core
+        // content that appears beyond its bounded prefix.
+        let bounded = excerpt_for(trimmed, MAX_MERGED_CHUNK_SOURCE_CHARS);
+        let normalized = bounded.split_whitespace().collect::<Vec<_>>().join(" ");
+        if parts.iter().any(|(seen, _)| seen.contains(&normalized)) {
             continue;
         }
-        if seen.insert(normalized) {
-            parts.push(trimmed.to_string());
-        }
+        let insertion_index =
+            parts.iter().position(|(seen, _)| normalized.contains(seen)).unwrap_or(parts.len());
+        parts.retain(|(seen, _)| !normalized.contains(seen));
+        parts.insert(insertion_index, (normalized, bounded));
     }
-    let merged = parts.join("\n");
-    if merged.chars().count() <= MAX_MERGED_CHUNK_SOURCE_CHARS {
-        merged
-    } else {
-        excerpt_for(&merged, MAX_MERGED_CHUNK_SOURCE_CHARS)
-    }
+    let merged = parts.into_iter().map(|(_, text)| text).collect::<Vec<_>>().join("\n");
+    excerpt_for(&merged, MAX_MERGED_CHUNK_SOURCE_CHARS)
 }
 
 fn chunk_literal_preserving_source_text(

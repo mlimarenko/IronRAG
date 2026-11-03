@@ -4,7 +4,9 @@ use crate::domains::query_ir::{
     QueryScope, QueryTargetKind,
 };
 use crate::services::query::execution::RuntimeChunkScoreKind;
-use crate::shared::extraction::table_markdown::build_semantic_table_row_text;
+use crate::shared::extraction::table_markdown::{
+    SemanticTableContext, build_semantic_table_row_text,
+};
 
 fn table_inventory_ir(target_types: Vec<QueryTargetKind>) -> QueryIR {
     QueryIR {
@@ -35,6 +37,7 @@ fn parsed_inventory_row(
         document_id,
         sheet_name: "sheet_01".to_string(),
         table_name: Some(table_name.to_string()),
+        table_ref: None,
         row_number,
         fields: fields
             .iter()
@@ -186,10 +189,36 @@ fn structural_section_label_preserves_identifier_punctuation() {
 }
 
 #[test]
+fn native_table_consumer_row_inventories_keep_two_source_tables() {
+    let document = Uuid::now_v7();
+    let rows = [(0, 1, "7"), (9, 1, "100"), (9, 2, "200"), (0, 2, "19")]
+        .into_iter()
+        .map(|(reference, number, value)| {
+            let mut row = parsed_inventory_row(document, "", number, &[("Stock", value)]);
+            row.table_name = None;
+            row.sheet_name.clear();
+            row.table_ref = Some(reference);
+            row
+        })
+        .collect::<Vec<_>>();
+    let initial = build_initial_table_rows_answer(&rows, 4).expect("all four source rows");
+    let inventory = build_table_value_inventory_answer(&rows).expect("inventory");
+    assert_eq!(initial.lines().count(), 4);
+    assert_eq!(inventory.lines().count(), 4);
+    for value in ["7", "19", "100", "200"] {
+        assert!(initial.contains(&format!("`{value}`")));
+        assert!(inventory.contains(&format!("`{value}`")));
+    }
+}
+
+#[test]
 fn semantic_table_row_protocol_round_trips_its_shared_emitter() {
     let source_text = build_semantic_table_row_text(
-        Some("sheet_01"),
-        Some("dataset_17"),
+        SemanticTableContext {
+            sheet_name: Some("sheet_01"),
+            table_name: Some("dataset_17"),
+            table_ref: Some(7),
+        },
         2,
         &["f_01".to_string(), "f_02".to_string()],
         &["v_01".to_string(), "v_02".to_string()],
@@ -200,6 +229,7 @@ fn semantic_table_row_protocol_round_trips_its_shared_emitter() {
 
     assert_eq!(parsed.sheet_name, "sheet_01");
     assert_eq!(parsed.table_name.as_deref(), Some("dataset_17"));
+    assert_eq!(parsed.table_ref, Some(7));
     assert_eq!(parsed.row_number, 3);
     assert_eq!(
         parsed.fields,

@@ -1,6 +1,7 @@
 use sqlx::{Postgres, Transaction};
 use uuid::Uuid;
 
+use super::identity::{content_request_identity, visibility_request_identity};
 use super::{
     AdmissionError, AdmissionFailpoint, AdmissionOutcome, ContentAdmissionBundle,
     ContentAdmissionRequest, ContentAdmissionTarget, NewJob, NewMutation, NewOperation,
@@ -15,20 +16,6 @@ use crate::infra::repositories::{
     content_revision_repository,
 };
 
-#[derive(serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-struct VisibilityRequestIdentity<'a> {
-    workspace_id: Uuid,
-    library_id: Uuid,
-    document_id: Uuid,
-    requested_by_principal_id: Option<Uuid>,
-    request_surface: &'a str,
-    operation_kind: &'static str,
-    source_identity: &'a str,
-    materialization_token: &'a Option<String>,
-    replacement: &'a ironrag_contracts::documents::ReplacementIdentity,
-}
-
 /// Admits a complete independent visibility bundle without claiming payload ownership.
 /// Replay returns the original item/floor and never clears a newer publication.
 ///
@@ -41,17 +28,7 @@ pub async fn admit_visibility_intent_with_failpoint(
     failpoint: Option<AdmissionFailpoint>,
 ) -> Result<AdmissionOutcome<super::VisibilityAdmissionBundle>, AdmissionError> {
     let intent = request.intent.clone().normalize()?;
-    let identity = serde_json::to_value(VisibilityRequestIdentity {
-        workspace_id: request.workspace_id,
-        library_id: request.library_id,
-        document_id: request.document_id,
-        requested_by_principal_id: request.requested_by_principal_id,
-        request_surface: &request.request_surface,
-        operation_kind: "visibility",
-        source_identity: &intent.source_identity,
-        materialization_token: &intent.materialization_token,
-        replacement: &intent.replacement,
-    })?;
+    let identity = visibility_request_identity(request, &intent);
     let digest = fingerprint(&identity)?;
     let scope = idempotency_scope(request.workspace_id, request.requested_by_principal_id);
     let mut transaction = postgres.begin().await?;
@@ -69,14 +46,7 @@ pub async fn admit_visibility_intent_with_failpoint(
     )
     .await?;
     if let Some(stored) = existing.as_ref() {
-        let stored_identity: serde_json::Value =
-            sqlx::query_scalar("select request_identity from content_mutation where id=$1")
-                .bind(stored.id)
-                .fetch_one(&mut *transaction)
-                .await?;
-        if stored_identity != identity {
-            return Err(AdmissionError::IdempotencyConflict { mutation_id: stored.id });
-        }
+        stored.verify_replay(&identity)?;
     }
     let replayed = existing.is_some();
     let document = lock_visibility_document(&mut transaction, request).await?;
@@ -131,7 +101,10 @@ pub async fn admit_visibility_intent_with_failpoint(
         source_identity: intent.source_identity,
         materialization_token: intent.materialization_token,
         replacement: intent.replacement,
-        request_fingerprint: digest,
+        request_fingerprint: mutation
+            .request_fingerprint
+            .clone()
+            .ok_or(AdmissionError::InvariantViolation("visibility fingerprint missing"))?,
     };
     let bundle = super::VisibilityAdmissionBundle {
         mutation,
@@ -373,9 +346,7 @@ async fn admit_content_transaction(
     let request_fingerprint = fingerprint(&request_identity)?;
 
     if let Some(existing) = existing_owner {
-        if existing.request_fingerprint.as_deref() != Some(request_fingerprint.as_str()) {
-            return Err(AdmissionError::IdempotencyConflict { mutation_id: existing.id });
-        }
+        existing.verify_replay(&request_identity)?;
         let mutation = existing.into_row();
         let bundle = load_content_bundle(transaction, mutation).await?;
         return Ok(AdmissionOutcome::Replayed(bundle));
@@ -552,40 +523,6 @@ fn content_fingerprint(request: &ContentAdmissionRequest) -> Result<String, Admi
     fingerprint(&content_request_identity(request))
 }
 
-fn content_request_identity(request: &ContentAdmissionRequest) -> serde_json::Value {
-    let target = match &request.target {
-        ContentAdmissionTarget::New { external_key, file_name, parent_external_key } => {
-            serde_json::json!({
-                "kind": "new",
-                "externalKey": external_key,
-                "fileName": file_name,
-                "parentExternalKey": parent_external_key,
-            })
-        }
-        ContentAdmissionTarget::Existing { document_id } => serde_json::json!({
-            "kind": "existing",
-            "documentId": document_id,
-        }),
-    };
-    let revision = request.revision.as_ref().map(|revision| {
-        serde_json::json!({
-            "contentSourceKind": revision.content_source_kind,
-            "visibilityIntentId": revision.visibility_intent_id,
-            "baseRevisionId": revision.base_revision_id,
-        })
-    });
-    serde_json::json!({
-        "workspaceId": request.workspace_id,
-        "libraryId": request.library_id,
-        "operationKind": request.operation_kind,
-        "sourceIdentity": request.source_identity,
-        "materializationToken": null,
-        "target": target,
-        "revision": revision,
-        "replacement": request.revision.as_ref().map(|revision| &revision.replacement),
-    })
-}
-
 /// Locks the authenticated target before a replay lookup and reads binding only
 /// from its immutable intent record. A stale exact replay returns its original
 /// bundle; new submissions must separately prove the current head obligation.
@@ -638,8 +575,8 @@ async fn load_payload_intent_identity(
     let Some(intent_id) = intent_id else {
         return Ok(None);
     };
-    let identity: Option<serde_json::Value> = sqlx::query_scalar(
-        "select m.request_identity from content_visibility_intent v
+    let pair: Option<(serde_json::Value, String)> = sqlx::query_as(
+        "select m.request_identity, m.request_fingerprint from content_visibility_intent v
          join content_mutation_item i on i.id = v.mutation_item_id and i.document_id = v.document_id
          join content_mutation m on m.id = i.mutation_id
          where v.mutation_item_id = $1 and v.document_id = $2
@@ -653,7 +590,11 @@ async fn load_payload_intent_identity(
     .bind(request.library_id)
     .fetch_optional(&mut **transaction)
     .await?;
-    identity.map(Some).ok_or(AdmissionError::VisibilityIntentSuperseded { document_id })
+    let (identity, digest) =
+        pair.ok_or(AdmissionError::VisibilityIntentSuperseded { document_id })?;
+    super::verify_fingerprint(&identity, &digest)
+        .map_err(|_| AdmissionError::VisibilityBindingConflict { document_id })?;
+    Ok(Some(identity))
 }
 
 async fn validate_current_payload_binding(
@@ -1289,7 +1230,7 @@ mod tests {
         ContentAdmissionRequest {
             workspace_id: Uuid::nil(),
             library_id: Uuid::max(),
-            operation_kind: "content_update".to_owned(),
+            operation_kind: "upload".to_owned(),
             requested_by_principal_id: None,
             request_surface: "api".to_owned(),
             idempotency_key: Some("request-001".to_owned()),
@@ -1325,6 +1266,66 @@ mod tests {
         let request = new_request();
 
         assert_eq!(content_fingerprint(&request).unwrap(), content_fingerprint(&request).unwrap());
+    }
+
+    #[test]
+    fn content_identity_retains_complete_admission_fields() {
+        let mut request = new_request();
+        for target in
+            [request.target.clone(), ContentAdmissionTarget::Existing { document_id: Uuid::max() }]
+        {
+            request.target = target;
+            let identity = content_request_identity(&request);
+            let target = match &request.target {
+                ContentAdmissionTarget::New { external_key, file_name, parent_external_key } => {
+                    serde_json::json!({
+                        "kind": "new", "externalKey": external_key, "fileName": file_name,
+                        "parentExternalKey": parent_external_key,
+                    })
+                }
+                ContentAdmissionTarget::Existing { document_id } => serde_json::json!({
+                    "kind": "existing", "documentId": document_id,
+                }),
+            };
+            let original = serde_json::json!({
+                "workspaceId": request.workspace_id, "libraryId": request.library_id,
+                "operationKind": request.operation_kind, "sourceIdentity": request.source_identity,
+                "materializationToken": null, "target": target,
+                "revision": request.revision.as_ref().map(|revision| serde_json::json!({
+                    "contentSourceKind": revision.content_source_kind,
+                    "visibilityIntentId": revision.visibility_intent_id, "baseRevisionId": revision.base_revision_id,
+                })),
+                "replacement": request.revision.as_ref().map(|revision| &revision.replacement),
+            });
+            assert_eq!(identity, original);
+            assert_eq!(fingerprint(&identity).unwrap(), fingerprint(&original).unwrap());
+        }
+    }
+
+    #[test]
+    fn visibility_identity_retains_complete_admission_fields() {
+        let request = super::super::VisibilityAdmissionRequest {
+            workspace_id: Uuid::nil(),
+            library_id: Uuid::max(),
+            document_id: Uuid::nil(),
+            requested_by_principal_id: None,
+            request_surface: "rest".into(),
+            intent: ironrag_contracts::documents::CreateVisibilityIntentRequest {
+                idempotency_key: "intent-key".into(),
+                source_identity: "source".into(),
+                materialization_token: None,
+                replacement: new_request().revision.unwrap().replacement,
+            },
+        };
+        let identity = visibility_request_identity(&request, &request.intent);
+        let original = serde_json::json!({
+            "workspaceId": request.workspace_id, "libraryId": request.library_id,
+            "documentId": request.document_id, "requestedByPrincipalId": null, "requestSurface": "rest",
+            "operationKind": "visibility", "sourceIdentity": "source", "materializationToken": null,
+            "replacement": request.intent.replacement,
+        });
+        assert_eq!(identity, original);
+        assert_eq!(fingerprint(&identity).unwrap(), fingerprint(&original).unwrap());
     }
 
     #[test]

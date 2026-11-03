@@ -4,6 +4,106 @@ use crate::domains::query::{QueryGraphEdgeReference, QueryGraphNodeReference};
 use crate::services::query::service::ExecutionPreparedReferenceContext;
 
 impl QueryService {
+    /// Exercises native document-read provenance in the database visibility fixture.
+    #[cfg(feature = "test-support")]
+    #[doc(hidden)]
+    pub async fn semantic_sources_from_native_read_for_test(
+        &self,
+        state: &AppState,
+        execution_id: Uuid,
+        native_structured_content: serde_json::Value,
+    ) -> anyhow::Result<Vec<ironrag_contracts::assistant::semantic_verification::SemanticSourceEntry>>
+    {
+        let execution =
+            query_repository::get_execution_by_id(&state.persistence.postgres, execution_id)
+                .await?
+                .ok_or_else(|| anyhow::anyhow!("test execution missing"))?;
+        let result = crate::interfaces::http::mcp::McpToolResult {
+            content: Vec::new(),
+            structured_content: native_structured_content,
+            is_error: false,
+        };
+        let reference = crate::services::query::agent_loop::native_document_read_reference(
+            "read_document",
+            &result,
+        )
+        .ok_or_else(|| anyhow::anyhow!("native read reference missing"))?;
+        let grounding = crate::services::query::assistant_grounding::AssistantGroundingEvidence {
+            verification_corpus: Vec::new(),
+            document_references: vec![reference],
+        };
+        let stage = super::agent_grounding::prepare_agent_verification_stage(
+            AgentAnswerVerificationRequest {
+                state,
+                execution: &execution,
+                context_bundle_id: execution.context_bundle_id,
+                answer_text: "Candidate",
+                assistant_grounding: &grounding,
+            },
+        )
+        .await?;
+        let sources =
+            crate::services::query::execution::semantic_verification::load_semantic_sources(
+                state,
+                crate::services::query::provider_billing::QueryProviderExecutionContext {
+                    workspace_id: execution.workspace_id,
+                    library_id: execution.library_id,
+                    query_execution_id: execution.id,
+                    runtime_execution_id: execution.runtime_execution_id,
+                },
+                &stage.generation.primary_answer_chunks,
+                &stage.generation.authoritative_evidence,
+                &stage.generation.assistant_grounding,
+            )
+            .await?;
+        let prepared = crate::services::query::execution::semantic_verification::prepare(
+            &execution.query_text,
+            "Candidate",
+            sources,
+        )?;
+        Ok(prepared.sources().to_vec())
+    }
+
+    /// Builds a valid synthetic failure snapshot for native read-visibility
+    /// fixtures. This grants no source authority and is never an HTTP endpoint.
+    #[cfg(feature = "test-support")]
+    #[doc(hidden)]
+    pub fn semantic_failure_report_for_test(
+        &self,
+        question: &str,
+        answer: &str,
+        chunk: Option<&crate::infra::knowledge_rows::KnowledgeChunkRow>,
+    ) -> anyhow::Result<
+        ironrag_contracts::assistant::semantic_verification::SemanticVerificationReport,
+    > {
+        use crate::services::query::execution::semantic_verification::{
+            AuthorizedSemanticSource, SemanticPreparationError, preparation_failure_report, prepare,
+        };
+        use ironrag_contracts::assistant::semantic_verification::{
+            SemanticFailureCode, SemanticSourceLocator,
+        };
+        let Some(chunk) = chunk else {
+            return Ok(preparation_failure_report(
+                question,
+                answer,
+                SemanticPreparationError::NoEvidence,
+                0,
+            ));
+        };
+        Ok(prepare(
+            question,
+            answer,
+            vec![AuthorizedSemanticSource {
+                document_id: chunk.document_id,
+                document_revision_id: chunk.revision_id,
+                locator: SemanticSourceLocator::Chunk { chunk_id: chunk.chunk_id },
+                text: chunk.content_text.clone(),
+                complete_document: None,
+            }],
+        )?
+        .failed(SemanticFailureCode::ProviderError, 0, None))
+    }
+
     /// Parks one hydrated execution read before the final provenance check.
     /// Service clones share this fixture gate; unrelated libraries cannot consume it.
     #[cfg(feature = "test-support")]
@@ -98,6 +198,23 @@ impl QueryService {
             execution.id,
             persisted_outcome_bundle.as_ref().map(|bundle| &bundle.candidate_summary),
         );
+        let semantic_verification = persisted_outcome_bundle
+            .as_ref()
+            .map(|bundle| {
+                crate::services::query::execution::persisted_semantic_verification(
+                    &bundle.candidate_summary,
+                )
+            })
+            .transpose()
+            .map_err(|error| {
+                ApiError::internal_with_log(error, "invalid persisted semantic verification")
+            })?
+            .flatten();
+        if let (Some(report), Some(turn)) = (&semantic_verification, &response_turn) {
+            validate_semantic_visible_body(report, &turn.content_text).map_err(|error| {
+                ApiError::internal_with_log(error, "semantic visible-body identity mismatch")
+            })?;
+        }
         let prepared_reference_context =
             resolve_prepared_reference_context(prepared_reference_context, execution.id);
 
@@ -167,8 +284,20 @@ impl QueryService {
         #[cfg(feature = "test-support")]
         self.pause_hydrated_execution_read(execution.library_id).await?;
 
-        if response_turn.is_some()
-            && !is_system_statement
+        // Reports expose canonical source text even when response persistence
+        // failed. Their visibility cannot depend on a response-turn pointer.
+        let exposes_source_data =
+            semantic_verification.as_ref().is_some_and(|report| !report.sources.is_empty())
+                || [
+                    chunk_references.len(),
+                    prepared_segment_references.len(),
+                    technical_fact_references.len(),
+                    graph_node_references.len(),
+                    graph_edge_references.len(),
+                ]
+                .into_iter()
+                .any(|count| count > 0);
+        if (exposes_source_data || (response_turn.is_some() && !is_system_statement))
             && !query_result_cache_repository::execution_sources_are_current(
                 &state.persistence.postgres,
                 execution.id,
@@ -198,11 +327,27 @@ impl QueryService {
             graph_edge_references,
             verification_state,
             verification_warnings,
+            semantic_verification,
             answer_disposition,
             clarification,
             query_ir,
         })
     }
+}
+
+pub(super) fn validate_semantic_visible_body(
+    report: &ironrag_contracts::assistant::semantic_verification::SemanticVerificationReport,
+    visible: &str,
+) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        report.visible_answer_sha256.as_deref()
+            == Some(
+                crate::services::query::execution::semantic_verification::answer_hash(visible)
+                    .as_str()
+            ),
+        "recorded semantic report does not identify the persisted visible answer"
+    );
+    Ok(())
 }
 
 fn resolve_prepared_reference_context(

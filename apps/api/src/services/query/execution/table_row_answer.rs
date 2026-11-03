@@ -5,7 +5,8 @@ use uuid::Uuid;
 use crate::domains::query_ir::{QueryAct, QueryIR, QueryTargetKind};
 use crate::services::query::text_match::normalized_alnum_tokens;
 use crate::shared::extraction::table_markdown::{
-    is_markdown_separator_row, parse_markdown_table_row,
+    is_markdown_separator_row, parse_markdown_table_row, split_semantic_key_value,
+    split_semantic_segments, unescape_semantic_segment,
 };
 
 use super::{
@@ -24,10 +25,20 @@ pub(crate) struct ParsedTableRow {
     pub(crate) document_id: Uuid,
     pub(crate) sheet_name: String,
     pub(crate) table_name: Option<String>,
+    pub(crate) table_ref: Option<i32>,
     pub(crate) row_number: usize,
     pub(crate) fields: Vec<(String, String)>,
     pub(crate) flattened_text: String,
     pub(crate) score: f32,
+}
+
+impl ParsedTableRow {
+    pub(super) fn same_table(&self, other: &Self) -> bool {
+        self.document_id == other.document_id
+            && self.table_ref == other.table_ref
+            && self.sheet_name == other.sheet_name
+            && self.table_name == other.table_name
+    }
 }
 
 pub(crate) fn build_table_row_grounded_answer(
@@ -83,15 +94,21 @@ pub(crate) fn build_table_row_grounded_answer(
 /// content classifiers. The round-trip regression below keeps this parser tied
 /// to the emitter instead of allowing these markers to spread into routing.
 pub(crate) fn parse_table_row_chunk(chunk: &RuntimeMatchedChunk) -> Option<ParsedTableRow> {
-    if !chunk.source_text.starts_with("Sheet: ") || !chunk.source_text.contains(" | Row ") {
+    let source_text = chunk.source_text.as_str();
+    let is_semantic_row = source_text.starts_with("Sheet: ")
+        || source_text.starts_with("Table: ")
+        || source_text.starts_with("Row ")
+        || source_text.contains(" | Row ");
+    if !is_semantic_row {
         return parse_raw_pipe_table_row_chunk(chunk);
     }
     let mut fields = Vec::new();
     let mut sheet_name = None::<String>;
     let mut table_name = None::<String>;
+    let mut table_ref = None;
     let mut row_number = None::<usize>;
     let mut seen_row_marker = false;
-    for part in chunk.source_text.split(" | ") {
+    for part in split_semantic_segments(source_text) {
         let trimmed = part.trim();
         if let Some(value) = trimmed.strip_prefix("Row ")
             && let Ok(parsed) = value.trim().parse::<usize>()
@@ -100,31 +117,38 @@ pub(crate) fn parse_table_row_chunk(chunk: &RuntimeMatchedChunk) -> Option<Parse
             seen_row_marker = true;
             continue;
         }
-        let Some((key, value)) = part.split_once(": ") else {
+        let Some((key, value)) = split_semantic_key_value(trimmed) else {
             continue;
         };
-        let key = key.trim();
-        let value = value.trim();
+        let key = unescape_semantic_segment(key.trim());
+        let value = unescape_semantic_segment(value.trim());
         if !seen_row_marker && key.eq_ignore_ascii_case("row") {
             row_number = value.parse::<usize>().ok();
             seen_row_marker = true;
             continue;
         }
         if !seen_row_marker && key.eq_ignore_ascii_case("sheet") {
-            sheet_name = Some(value.to_string());
+            sheet_name = Some(value);
             continue;
         }
         if !seen_row_marker && key.eq_ignore_ascii_case("table") {
-            table_name = Some(value.to_string());
+            table_name = Some(value);
             continue;
         }
-        fields.push((key.to_string(), value.to_string()));
+        if !seen_row_marker && key.eq_ignore_ascii_case("table ref") {
+            table_ref = Some(value.parse::<i32>().ok().filter(|value| *value >= 0)?);
+            continue;
+        }
+        fields.push((key, value));
     }
     let row_number = row_number?;
     Some(ParsedTableRow {
         document_id: chunk.document_id,
-        sheet_name: sheet_name.unwrap_or_else(|| "Sheet".to_string()),
+        // Absence is not a source sheet named "Sheet". Keeping it empty also
+        // makes row-derived and directly emitted summary identities agree.
+        sheet_name: sheet_name.unwrap_or_default(),
         table_name,
+        table_ref,
         row_number,
         fields,
         flattened_text: chunk.source_text.to_lowercase(),
@@ -150,6 +174,7 @@ fn parse_raw_pipe_table_row_chunk(chunk: &RuntimeMatchedChunk) -> Option<ParsedT
         document_id: chunk.document_id,
         sheet_name: chunk.document_label.clone(),
         table_name: None,
+        table_ref: None,
         row_number: usize::try_from(chunk.chunk_index).ok()?.saturating_add(1),
         flattened_text: cells.join(" ").to_lowercase(),
         fields,
@@ -174,17 +199,17 @@ fn parse_raw_pipe_cells(source_text: &str) -> Option<Vec<String>> {
 fn build_initial_table_rows_answer(rows: &[ParsedTableRow], row_count: usize) -> Option<String> {
     let mut rows = rows.to_vec();
     rows.sort_by(|left, right| {
-        left.sheet_name
-            .cmp(&right.sheet_name)
-            .then_with(|| left.table_name.cmp(&right.table_name))
+        left.document_id
+            .cmp(&right.document_id)
+            .then_with(|| left.table_ref.cmp(&right.table_ref))
+            .then_with(|| {
+                left.sheet_name
+                    .cmp(&right.sheet_name)
+                    .then_with(|| left.table_name.cmp(&right.table_name))
+            })
             .then_with(|| left.row_number.cmp(&right.row_number))
     });
-    rows.dedup_by(|left, right| {
-        left.document_id == right.document_id
-            && left.sheet_name == right.sheet_name
-            && left.table_name == right.table_name
-            && left.row_number == right.row_number
-    });
+    rows.dedup_by(|left, right| left.same_table(right) && left.row_number == right.row_number);
     let selected = rows.into_iter().take(row_count).collect::<Vec<_>>();
     if selected.len() != row_count {
         return None;
@@ -265,13 +290,14 @@ fn build_raw_pipe_table_row_answer(question: &str, row: &ParsedTableRow) -> Opti
 fn build_table_value_inventory_answer(rows: &[ParsedTableRow]) -> Option<String> {
     let mut rows = rows.to_vec();
     rows.sort_by(|left, right| {
-        left.sheet_name.cmp(&right.sheet_name).then_with(|| left.row_number.cmp(&right.row_number))
+        left.document_id
+            .cmp(&right.document_id)
+            .then_with(|| left.table_ref.cmp(&right.table_ref))
+            .then_with(|| left.sheet_name.cmp(&right.sheet_name))
+            .then_with(|| left.table_name.cmp(&right.table_name))
+            .then_with(|| left.row_number.cmp(&right.row_number))
     });
-    rows.dedup_by(|left, right| {
-        left.document_id == right.document_id
-            && left.sheet_name == right.sheet_name
-            && left.row_number == right.row_number
-    });
+    rows.dedup_by(|left, right| left.same_table(right) && left.row_number == right.row_number);
     if rows.is_empty() {
         return None;
     }
@@ -310,13 +336,14 @@ fn build_table_column_inventory_answer(
     render_table_column_inventory(table_name, rows)
 }
 
-type TableColumnInventoryGroup<'a> = ((Uuid, String, String), Vec<&'a ParsedTableRow>);
+type TableColumnInventoryKey = (Uuid, Option<i32>, String, String);
+type TableColumnInventoryGroup<'a> = (TableColumnInventoryKey, Vec<&'a ParsedTableRow>);
 type RankedTableColumnInventoryGroup<'a> = (usize, f32, String, String, Vec<&'a ParsedTableRow>);
 
 fn table_column_inventory_groups(
     rows: &[ParsedTableRow],
-) -> HashMap<(Uuid, String, String), Vec<&ParsedTableRow>> {
-    let mut groups: HashMap<(Uuid, String, String), Vec<&ParsedTableRow>> = HashMap::new();
+) -> HashMap<TableColumnInventoryKey, Vec<&ParsedTableRow>> {
+    let mut groups: HashMap<TableColumnInventoryKey, Vec<&ParsedTableRow>> = HashMap::new();
     for row in rows {
         let Some(table_name) = row.table_name.as_ref().filter(|value| !value.trim().is_empty())
         else {
@@ -324,7 +351,7 @@ fn table_column_inventory_groups(
         };
         if table_row_has_inventory_fields(row) {
             groups
-                .entry((row.document_id, row.sheet_name.clone(), table_name.clone()))
+                .entry((row.document_id, row.table_ref, row.sheet_name.clone(), table_name.clone()))
                 .or_default()
                 .push(row);
         }
@@ -337,10 +364,10 @@ fn table_row_has_inventory_fields(row: &ParsedTableRow) -> bool {
 }
 
 fn table_inventory_token_counts(
-    groups: &HashMap<(Uuid, String, String), Vec<&ParsedTableRow>>,
+    groups: &HashMap<TableColumnInventoryKey, Vec<&ParsedTableRow>>,
 ) -> BTreeMap<String, usize> {
     let mut table_token_counts = BTreeMap::new();
-    for (_, _, table_name) in groups.keys() {
+    for (_, _, _, table_name) in groups.keys() {
         for token in normalized_alnum_tokens(table_name, 2) {
             table_token_counts.entry(token).and_modify(|count| *count += 1).or_insert(1);
         }
@@ -349,7 +376,7 @@ fn table_inventory_token_counts(
 }
 
 fn rank_table_column_inventory_groups<'a>(
-    groups: HashMap<(Uuid, String, String), Vec<&'a ParsedTableRow>>,
+    groups: HashMap<TableColumnInventoryKey, Vec<&'a ParsedTableRow>>,
     target_tokens: &BTreeSet<String>,
     table_token_counts: &BTreeMap<String, usize>,
 ) -> Vec<RankedTableColumnInventoryGroup<'a>> {
@@ -365,7 +392,7 @@ fn rank_table_column_inventory_groups<'a>(
 }
 
 fn rank_table_column_inventory_group<'a>(
-    ((_, sheet_name, table_name), rows): TableColumnInventoryGroup<'a>,
+    ((_, _, sheet_name, table_name), rows): TableColumnInventoryGroup<'a>,
     target_tokens: &BTreeSet<String>,
     table_token_counts: &BTreeMap<String, usize>,
     group_count: usize,

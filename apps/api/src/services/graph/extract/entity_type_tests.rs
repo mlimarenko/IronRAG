@@ -201,6 +201,7 @@ impl LlmGateway for RecordingGateway {
         };
         match outcome {
             ChatOutcome::Text { output, usage } => Ok(ChatResponse {
+                completion_status: crate::integrations::llm::ChatCompletionStatus::Complete,
                 provider_kind: std::mem::take(&mut request.provider_kind),
                 model_name: std::mem::take(&mut request.model_name),
                 output_text: output,

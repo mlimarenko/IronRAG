@@ -413,6 +413,7 @@ class RankMetricTests(unittest.TestCase):
             [
                 "post:/query/sessions/session-1/turns",
                 "get:/query/executions/00000000-0000-4000-8000-000000000001",
+                "get:/billing/executions/query_execution/00000000-0000-4000-8000-000000000001",
                 "post:/knowledge/libraries/00000000-0000-4000-8000-000000000008/search",
             ],
         )

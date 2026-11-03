@@ -148,6 +148,7 @@ pub(super) fn grounded_answer_ledger_outcome(mut result_json: Value) -> ToolExec
             .map(ToOwned::to_owned),
         result_json: Some(result_json),
         grounding_text: None,
+        document_reference: None,
         grounded_answer_body: None,
         grounded_answer_outcome: None,
         grounded_answer_ready: false,
@@ -185,8 +186,10 @@ pub(super) fn ready_grounded_answer_passthrough_outcome(
             "isError": false
         })),
         grounding_text: Some("verifier-grade evidence".to_string()),
+        document_reference: None,
         grounded_answer_body: Some(answer_body.to_string()),
         grounded_answer_outcome: Some(AgentGroundedAnswerOutcome {
+            source_execution_id: Some(Uuid::from_u128(101)),
             disposition: QueryAnswerDisposition::FactualReady,
             clarification: QueryClarification::default(),
         }),
@@ -211,6 +214,7 @@ pub(super) fn synthetic_success_outcome() -> ToolExecutionOutcome {
         result_text: Some("ok".to_string()),
         result_json: None,
         grounding_text: None,
+        document_reference: None,
         grounded_answer_body: None,
         grounded_answer_outcome: None,
         grounded_answer_ready: false,

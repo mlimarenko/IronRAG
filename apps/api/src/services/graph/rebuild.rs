@@ -36,9 +36,10 @@ use crate::{
         },
         graph::error::GraphServiceError,
         graph::extract::{
-            GRAPH_EXTRACTION_VERSION, GraphExtractionCandidateSet,
-            extraction_lifecycle_from_record, extraction_recovery_summary_from_record,
-            repair_graph_extraction_candidate_set, repair_graph_extraction_normalized_json,
+            GRAPH_EXTRACTION_VERSION, GraphExtractionCandidateSet, extraction_lifecycle_from_json,
+            extraction_lifecycle_from_record, extraction_recovery_summary_from_json,
+            extraction_recovery_summary_from_record, repair_graph_extraction_candidate_set,
+            repair_graph_extraction_normalized_json,
         },
         graph::merge::{
             GraphMergeOutcome, GraphMergeScope, MergeChunkInput,
@@ -73,10 +74,15 @@ enum RebuildTransactionOutcome {
 pub(crate) async fn rebuild_library_graph(
     state: &AppState,
     library_id: Uuid,
+    recovery_policy: super::service::GraphRebuildRecovery,
 ) -> Result<GraphProjectionOutcome, GraphServiceError> {
     let mut guard = match repositories::acquire_runtime_library_graph_rebuild_guard(
         &state.persistence.postgres,
         library_id,
+        match recovery_policy {
+            super::service::GraphRebuildRecovery::DerivedOnlyWithWriterFence { deadline } => repositories::runtime_graph_repository::RuntimeGraphRebuildCoordination::FenceWriters { deadline },
+            super::service::GraphRebuildRecovery::DerivedOnly | super::service::GraphRebuildRecovery::AdmitReextraction => repositories::runtime_graph_repository::RuntimeGraphRebuildCoordination::Optimistic,
+        },
     )
     .await
     .context("failed to acquire atomic runtime graph rebuild guard")?
@@ -87,7 +93,7 @@ pub(crate) async fn rebuild_library_graph(
         }
         repositories::RuntimeGraphRebuildGuardAcquireOutcome::Busy => {
             return Err(GraphServiceError::WriteContention {
-                message: "another whole-library graph rebuild is already running".to_string(),
+                message: "graph rebuild admission or library lifecycle fence is busy".to_string(),
             });
         }
     };
@@ -102,9 +108,15 @@ pub(crate) async fn rebuild_library_graph(
         }
         Ok(RebuildTransactionOutcome::CoverageRejected(failure)) => {
             guard.rollback().await.context("failed to roll back rejected runtime graph rebuild")?;
-            let recovery =
-                enqueue_graph_reextract_jobs(state, library_id, &failure.recovery_candidates).await;
-            Err(failure.into_graph_error(library_id, &recovery))
+            let recovery = match recovery_policy {
+                super::service::GraphRebuildRecovery::DerivedOnly
+                | super::service::GraphRebuildRecovery::DerivedOnlyWithWriterFence { .. } => None,
+                super::service::GraphRebuildRecovery::AdmitReextraction => Some(
+                    enqueue_graph_reextract_jobs(state, library_id, &failure.recovery_candidates)
+                        .await,
+                ),
+            };
+            Err(failure.into_graph_error(library_id, recovery.as_ref()))
         }
         Err(error) => {
             let rollback_result =
@@ -122,6 +134,8 @@ async fn rebuild_library_graph_in_transaction(
     library_id: Uuid,
     connection: &mut sqlx::PgConnection,
 ) -> Result<RebuildTransactionOutcome, GraphServiceError> {
+    let started = std::time::Instant::now();
+    tracing::info!(%library_id, phase = "planning", "runtime graph rebuild phase");
     let snapshot =
         repositories::get_runtime_graph_snapshot_with_executor(&mut *connection, library_id)
             .await
@@ -136,16 +150,21 @@ async fn rebuild_library_graph_in_transaction(
         &ready_documents,
     )
     .await?;
-    let extractions = repositories::runtime_graph_repository::
-        list_runtime_graph_extraction_records_by_library_with_executor(
-            &mut *connection,
+    let mut extractions =
+        repositories::runtime_graph_repository::RuntimeGraphRebuildExtractionCursor::open(
+            connection,
             library_id,
             GRAPH_EXTRACTION_VERSION,
         )
         .await
         .context("failed to reload runtime graph extraction records for rebuild")?;
 
-    if extractions.is_empty() {
+    let first_batch = extractions
+        .next_batch(connection)
+        .await
+        .context("failed to fetch runtime graph rebuild extraction")?;
+    if first_batch.is_empty() {
+        extractions.close(connection).await.context("failed to close rebuild extraction cursor")?;
         let coverage = match assess_rebuild_coverage(
             projection_version,
             &ready_documents,
@@ -164,6 +183,7 @@ async fn rebuild_library_graph_in_transaction(
         ) {
             return Err(error);
         }
+        tracing::info!(%library_id, phase = "projection", elapsed_seconds = started.elapsed().as_secs(), "runtime graph rebuild phase");
         let projection = project_rebuild_normalized_graph_with_connection(
             state,
             connection,
@@ -173,45 +193,25 @@ async fn rebuild_library_graph_in_transaction(
         return Ok(RebuildTransactionOutcome::Published(projection));
     }
 
-    let mut changed_node_ids = BTreeSet::new();
-    let mut changed_edge_ids = BTreeSet::new();
-
-    for record in extractions {
-        let expected_completion = ready_documents.get(&record.document_id);
-        let Some(merge_outcome) = rebuild_graph_extraction_record_with_connection(
-            state,
-            connection,
-            library_id,
-            projection_version,
-            expected_completion,
-            record,
-        )
-        .await?
-        else {
-            continue;
-        };
-        changed_node_ids.extend(merge_outcome.summary_refresh_node_ids());
-        changed_edge_ids.extend(merge_outcome.summary_refresh_edge_ids());
-    }
-
-    repositories::recalculate_runtime_graph_support_counts_by_ids_with_executor(
+    tracing::info!(%library_id, phase = "merge", elapsed_seconds = started.elapsed().as_secs(), "runtime graph rebuild phase");
+    merge_rebuild_extraction_cursor_with_connection(
+        state,
         connection,
-        library_id,
-        projection_version,
-        &changed_node_ids.iter().copied().collect::<Vec<_>>(),
-        &changed_edge_ids.iter().copied().collect::<Vec<_>>(),
+        &GraphMergeScope::new(library_id, projection_version),
+        &ready_documents,
+        &mut extractions,
+        first_batch,
+        started,
     )
-    .await
-    .context("failed to reconcile rebuilt graph support counts")?;
+    .await?;
+    extractions.close(connection).await.context("failed to close rebuild extraction cursor")?;
 
-    let merged_nodes = repositories::list_admitted_runtime_graph_nodes_by_library_with_executor(
-        &mut *connection,
-        library_id,
-        projection_version,
-    )
-    .await
-    .context("failed to load rebuilt graph nodes")?;
-    let projected_document_ids = runtime_graph_document_ids(&merged_nodes);
+    // Final transactional support synchronization recounts all targets. Coverage
+    // depends on admitted identities, not the preliminary support counters.
+    tracing::info!(%library_id, phase = "coverage", elapsed_seconds = started.elapsed().as_secs(), "runtime graph rebuild phase");
+    let projected_document_ids =
+        load_projection_document_ids_with_connection(connection, library_id, projection_version)
+            .await?;
 
     let coverage = match assess_rebuild_coverage(
         projection_version,
@@ -223,15 +223,15 @@ async fn rebuild_library_graph_in_transaction(
         Err(failure) => return Ok(RebuildTransactionOutcome::CoverageRejected(failure)),
     };
 
-    let merged_edges = repositories::list_admitted_runtime_graph_edges_by_library_with_executor(
+    let merged_counts = repositories::count_admitted_runtime_graph_projection_with_executor(
         &mut *connection,
         library_id,
         projection_version,
     )
     .await
-    .context("failed to load rebuilt graph edges")?;
+    .context("failed to count rebuilt graph nodes and edges")?;
 
-    if merged_nodes.is_empty() && merged_edges.is_empty() {
+    if merged_counts.node_count == 0 && merged_counts.edge_count == 0 {
         if let Some(error) = empty_rebuild_conflict(
             library_id,
             snapshot.as_ref(),
@@ -241,6 +241,7 @@ async fn rebuild_library_graph_in_transaction(
         ) {
             return Err(error);
         }
+        tracing::info!(%library_id, phase = "projection", elapsed_seconds = started.elapsed().as_secs(), "runtime graph rebuild phase");
         let projection = project_rebuild_normalized_graph_with_connection(
             state,
             connection,
@@ -251,11 +252,68 @@ async fn rebuild_library_graph_in_transaction(
     }
 
     let projection_scope = GraphProjectionScope::new(library_id, projection_version);
+    tracing::info!(%library_id, phase = "projection", elapsed_seconds = started.elapsed().as_secs(), "runtime graph rebuild phase");
     let projection =
         project_rebuild_normalized_graph_with_connection(state, connection, &projection_scope)
             .await
             .context("failed to project rebuilt graph")?;
     Ok(RebuildTransactionOutcome::Published(projection))
+}
+
+async fn merge_rebuild_extraction_cursor_with_connection(
+    state: &AppState,
+    connection: &mut sqlx::PgConnection,
+    scope: &GraphMergeScope,
+    ready_documents: &BTreeMap<Uuid, ReadyGraphDocument>,
+    extractions: &mut repositories::RuntimeGraphRebuildExtractionCursor,
+    mut batch: Vec<repositories::RuntimeGraphRebuildExtractionRow>,
+    started: std::time::Instant,
+) -> Result<(), GraphServiceError> {
+    let mut batches = 0usize;
+    let mut records = 0usize;
+    while !batch.is_empty() {
+        let batch_len = batch.len();
+        let document_ids: Vec<_> = batch.iter().map(|record| record.document_id).collect();
+        let chunk_ids: Vec<_> = batch.iter().map(|record| record.chunk_id).collect();
+        let revision_ids: Vec<_> = batch
+            .iter()
+            .filter_map(|record| {
+                extraction_lifecycle_from_json(record.lifecycle.as_ref()).revision_id
+            })
+            .collect();
+        let identities = repositories::runtime_graph_repository::load_rebuild_identities(
+            connection,
+            &document_ids,
+            &revision_ids,
+            &chunk_ids,
+        )
+        .await
+        .context("failed to prefetch rebuild source identities")?;
+        for record in batch {
+            let expected_completion = ready_documents.get(&record.document_id);
+            rebuild_graph_extraction_record_with_connection(
+                state,
+                connection,
+                scope.library_id,
+                scope.projection_version,
+                expected_completion,
+                &identities,
+                record,
+            )
+            .await?;
+        }
+        batches += 1;
+        records += batch_len;
+        if batches == 1 || batches % 16 == 0 {
+            tracing::info!(library_id = %scope.library_id, batches, records, elapsed_seconds = started.elapsed().as_secs(), "runtime graph rebuild merge progress");
+        }
+        batch = extractions
+            .next_batch(connection)
+            .await
+            .context("failed to fetch runtime graph rebuild extraction")?;
+    }
+    tracing::info!(library_id = %scope.library_id, batches, records, elapsed_seconds = started.elapsed().as_secs(), "runtime graph rebuild merge complete");
+    Ok(())
 }
 
 async fn rebuild_graph_extraction_record_with_connection(
@@ -264,18 +322,13 @@ async fn rebuild_graph_extraction_record_with_connection(
     library_id: Uuid,
     projection_version: i64,
     expected_completion: Option<&ReadyGraphDocument>,
-    record: repositories::RuntimeGraphExtractionRecordRow,
+    identities: &repositories::runtime_graph_repository::RuntimeGraphRebuildIdentities,
+    record: repositories::runtime_graph_repository::RuntimeGraphRebuildExtractionRow,
 ) -> Result<Option<GraphMergeOutcome>, GraphServiceError> {
     if record.status != ASYNC_OP_STATUS_READY {
         return Ok(None);
     }
-    let Some(document_row) = content_document_repository::get_document_by_id_with_executor(
-        &mut *connection,
-        record.document_id,
-    )
-    .await
-    .with_context(|| format!("failed to load document {}", record.document_id))?
-    else {
+    let Some(document_row) = identities.documents.get(&record.document_id) else {
         return Ok(None);
     };
     if record.library_id != library_id
@@ -284,16 +337,10 @@ async fn rebuild_graph_extraction_record_with_connection(
     {
         return Ok(None);
     }
-    let Some(document_head) = content_document_head_repository::get_document_head_with_executor(
-        &mut *connection,
-        record.document_id,
-    )
-    .await
-    .with_context(|| format!("failed to load document head {}", record.document_id))?
-    else {
+    let Some(document_head) = identities.heads.get(&record.document_id) else {
         return Ok(None);
     };
-    let extraction_lifecycle = extraction_lifecycle_from_record(&record);
+    let extraction_lifecycle = extraction_lifecycle_from_json(record.lifecycle.as_ref());
     let Some(revision_id) = extraction_lifecycle.revision_id else {
         return Ok(None);
     };
@@ -308,13 +355,7 @@ async fn rebuild_graph_extraction_record_with_connection(
     {
         return Ok(None);
     }
-    let Some(revision) = content_revision_repository::get_revision_by_id_with_executor(
-        &mut *connection,
-        revision_id,
-    )
-    .await
-    .with_context(|| format!("failed to load revision {revision_id}"))?
-    else {
+    let Some(revision) = identities.revisions.get(&revision_id) else {
         return Ok(None);
     };
     if revision.document_id != record.document_id
@@ -323,11 +364,7 @@ async fn rebuild_graph_extraction_record_with_connection(
     {
         return Ok(None);
     }
-    let Some(chunk_row) =
-        content_chunk_repository::get_chunk_by_id_with_executor(&mut *connection, record.chunk_id)
-            .await
-            .with_context(|| format!("failed to load chunk {}", record.chunk_id))?
-    else {
+    let Some(chunk_row) = identities.chunks.get(&record.chunk_id) else {
         return Ok(None);
     };
     if chunk_row.revision_id != revision_id
@@ -336,9 +373,11 @@ async fn rebuild_graph_extraction_record_with_connection(
         return Ok(None);
     }
 
-    let document = synthesize_document_row(&document_row, &document_head, Some(&revision));
-    let chunk = synthesize_chunk_row(&chunk_row, document_row.id, library_id, revision.created_at);
-    let candidates = repaired_graph_extraction_candidates(record.normalized_output_json.clone())
+    let document = synthesize_document_row(document_row, document_head, Some(revision));
+    let chunk = synthesize_chunk_row(chunk_row, document_row.id, library_id, revision.created_at);
+    let extraction_recovery =
+        extraction_recovery_summary_from_json(record.recovery_summary.as_ref());
+    let candidates = repaired_graph_extraction_candidates(record.normalized_output_json)
         .with_context(|| {
             format!(
                 "failed to decode normalized graph extraction for document {} chunk {}",
@@ -351,7 +390,6 @@ async fn rebuild_graph_extraction_record_with_connection(
 
     let merge_scope = GraphMergeScope::new(library_id, projection_version)
         .with_lifecycle(Some(revision_id), extraction_lifecycle.activated_by_attempt_id);
-    let extraction_recovery = extraction_recovery_summary_from_record(&record);
     merge_chunk_graph_candidates_with_connection(
         connection,
         &state.bulk_ingest_hardening_services.graph_quality_guard,
@@ -807,7 +845,7 @@ async fn load_projection_document_ids_with_connection(
     library_id: Uuid,
     projection_version: i64,
 ) -> Result<BTreeSet<Uuid>, GraphServiceError> {
-    let nodes = repositories::list_admitted_runtime_graph_nodes_by_library_with_executor(
+    let document_keys = repositories::list_admitted_runtime_graph_document_keys_with_executor(
         &mut *connection,
         library_id,
         projection_version,
@@ -818,16 +856,11 @@ async fn load_projection_document_ids_with_connection(
             "failed to load projection {projection_version} document baseline for graph rebuild"
         )
     })?;
-    Ok(runtime_graph_document_ids(&nodes))
-}
-
-fn runtime_graph_document_ids(nodes: &[repositories::RuntimeGraphNodeRow]) -> BTreeSet<Uuid> {
-    nodes
+    Ok(document_keys
         .iter()
-        .filter(|node| node.node_type == "document")
-        .filter_map(|node| node.identity_key.strip_prefix("document:"))
+        .filter_map(|key| key.strip_prefix("document:"))
         .filter_map(|document_id| Uuid::parse_str(document_id).ok())
-        .collect()
+        .collect())
 }
 
 fn select_rebuild_baseline_document_ids(
@@ -870,16 +903,25 @@ impl RebuildCoverageFailure {
     fn into_graph_error(
         self,
         library_id: Uuid,
-        recovery: &GraphReextractOutcome,
+        recovery: Option<&GraphReextractOutcome>,
     ) -> GraphServiceError {
         let coverage = self.coverage;
         let retention_percent = coverage_percent(coverage.retained_baseline, coverage.baseline);
         let completion_coverage_percent = coverage_percent(coverage.completed, coverage.ready);
         let positive_projection_percent =
             coverage_percent(coverage.projected_positive, coverage.positive);
+        let recovery_message = match recovery {
+            Some(recovery) => format!(
+                "graph_refresh recovery jobs were enqueued={}, deduplicated={}, failed={}",
+                recovery.enqueued, recovery.skipped_dedupe, recovery.failures,
+            ),
+            None => {
+                "graph_refresh recovery admission was skipped (derived-only rebuild)".to_string()
+            }
+        };
         GraphServiceError::StateConflict {
             message: format!(
-                "runtime graph rebuild for library {library_id} refused projection {}: it retains {} of {} baseline documents ({retention_percent:.2}%), has current completion markers for {} of {} ready documents ({completion_coverage_percent:.2}%), and projects {} of {} positive-contribution completions ({positive_projection_percent:.2}%); all three must meet the {MIN_REBUILD_PUBLICATION_FLOOR_PERCENT}% publication floor; active projection was left unchanged, all staging writes were rolled back, and graph_refresh recovery jobs were enqueued={}, deduplicated={}, failed={}",
+                "runtime graph rebuild for library {library_id} refused projection {}: it retains {} of {} baseline documents ({retention_percent:.2}%), has current completion markers for {} of {} ready documents ({completion_coverage_percent:.2}%), and projects {} of {} positive-contribution completions ({positive_projection_percent:.2}%); all three must meet the {MIN_REBUILD_PUBLICATION_FLOOR_PERCENT}% publication floor; active projection was left unchanged, all staging writes were rolled back, and {recovery_message}",
                 self.projection_version,
                 coverage.retained_baseline,
                 coverage.baseline,
@@ -887,9 +929,6 @@ impl RebuildCoverageFailure {
                 coverage.ready,
                 coverage.projected_positive,
                 coverage.positive,
-                recovery.enqueued,
-                recovery.skipped_dedupe,
-                recovery.failures,
             ),
         }
     }

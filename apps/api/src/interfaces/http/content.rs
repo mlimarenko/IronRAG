@@ -78,6 +78,10 @@ pub fn router() -> Router<AppState> {
         )
         .route("/content/libraries/{library_id}/documents/facets", get(list_document_facets))
         .route(
+            "/content/libraries/{library_id}/documents/by-external-key",
+            get(get_document_by_external_key),
+        )
+        .route(
             "/content/documents/{document_id}",
             get(get_document).patch(patch_document_metadata).delete(delete_document),
         )

@@ -34,6 +34,7 @@ fn enumeration_evidence(values: &[&str]) -> AuthoritativeAnswerEvidence {
 
 fn verified_verification() -> RuntimeAnswerVerification {
     RuntimeAnswerVerification {
+        semantic_verification: None,
         state: QueryVerificationState::Verified,
         warnings: Vec::new(),
         unsupported_literals: Vec::new(),
@@ -57,6 +58,86 @@ fn one_item_enumeration_answer_is_demoted_when_evidence_holds_more_values() {
         "{:?}",
         verification.warnings
     );
+}
+
+#[test]
+fn partial_enumeration_is_not_factual_ready_after_final_visibility() {
+    use crate::domains::{
+        query::QueryAnswerDisposition,
+        query_ir::{QueryLanguage, VerificationLevel},
+    };
+    use crate::services::query::execution::verification_policy::{
+        AnswerVisibilityKind, finalize_answer_visibility,
+    };
+
+    let answer = "The documented method is `Read`.";
+    let mut verification = verified_verification();
+    apply_enumeration_coverage_warning(
+        answer,
+        &enumerate_query_ir(),
+        &enumeration_evidence(&["Read", "Create", "Update", "Delete"]),
+        &mut verification,
+    );
+
+    for level in [VerificationLevel::Moderate, VerificationLevel::Lenient] {
+        let finalized = finalize_answer_visibility(
+            level,
+            verification.state,
+            &verification.warnings,
+            QueryLanguage::En,
+            answer,
+            AnswerVisibilityKind::FactualCandidate,
+        );
+
+        assert_eq!(finalized.disposition, QueryAnswerDisposition::NonTerminal);
+        assert_eq!(finalized.visible_answer, answer);
+    }
+
+    let strict = finalize_answer_visibility(
+        VerificationLevel::Strict,
+        verification.state,
+        &verification.warnings,
+        QueryLanguage::En,
+        answer,
+        AnswerVisibilityKind::FactualCandidate,
+    );
+    assert_eq!(strict.disposition, QueryAnswerDisposition::SafeFallback);
+    assert_ne!(strict.visible_answer, answer);
+}
+
+#[test]
+fn complete_enumeration_remains_factual_ready_after_final_visibility() {
+    use crate::domains::{
+        query::QueryAnswerDisposition,
+        query_ir::{QueryLanguage, VerificationLevel},
+    };
+    use crate::services::query::execution::verification_policy::{
+        AnswerVisibilityKind, finalize_answer_visibility,
+    };
+
+    let answer = "Documented methods: `Read`, `Create`, `Update`, `Delete`.";
+    let mut verification = verified_verification();
+    apply_enumeration_coverage_warning(
+        answer,
+        &enumerate_query_ir(),
+        &enumeration_evidence(&["Read", "Create", "Update", "Delete"]),
+        &mut verification,
+    );
+
+    for level in
+        [VerificationLevel::Strict, VerificationLevel::Moderate, VerificationLevel::Lenient]
+    {
+        let finalized = finalize_answer_visibility(
+            level,
+            verification.state,
+            &verification.warnings,
+            QueryLanguage::En,
+            answer,
+            AnswerVisibilityKind::FactualCandidate,
+        );
+        assert_eq!(finalized.disposition, QueryAnswerDisposition::FactualReady);
+        assert_eq!(finalized.visible_answer, answer);
+    }
 }
 
 #[test]

@@ -84,7 +84,7 @@ fn assert_recognition_and_budget_defaults(settings: &Settings) {
     assert_eq!(settings.recognition_default_raster_image_engine, "vision");
     assert_eq!(
         settings.default_recognition_policy().raster_image_engine,
-        RecognitionEngine::Vision
+        RasterImageEngine::Vision
     );
     assert_eq!(
         settings.runtime_trace_payload_budget_bytes,
@@ -358,16 +358,11 @@ fn active_semantic_rerank_timeout_above_the_turn_wait_budget_is_rejected() {
 }
 
 #[test]
-fn recognition_default_raster_image_engine_overrides_default() {
-    let settings = settings_from_env_entries(&[(
-        "IRONRAG_RECOGNITION_DEFAULT_RASTER_IMAGE_ENGINE",
-        "docling",
-    )]);
+fn recognition_default_raster_image_engine_rejects_xberg() {
+    let mut settings = sample_settings();
+    settings.recognition_default_raster_image_engine = "xberg".into();
 
-    assert_eq!(
-        settings.default_recognition_policy().raster_image_engine,
-        RecognitionEngine::Docling
-    );
+    assert!(validate_recognition_settings(&settings).is_err());
 }
 
 #[test]
@@ -376,7 +371,32 @@ fn recognition_default_raster_image_engine_rejects_unsupported_native() {
     settings.recognition_default_raster_image_engine = "native".to_string();
 
     let error = validate_recognition_settings(&settings).expect_err("native must be rejected");
-    assert!(error.contains("rasterImageEngine must be either docling or vision"));
+    assert!(error.contains("rasterImageEngine must be vision"));
+}
+
+#[test]
+fn recognition_default_raster_image_engine_rejects_retired_docling() {
+    let mut settings = sample_settings();
+    settings.recognition_default_raster_image_engine = "docling".into();
+    assert!(validate_recognition_settings(&settings).is_err());
+}
+
+#[test]
+fn retired_docling_environment_is_rejected_without_reading_values() {
+    for key in ["IRONRAG_DOCLING_TIMEOUT_SECS", "IRONRAG_DOCLING_PYTHON_BIN"] {
+        assert!(
+            super::super::loading::reject_retired_extraction_environment([
+                std::ffi::OsString::from(key)
+            ])
+            .is_err()
+        );
+    }
+    assert!(
+        super::super::loading::reject_retired_extraction_environment([std::ffi::OsString::from(
+            "IRONRAG_RECOGNITION_DEFAULT_RASTER_IMAGE_ENGINE"
+        )])
+        .is_ok()
+    );
 }
 
 #[test]

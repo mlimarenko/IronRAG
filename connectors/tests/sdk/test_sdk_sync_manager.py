@@ -3010,6 +3010,68 @@ async def _list_problem_failure(body: dict[str, object], *, status: int = 400) -
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("with_request", [True, False])
+async def test_item_error_logs_only_safe_timeout_request_context(
+    tmp_path: Path, with_request: bool
+) -> None:
+    request = (
+        httpx.Request(
+            "GET", "https://private-user:private-password@example.com/private-path?secret=value"
+        )
+        if with_request
+        else None
+    )
+    exc = httpx.ReadTimeout("timed out", request=request)
+    manager = _manager(
+        tmp_path,
+        adapter=OneRefAdapter(asyncio.Event(), asyncio.Event()),
+        orchestrator=RaisingOrchestrator(exc),
+    )
+    with patch("ironrag_connector.sync.log.error") as error_log:
+        report = await manager.run_once(reason="timeout-context")
+
+    event = next(call for call in error_log.call_args_list if call.args[0] == "sync.item_error")
+    fields = event.kwargs
+    assert report.errors == 1
+    if with_request:
+        assert fields["request_method"] == "GET"
+        assert fields["request_host"] == "example.com"
+        context = {key: value for key, value in fields.items() if key.startswith("request_")}
+        assert context == {"request_method": "GET", "request_host": "example.com"}
+    else:
+        assert "request_method" not in fields
+        assert "request_host" not in fields
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("request_id", ["request-123", None])
+async def test_item_error_logs_native_problem_context(
+    tmp_path: Path, request_id: str | None
+) -> None:
+    exc = await _list_problem_failure(
+        _problem_body(code="mutation_in_flight", requestId=request_id), status=409
+    )
+    assert isinstance(exc, IronRagProblemError)
+    manager = _manager(
+        tmp_path,
+        adapter=OneRefAdapter(asyncio.Event(), asyncio.Event()),
+        orchestrator=RaisingOrchestrator(exc),
+    )
+    with patch("ironrag_connector.sync.log.error") as error_log:
+        report = await manager.run_once(reason="problem-context")
+
+    event = next(call for call in error_log.call_args_list if call.args[0] == "sync.item_error")
+    assert report.errors == 1
+    assert event.kwargs["problem_code"] == "mutation_in_flight"
+    if request_id is None:
+        assert "request_id" not in event.kwargs
+    else:
+        assert event.kwargs["request_id"] == request_id
+    assert "request_method" not in event.kwargs
+    assert "request_host" not in event.kwargs
+
+
+@pytest.mark.asyncio
 async def test_malformed_problem_disposition_in_the_reap_listing_does_not_abort_the_sweep(
     tmp_path: Path,
 ) -> None:

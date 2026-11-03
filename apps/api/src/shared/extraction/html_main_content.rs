@@ -7,10 +7,10 @@ use anyhow::Result;
 use reqwest::Url;
 use scraper::Html;
 
-use self::decoding::{decode_html, safe_html_truncation_boundary};
+use self::decoding::decode_html;
 use self::media::collect_outbound_resources;
 use self::metadata::{collect_outbound_links, extract_title};
-use self::rendering::{parse_selector, render_markdownish_text, select_content_root};
+use self::rendering::{media_blocks, parse_selector, select_content_root, selected_html};
 use crate::shared::extraction::{
     ExtractionOutput, ExtractionSourceMetadata, build_text_layout_from_content,
 };
@@ -20,14 +20,17 @@ const HTML_LINK_LIMIT: usize = 512;
 const HTML_RESOURCE_LIMIT: usize = 128;
 const HTML_CHARSET_SCAN_BYTES: usize = 4_096;
 const MIN_CRAWLABLE_IMAGE_DIMENSION: u32 = 48;
-/// Hard cap on the size of HTML we hand to `scraper::Html::parse_document`.
-/// The DOM arena built by `html5ever` is dense: a 20 MB HTML source with
-/// heavy inline markup or base64-encoded images can allocate 1.5–2 GB of
-/// nested `Node` structures and OOM-kill the worker. Above this cap we
-/// truncate the decoded source at a tag boundary, parse whatever fits, and
-/// warn. The pipeline still produces a usable extraction for any input size;
-/// only the tail of very large pages is dropped from graph extraction.
-const HTML_PARSE_SOFT_CAP_BYTES: usize = 4 * 1024 * 1024;
+// The existing DOM allocation budget is a hard refusal, never success with a
+// truncated tail: dense HTML can expand to hundreds of times its source size.
+const HTML_PARSE_LIMIT_BYTES: usize = 4 * 1024 * 1024;
+
+pub struct PreparedHtml {
+    pub source: String,
+    pub source_map: serde_json::Value,
+    pub warnings: Vec<String>,
+    title: Option<String>,
+    media: Vec<String>,
+}
 
 #[derive(Debug, Clone)]
 struct DecodedHtml {
@@ -36,37 +39,20 @@ struct DecodedHtml {
     had_errors: bool,
 }
 
-pub fn extract_html_main_content(
+/// Select the product's main root and media without converting document text.
+pub fn prepare_html_main_content(
     file_bytes: &[u8],
     mime_type: Option<&str>,
-) -> Result<ExtractionOutput> {
+) -> Result<PreparedHtml> {
+    anyhow::ensure!(file_bytes.len() <= HTML_PARSE_LIMIT_BYTES, "html_parse_limit");
     let decoded = decode_html(file_bytes, mime_type);
-    let original_len = decoded.content.len();
-    let (parse_source, truncated) = if original_len > HTML_PARSE_SOFT_CAP_BYTES {
-        let boundary = safe_html_truncation_boundary(&decoded.content, HTML_PARSE_SOFT_CAP_BYTES);
-        tracing::warn!(
-            stage = "html_extract",
-            original_bytes = original_len,
-            kept_bytes = boundary,
-            cap_bytes = HTML_PARSE_SOFT_CAP_BYTES,
-            "HTML source exceeds parse soft cap; truncating before DOM build to protect worker memory"
-        );
-        (&decoded.content[..boundary], true)
-    } else {
-        (decoded.content.as_str(), false)
-    };
-    let document = Html::parse_document(parse_source);
+    anyhow::ensure!(decoded.content.len() <= HTML_PARSE_LIMIT_BYTES, "html_parse_limit");
+    let document = Html::parse_document(&decoded.content);
     let title = extract_title(&document);
-    let content_root = select_content_root(&document);
-    let root = content_root.unwrap_or_else(|| document.root_element());
-    let rendered_text = render_markdownish_text(root, title.as_deref());
-    let layout = build_text_layout_from_content(&rendered_text);
+    let root = select_content_root(&document).unwrap_or_else(|| document.root_element());
     let outbound_links = collect_outbound_links(root);
     let outbound_resources = collect_outbound_resources(root);
     let mut warnings = Vec::new();
-    if rendered_text.trim().is_empty() {
-        warnings.push("html page did not yield readable main content".to_string());
-    }
     if decoded.had_errors {
         warnings.push(format!(
             "html payload required replacement characters while decoding with {}",
@@ -79,14 +65,38 @@ pub fn extract_html_main_content(
     if outbound_resources.len() == HTML_RESOURCE_LIMIT {
         warnings.push("outbound resource collection reached the configured limit".to_string());
     }
-    if truncated {
-        warnings.push(format!(
-            "html source was truncated from {} to {} bytes before DOM parsing to stay within worker memory budget",
-            original_len,
-            parse_source.len(),
-        ));
-    }
+    Ok(PreparedHtml {
+        source: selected_html(root),
+        source_map: serde_json::json!({
+            "title": title, "outboundLinks": outbound_links, "outboundResources": outbound_resources,
+            "contentRootTag": root.value().name(), "charset": decoded.charset,
+        }),
+        warnings,
+        title,
+        media: media_blocks(root),
+    })
+}
 
+/// Project child-produced native text into crawl metadata and media semantics.
+pub fn extract_html_main_content(
+    file_bytes: &[u8],
+    mime_type: Option<&str>,
+    native_content: &str,
+) -> Result<ExtractionOutput> {
+    let prepared = prepare_html_main_content(file_bytes, mime_type)?;
+    let mut blocks = Vec::new();
+    if let Some(title) =
+        prepared.title.filter(|_| !native_content.trim().is_empty() || !prepared.media.is_empty())
+    {
+        blocks.push(format!("# {title}"));
+    }
+    blocks.push(native_content.to_owned());
+    blocks.extend(prepared.media);
+    let layout = build_text_layout_from_content(&blocks.join("\n\n"));
+    let mut warnings = prepared.warnings;
+    if layout.content_text.trim().is_empty() {
+        warnings.push("html page did not yield readable main content".into());
+    }
     Ok(ExtractionOutput {
         extraction_kind: "html_main_content".to_string(),
         content_text: layout.content_text,
@@ -98,13 +108,7 @@ pub fn extract_html_main_content(
             line_count: i32::try_from(layout.structure_hints.lines.len()).unwrap_or(i32::MAX),
         },
         structure_hints: layout.structure_hints,
-        source_map: serde_json::json!({
-            "title": title,
-            "outboundLinks": outbound_links,
-            "outboundResources": outbound_resources,
-            "contentRootTag": root.value().name(),
-            "charset": decoded.charset,
-        }),
+        source_map: prepared.source_map,
         provider_kind: None,
         model_name: None,
         usage_json: serde_json::json!({}),

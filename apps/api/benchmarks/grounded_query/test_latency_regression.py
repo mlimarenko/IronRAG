@@ -56,9 +56,7 @@ def benchmark_case(
     )
     return {
         "caseId": case_id,
-        "caseDefinitionSha256": benchmark.stable_json_sha256(
-            {"caseId": case_id, "question": question}
-        ),
+        "caseDefinitionSha256": benchmark.case_definition_sha256(benchmark.BenchmarkCase(**policy)),
         "question": question,
         "searchQuery": question,
         "topSearchDocumentOk": strict_case_pass,
@@ -769,6 +767,9 @@ class BenchmarkComparisonTests(unittest.TestCase):
     def test_raw_answer_failure_overrides_forged_stored_pass_boolean(self) -> None:
         case = benchmark_case("forged-pass", 100.0)
         case["casePolicy"]["answer_required_all"] = ["absent required phrase"]
+        case["caseDefinitionSha256"] = benchmark.case_definition_sha256(
+            benchmark.BenchmarkCase(**case["casePolicy"])
+        )
         case["strictCasePass"] = True
         case["failedChecks"] = []
 
@@ -1103,12 +1104,13 @@ class BenchmarkComparisonTests(unittest.TestCase):
         candidate = candidate_matrix([benchmark_case("case-1", 100.0)])
         candidate_case = candidate["suites"][0]["cases"][0]
         candidate_case["question"] = "Edited question under the same identifier"
+        candidate_case["casePolicy"]["question"] = candidate_case["question"]
         for evidence_name in ("turnPayload", "executionDetail"):
             evidence = candidate_case["rawEvaluationEvidence"][evidence_name]
             evidence["execution"]["queryText"] = candidate_case["question"]
             evidence["requestTurn"]["contentText"] = candidate_case["question"]
-        candidate_case["caseDefinitionSha256"] = benchmark.stable_json_sha256(
-            {"caseId": "case-1", "question": candidate_case["question"]}
+        candidate_case["caseDefinitionSha256"] = benchmark.case_definition_sha256(
+            benchmark.BenchmarkCase(**candidate_case["casePolicy"])
         )
         candidate["suites"][0]["integrity"]["suiteDefinitionSha256"] = (
             benchmark.stable_json_sha256(

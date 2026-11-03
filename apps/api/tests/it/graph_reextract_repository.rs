@@ -27,11 +27,630 @@ use ironrag_backend::{
             runtime_repository::{self, NewRuntimeExecution},
         },
     },
-    services::graph::error::GraphServiceError,
+    services::graph::{error::GraphServiceError, service::GraphRebuildRecovery},
 };
 use temp_postgres_database::TempPostgresDatabase;
 
 const GRAPH_EXTRACTION_VERSION: &str = "graph_extract";
+
+fn fence_deadline() -> chrono::DateTime<Utc> {
+    Utc::now() + Duration::minutes(5)
+}
+
+#[tokio::test]
+#[ignore = "requires local postgres service"]
+async fn fenced_rebuild_waits_for_raw_graph_before_taking_library_row() -> Result<()> {
+    use ironrag_backend::infra::repositories::content_document_repository;
+    use runtime_graph_repository::{
+        RuntimeGraphRebuildCoordination as Policy,
+        RuntimeGraphRebuildGuardAcquireOutcome as Outcome,
+    };
+    let fixture = GraphReextractFixture::create().await?;
+    let result = async {
+        let (document, _) = fixture.create_readable_revision("raw-order").await?;
+        let mut raw = fixture.pool.begin().await?;
+        sqlx::query("select pg_advisory_xact_lock(hashtextextended($1::text, 0))")
+            .bind(fixture.library_id.to_string())
+            .execute(&mut *raw)
+            .await?;
+        let contender =
+            PgPoolOptions::new().max_connections(1).connect(&fixture.database.database_url).await?;
+        let pid =
+            sqlx::query_scalar::<_, i32>("select pg_backend_pid()").fetch_one(&contender).await?;
+        let pool = contender.clone();
+        let library = fixture.library_id;
+        let pending = tokio::spawn(async move {
+            runtime_graph_repository::acquire_runtime_library_graph_rebuild_guard(
+                &pool,
+                library,
+                Policy::FenceWriters { deadline: fence_deadline() },
+            )
+            .await
+        });
+        crate::postgres_activity::wait_for_backend_lock(
+            &fixture.pool,
+            pid,
+            "pg_advisory_lock(hashtextextended",
+        )
+        .await?;
+        // This is the same catalog write performed by the vector-GC connection;
+        // it must finish while the rebuild is waiting on the raw graph lock.
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            content_document_repository::update_document_state(
+                &fixture.pool,
+                document,
+                "active",
+                None,
+            ),
+        )
+        .await??;
+        raw.rollback().await?;
+        match tokio::time::timeout(std::time::Duration::from_secs(5), pending).await??? {
+            Outcome::Acquired(guard) => guard.rollback().await?,
+            _ => anyhow::bail!("rebuild did not acquire after raw graph release"),
+        }
+        contender.close().await;
+        Ok::<_, anyhow::Error>(())
+    }
+    .await;
+    let cleanup = fixture.cleanup().await;
+    result?;
+    cleanup
+}
+
+#[tokio::test]
+#[ignore = "requires local postgres service"]
+async fn fenced_rebuild_busy_and_scope_are_isolated() -> Result<()> {
+    use ironrag_backend::infra::repositories::content_document_repository;
+    use runtime_graph_repository::{
+        RuntimeGraphRebuildCoordination as Policy,
+        RuntimeGraphRebuildGuardAcquireOutcome as Outcome,
+    };
+    let fixture = GraphReextractFixture::create().await?;
+    let result = async {
+        let (document, _) = fixture.create_readable_revision("scope").await?;
+        let other = catalog_repository::create_library(&fixture.pool, fixture.workspace_id,
+            "fence-other-library", "Other", None, None).await?;
+        let other_document = Uuid::now_v7();
+        sqlx::query("insert into content_document (id, workspace_id, library_id, external_key, document_state) values ($1,$2,$3,$4,'active')")
+            .bind(other_document).bind(fixture.workspace_id).bind(other.id).bind("other-source")
+            .execute(&fixture.pool).await?;
+        let mut holder = fixture.pool.begin().await?;
+        sqlx::query("select id from catalog_library where id=$1 for no key update")
+            .bind(fixture.library_id).execute(&mut *holder).await?;
+        assert!(matches!(runtime_graph_repository::acquire_runtime_library_graph_rebuild_guard(
+            &fixture.pool, fixture.library_id, Policy::FenceWriters { deadline: fence_deadline() }).await?, Outcome::Busy));
+        let optimistic = match runtime_graph_repository::acquire_runtime_library_graph_rebuild_guard(
+            &fixture.pool, fixture.library_id, Policy::Optimistic).await? {
+            Outcome::Acquired(guard) => guard, _ => anyhow::bail!("busy fence leaked graph locks"),
+        };
+        optimistic.rollback().await?;
+        holder.rollback().await?;
+        let optimistic = match runtime_graph_repository::acquire_runtime_library_graph_rebuild_guard(
+            &fixture.pool, fixture.library_id, Policy::Optimistic).await? {
+            Outcome::Acquired(guard) => guard, _ => anyhow::bail!("optimistic guard unavailable"),
+        };
+        assert!(content_document_repository::update_document_state(&fixture.pool, document, "active", None).await?.is_some());
+        optimistic.rollback().await?;
+        let fenced = match runtime_graph_repository::acquire_runtime_library_graph_rebuild_guard(
+            &fixture.pool, fixture.library_id, Policy::FenceWriters { deadline: fence_deadline() }).await? {
+            Outcome::Acquired(guard) => guard, _ => anyhow::bail!("fenced guard unavailable"),
+        };
+        assert!(matches!(runtime_graph_repository::acquire_runtime_library_graph_rebuild_guard(
+            &fixture.pool, other.id, Policy::FenceWriters { deadline: fence_deadline() }).await?, Outcome::Busy));
+        assert!(content_document_repository::update_document_state(&fixture.pool, other_document, "active", None).await?.is_some());
+        fenced.rollback().await?;
+        assert!(matches!(runtime_graph_repository::acquire_runtime_library_graph_rebuild_guard(
+            &fixture.pool, Uuid::now_v7(), Policy::FenceWriters { deadline: fence_deadline() }).await?, Outcome::LibraryNotFound));
+        catalog_repository::archive_library(&fixture.pool, fixture.library_id).await?;
+        assert!(matches!(runtime_graph_repository::acquire_runtime_library_graph_rebuild_guard(
+            &fixture.pool, fixture.library_id, Policy::FenceWriters { deadline: fence_deadline() }).await?, Outcome::LibraryNotFound));
+        Ok::<_, anyhow::Error>(())
+    }.await;
+    let cleanup = fixture.cleanup().await;
+    result?;
+    cleanup
+}
+
+#[tokio::test]
+#[ignore = "requires local postgres service"]
+async fn fenced_rebuild_blocks_lifecycle_writer_until_rollback() -> Result<()> {
+    use ironrag_backend::infra::repositories::content_document_repository;
+    let fixture = GraphReextractFixture::create().await?;
+    let result = async {
+        let (document_id, _) = fixture.create_readable_revision("fence").await?;
+        let writer =
+            PgPoolOptions::new().max_connections(1).connect(&fixture.database.database_url).await?;
+        sqlx::query("set lock_timeout = '100ms'").execute(&writer).await?;
+        let guard = match runtime_graph_repository::acquire_runtime_library_graph_rebuild_guard(
+            &fixture.pool,
+            fixture.library_id,
+            runtime_graph_repository::RuntimeGraphRebuildCoordination::FenceWriters {
+                deadline: fence_deadline(),
+            },
+        )
+        .await?
+        {
+            runtime_graph_repository::RuntimeGraphRebuildGuardAcquireOutcome::Acquired(guard) => {
+                guard
+            }
+            _ => anyhow::bail!("rebuild guard was not acquired"),
+        };
+        let blocked = content_document_repository::update_document_state(
+            &writer,
+            document_id,
+            "active",
+            None,
+        )
+        .await;
+        guard.rollback().await?;
+        let after = content_document_repository::update_document_state(
+            &writer,
+            document_id,
+            "active",
+            None,
+        )
+        .await?;
+        let guard = match runtime_graph_repository::acquire_runtime_library_graph_rebuild_guard(
+            &fixture.pool,
+            fixture.library_id,
+            runtime_graph_repository::RuntimeGraphRebuildCoordination::FenceWriters {
+                deadline: fence_deadline(),
+            },
+        )
+        .await?
+        {
+            runtime_graph_repository::RuntimeGraphRebuildGuardAcquireOutcome::Acquired(guard) => {
+                guard
+            }
+            _ => anyhow::bail!("second rebuild guard was not acquired"),
+        };
+        guard.commit().await?;
+        let after_commit = content_document_repository::update_document_state(
+            &writer,
+            document_id,
+            "active",
+            None,
+        )
+        .await?;
+        let guard = match runtime_graph_repository::acquire_runtime_library_graph_rebuild_guard(
+            &fixture.pool,
+            fixture.library_id,
+            runtime_graph_repository::RuntimeGraphRebuildCoordination::FenceWriters {
+                deadline: fence_deadline(),
+            },
+        )
+        .await?
+        {
+            runtime_graph_repository::RuntimeGraphRebuildGuardAcquireOutcome::Acquired(guard) => {
+                guard
+            }
+            _ => anyhow::bail!("cancellation guard was not acquired"),
+        };
+        let cancelled = tokio::time::timeout(std::time::Duration::from_millis(50), async move {
+            let _guard = guard;
+            std::future::pending::<()>().await;
+        })
+        .await;
+        assert!(cancelled.is_err(), "deadline must cancel the guard-owning future");
+        sqlx::query("set lock_timeout = '5s'").execute(&writer).await?;
+        let after_cancel = content_document_repository::update_document_state(
+            &writer,
+            document_id,
+            "active",
+            None,
+        )
+        .await?;
+        writer.close().await;
+        let error = blocked.expect_err("lifecycle writer must be fenced");
+        assert_eq!(
+            error.as_database_error().and_then(|error| error.code()).as_deref(),
+            Some("55P03")
+        );
+        assert!(after.is_some());
+        assert!(after_commit.is_some());
+        assert!(after_cancel.is_some());
+        Ok::<_, anyhow::Error>(())
+    }
+    .await;
+    let cleanup = fixture.cleanup().await;
+    result?;
+    cleanup
+}
+
+#[tokio::test]
+#[ignore = "requires local postgres service"]
+async fn derived_only_coverage_refusal_preserves_graph_without_admitting_jobs() -> Result<()> {
+    let fixture = GraphReextractFixture::create().await?;
+    let result = async {
+        fixture.publish_non_empty_ready_projection("published", "Published Entity").await?;
+        let before = fixture.graph_state_digest().await?;
+        let evidence_before = fixture.evidence_count().await?;
+        let (document_id, revision_id) = fixture.create_readable_revision("missing").await?;
+        fixture
+            .create_completed_graph_stage_with_count(
+                document_id,
+                revision_id,
+                GRAPH_EXTRACTION_VERSION,
+                serde_json::json!(1),
+            )
+            .await?;
+        let jobs_before = sqlx::query_scalar::<_, i64>(
+            "select count(*) from ingest_job where library_id=$1 and job_kind='graph_refresh'",
+        )
+        .bind(fixture.library_id)
+        .fetch_one(&fixture.pool)
+        .await?;
+        let outcome = fixture
+            .state
+            .application_services
+            .graph
+            .rebuild_library_graph(
+                &fixture.state,
+                fixture.library_id,
+                GraphRebuildRecovery::DerivedOnlyWithWriterFence { deadline: fence_deadline() },
+            )
+            .await;
+        anyhow::ensure!(
+            matches!(&outcome, Err(GraphServiceError::StateConflict { .. })),
+            "derived-only rebuild must refuse insufficient coverage: {outcome:?}"
+        );
+        anyhow::ensure!(
+            fixture.graph_state_digest().await? == before,
+            "refusal changed graph state"
+        );
+        anyhow::ensure!(
+            fixture.evidence_count().await? == evidence_before,
+            "refusal changed evidence"
+        );
+        anyhow::ensure!(fixture.projection_row_count(2).await? == 0, "refusal left staged targets");
+        let jobs_after = sqlx::query_scalar::<_, i64>(
+            "select count(*) from ingest_job where library_id=$1 and job_kind='graph_refresh'",
+        )
+        .bind(fixture.library_id)
+        .fetch_one(&fixture.pool)
+        .await?;
+        anyhow::ensure!(jobs_after == jobs_before, "derived-only refusal admitted recovery jobs");
+        Ok::<_, anyhow::Error>(())
+    }
+    .await;
+    let cleanup = fixture.cleanup().await;
+    result?;
+    cleanup
+}
+
+#[tokio::test]
+#[ignore = "requires local postgres service"]
+async fn rebuild_excludes_withdrawn_readability_and_preserves_current_source() -> Result<()> {
+    let fixture = GraphReextractFixture::create().await?;
+    let result = async {
+        let (withdrawn_document, withdrawn_revision) = fixture
+            .publish_non_empty_ready_projection("withdrawn", "Withdrawn Entity")
+            .await?;
+        let (valid_document, valid_revision) = fixture.create_readable_revision("retained").await?;
+        let chunk = fixture.create_revision_chunk(valid_revision, "retained").await?;
+        let attempt = fixture.create_completed_graph_stage_with_count(
+            valid_document, valid_revision, GRAPH_EXTRACTION_VERSION, serde_json::json!(1),
+        ).await?;
+        fixture.create_current_ready_extraction(
+            valid_document, chunk, Some(valid_revision), Some(attempt), "Retained Entity",
+        ).await?;
+        fixture.create_current_ready_extraction(
+            valid_document, chunk, Some(valid_revision), Some(attempt), "Second Retained Entity",
+        ).await?;
+        let stale = fixture.create_current_ready_extraction(
+            valid_document, chunk, Some(Uuid::now_v7()), Some(attempt), "Stale Entity",
+        ).await?;
+        sqlx::query("update runtime_graph_extraction set normalized_output_json = '{\"entities\":[42]}'::jsonb where id=$1")
+            .bind(stale).execute(&fixture.pool).await?;
+        fixture.state.application_services.graph.rebuild_library_graph(
+            &fixture.state, fixture.library_id, GraphRebuildRecovery::DerivedOnlyWithWriterFence { deadline: fence_deadline() },
+        ).await?;
+        let before = runtime_graph_repository::get_runtime_graph_snapshot(&fixture.pool, fixture.library_id)
+            .await?.context("published snapshot")?;
+        anyhow::ensure!(ironrag_backend::infra::repositories::content_fingerprint_repository::graph_projection_is_current(
+            &fixture.pool, before.projection_identity(),
+        ).await?, "initial projection must be current");
+        let revision = fixture.state.document_store.get_revision(withdrawn_revision).await?.context("revision")?;
+        fixture.state.document_store.update_revision_readiness(
+            ironrag_backend::infra::knowledge_plane::RevisionReadinessUpdate {
+                revision_id: withdrawn_revision, text_state: "failed",
+                vector_state: &revision.vector_state, graph_state: &revision.graph_state,
+                text_readable_at: None, vector_ready_at: revision.vector_ready_at,
+                graph_ready_at: revision.graph_ready_at,
+                superseded_by_revision_id: revision.superseded_by_revision_id,
+            },
+        ).await?.context("withdraw revision readability")?;
+        anyhow::ensure!(!ironrag_backend::infra::repositories::content_fingerprint_repository::graph_projection_is_current(
+            &fixture.pool, before.projection_identity(),
+        ).await?, "withdrawn readability must invalidate the original projection");
+        fixture.state.application_services.graph.rebuild_library_graph(
+            &fixture.state, fixture.library_id, GraphRebuildRecovery::DerivedOnlyWithWriterFence { deadline: fence_deadline() },
+        ).await?;
+        let after = runtime_graph_repository::get_runtime_graph_snapshot(&fixture.pool, fixture.library_id)
+            .await?.context("successor snapshot")?;
+        anyhow::ensure!(after.projection_version > before.projection_version, "rebuild must publish a successor");
+        anyhow::ensure!(ironrag_backend::infra::repositories::content_fingerprint_repository::graph_projection_is_current(
+            &fixture.pool, after.projection_identity(),
+        ).await?, "successor must contain only current published sources");
+        let documents = sqlx::query_scalar::<_, Uuid>(
+            "select document_id from runtime_graph_node where library_id=$1 and projection_version=$2 and node_type='document'",
+        ).bind(fixture.library_id).bind(after.projection_version).fetch_all(&fixture.pool).await?;
+        anyhow::ensure!(!documents.contains(&withdrawn_document), "successor retained an unreadable source");
+        anyhow::ensure!(documents.contains(&valid_document), "successor lost a current readable source");
+        let labels = sqlx::query_scalar::<_, String>(
+            "select label from runtime_graph_node where library_id=$1 and projection_version=$2 and node_type='concept'",
+        ).bind(fixture.library_id).bind(after.projection_version).fetch_all(&fixture.pool).await?;
+        anyhow::ensure!(labels.iter().any(|label| label == "Retained Entity") &&
+            labels.iter().any(|label| label == "Second Retained Entity") &&
+            !labels.iter().any(|label| label == "Stale Entity" || label == "Withdrawn Entity"),
+            "unexpected rebuilt labels: {labels:?}");
+        anyhow::ensure!(!ironrag_backend::infra::repositories::content_fingerprint_repository::graph_projection_is_current(
+            &fixture.pool, before.projection_identity(),
+        ).await?, "original projection must remain stale");
+        anyhow::ensure!(
+            fixture.state.document_store.get_revision(withdrawn_revision).await?.context("revision")?.text_state == "failed",
+            "rebuild must preserve the source failure"
+        );
+        Ok::<_, anyhow::Error>(())
+    }.await;
+    let cleanup = fixture.cleanup().await;
+    result?;
+    cleanup
+}
+
+#[tokio::test]
+#[ignore = "requires local postgres service"]
+async fn malformed_eligible_extraction_rolls_back_after_partial_merge() -> Result<()> {
+    let fixture = GraphReextractFixture::create().await?;
+    let result = async {
+        let (document_id, revision_id) = fixture.publish_non_empty_ready_projection(
+            "malformed-rebuild", "Retained Entity").await?;
+        let (chunk_id, attempt_id) = sqlx::query_as::<_, (Uuid, Option<Uuid>)>(
+            "select chunk_id, (raw_output_json->'lifecycle'->>'activated_by_attempt_id')::uuid
+             from runtime_graph_extraction where document_id=$1")
+            .bind(document_id).fetch_one(&fixture.pool).await?;
+        let extraction_id = fixture.create_current_ready_extraction(document_id, chunk_id,
+            Some(revision_id), attempt_id, "Malformed Entity").await?;
+        sqlx::query("update runtime_graph_extraction set normalized_output_json='{
+            \"entities\": [42], \"relations\": []}'::jsonb, created_at=now()+interval '1 day' where id=$1")
+            .bind(extraction_id).execute(&fixture.pool).await?;
+        let before = sqlx::query_as::<_, (Uuid, serde_json::Value, serde_json::Value)>(
+            "select id, raw_output_json, normalized_output_json from runtime_graph_extraction order by id")
+            .fetch_all(&fixture.pool).await?;
+        let snapshot_before = sqlx::query_as::<_, (i64, i32, i32, i64)>(
+            "select projection_version, node_count, edge_count, topology_generation from runtime_graph_snapshot where library_id=$1")
+            .bind(fixture.library_id).fetch_one(&fixture.pool).await?;
+        let identities_before = sqlx::query_as::<_, (String, String, serde_json::Value)>(
+            "select canonical_key, label, metadata_json from runtime_graph_node where library_id=$1 order by canonical_key")
+            .bind(fixture.library_id).fetch_all(&fixture.pool).await?;
+        let error = fixture.state.application_services.graph.rebuild_library_graph(
+            &fixture.state, fixture.library_id, GraphRebuildRecovery::AdmitReextraction).await.expect_err("malformed eligible JSON must fail");
+        assert!(format!("{error:?}").contains("failed to decode normalized graph extraction"));
+        let snapshot_after = sqlx::query_as::<_, (i64, i32, i32, i64)>(
+            "select projection_version, node_count, edge_count, topology_generation from runtime_graph_snapshot where library_id=$1")
+            .bind(fixture.library_id).fetch_one(&fixture.pool).await?;
+        assert_eq!(snapshot_before, snapshot_after);
+        assert_eq!(fixture.projection_row_count(2).await?, 0);
+        let identities_after = sqlx::query_as::<_, (String, String, serde_json::Value)>(
+            "select canonical_key, label, metadata_json from runtime_graph_node where library_id=$1 order by canonical_key")
+            .bind(fixture.library_id).fetch_all(&fixture.pool).await?;
+        assert_eq!(identities_before, identities_after);
+        let after = sqlx::query_as::<_, (Uuid, serde_json::Value, serde_json::Value)>(
+            "select id, raw_output_json, normalized_output_json from runtime_graph_extraction order by id")
+            .fetch_all(&fixture.pool).await?;
+        assert_eq!(before, after);
+        Ok::<_, anyhow::Error>(())
+    }.await;
+    let cleanup = fixture.cleanup().await;
+    result?;
+    cleanup
+}
+
+#[tokio::test]
+#[ignore = "requires local postgres service"]
+async fn late_rebuild_publication_failure_restores_the_entire_previous_graph() -> Result<()> {
+    let fixture = GraphReextractFixture::create().await?;
+    let result = async {
+        fixture.publish_non_empty_ready_projection("late-publication", "Retained Entity").await?;
+        let before = fixture.graph_state_digest().await?;
+        sqlx::raw_sql(
+            "create sequence terminal_rebuild_failure_receipt;
+            create function refuse_terminal_rebuild() returns trigger language plpgsql as $$
+            begin if new.projection_version=2 and new.graph_status='ready' then
+              perform nextval('terminal_rebuild_failure_receipt');
+              raise exception 'fixture refuses terminal publication';
+            end if; return new; end $$;
+            create trigger refuse_terminal_rebuild before insert or update on runtime_graph_snapshot
+              for each row execute function refuse_terminal_rebuild();",
+        )
+        .execute(&fixture.pool)
+        .await?;
+        let rebuild = fixture
+            .state
+            .application_services
+            .graph
+            .rebuild_library_graph(
+                &fixture.state,
+                fixture.library_id,
+                GraphRebuildRecovery::AdmitReextraction,
+            )
+            .await;
+        assert!(rebuild.is_err(), "terminal snapshot rejection must fail the rebuild");
+        let injected_failure =
+            sqlx::query_scalar::<_, bool>("select is_called from terminal_rebuild_failure_receipt")
+                .fetch_one(&fixture.pool)
+                .await?;
+        assert!(
+            injected_failure,
+            "the error must come from terminal publication, not an earlier phase"
+        );
+        assert_eq!(before, fixture.graph_state_digest().await?);
+        assert_eq!(fixture.projection_row_count(2).await?, 0);
+        Ok::<_, anyhow::Error>(())
+    }
+    .await;
+    let cleanup = fixture.cleanup().await;
+    result?;
+    cleanup
+}
+
+#[tokio::test]
+#[ignore = "requires local postgres service"]
+async fn bounded_batch_rebuild_65_records() -> Result<()> {
+    Box::pin(bounded_memory_rebuild(65, false)).await
+}
+
+#[tokio::test]
+#[ignore = "requires local postgres service"]
+async fn bounded_memory_rebuild_1024_records() -> Result<()> {
+    Box::pin(bounded_memory_rebuild(1024, false)).await
+}
+
+#[tokio::test]
+#[ignore = "requires local postgres service"]
+async fn bounded_memory_rebuild_4096_records() -> Result<()> {
+    Box::pin(bounded_memory_rebuild(4096, false)).await
+}
+
+#[tokio::test]
+#[ignore = "requires local postgres service"]
+async fn bounded_memory_rebuild_preserves_large_graph_payloads() -> Result<()> {
+    Box::pin(bounded_memory_rebuild(4096, true)).await
+}
+
+async fn bounded_memory_rebuild(record_count: i32, large_graph_payload: bool) -> Result<()> {
+    let fixture = GraphReextractFixture::create().await?;
+    let result = async {
+        let (document_id, revision_id) = fixture.create_readable_revision("memory-corpus").await?;
+        let chunk_id = fixture.create_revision_chunk(revision_id, "memory-corpus").await?;
+        let attempt_id = fixture.create_completed_graph_stage_with_count(document_id, revision_id,
+            GRAPH_EXTRACTION_VERSION, serde_json::json!(record_count)).await?;
+        let seed_id = fixture.create_current_ready_extraction(document_id, chunk_id,
+            Some(revision_id), Some(attempt_id), "Memory Entity 0").await?;
+        // JSON expansion happens on the server, never as a corpus-sized client Vec.
+        sqlx::query("insert into content_chunk
+            (id, revision_id, chunk_index, start_offset, end_offset, token_count, normalized_text, text_checksum)
+            select md5(('memory-chunk-'||i)::text)::uuid, revision_id, i, start_offset, end_offset,
+              token_count, normalized_text, 'memory-checksum-'||i
+            from content_chunk cross join generate_series(1,$2-1) i where id=$1")
+            .bind(chunk_id).bind(record_count).execute(&fixture.pool).await?;
+        sqlx::query("insert into runtime_graph_extraction
+            (id, runtime_execution_id, library_id, document_id, chunk_id, provider_kind, model_name,
+             extraction_version, prompt_hash, status, raw_output_json, normalized_output_json, glean_pass_count, created_at)
+            select md5(('memory-extraction-'||i)::text)::uuid, runtime_execution_id, library_id,
+              document_id, md5(('memory-chunk-'||i)::text)::uuid, provider_kind, model_name,
+              extraction_version, prompt_hash, status, raw_output_json,
+              jsonb_set(normalized_output_json, '{entities,0,label}', to_jsonb('Memory Entity '||i)),
+              glean_pass_count, created_at
+            from runtime_graph_extraction cross join generate_series(1,$2-1) i where id=$1")
+            .bind(seed_id).bind(record_count).execute(&fixture.pool).await?;
+        if record_count == 65 {
+            let mut transaction = fixture.pool.begin().await?;
+            let mut cursor = runtime_graph_repository::RuntimeGraphRebuildExtractionCursor::open(
+                &mut transaction, fixture.library_id, GRAPH_EXTRACTION_VERSION,
+            ).await?;
+            let first = cursor.next_batch(&mut transaction).await?;
+            let second = cursor.next_batch(&mut transaction).await?;
+            let end = cursor.next_batch(&mut transaction).await?;
+            assert_eq!((first.len(), second.len(), end.len()), (64, 1, 0));
+            let documents: Vec<_> = first.iter().map(|row| row.document_id).collect();
+            let chunks: Vec<_> = first.iter().map(|row| row.chunk_id).collect();
+            let identities = runtime_graph_repository::load_rebuild_identities(
+                &mut transaction, &documents, &[revision_id], &chunks,
+            ).await?;
+            assert_eq!((identities.documents.len(), identities.heads.len(), identities.revisions.len(), identities.chunks.len()), (1, 1, 1, 64));
+            cursor.close(&mut transaction).await?;
+            transaction.rollback().await?;
+        }
+        sqlx::query("update runtime_graph_extraction set
+            raw_output_json=raw_output_json || jsonb_build_object('provider_payload',repeat('x',262144)),
+            normalized_output_json=jsonb_set(normalized_output_json, '{entities,0,summary}', to_jsonb(repeat('s',16384)))")
+            .execute(&fixture.pool).await?;
+        let raw_digest_before = sqlx::query_scalar::<_, String>(
+            "select md5(string_agg(md5(raw_output_json::text), '' order by id)) from runtime_graph_extraction")
+            .fetch_one(&fixture.pool).await?;
+        let outcome = fixture.state.application_services.graph.rebuild_library_graph(
+            &fixture.state, fixture.library_id, GraphRebuildRecovery::AdmitReextraction).await?;
+        assert_eq!(outcome.node_count, usize::try_from(record_count)?+1);
+        assert_eq!(outcome.edge_count, usize::try_from(record_count)?);
+        assert_eq!(outcome.graph_status, "ready");
+        let labels = sqlx::query_scalar::<_, String>(
+            "select label from runtime_graph_node where node_type<>'document' order by label")
+            .fetch_all(&fixture.pool).await?.into_iter().collect::<HashSet<_>>();
+        assert_eq!(labels, (0..record_count).map(|i| format!("Memory Entity {i}")).collect());
+        let relations = sqlx::query_as::<_, (String, i64)>(
+            "select relation_type, count(*) from runtime_graph_edge group by relation_type")
+            .fetch_all(&fixture.pool).await?;
+        assert_eq!(relations, vec![("mentions".to_string(), i64::from(record_count))]);
+        let evidence_count = fixture.evidence_count().await?;
+        assert_eq!(evidence_count, i64::from(record_count)*3);
+        let exact_entity_evidence = sqlx::query_scalar::<_, i64>(
+            "select count(*) from runtime_graph_evidence e
+             join runtime_graph_node n on n.id=e.target_id and e.target_kind='node'
+             join runtime_graph_extraction x on x.chunk_id=e.chunk_id
+               and x.document_id=e.document_id
+             join content_chunk c on c.id=e.chunk_id and c.revision_id=e.revision_id
+             where e.document_id=$1 and e.revision_id=$2
+               and n.label=x.normalized_output_json#>>'{entities,0,label}'")
+            .bind(document_id).bind(revision_id).fetch_one(&fixture.pool).await?;
+        assert_eq!(exact_entity_evidence, i64::from(record_count));
+        let exact_document_edges = sqlx::query_scalar::<_, i64>(
+            "select count(*) from runtime_graph_edge e
+             join runtime_graph_node source on source.id=e.from_node_id
+             join runtime_graph_node target on target.id=e.to_node_id
+             where source.canonical_key=$1 and target.node_type='concept'
+               and e.relation_type='mentions'")
+            .bind(format!("document:{document_id}")).fetch_one(&fixture.pool).await?;
+        assert_eq!(exact_document_edges, i64::from(record_count));
+        let raw_digest_after = sqlx::query_scalar::<_, String>(
+            "select md5(string_agg(md5(raw_output_json::text), '' order by id)) from runtime_graph_extraction")
+            .fetch_one(&fixture.pool).await?;
+        assert_eq!(raw_digest_before, raw_digest_after);
+        if large_graph_payload {
+            // Inflate persisted rows on the server during the next real rebuild.
+            // The projection must classify identities without fetching payloads.
+            sqlx::raw_sql("create function memory_payload() returns trigger language plpgsql as $$
+                begin new.metadata_json := new.metadata_json || jsonb_build_object('fixture_payload',repeat('g',262144));
+                return new; end $$;
+                create trigger memory_node_payload before insert on runtime_graph_node for each row execute function memory_payload();
+                create trigger memory_edge_payload before insert on runtime_graph_edge for each row execute function memory_payload();")
+                .execute(&fixture.pool).await?;
+            let rebuilt = fixture.state.application_services.graph.rebuild_library_graph(
+                &fixture.state, fixture.library_id, GraphRebuildRecovery::AdmitReextraction).await?;
+            assert_eq!((rebuilt.node_count, rebuilt.edge_count), (outcome.node_count, outcome.edge_count));
+            let payloads = sqlx::query_as::<_, (i64, i64)>(
+                "select count(*), min(length(metadata_json->>'fixture_payload'))::bigint from (
+                   select metadata_json from runtime_graph_node union all
+                   select metadata_json from runtime_graph_edge) payloads")
+                .fetch_one(&fixture.pool).await?;
+            assert_eq!(payloads, (i64::from(record_count)*2+1, 262144));
+            let summaries = sqlx::query_scalar::<_, i64>(
+                "select count(*) from runtime_graph_node where node_type<>'document' and summary=repeat('s',16384)")
+                .fetch_one(&fixture.pool).await?;
+            assert_eq!(summaries, i64::from(record_count));
+            let aliases = sqlx::query_scalar::<_, i64>(
+                "select count(*) from runtime_graph_node where aliases_json ? label")
+                .fetch_one(&fixture.pool).await?;
+            assert_eq!(aliases, i64::from(record_count)+1);
+            let topology = ironrag_backend::services::knowledge::graph_stream::build_graph_topology_bytes(
+                &fixture.state, fixture.library_id).await?;
+            assert!(topology.len() > usize::try_from(record_count)? * 16384);
+            assert!(topology.ends_with(b"{\"s\":\"end\"}\n"));
+            tracing::info!(topology_bytes = topology.len(), "rendered graph memory fixture topology");
+            tracing::info!(graph_payload_bytes_per_target = 262144, retained_targets = payloads.0,
+                "preserved graph memory fixture payloads");
+        }
+        tracing::info!(record_count, raw_extra_bytes_per_record = 262144,
+            normalized_summary_bytes_per_record = 16384, nodes = outcome.node_count,
+            edges = outcome.edge_count, evidence_count, "rebuilt complete graph memory fixture");
+        Ok::<_, anyhow::Error>(())
+    }.await;
+    let cleanup = fixture.cleanup().await;
+    result?;
+    cleanup
+}
 /// The extraction-contract stamp the fixtures write into completed-stage
 /// details and pass back to the repository boundary. Any self-consistent value
 /// exercises the contract gap; it mirrors the production literal so a failure
@@ -345,7 +964,11 @@ impl GraphReextractFixture {
             .state
             .application_services
             .graph
-            .rebuild_library_graph(&self.state, self.library_id)
+            .rebuild_library_graph(
+                &self.state,
+                self.library_id,
+                GraphRebuildRecovery::AdmitReextraction,
+            )
             .await
             .map_err(|error| {
                 anyhow::anyhow!("failed to publish ready graph projection: {error}")
@@ -1970,7 +2593,11 @@ async fn refused_partial_rebuild_cannot_seed_a_later_projection() -> Result<()> 
             .state
             .application_services
             .graph
-            .rebuild_library_graph(&fixture.state, fixture.library_id)
+            .rebuild_library_graph(
+                &fixture.state,
+                fixture.library_id,
+                GraphRebuildRecovery::AdmitReextraction,
+            )
             .await;
         let first_rebuild_is_coverage_conflict =
             matches!(&first_rebuild, Err(GraphServiceError::StateConflict { .. }));
@@ -2010,7 +2637,11 @@ async fn refused_partial_rebuild_cannot_seed_a_later_projection() -> Result<()> 
             .state
             .application_services
             .graph
-            .rebuild_library_graph(&fixture.state, fixture.library_id)
+            .rebuild_library_graph(
+                &fixture.state,
+                fixture.library_id,
+                GraphRebuildRecovery::AdmitReextraction,
+            )
             .await;
         let second_rebuild_is_coverage_conflict =
             matches!(&second_rebuild, Err(GraphServiceError::StateConflict { .. }));
@@ -2132,7 +2763,11 @@ async fn coverage_refusal_preserves_the_existing_ready_projection_atomically() -
             .state
             .application_services
             .graph
-            .rebuild_library_graph(&fixture.state, fixture.library_id)
+            .rebuild_library_graph(
+                &fixture.state,
+                fixture.library_id,
+                GraphRebuildRecovery::AdmitReextraction,
+            )
             .await;
         let refused_rebuild_is_coverage_conflict =
             matches!(&refused_rebuild, Err(GraphServiceError::StateConflict { .. }));
@@ -2397,7 +3032,11 @@ async fn authoritative_zero_completion_replaces_ready_projection_with_empty_snap
             .state
             .application_services
             .graph
-            .rebuild_library_graph(&fixture.state, fixture.library_id)
+            .rebuild_library_graph(
+                &fixture.state,
+                fixture.library_id,
+                GraphRebuildRecovery::AdmitReextraction,
+            )
             .await;
         let empty_rebuild_is_published = matches!(
             &empty_rebuild,
@@ -2572,7 +3211,11 @@ async fn lifecycleless_old_revision_extraction_is_not_merged_as_the_current_head
             .state
             .application_services
             .graph
-            .rebuild_library_graph(&fixture.state, fixture.library_id)
+            .rebuild_library_graph(
+                &fixture.state,
+                fixture.library_id,
+                GraphRebuildRecovery::AdmitReextraction,
+            )
             .await;
         let rebuild_is_empty = matches!(
             &rebuild,

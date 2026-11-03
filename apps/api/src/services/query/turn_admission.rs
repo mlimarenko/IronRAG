@@ -173,24 +173,30 @@ fn admission_rejected() -> ApiError {
     )
 }
 
-pub(crate) async fn with_query_turn_admission<F, T>(
+pub(crate) fn with_query_turn_admission<F, T>(
     admission: QueryTurnAdmission,
     future: F,
-) -> Result<T, ApiError>
+) -> impl std::future::Future<Output = Result<T, ApiError>>
 where
     F: std::future::Future<Output = Result<T, ApiError>>,
 {
-    if HOLDING_TURN_ADMISSION.try_with(|_| ()).is_ok() {
-        return future.await;
+    // Task-local scopes retain and move their child future. Allocate the query
+    // pipeline before building either scope so nested admission/lane wrappers
+    // carry a pointer, not multiple inline copies of the pipeline state.
+    let future = Box::pin(future);
+    async move {
+        if HOLDING_TURN_ADMISSION.try_with(|_| ()).is_ok() {
+            return future.await;
+        }
+        let permit = admission.acquire().await?;
+        HOLDING_TURN_ADMISSION
+            .scope((), async move {
+                let result = future.await;
+                drop(permit);
+                result
+            })
+            .await
     }
-    let permit = admission.acquire().await?;
-    HOLDING_TURN_ADMISSION
-        .scope((), async move {
-            let result = future.await;
-            drop(permit);
-            result
-        })
-        .await
 }
 
 #[cfg(test)]
@@ -222,6 +228,62 @@ mod tests {
         .await
         .expect("nested admission should not deadlock");
         assert_eq!(outcome, 7);
+    }
+
+    #[tokio::test]
+    async fn cancelled_pipeline_drops_its_state_and_releases_admission() {
+        use crate::integrations::provider_budget::{ProviderLane, current_lane, with_lane};
+        use std::sync::atomic::AtomicBool;
+
+        struct PipelineState(Arc<AtomicBool>);
+        impl Drop for PipelineState {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::SeqCst);
+            }
+        }
+
+        let admission = QueryTurnAdmission::new(QueryTurnAdmissionConfig {
+            max_concurrent: 1,
+            max_queue: 0,
+            acquire_timeout: Duration::from_secs(1),
+        });
+        let dropped = Arc::new(AtomicBool::new(false));
+        let pipeline_state = PipelineState(Arc::clone(&dropped));
+        let mut execution = Box::pin(with_lane(
+            ProviderLane::Query,
+            with_query_turn_admission(admission.clone(), async move {
+                let _state = pipeline_state;
+                assert_eq!(current_lane(), ProviderLane::Query);
+                std::future::pending::<()>().await;
+                Ok::<_, ApiError>(())
+            }),
+        ));
+        assert!(futures::poll!(execution.as_mut()).is_pending());
+        assert_eq!(admission.semaphore.available_permits(), 0);
+        assert!(!dropped.load(Ordering::SeqCst));
+        drop(execution);
+        assert!(dropped.load(Ordering::SeqCst));
+        assert_eq!(admission.semaphore.available_permits(), 1);
+        assert_eq!(current_lane(), ProviderLane::Ingest);
+        with_query_turn_admission(admission, async { Ok::<_, ApiError>(()) })
+            .await
+            .expect("a canceled pipeline must not leave a task-local permit behind");
+    }
+
+    #[tokio::test]
+    async fn failed_pipeline_releases_admission() {
+        let admission = QueryTurnAdmission::new(QueryTurnAdmissionConfig {
+            max_concurrent: 1,
+            max_queue: 0,
+            acquire_timeout: Duration::from_secs(1),
+        });
+        let error = with_query_turn_admission(admission.clone(), async {
+            Err::<(), _>(ApiError::Internal)
+        })
+        .await
+        .expect_err("pipeline failure must propagate");
+        assert_eq!(error.kind(), ApiError::Internal.kind());
+        assert_eq!(admission.semaphore.available_permits(), 1);
     }
 
     #[tokio::test]

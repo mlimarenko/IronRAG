@@ -339,7 +339,7 @@ impl ContentService {
         // the revision text and its checksum must be the exact text
         // `prepare_and_persist_revision_structure` hashes for the fence.
         let extraction_plan = if file_name.is_some() || mime_type.is_some() {
-            build_inline_text_extraction_plan_for_source(text, file_name, mime_type).map_err(
+            build_inline_text_extraction_plan_for_source(text, file_name, mime_type).await.map_err(
                 |error| ApiError::BadRequest(format!("inline extraction failed: {error}")),
             )?
         } else {

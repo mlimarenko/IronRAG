@@ -6,6 +6,29 @@ use crate::shared::extraction::file_extract::{
     ExtractionFailureClass, FileExtractError, UploadAdmissionError, UploadFileKind,
 };
 
+#[tokio::test]
+async fn web_admission_keeps_native_html_title_and_links_without_provider_usage() {
+    let html = br#"<!doctype html><html><head><title>Admission title</title></head><body><main><h1>Guide</h1><p>Native admission text.</p><a href="https://docs.example.test/next">Next</a></main></body></html>"#;
+    let plan = super::support::inspect_web_resource("guide.html", Some("text/html"), html)
+        .await
+        .expect("model-free HTML admission through the native child");
+    assert_eq!(
+        super::support::extraction_title(&plan.source_map).as_deref(),
+        Some("Admission title")
+    );
+    assert!(plan.normalized_text.as_deref().unwrap().contains("Native admission text."));
+    assert!(
+        plan.source_map["outboundLinks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|link| link == "https://docs.example.test/next")
+    );
+    assert!(plan.provider_kind.is_none());
+    assert!(plan.model_name.is_none());
+    assert!(plan.usage_json.get("vision_calls").is_none());
+}
+
 #[test]
 fn source_identity_distinguishes_all_four_filter_roles() {
     let empty = serde_json::json!([]);
@@ -80,7 +103,7 @@ fn web_extraction_rejection_maps_only_content_failures_to_unsupported_content() 
     assert_eq!(content_failure.failure_code, "unsupported_content");
     assert_eq!(content_failure.candidate_reason.as_deref(), Some("unsupported_content"));
 
-    // A docling timeout is operational: it must not be published as a
+    // A native extractor timeout is operational: it must not be published as a
     // supported-content verdict about the candidate.
     let operational_failure = WebRunFailure::from_extraction_rejection(
         &UploadAdmissionError::from_file_extract_error(
@@ -90,7 +113,7 @@ fn web_extraction_rejection_maps_only_content_failures_to_unsupported_content() 
             &FileExtractError::ExtractionFailed {
                 file_kind: UploadFileKind::Pdf,
                 class: ExtractionFailureClass::OperationalRetryable,
-                message: "docling extraction timed out".to_string(),
+                message: "native extraction timed out".to_string(),
             },
         ),
         Some("https://docs.example.test/guide.pdf".to_string()),
@@ -108,7 +131,7 @@ fn web_extraction_rejection_maps_only_content_failures_to_unsupported_content() 
             &FileExtractError::ExtractionFailed {
                 file_kind: UploadFileKind::Pdf,
                 class: ExtractionFailureClass::OperationalTerminal,
-                message: "docling returned invalid output".to_string(),
+                message: "native extractor returned invalid output".to_string(),
             },
         ),
         Some("https://docs.example.test/guide.pdf".to_string()),

@@ -132,6 +132,7 @@ pub(super) fn map_execution_detail(
         graph_edge_references,
         verification_state,
         verification_warnings,
+        semantic_verification,
         answer_disposition,
         clarification,
         query_ir: _,
@@ -150,6 +151,7 @@ pub(super) fn map_execution_detail(
         graph_edge_references,
         verification_state,
         verification_warnings,
+        semantic_verification,
         answer_disposition,
         clarification,
     });
@@ -168,6 +170,7 @@ pub(super) fn map_execution_detail(
         reference_summary: evidence.reference_summary,
         verification_state: evidence.verification_state,
         verification_warnings: evidence.verification_warnings,
+        semantic_verification: evidence.semantic_verification,
         answer_disposition: evidence.answer_disposition,
         clarification: evidence.clarification,
     }
@@ -186,6 +189,7 @@ pub(super) fn map_execution_detail_to_evidence(
         graph_edge_references: detail.graph_edge_references,
         verification_state: detail.verification_state,
         verification_warnings: detail.verification_warnings,
+        semantic_verification: detail.semantic_verification,
         answer_disposition: detail.answer_disposition,
         clarification: detail.clarification,
     }))
@@ -204,6 +208,8 @@ struct ExecutionEvidenceParts {
     graph_edge_references: Vec<QueryGraphEdgeReference>,
     verification_state: QueryVerificationState,
     verification_warnings: Vec<QueryVerificationWarning>,
+    semantic_verification:
+        Option<ironrag_contracts::assistant::semantic_verification::SemanticVerificationReport>,
     answer_disposition: crate::domains::query::QueryAnswerDisposition,
     clarification: QueryClarification,
 }
@@ -221,6 +227,7 @@ fn map_execution_evidence_parts(
         graph_edge_references,
         verification_state,
         verification_warnings,
+        semantic_verification,
         answer_disposition,
         clarification,
     } = parts;
@@ -243,6 +250,7 @@ fn map_execution_evidence_parts(
             .map(map_graph_edge_reference)
             .collect(),
         reference_summary: None,
+        semantic_verification,
         verification_state: map_verification_state(verification_state),
         verification_warnings: verification_warnings
             .into_iter()
@@ -294,6 +302,7 @@ pub(crate) fn map_turn_execution_response(
             .map(map_graph_edge_reference)
             .collect(),
         reference_summary: None,
+        semantic_verification: outcome.semantic_verification,
         verification_state: map_verification_state(outcome.verification_state),
         verification_warnings: outcome
             .verification_warnings

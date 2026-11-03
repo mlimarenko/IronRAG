@@ -12,14 +12,17 @@ use super::disposition::{
 use super::document_statement::finalize_deterministic_document_statement;
 use super::literal_coverage::{answer_generation_question, answer_question_for_disposition};
 use super::literal_revision::{
-    LiteralRevisionAttempt, LiteralRevisionPath, finalize_verified_answer,
-    revise_answer_literals_if_needed,
+    LiteralRevisionAttempt, LiteralRevisionPath, revise_answer_literals_if_needed,
 };
 use super::output_boundary::{
     enforce_hard_output_boundary, selected_runtime_answer_chunks,
     selected_runtime_grounding_evidence,
 };
-use super::preflight::{FastPathOutcome, PreflightAnswerCandidate, persist_llm_context_snapshot};
+use super::preflight::{
+    FastPathOutcome, PreflightAnswerCandidate, persist_failed_answer_snapshot,
+    persist_llm_context_snapshot,
+};
+use super::selected_answer::{SelectedAnswerContext, finish_selected_answer};
 use super::verification::verify_generated_answer;
 use super::{
     AnswerGenerationStage, AnswerKind, AppState, ChatMessage, PreparedAnswerQueryResult,
@@ -198,12 +201,14 @@ async fn try_pre_retrieval_clarification(
     finalize_typed_clarification_verification(
         state,
         execution_id,
+        request.effective_question,
         &visible_answer,
         &prepared.query_ir,
         &clarification,
     )
     .await?;
-    persist_llm_context_snapshot(state, context.snapshot_context.snapshot(&visible_answer)).await?;
+    persist_llm_context_snapshot(state, context.snapshot_context.snapshot(&visible_answer)?)
+        .await?;
     Ok(Some(RuntimeAnswerQueryResult { answer: visible_answer, provider_calls: Vec::new() }))
 }
 
@@ -311,7 +316,7 @@ async fn finish_single_shot_fast_path(
         },
     )
     .await?;
-    revise_answer_literals_if_needed(
+    let revision_result = revise_answer_literals_if_needed(
         LiteralRevisionAttempt {
             state,
             execution_context,
@@ -325,8 +330,12 @@ async fn finish_single_shot_fast_path(
         provider_calls,
         &mut single_debug,
     )
-    .await?;
-    verification_stage = finalize_verified_answer(state, execution_id, verification_stage).await?;
+    .await;
+    context.snapshot_context.record_iterations(single_debug)?;
+    if let Err(error) = revision_result {
+        persist_failed_answer_snapshot(state, context.snapshot_context).await;
+        return Err(error);
+    }
     let verify_elapsed_ms = verify_started.elapsed().as_millis();
 
     if single_shot_answer_is_acceptable(
@@ -341,26 +350,21 @@ async fn finish_single_shot_fast_path(
             verify_elapsed_ms,
             single_shot_start.elapsed().as_millis(),
         );
-        persist_llm_context_snapshot(
-            state,
-            context.snapshot_context.snapshot_with_iterations(
-                &verification_stage.generation.answer,
-                single_debug,
-                single.iterations,
-            ),
+        let selected = finish_selected_answer(
+            SelectedAnswerContext {
+                state,
+                execution: execution_context,
+                question: request.effective_question,
+                snapshot: context.snapshot_context,
+            },
+            verification_stage,
+            provider_calls,
         )
         .await?;
-        return Ok(SingleShotOutcome::Accepted(Box::new(RuntimeAnswerQueryResult {
-            answer: verification_stage.generation.answer,
-            provider_calls: std::mem::take(provider_calls),
-        })));
+        return Ok(SingleShotOutcome::Accepted(Box::new(selected)));
     }
     log_single_shot_rejected(execution_id);
-    Ok(SingleShotOutcome::Rejected(Some(Box::new(PreflightAnswerCandidate {
-        verification_stage,
-        debug_iterations: single_debug,
-        total_iterations: single.iterations,
-    }))))
+    Ok(SingleShotOutcome::Rejected(Some(Box::new(PreflightAnswerCandidate { verification_stage }))))
 }
 
 /// The preflight's deterministic override. The product's own statement about
@@ -386,11 +390,12 @@ async fn finish_preflight_override(
         finalize_deterministic_document_statement(
             state,
             execution_id,
+            request.effective_question,
             &override_answer,
             &prepared.query_ir,
         )
         .await?;
-        persist_llm_context_snapshot(state, answer.snapshot_context.snapshot(&override_answer))
+        persist_llm_context_snapshot(state, answer.snapshot_context.snapshot(&override_answer)?)
             .await?;
         return Ok(Some(RuntimeAnswerQueryResult {
             answer: override_answer,
@@ -420,17 +425,18 @@ async fn finish_preflight_override(
         },
     )
     .await?;
-    let verification_stage =
-        finalize_verified_answer(state, execution_id, verification_stage).await?;
-    persist_llm_context_snapshot(
-        state,
-        answer.snapshot_context.snapshot(&verification_stage.generation.answer),
+    finish_selected_answer(
+        SelectedAnswerContext {
+            state,
+            execution: request.execution_context,
+            question: request.effective_question,
+            snapshot: answer.snapshot_context,
+        },
+        verification_stage,
+        provider_calls,
     )
-    .await?;
-    Ok(Some(RuntimeAnswerQueryResult {
-        answer: verification_stage.generation.answer,
-        provider_calls: std::mem::take(provider_calls),
-    }))
+    .await
+    .map(Some)
 }
 
 pub(super) async fn generate_answer_query_after_binding(
@@ -460,12 +466,12 @@ pub(super) async fn generate_answer_query_after_binding(
         query_ir_requires_remediation_synthesis(&prepared.query_ir);
 
     if let Some(result) = try_deterministic_answer(
-        request.state,
-        request.effective_question,
+        &request,
         generation_question,
         &prepared,
         &snapshot_context,
         requires_remediation_synthesis,
+        provider_calls,
     )
     .await?
     {
@@ -568,12 +574,13 @@ async fn try_preflight_clarification(
     finalize_typed_clarification_verification(
         state,
         execution_id,
+        request.effective_question,
         &visible_answer,
         &prepared.query_ir,
         &clarification,
     )
     .await?;
-    persist_llm_context_snapshot(state, answer.snapshot_context.snapshot(&visible_answer)).await?;
+    persist_llm_context_snapshot(state, answer.snapshot_context.snapshot(&visible_answer)?).await?;
     Ok(Some(RuntimeAnswerQueryResult {
         answer: visible_answer,
         provider_calls: std::mem::take(provider_calls),

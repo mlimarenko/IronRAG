@@ -170,6 +170,23 @@ fn map_entity_extracts_valid_compact_fields() {
 }
 
 #[test]
+fn map_entity_preserves_malformed_metadata_defaults_and_state_precedence() {
+    for (metadata, expected_state) in [
+        (json!({}), "active"),
+        (json!({"sub_type": 7, "confidence": "0.75", "entity_state": false}), "active"),
+        (json!({"entity_state": null, "relation_state": "inactive"}), "inactive"),
+        (json!({"entity_state": "active", "relation_state": "inactive"}), "active"),
+    ] {
+        let row = runtime_node(Uuid::from_u128(2), "entity", json!(null), metadata);
+        let entity = map_entity(&row, 8);
+        assert_eq!(entity.entity_state, expected_state);
+        assert!(entity.entity_sub_type.is_none());
+        assert!(entity.confidence.is_none());
+        assert!(entity.aliases.is_empty());
+    }
+}
+
+#[test]
 fn runtime_only_documents_receive_ids_without_replacing_known_documents() {
     let known_document_id = Uuid::from_u128(1);
     let runtime_document_id = Uuid::from_u128(2);
@@ -315,20 +332,20 @@ fn runtime_node(
     node_type: &str,
     aliases_json: Value,
     metadata_json: Value,
-) -> RuntimeGraphNodeRow {
-    RuntimeGraphNodeRow {
+) -> RuntimeGraphTopologyNodeRow {
+    RuntimeGraphTopologyNodeRow {
         id,
-        library_id: Uuid::nil(),
         identity_key: format!("key-{}", id.as_u128()),
         label: format!("Label {}", id.as_u128()),
         node_type: node_type.into(),
         aliases_json,
         summary: Some("Summary".into()),
-        metadata_json,
+        document_id_json: metadata_json.get("document_id").cloned(),
+        sub_type_json: metadata_json.get("sub_type").cloned(),
+        confidence_json: metadata_json.get("confidence").cloned(),
+        entity_state_json: metadata_json.get("entity_state").cloned(),
+        relation_state_json: metadata_json.get("relation_state").cloned(),
         support_count: 1,
-        projection_version: 1,
-        created_at: Utc::now(),
-        updated_at: Utc::now(),
     }
 }
 

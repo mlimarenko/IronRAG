@@ -1,5 +1,125 @@
 use super::*;
 
+fn native_document_read_result(
+    content: &str,
+    start: usize,
+    total: usize,
+) -> crate::interfaces::http::mcp::McpToolResult {
+    let end = start + content.chars().count();
+    crate::interfaces::http::mcp::McpToolResult {
+        content: vec![crate::interfaces::http::mcp::McpContentBlock {
+            content_type: "text",
+            text: "Tool wrapper is not selected evidence".into(),
+        }],
+        structured_content: serde_json::json!({
+            "documentId":Uuid::from_u128(1), "documentTitle":"Selected native document",
+            "libraryId":Uuid::from_u128(2), "workspaceId":Uuid::from_u128(3),
+            "latestRevisionId":Uuid::from_u128(4), "readMode":"full", "readabilityState":"readable",
+            "readinessKind":"ready", "graphCoverageKind":"complete", "content":content,
+            "sliceStartOffset":start, "sliceEndOffset":end, "totalContentLength":total,
+            "hasMore":end < total, "sourceAccess":{"kind":"stored_document","href":"/documents/selected/source"}
+        }),
+        is_error: false,
+    }
+}
+
+#[test]
+fn native_document_read_identity_and_exact_text_survive_debug_compaction_and_replay() {
+    let text = "Условие: без подтверждения перезапуск запрещён.";
+    let mut result = native_document_read_result(text, 0, text.chars().count());
+    result.structured_content["diagnostic"] =
+        serde_json::json!("x".repeat(TOOL_DEBUG_RESULT_JSON_CHAR_LIMIT));
+    let reference =
+        native_document_read_reference(READ_DOCUMENT_TOOL_NAME, &result).expect("native reference");
+    assert_eq!(reference.document_id, Uuid::from_u128(1));
+    assert_eq!(reference.revision_id, Some(Uuid::from_u128(4)));
+    assert_eq!(reference.excerpt, text);
+    assert_eq!(reference.slice_start_offset, 0);
+    assert_eq!(reference.slice_end_offset, text.chars().count());
+    assert_eq!(
+        reference.source_access.as_ref().expect("source access").href,
+        "/documents/selected/source"
+    );
+    let compact = debug_tool_result_json(&result);
+    assert_eq!(compact["structuredContent"]["truncated"], true);
+    let mut outcome = super::test_support::synthetic_success_outcome();
+    outcome.document_reference = Some(Box::new(reference));
+    outcome.result_json = Some(compact);
+    let mut seen = BTreeMap::new();
+    record_effective_tool_payload_outcome(&mut seen, "effective".into(), "raw".into(), &outcome);
+    let entry = seen.remove("effective").expect("cached native result");
+    let EffectiveToolPayloadState::Completed(payload) = entry.state else {
+        panic!("completed payload")
+    };
+    let replay = replayed_tool_execution_outcome(*payload);
+    assert!(replay.is_replay);
+    let mut grounding = AssistantGroundingEvidence::default();
+    retain_document_read_reference(&mut grounding, outcome.document_reference.as_deref());
+    retain_document_read_reference(&mut grounding, replay.document_reference.as_deref());
+    assert_eq!(grounding.document_references.len(), 1);
+    assert_eq!(grounding.document_references[0].excerpt, text);
+    assert_eq!(grounding.document_references[0].rank, 1);
+}
+
+#[test]
+fn partial_native_document_read_retains_only_the_actual_character_slice() {
+    let text = "Условие";
+    let result = native_document_read_result(text, 13, 100);
+    let reference =
+        native_document_read_reference(READ_DOCUMENT_TOOL_NAME, &result).expect("selected slice");
+    assert_eq!(reference.slice_start_offset, 13);
+    assert_eq!(reference.slice_end_offset, 20);
+    assert_eq!(reference.excerpt, text);
+    assert_ne!(reference.slice_end_offset, 100);
+}
+
+#[test]
+fn failed_unversioned_malformed_or_wrapper_only_reads_cannot_supply_document_authority() {
+    let result = native_document_read_result("Read content", 0, 12);
+    assert!(native_document_read_reference("search_documents", &result).is_none());
+    let mut failed = native_document_read_result("Read content", 0, 12);
+    failed.is_error = true;
+    assert!(native_document_read_reference(READ_DOCUMENT_TOOL_NAME, &failed).is_none());
+    for (field, value) in [
+        ("latestRevisionId", serde_json::Value::Null),
+        ("sliceEndOffset", serde_json::json!(99)),
+        ("content", serde_json::Value::Null),
+        ("readabilityState", serde_json::json!("not_ready")),
+    ] {
+        let mut invalid = native_document_read_result("Read content", 0, 12);
+        invalid.structured_content[field] = value;
+        assert!(
+            native_document_read_reference(READ_DOCUMENT_TOOL_NAME, &invalid).is_none(),
+            "{field}"
+        );
+    }
+    let mut wrapper = native_document_read_result("Read content", 0, 12);
+    wrapper.structured_content = serde_json::Value::Null;
+    wrapper.content[0].text =
+        serde_json::to_string(&result.structured_content).expect("wrapper fixture");
+    assert!(native_document_read_reference(READ_DOCUMENT_TOOL_NAME, &wrapper).is_none());
+}
+
+#[test]
+fn passthrough_identity_comes_from_actual_execution_metadata_not_text_or_summary() {
+    let actual = Uuid::from_u128(22);
+    let unrelated = Uuid::from_u128(99);
+    let result = crate::interfaces::http::mcp::McpToolResult {
+        content: vec![crate::interfaces::http::mcp::McpContentBlock {
+            content_type: "text",
+            text: format!("{{\"executionId\":\"{unrelated}\"}}"),
+        }],
+        structured_content: super::test_support::with_test_completion_envelope(serde_json::json!({
+            "executionId":actual,"answerBody":"A child answer.","finalAnswerReady":true,"finalizable":true,"lifecycleState":"completed",
+            "clarification":{"required":false},"executionDetail":{"answerDisposition":"factual_ready","semanticVerification":{"projection":"summary","executionId":unrelated}}
+        })),
+        is_error: false,
+    };
+    let outcome = grounded_answer_typed_outcome(GROUNDED_ANSWER_TOOL_NAME, &result)
+        .expect("completed child outcome");
+    assert_eq!(outcome.source_execution_id, Some(actual));
+}
+
 #[test]
 fn tool_result_full_text_extracts_all_content_blocks() {
     let result = crate::interfaces::http::mcp::McpToolResult {
@@ -44,6 +164,7 @@ fn raw_result_text_is_never_remembered_as_an_answer() {
         result_text: Some(rendered_tool_text),
         result_json: None,
         grounding_text: None,
+        document_reference: None,
         grounded_answer_body: None,
         grounded_answer_outcome: None,
         grounded_answer_ready: true,
@@ -93,8 +214,10 @@ fn verified_grounded_answer_memory_prefers_structured_answer_body() {
             "isError": false
         })),
         grounding_text: None,
+        document_reference: None,
         grounded_answer_body: Some("Clean Alpha answer.".to_string()),
         grounded_answer_outcome: Some(AgentGroundedAnswerOutcome {
+            source_execution_id: None,
             disposition: QueryAnswerDisposition::FactualReady,
             clarification: QueryClarification::default(),
         }),

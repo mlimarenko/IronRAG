@@ -58,7 +58,8 @@ use crate::{
     interfaces::http::router_support::ApiError,
     services::{
         ai_catalog_service::ResolvedRuntimeBinding,
-        query::provider_billing::{QueryProviderCallReservation, QueryProviderExecutionContext},
+        ops::billing::provider_reservation::ProviderCallReservation,
+        query::provider_billing::QueryProviderExecutionContext,
     },
 };
 
@@ -195,7 +196,7 @@ impl QueryCompilerService {
         binding: &ResolvedRuntimeBinding,
         command: &CompileQueryCommand,
     ) -> Result<CompileQueryOutcome, ApiError> {
-        let mut provider_call = QueryProviderCallReservation::reserve(
+        let mut provider_call = ProviderCallReservation::reserve(
             state,
             command.execution_context,
             binding,
@@ -431,7 +432,7 @@ async fn store_compile_cache(
 
 /// Best-effort terminalization of a reservation whose provider call failed.
 /// A failure to terminalize does not replace the original provider error.
-async fn terminalize_failed_provider_call(provider_call: &mut QueryProviderCallReservation) {
+async fn terminalize_failed_provider_call(provider_call: &mut ProviderCallReservation) {
     if let Err(billing_error) = provider_call.fail().await {
         log_provider_call_fail_failure(provider_call.provider_call_id(), &billing_error);
     }

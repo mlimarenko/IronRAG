@@ -2,7 +2,7 @@
 
 [Overview](./README.md) | [IAM](./IAM.md) | [MCP](./MCP.md)
 
-Command-line tool for IronRAG admin operations. Connects directly to PostgreSQL.
+Command-line tool for IronRAG admin operations and local HTTP probes. Database-backed commands connect directly to PostgreSQL.
 
 ## Build
 
@@ -14,7 +14,8 @@ The binary is also included in the Docker image at `/usr/local/bin/ironrag-cli`.
 
 ## Configuration
 
-The CLI reads the same environment variables as the backend server. The required variable is `DATABASE_URL` (or the equivalent setting from the application config).
+Database-backed commands read the backend configuration, including `IRONRAG_DATABASE_URL`.
+The `version` and `probe` commands do not load runtime configuration or connect to PostgreSQL.
 
 ## Commands
 
@@ -25,6 +26,24 @@ ironrag-cli version
 ```
 
 Prints the CLI build version (matches the `ironrag-backend` crate version).
+
+### Probe local health or readiness
+
+```bash
+ironrag-cli probe --endpoint health
+ironrag-cli probe --endpoint ready --port 8080
+```
+
+The probe connects only to `127.0.0.1`. `health` selects `/v1/health` and is the
+default; `ready` selects `/v1/ready`. The default port is `8080`.
+
+Exit 0 requires a successful HTTP status and a complete response body of at most
+64 KiB within two seconds. Redirects, transport errors, invalid or oversized
+responses and timeouts return a nonzero exit code. Probes bypass proxies and
+do not print response bodies.
+
+The image healthcheck uses `health`; Compose API and worker checks use `ready`.
+Kubernetes keeps its HTTP probes. No database credentials are needed by this command.
 
 ### List users
 
@@ -143,13 +162,192 @@ Ships in the Docker image at `/usr/local/bin/ironrag-maintenance`.
 ## Configuration
 
 Reads the same environment variables as the backend server. The required
-database setting is `DATABASE_URL`.
+database setting is `IRONRAG_DATABASE_URL`.
 
 ## Schema rollout
 
-0.6.0 starts a fresh database from one baseline, `apps/api/migrations/0001_init.sql`. A 0.5.x database cannot be upgraded in place: recreate it and re-ingest the sources. SQLx verifies the applied baseline checksum at startup, so editing that file does not migrate a live database. `make migration-check` compares the source file with `scripts/ops/baseline-checksum.txt` and changes nothing.
+IronRAG starts a fresh database from one baseline,
+`apps/api/migrations/0001_init.sql`. A 0.5.x database cannot be upgraded in
+place to 0.6.0; recreate it and re-ingest sources. SQLx checks the checksum of
+an already applied baseline at startup, so editing that file does not migrate a
+live database. `make migration-check` checks the source file against
+`scripts/ops/baseline-checksum.txt`; it does not change a database.
 
-A reviewed operator transition on an existing database runs as `ironrag-maintenance migrate <transition>`. Without `--apply` it only previews its preconditions; run `--apply` after a backup and with the new binary in place. The command applies its own DDL and updates the recorded checksum. Never run its SQL body directly and never edit the checksum by hand. Steps that need `psql`, such as `scripts/ops/apply-knowledge-structured-block-fk-indexes.sql`, remain separate operator actions.
+For a later baseline change on an existing database, first establish its
+recorded schema revision and the exact predecessor required by the intended
+operator transition. Recreate the database when no reviewed transition covers
+it. The supported `ironrag-maintenance migrate <transition>` commands preview
+their own guarded hop without `--apply`; add `--apply` only after reviewing the
+preconditions, backups, new binary and release gates. Each command checks its
+predecessor objects, applies its own DDL and compare-and-sets the SQLx checksum
+for migration 1. Do not apply its SQL body directly or stamp the checksum by
+hand. Historical index steps that require `psql`, including
+`scripts/ops/apply-knowledge-structured-block-fk-indexes.sql`, are separate
+operator actions; the maintenance CLI does not execute them. Follow the
+predecessor and target instructions in the transition's SQL or implementation
+before running a later hop. For the manual FK-index step, verify all three
+index definitions, then use the SQL file's compare-and-set template with the
+independently verified predecessor and target SHA-384 values; require exactly
+one updated migration row.
+
+The revision-admission transition requires a reviewed import-admission
+certificate for every predecessor readable revision. Its dry run accepts the
+manifest, its independently reviewed raw SHA-256, the accepted recovery
+snapshot ID, source baseline SHA-384 and operator identity; only the same
+command with `--apply` changes the schema. Do not infer filenames or source
+identities from mutable document labels, and do not run this transition while
+old lifecycle writers are active. The JSON manifest contains
+`recoverySnapshotId`, `sourceBaselineSha384`, `admittedBy` and `revisions`.
+Each revision supplies its `revisionId`, `documentId`, `workspaceId`,
+`libraryId`, `storageKey` and a `replacement` with exact `checksum`,
+`byteSize`, `mimeType`, `fileName`, and explicit nullable `title`,
+`languageCode`, `sourceUri`, `documentHint`. `storageKey` is required but may
+be null. Every row also requires `sourceEvidence`:
+
+- `{"kind":"source_blob"}` requires the retained revision storage key and
+  verifies the actual source size and SHA-256.
+- `{"kind":"snapshot_revision","knowledgeRevisionPresent":true,
+  "normalizedTextSha256":"<lowercase SHA-256>","textChecksum":"<retained checksum>",
+  "textState":"text_readable","textReadableAt":"<retained RFC3339 timestamp>"}` binds the captured
+  knowledge row and actual normalized-text UTF-8 digest when original storage
+  is absent. These fields are explicit nullable values where retained metadata
+  is absent. With no knowledge row, use `knowledgeRevisionPresent:false` and
+  null for the other four fields. This preserves historical head metadata;
+  it does not invent a projection or verify unavailable original bytes.
+
+Both variants require the exact scope and replacement descriptor, explicit
+import filename, independently pinned snapshot and raw certificate hash.
+Missing or extra readable revisions are rejected. With no readable revisions,
+the certificate may be omitted.
+
+```bash
+ironrag-maintenance migrate content-visibility-intent-schema \
+  --import-admission-manifest /path/to/reviewed-admission.json \
+  --import-admission-sha256 '<reviewed raw certificate SHA-256>' \
+  --accepted-recovery-snapshot-id '<accepted snapshot ID>' \
+  --source-baseline-sha384 '<reviewed source baseline SHA-384>' \
+  --admitted-by '<reviewed operator identity>' --json
+```
+
+Review the dry-run result, then repeat the same command with `--apply` only
+after authorizing the coordinated rollout.
+
+### `migrate vision-recognition-schema`
+
+This guarded command replaces current Xberg raster policies with singleton
+Vision. It accepts only the exact frozen predecessor
+`eb822d7bf07c194659bf092841341e850995fc4b487486a2a112baeb59dc43d6a799afd3930f8e63e18a831ea3e4c4e8`.
+Earlier installations must complete their applicable native hops first, including
+the immutable `migrate xberg-recognition-schema` transition.
+
+Stop and drain API, workers, importers and maintenance writers for the binary
+switch. Preserve original source storage, publication/history, credentials, vectors
+and existing archives. No reset, manual ledger edit or additional backup/restore
+campaign is part of this transition.
+
+```bash
+ironrag-maintenance migrate vision-recognition-schema --json
+# After reviewing the dry-run report and authorizing this window:
+ironrag-maintenance migrate vision-recognition-schema --apply --json
+```
+
+Both modes use the shared advisory lock, five-second lock timeout and exact
+predecessor certificate. Only the catalog library owner is locked. User UPDATE
+triggers that can fire for the policy update, rules and inheritance are refused.
+A per-row certificate allows only the exact `xberg` to `vision` policy substitution;
+other library fields, including timestamps, must remain unchanged. Apply checks
+the changed-row count, validates the singleton constraint/default and CAS-stamps
+the baseline in one transaction. The JSON remains `{"rasterImageEngine":"vision"}`.
+Existing Vision rows are not updated; `policiesChanged` is zero when all policies
+already use Vision. Historical extraction provenance is never rewritten.
+
+Dry-run rolls back without persistent writes. Unknown revisions, malformed
+policies, partial/pre-applied constraints and unexpected UPDATE effects refuse
+without stamping. A current rerun validates readiness and reports
+`alreadyCurrent`. Never bypass a refusal by resetting data or editing SQLx checksums.
+`IRONRAG_RECOGNITION_DEFAULT_RASTER_IMAGE_ENGINE` accepts only `vision`.
+
+Snapshot writer and reader accept schema 6 only. Preserve schema-5 and older
+archives unchanged, even when their current policies already use Vision. Restore
+an older archive in isolation with its immutable creator runtime, run applicable
+guarded native baseline transitions including `vision-recognition-schema`, then
+export schema 6 with the current runtime. Do not modify an archive version field
+or point the creator runtime at the current deployment. The reader does not
+convert archives or silently substitute a current Xberg policy.
+
+An unchanged-schema patch does not require replaying an already completed schema
+hop. Retire a stale marker through reviewed source changes only after read-only
+evidence establishes all of the following for the intended deployment:
+
+- The database has exactly the successful migration history and SHA-384 baseline
+  required by the candidate, with no dirty, missing or extra migration rows.
+- Native schema validation passes the candidate's required object groups,
+  including its canonical object-definition certificate. Source equality or a
+  recorded checksum alone is insufficient. Existing API/worker readiness can be
+  reused only when their deployed schema-validation contract is identical to the
+  candidate's; otherwise obtain native validation for the candidate itself.
+- Both API and worker report ready with successful startup authority, and the
+  observed images, source revisions and schema evidence identify the same target.
+
+Record that evidence with the source review. Keep the checker fail-closed for any
+future marker; do not add an ignore flag or bypass release provenance. Current
+schema compatibility does not establish who authorized historical data changes
+or retroactively approve their effects. A real transition still requires its
+reviewed predecessor/target, coordinated writers, owned backup, isolated restore
+and rehearsal. Historical snapshot admission, reclassification or withdrawal
+requires a separate explicit decision; retiring a stale marker grants none of
+those permissions.
+
+### `migrate billing-document-read-schema`
+
+Adds native `read_document` provider-call attribution to the existing billing
+ledger. The exact predecessor is the Vision baseline
+`52d2734052d7ebbbfa4a239935387d385cc0a6c89c85f7ed06ad39e7e3502351df7083b3b9cd82a478c17ac61e653215`.
+Earlier installations must complete their applicable guarded transitions first.
+
+```bash
+ironrag-maintenance migrate billing-document-read-schema --json
+# Only after reviewing the dry run and authorizing the runtime cutover:
+ironrag-maintenance migrate billing-document-read-schema --apply --json
+```
+
+Stop and drain API, workers and maintenance writers before replacing the runtime.
+This hop adds an enum value, an attribution table and its tenant-scope index. It
+does not update existing calls, usage, charges, credentials or source revisions.
+Document/revision IDs survive revision-byte retention; the composite library and
+workspace FK enforces tenant scope and cascades attribution on library deletion.
+
+The shared transaction validates predecessor objects and refuses even partial
+pre-applied DDL. It creates and certifies the columns, keys and index before the
+checksum CAS. Dry-run makes no persistent writes. Unknown checksums, pre-applied
+DDL and damaged current certificates refuse without a stamp. Reruns at the
+current revision validate its objects and return `alreadyCurrent`. Do not bypass
+a refusal by resetting the database or editing the SQLx ledger. Availability of
+this command does not authorize applying it to an existing installation.
+
+### `migrate billing-knowledge-search-schema`
+
+Adds a durable standalone knowledge-search owner to the existing billing ledger.
+It stores workspace/library attribution and creation time, not raw search text
+or fabricated query/runtime IDs. The exact predecessor is the native document-read
+baseline `464d53698e9b4a52de78c3972e387aa69d35a4f0ebd63c8381f97cfe3b1a35faff1638daa2cd70e2007c172b5d317984`.
+Complete all earlier applicable guarded hops first.
+
+```bash
+ironrag-maintenance migrate billing-knowledge-search-schema --json
+# Only after reviewing the dry run and authorizing the runtime cutover:
+ironrag-maintenance migrate billing-knowledge-search-schema --apply --json
+```
+
+Stop and drain API, workers and maintenance writers before replacing the runtime.
+This additive hop preserves existing calls, usage, charges, document-read owners
+and source history. Its library/workspace FK enforces scope and cascades search
+attribution on library deletion. Exact column/PK, enum, FK and index certificates
+gate the checksum CAS. Dry-run rolls back without persistent writes; unknown
+checksums, partial/pre-applied DDL and current object drift refuse without a stamp.
+Historical command reruns validate the recorded revision's current certificates,
+not an obsolete predecessor enum. Never reset data or edit the SQLx ledger to
+bypass refusal. Command availability does not authorize a live transition.
 
 ## `audit` — read-only inspection
 
@@ -438,16 +636,26 @@ restores the projection to `active` with a NULL `deleted_at`.
 **Limits.** Does not change content, heads, readiness or chunks; does not insert
 missing projections or purge orphans. No provider calls or scheduled backfill.
 Apply holds the existing library lifecycle lock and advances source-truth
-generation only when rows change. `--dry-run` counts eligible drift without writing;
-an unchanged rerun reports zero updated rows.
+generation only when rows change. `--dry-run --json` reports exact document and
+revision IDs, changed column names and a SHA-256 plan digest without writing.
+The digest binds the complete before/source metadata; raw metadata values are
+not printed. The report's `dry_run` distinguishes a preview from an applied plan.
+
+Apply requires one `--library` and the reviewed `plans[].sha256` as
+`--expected-plan`. It rechecks that plan under row locks in a repeatable-read
+transaction and writes only the approved IDs. Changed values, membership or a
+concurrent lifecycle change cause refusal, not an automatic retry. Obtain and
+review a fresh preview after refusal. A fresh empty plan applies as a no-op;
+reusing the pre-repair digest does not authorize another cohort.
 
 ```bash
 ironrag-maintenance repair knowledge-projection-metadata --library <uuid> --dry-run --json
-ironrag-maintenance repair knowledge-projection-metadata --library <uuid> --json
+ironrag-maintenance repair knowledge-projection-metadata --library <uuid> --expected-plan <reviewed-sha256> --json
 ironrag-maintenance repair knowledge-projection-metadata --library <uuid> --dry-run --json
 ```
 
-Omit `--library` to reconcile every library.
+Omit `--library` only for a read-only preview of every library. Unscoped apply is
+not permitted.
 
 ---
 

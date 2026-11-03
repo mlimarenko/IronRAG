@@ -44,6 +44,7 @@ use ironrag_backend::{
     infra::repositories::{catalog_repository, webhook_repository},
     services::maintenance::{
         admission_visibility_policy_schema, ai_binding_purpose_schema,
+        billing_document_read_schema, billing_knowledge_search_schema,
         content_visibility_intent_schema,
         credential_secrets::{self, CredentialSecretMigrationOptions},
         decision_catalog_schema,
@@ -54,13 +55,14 @@ use ironrag_backend::{
         },
         ops_failure_disposition_schema, orphan_knowledge_documents, rebuild as maintenance_rebuild,
         repair as maintenance_repair, retention as maintenance_retention, service_identity_schema,
-        vector_orphan_reconcile,
+        vector_orphan_reconcile, vision_recognition_schema,
         webhook_outbox_ops::{
             self, MAX_WEBHOOK_LIFECYCLE_OUTBOX_AUDIT_LIMIT,
             MAX_WEBHOOK_LIFECYCLE_OUTBOX_RESOLUTION_REASON_CODE_BYTES,
             WebhookLifecycleOutboxAuditCursor, WebhookLifecycleOutboxAuditOptions,
             WebhookLifecycleOutboxDispatchState,
         },
+        xberg_recognition_schema,
     },
 };
 use serde::Serialize;
@@ -235,12 +237,15 @@ enum RepairCommand {
     /// Restores projected lifecycle without changing source, heads, readiness
     /// or chunk text. Idempotent; does not recreate missing projections.
     KnowledgeProjectionMetadata {
-        /// Restrict to one library. Default: every library.
+        /// Library to inspect. Required when applying an approved plan.
         #[arg(long)]
         library: Option<Uuid>,
-        /// Count rows that would be updated without writing.
-        #[arg(long)]
+        /// Preview exact row IDs, fields and a plan digest without writing.
+        #[arg(long, conflicts_with = "expected_plan")]
         dry_run: bool,
+        /// SHA-256 from the reviewed preview; stale plans refuse before writing.
+        #[arg(long, requires = "library", required_unless_present = "dry_run")]
+        expected_plan: Option<String>,
         /// Emit JSON instead of a human-readable summary.
         #[arg(long)]
         json: bool,
@@ -396,6 +401,36 @@ enum RepairCommand {
 
 #[derive(Subcommand)]
 enum MigrateCommand {
+    /// Add standalone knowledge-search billing attribution. Dry-run unless --apply is given.
+    BillingKnowledgeSearchSchema {
+        #[arg(long)]
+        apply: bool,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Add native document-read billing attribution. Dry-run unless --apply is given.
+    BillingDocumentReadSchema {
+        #[arg(long)]
+        apply: bool,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Require Vision for current raster policies without changing extraction history.
+    /// Without `--apply`, validate the exact predecessor and roll back.
+    VisionRecognitionSchema {
+        #[arg(long)]
+        apply: bool,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Replace current Docling raster policies with Xberg under preservation locks.
+    /// Without `--apply`, validate the exact predecessor without persistent writes.
+    XbergRecognitionSchema {
+        #[arg(long)]
+        apply: bool,
+        #[arg(long)]
+        json: bool,
+    },
     /// Apply the additive live schema required by integration provisioning.
     /// Without `--apply`, reports whether the database still needs the upgrade.
     IntegrationProvisioningSchema {
@@ -519,6 +554,12 @@ enum RebuildCommand {
         /// Restrict to one library. Default: every library.
         #[arg(long)]
         library: Option<Uuid>,
+        /// Defer lifecycle writes for this library until rebuild commit or rollback.
+        #[arg(long, requires_all = ["library", "fence_deadline"])]
+        fence_writers: bool,
+        /// Required future absolute UTC cutoff for the writer fence.
+        #[arg(long, requires = "fence_writers")]
+        fence_deadline: Option<chrono::DateTime<chrono::Utc>>,
     },
     /// Re-embed every entity node in the library into the per-dim
     /// `knowledge_entity_vector_d*` PostgreSQL relations.
@@ -623,6 +664,38 @@ fn parse_webhook_outbox_resolution_reason_code(value: &str) -> Result<String, St
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
+    let deadline = match &cli.command {
+        Command::Rebuild(RebuildCommand::RuntimeGraph {
+            fence_writers: true,
+            fence_deadline: Some(deadline),
+            ..
+        }) => {
+            let remaining = (*deadline - chrono::Utc::now())
+                .to_std()
+                .context("writer fence deadline must be in the future")?;
+            if remaining.is_zero() {
+                bail!("writer fence deadline must be in the future");
+            }
+            if remaining.as_millis() > i32::MAX as u128 {
+                bail!("writer fence deadline exceeds PostgreSQL timeout range");
+            }
+            Some(
+                tokio::time::Instant::now()
+                    .checked_add(remaining)
+                    .context("writer fence deadline cannot be represented by the runtime clock")?,
+            )
+        }
+        _ => None,
+    };
+    if let Some(deadline) = deadline {
+        return tokio::time::timeout_at(deadline, run(cli))
+            .await
+            .context("writer fence deadline expired; rebuild cancelled")?;
+    }
+    run(cli).await
+}
+
+async fn run(cli: Cli) -> Result<()> {
     let settings = Settings::from_env().context("load settings from env")?;
     let state = AppState::new(settings).await.context("init application state")?;
     let deployment_id =

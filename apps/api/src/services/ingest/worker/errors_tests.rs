@@ -156,7 +156,7 @@ fn extraction_failures_keep_their_own_retry_decision() {
         "extractor timed out",
     ));
     let worker_terminal = anyhow::Error::new(ContentExtractionError::extraction_failed_terminal(
-        "docling_process_oom",
+        "xberg_process_oom",
         "document did not fit the extraction worker's memory budget",
     ));
 
@@ -169,7 +169,7 @@ fn extraction_failures_keep_their_own_retry_decision() {
     assert!(retryable.is_retryable());
 
     assert_eq!(worker_terminal.failure_class, "content_extract");
-    assert_eq!(worker_terminal.failure_code, "docling_process_oom");
+    assert_eq!(worker_terminal.failure_code, "xberg_process_oom");
     // A terminal extraction fault caused by worker resources is operational;
     // only a rejected content admission is `content_unsupported`.
     assert_eq!(worker_terminal.failure_disposition, OpsFailureDisposition::OperationalTerminal);
@@ -262,7 +262,7 @@ fn malformed_local_bytes_are_the_content_unsupported_outcome() {
 
 #[test]
 fn operational_extraction_rejection_is_retryable_not_content_unsupported() {
-    // A docling timeout is operational: the same payload may extract on retry.
+    // A xberg timeout is operational: the same payload may extract on retry.
     let rejection = UploadAdmissionError::from_file_extract_error(
         "manual.pdf",
         Some("application/pdf"),
@@ -270,7 +270,7 @@ fn operational_extraction_rejection_is_retryable_not_content_unsupported() {
         &FileExtractError::ExtractionFailed {
             file_kind: UploadFileKind::Pdf,
             class: ExtractionFailureClass::OperationalRetryable,
-            message: "docling extraction timed out".to_string(),
+            message: "xberg extraction timed out".to_string(),
         },
     );
     let error = anyhow::Error::new(ContentExtractionError::from_upload_rejection(&rejection));
@@ -291,7 +291,7 @@ fn terminal_extractor_fault_is_operational_not_content_unsupported() {
         &FileExtractError::ExtractionFailed {
             file_kind: UploadFileKind::Pdf,
             class: ExtractionFailureClass::OperationalTerminal,
-            message: "docling returned invalid output".to_string(),
+            message: "xberg returned invalid output".to_string(),
         },
     );
     let error = anyhow::Error::new(ContentExtractionError::from_upload_rejection(&rejection));

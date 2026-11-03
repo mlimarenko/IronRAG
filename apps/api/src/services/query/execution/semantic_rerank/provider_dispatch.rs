@@ -320,7 +320,7 @@ fn systemone_request(
 /// request too. Dropping only the tail keeps opaque indices contiguous, exactly
 /// as the chat preparation does. Returns `None` when even a single candidate
 /// cannot be represented.
-fn build_systemone_decision_request(
+pub(super) fn build_systemone_decision_request(
     binding: &ResolvedRuntimeBinding,
     prepared: &PreparedSemanticRerankRequest,
     levels: &[String],

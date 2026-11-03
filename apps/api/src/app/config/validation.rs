@@ -367,7 +367,7 @@ pub(super) fn validate_login_rate_limit_settings(settings: &Settings) -> Result<
 pub(super) fn validate_recognition_settings(settings: &Settings) -> Result<(), String> {
     let engine = settings
         .recognition_default_raster_image_engine
-        .parse::<RecognitionEngine>()
+        .parse::<RasterImageEngine>()
         .map_err(|error| format!("recognition_default_raster_image_engine: {error}"))?;
     let policy = LibraryRecognitionPolicy { raster_image_engine: engine };
     policy.validate().map_err(|error| format!("recognition_default_raster_image_engine: {error}"))

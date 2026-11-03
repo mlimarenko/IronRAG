@@ -47,7 +47,16 @@ pub async fn vector_plane(state: &AppState, source_library_id: Uuid) -> anyhow::
 /// Batch mode tolerates `StateConflict` errors per-library (graph source
 /// material inconsistent) and surfaces a non-zero exit at the end so an
 /// operator script can detect partial completion without log grep.
-pub async fn runtime_graph(state: &AppState, library_filter: Option<Uuid>) -> anyhow::Result<()> {
+/// Coverage refusal never admits graph re-extraction jobs.
+pub async fn runtime_graph(
+    state: &AppState,
+    library_filter: Option<Uuid>,
+    fence_deadline: Option<chrono::DateTime<chrono::Utc>>,
+) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        fence_deadline.is_none() || library_filter.is_some(),
+        "writer fence requires one library"
+    );
     let batch_mode = library_filter.is_none();
     let mut libraries =
         catalog_repository::list_libraries(&state.persistence.postgres, None).await?;
@@ -61,7 +70,7 @@ pub async fn runtime_graph(state: &AppState, library_filter: Option<Uuid>) -> an
     let mut conflict_count = 0usize;
     for library in libraries {
         log_rebuilding_runtime_graph(&library);
-        match rebuild_one_library_graph(state, &library).await {
+        match rebuild_one_library_graph(state, &library, fence_deadline).await {
             Ok(()) => {}
             Err(GraphServiceError::StateConflict { message }) if batch_mode => {
                 conflict_count = conflict_count.saturating_add(1);
@@ -87,8 +96,23 @@ pub async fn runtime_graph(state: &AppState, library_filter: Option<Uuid>) -> an
 async fn rebuild_one_library_graph(
     state: &AppState,
     library: &catalog_repository::CatalogLibraryRow,
+    fence_deadline: Option<chrono::DateTime<chrono::Utc>>,
 ) -> Result<(), GraphServiceError> {
-    let outcome = state.application_services.graph.rebuild_library_graph(state, library.id).await?;
+    let outcome = state
+        .application_services
+        .graph
+        .rebuild_library_graph(
+            state,
+            library.id,
+            if let Some(deadline) = fence_deadline {
+                crate::services::graph::service::GraphRebuildRecovery::DerivedOnlyWithWriterFence {
+                    deadline,
+                }
+            } else {
+                crate::services::graph::service::GraphRebuildRecovery::DerivedOnly
+            },
+        )
+        .await?;
     log_runtime_graph_rebuild_completed(library.id, &outcome);
     Ok(())
 }

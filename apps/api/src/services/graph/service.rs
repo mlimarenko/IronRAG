@@ -98,6 +98,17 @@ impl GraphRebuildOutcome {
 #[derive(Clone, Default)]
 pub struct GraphService;
 
+/// Controls whether a rejected rebuild may admit graph re-extraction jobs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GraphRebuildRecovery {
+    /// Rebuild solely from stored, current source material.
+    DerivedOnly,
+    /// Operator-admitted derived-only rebuild that defers library lifecycle writers.
+    DerivedOnlyWithWriterFence { deadline: chrono::DateTime<chrono::Utc> },
+    /// Admit bounded re-extraction when coverage prevents publication.
+    AdmitReextraction,
+}
+
 /// Graph reconcile result coupled to the still-held ingest authority guard.
 /// Callers must consume `publication_guard` in the matching lifecycle
 /// publication, including when `outcome` is a degraded graph error.
@@ -443,12 +454,14 @@ impl GraphService {
         crate::services::graph::projection::project_normalized_graph(state, scope).await
     }
 
+    /// Rebuilds the graph from stored inputs using the caller's recovery policy.
     pub async fn rebuild_library_graph(
         &self,
         state: &AppState,
         library_id: Uuid,
+        recovery: GraphRebuildRecovery,
     ) -> Result<GraphProjectionOutcome, GraphServiceError> {
-        crate::services::graph::rebuild::rebuild_library_graph(state, library_id).await
+        crate::services::graph::rebuild::rebuild_library_graph(state, library_id, recovery).await
     }
 
     pub async fn reconcile_revision_graph(
@@ -513,7 +526,7 @@ impl GraphService {
         let reconcile_state = state.clone();
         let reconcile_cancellation_token = cancellation_token.clone();
         let outcome = publication_guard
-            .run_graph_savepoint(move |connection| {
+            .run_graph_savepoint(deadline, move |connection| {
                 Box::pin(async move {
                     match tokio::time::timeout(
                         remaining,

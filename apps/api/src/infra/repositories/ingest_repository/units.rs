@@ -183,6 +183,7 @@ where
             started_at = coalesce(content_revision_ingest_unit.started_at, excluded.started_at),
             completed_at = now(),
             updated_at = now()
+        where content_revision_ingest_unit.unit_state <> 'completed'
         returning
             revision_id,
             stage_name,
@@ -302,7 +303,8 @@ where
 }
 
 /// Unconditional operator/test read across attempts. Production reads must use
-/// the fenced variant, which returns only units owned by the current attempt.
+/// the fenced variant, which validates authority but reads across attempts so
+/// a completed historical primary key cannot be hidden and then overwritten.
 pub async fn list_content_revision_ingest_units_unfenced(
     postgres: &PgPool,
     revision_id: Uuid,
@@ -325,7 +327,7 @@ pub async fn list_content_revision_ingest_units_fenced(
         &mut *transaction,
         authority.revision_id,
         stage_name,
-        Some(authority.attempt_id),
+        None,
     )
     .await?;
     transaction.commit().await?;
@@ -337,6 +339,7 @@ async fn sum_completed_content_revision_ingest_unit_pages_with_executor<'e, E>(
     revision_id: Uuid,
     stage_name: &str,
     attempt_id: Option<Uuid>,
+    identity: &Value,
 ) -> Result<i64, sqlx::Error>
 where
     E: Executor<'e, Database = Postgres>,
@@ -351,11 +354,16 @@ where
            and content_text is not null
            and content_checksum =
                'sha256:' || encode(digest(content_text, 'sha256'), 'hex')
-           and ($3::uuid is null or attempt_id = $3)",
+            and ($3::uuid is null or attempt_id = $3)
+            and details_json -> 'extractionIdentity' = $4
+            and source_map_json -> 'extraction_identity' = $4
+            and range_start = (unit_ordinal - 1) * ($4 ->> 'page_batch_size')::integer + 1
+            and range_end = least(unit_ordinal * ($4 ->> 'page_batch_size')::integer, ($4 ->> 'source_unit_count')::integer)",
     )
     .bind(revision_id)
     .bind(stage_name)
     .bind(attempt_id)
+    .bind(identity)
     .fetch_one(executor)
     .await
 }
@@ -364,6 +372,7 @@ pub async fn sum_completed_content_revision_ingest_unit_pages_fenced(
     postgres: &PgPool,
     authority: IngestRevisionWriteAuthority,
     stage_name: &str,
+    identity: &Value,
 ) -> Result<IngestAttemptMutationOutcome<i64>, sqlx::Error> {
     let mut transaction = postgres.begin().await?;
     if !lock_ingest_unit_write_authority(&mut transaction, authority).await? {
@@ -374,7 +383,8 @@ pub async fn sum_completed_content_revision_ingest_unit_pages_fenced(
         &mut *transaction,
         authority.revision_id,
         stage_name,
-        Some(authority.attempt_id),
+        None,
+        identity,
     )
     .await?;
     transaction.commit().await?;
@@ -386,6 +396,7 @@ async fn get_content_revision_ingest_unit_page_progress_with_executor<'e, E>(
     revision_id: Uuid,
     stage_name: &str,
     attempt_id: Option<Uuid>,
+    identity: &Value,
 ) -> Result<ContentRevisionIngestUnitPageProgress, sqlx::Error>
 where
     E: Executor<'e, Database = Postgres>,
@@ -402,22 +413,21 @@ where
                     ),
                 0
             )::bigint as completed_page_count,
-            max(
-                case
-                    when details_json ->> 'pageCount' ~ '^[0-9]+$'
-                    then (details_json ->> 'pageCount')::bigint
-                    else null
-                end
-            ) as total_page_count
+            max(($4 ->> 'source_unit_count')::bigint) as total_page_count
          from content_revision_ingest_unit
          where revision_id = $1
            and stage_name = $2
            and unit_kind = 'pdf_page_range'
-           and ($3::uuid is null or attempt_id = $3)",
+            and ($3::uuid is null or attempt_id = $3)
+            and details_json -> 'extractionIdentity' = $4
+            and source_map_json -> 'extraction_identity' = $4
+            and range_start = (unit_ordinal - 1) * ($4 ->> 'page_batch_size')::integer + 1
+            and range_end = least(unit_ordinal * ($4 ->> 'page_batch_size')::integer, ($4 ->> 'source_unit_count')::integer)",
     )
     .bind(revision_id)
     .bind(stage_name)
     .bind(attempt_id)
+    .bind(identity)
     .fetch_one(executor)
     .await
 }
@@ -426,6 +436,7 @@ pub async fn get_content_revision_ingest_unit_page_progress_fenced(
     postgres: &PgPool,
     authority: IngestRevisionWriteAuthority,
     stage_name: &str,
+    identity: &Value,
 ) -> Result<IngestAttemptMutationOutcome<ContentRevisionIngestUnitPageProgress>, sqlx::Error> {
     let mut transaction = postgres.begin().await?;
     if !lock_ingest_unit_write_authority(&mut transaction, authority).await? {
@@ -436,7 +447,8 @@ pub async fn get_content_revision_ingest_unit_page_progress_fenced(
         &mut *transaction,
         authority.revision_id,
         stage_name,
-        Some(authority.attempt_id),
+        None,
+        identity,
     )
     .await?;
     transaction.commit().await?;

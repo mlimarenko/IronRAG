@@ -225,6 +225,7 @@ fn replayed_outcome_is_flagged_as_replay() {
         result_text: Some("cached".to_string()),
         result_json: None,
         grounding_text: None,
+        document_reference: None,
         grounded_answer_body: None,
         grounded_answer_outcome: None,
         grounded_answer_ready: false,
@@ -315,8 +316,10 @@ fn completed_effective_tool_payload_tracking_is_turn_scoped() {
                 result_text: Some("cached body".to_string()),
                 result_json: None,
                 grounding_text: None,
+                document_reference: None,
                 grounded_answer_body: Some("cached body".to_string()),
                 grounded_answer_outcome: Some(AgentGroundedAnswerOutcome {
+                    source_execution_id: None,
                     disposition: QueryAnswerDisposition::FactualReady,
                     clarification: QueryClarification::default(),
                 }),

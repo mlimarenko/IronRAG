@@ -73,6 +73,24 @@ JSON-RPC поверхность намеренно маленькая: `initiali
 
 Response структура: текст tool-result содержит ответ. Дефолтный профиль `compact` возвращает ограниченные references и warnings, typed verifier/readiness/completion state, repair policy и trace identifiers без дублирования диагностического execution-объекта. Запрашивайте `responseProfile: "full"` только когда операционному клиенту действительно нужен `executionDetail` с chunk, prepared-segment, technical-fact, graph-entity, graph-relation, runtime, request и response полями. Верхнеуровневые `runtimeExecutionId`, `executionId` и `conversationId` остаются короткими ссылками для trace lookup в обоих профилях. Встроенный UI-ассистент сам является tool-using агентом над этим MCP answer surface: он может вызвать `grounded_answer`, инспектировать raw search/read tools или ответить напрямую, когда lookup по библиотеке не нужен. Внешние MCP-клиенты получают тот же словарь инструментов, те же схемы и тот же контракт результата `grounded_answer`.
 
+Если семантический report сохранён, профиль `full` возвращает его в
+`executionDetail.semanticVerification`. Report привязан к точному вопросу,
+проверенному кандидату и разрешённому evidence manifest. `visibleAnswerSha256`
+обозначает итоговый видимый текст: если он отличается от `checkedAnswerSha256`,
+выводы относятся к кандидату, а не к заменившему его fallback. Выполнение проверки,
+подтверждение утверждений, полнота и классификация отказа не равны готовности
+ответа. Failed/not-run не подтверждает смысл ответа; корректное воздержание в
+границах источника не подтверждает отсутствующий запрошенный факт. Историческим
+executions без report не приписывается выдуманный результат.
+
+Компактный `semanticVerification` явно помечен `projection: "summary"`. Он
+сохраняет точные identity hashes и общие исходы, возвращает не более восьми
+unit/caveat findings и запрошенное ограниченное число sources. Total counts и
+truncation указаны отдельно. Source text и evidence quotes не включены;
+сокращённый текст findings помечается. Это не канонический report и не основание
+для повторного использования verdict. Точный проверенный текст и валидированные
+цитаты доступны в разрешённом full execution detail.
+
 ### Обнаружение
 
 | Инструмент | Описание | Обязательные параметры |
@@ -95,6 +113,14 @@ Response структура: текст tool-result содержит ответ.
 | `read_document` | Прочитать документ полностью или фрагментом. | `documentId` |
 | `view_document_image` | Получить оригинальные байты изображения (PNG/JPEG/и т.п.) документа-вложения, чтобы мультимодальная модель могла его увидеть напрямую. Показывается только когда активный Agent binding указывает на мультимодальную модель. | `documentId` |
 | `list_documents` | Список документов в библиотеке с фильтрацией по статусу. | `library` (опц.) |
+
+`read_document.content` содержит точный фрагмент канонического текста
+опубликованной revision. `sliceStartOffset`, `sliceEndOffset` и
+`totalContentLength` считают Unicode-символы в том же тексте, включая пробелы и
+переносы строк. Описание изображения остаётся в отдельном поле
+`visualDescription` и не меняет координаты документа. `mode: "full"` означает
+полное чтение только при начале окна с нуля, конце на полной длине и отсутствии
+продолжения.
 
 ### Мутации только diagnostics surface
 

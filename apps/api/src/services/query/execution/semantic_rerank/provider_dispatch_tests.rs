@@ -168,6 +168,7 @@ impl LlmGateway for RecordingGateway {
     async fn generate(&self, mut request: ChatRequest) -> anyhow::Result<ChatResponse> {
         *self.chats.lock().expect("chat counter") += 1;
         Ok(ChatResponse {
+            completion_status: crate::integrations::llm::ChatCompletionStatus::Complete,
             provider_kind: std::mem::take(&mut request.provider_kind),
             model_name: std::mem::take(&mut request.model_name),
             output_text: serde_json::json!({"scores": [{"index": 0, "score": 0.9}]}).to_string(),

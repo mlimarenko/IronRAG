@@ -13,6 +13,9 @@ use crate::{
     services::ingest::cancellation::{StageError, ensure_not_cancelled},
     shared::extraction::{
         structured_document::{StructuredBlockData, StructuredBlockKind},
+        table_markdown::{
+            split_semantic_key_value, split_semantic_segments, unescape_semantic_segment,
+        },
         table_summary::is_table_summary_text,
         technical_facts::{
             TechnicalFactConflict, TechnicalFactKind, TechnicalFactQualifier, TechnicalFactValue,
@@ -277,26 +280,41 @@ fn preferred_table_row_text(block: &StructuredBlockData) -> String {
     if normalized_text.is_empty() {
         return block.text.clone();
     }
-    if !normalized_text.starts_with("Sheet: ") && !normalized_text.contains(" | Row ") {
+    if !normalized_text.starts_with("Sheet: ")
+        && !normalized_text.starts_with("Table: ")
+        && !normalized_text.starts_with("Row ")
+        && !normalized_text.contains(" | Row ")
+    {
         return block.text.clone();
     }
-    let segments = normalized_text
-        .split(" | ")
-        .map(str::trim)
-        .filter(|segment| !segment.is_empty())
-        .filter(|segment| {
-            !segment.starts_with("Sheet: ")
-                && !segment.starts_with("Table: ")
-                && !segment.starts_with("Row ")
-        })
-        .collect::<Vec<_>>();
-    if !table_row_has_formal_technical_signal(&segments) {
+    let mut pairs = Vec::<(String, String)>::new();
+    let mut seen_row = false;
+    for segment in split_semantic_segments(normalized_text) {
+        let trimmed = segment.trim();
+        if trimmed.strip_prefix("Row ").is_some_and(|value| value.parse::<usize>().is_ok()) {
+            seen_row = true;
+            continue;
+        }
+        if !seen_row || trimmed.is_empty() {
+            continue;
+        }
+        let Some((key, value)) = split_semantic_key_value(trimmed) else {
+            continue;
+        };
+        let key = unescape_semantic_segment(key.trim());
+        let value = unescape_semantic_segment(value.trim());
+        if value.is_empty() {
+            continue;
+        }
+        pairs.push((key, value));
+    }
+    if !table_row_has_formal_technical_signal(&pairs) {
         return String::new();
     }
-    segments.join(" | ")
+    pairs.iter().map(|(key, value)| format!("{key}: {value}")).collect::<Vec<_>>().join(" | ")
 }
 
-fn table_row_has_formal_technical_signal(segments: &[&str]) -> bool {
+fn table_row_has_formal_technical_signal(pairs: &[(String, String)]) -> bool {
     let mut has_url = false;
     let mut has_explicit_port = false;
     let mut has_http_method = false;
@@ -304,8 +322,7 @@ fn table_row_has_formal_technical_signal(segments: &[&str]) -> bool {
     let mut has_protocol = false;
     let mut has_prefixed_semver = false;
 
-    for segment in segments {
-        let value = segment.split_once(": ").map_or(*segment, |(_, value)| value);
+    for (_, value) in pairs {
         if !extract_http_response_status_literals(value).is_empty() {
             return true;
         }

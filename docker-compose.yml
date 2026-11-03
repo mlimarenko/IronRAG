@@ -6,7 +6,7 @@
 # variants are opt-in:
 #
 #   default (no profile)   filesystem content storage, prebuilt Hub images,
-#                          Docling-capable local memory caps. Just
+#                          native parsing + remote Vision (8 GiB baseline). Just
 #                          `docker compose up -d`.
 #
 #   s4 profile             bundled s4core (S3-compatible) object storage.
@@ -25,7 +25,7 @@
 #                          big corpora — no separate file, just env:
 #     IRONRAG_DB_MEMORY_LIMIT=6144M \
 #     IRONRAG_BACKEND_MEMORY_LIMIT=4096M \
-#     IRONRAG_WORKER_MEMORY_LIMIT=4096M \
+#     IRONRAG_WORKER_MEMORY_LIMIT=5120M \
 #       docker compose up -d
 #
 #   local source build     build the images from this tree instead of pulling.
@@ -52,7 +52,7 @@
 #     (Kubernetes: set worker.replicaCount in charts/ironrag/values.yaml.)
 #
 # Application environment. Only operator-facing knobs live here. Narrow runtime
-# tuning (allocator, tokio pool, ingest parallelism, docling batching, pgvector
+# tuning (allocator, tokio pool, ingest parallelism, native page batching, pgvector
 # index budget, OTEL exporter selection) is baked into the image defaults
 # (apps/api/Dockerfile + apps/api/src/app/config.rs) and stays overridable by
 # setting the matching IRONRAG_*/OTEL_* env var.
@@ -135,10 +135,10 @@ x-ironrag-runtime-env: &ironrag-runtime-env
   IRONRAG_INGESTION_MAX_PARALLEL_JOBS_GLOBAL: ${IRONRAG_INGESTION_MAX_PARALLEL_JOBS_GLOBAL:-4}
   IRONRAG_INGESTION_MAX_PARALLEL_JOBS_PER_WORKSPACE: ${IRONRAG_INGESTION_MAX_PARALLEL_JOBS_PER_WORKSPACE:-2}
   IRONRAG_INGESTION_MAX_PARALLEL_JOBS_PER_LIBRARY: ${IRONRAG_INGESTION_MAX_PARALLEL_JOBS_PER_LIBRARY:-1}
-  IRONRAG_DOCLING_PAGE_BATCH_SIZE: ${IRONRAG_DOCLING_PAGE_BATCH_SIZE:-10}
-  IRONRAG_DOCLING_PAGE_STREAM_WINDOW_PAGES: ${IRONRAG_DOCLING_PAGE_STREAM_WINDOW_PAGES:-40}
-  IRONRAG_DOCLING_MAX_CONCURRENCY: ${IRONRAG_DOCLING_MAX_CONCURRENCY:-auto}
-  IRONRAG_DOCLING_ACQUIRE_TIMEOUT_SECS: ${IRONRAG_DOCLING_ACQUIRE_TIMEOUT_SECS:-1800}
+  IRONRAG_XBERG_EXTRACT_BIN: ${IRONRAG_XBERG_EXTRACT_BIN:-ironrag-extract}
+  IRONRAG_XBERG_TIMEOUT_SECS: ${IRONRAG_XBERG_TIMEOUT_SECS:-300}
+  IRONRAG_XBERG_ACQUIRE_TIMEOUT_SECS: ${IRONRAG_XBERG_ACQUIRE_TIMEOUT_SECS:-600}
+  IRONRAG_XBERG_PAGE_BATCH_SIZE: ${IRONRAG_XBERG_PAGE_BATCH_SIZE:-10}
   IRONRAG_INGESTION_HEAVY_PIPELINE_PARALLELISM: ${IRONRAG_INGESTION_HEAVY_PIPELINE_PARALLELISM:-auto}
   IRONRAG_INGESTION_HEAVY_ACQUIRE_TIMEOUT_SECS: ${IRONRAG_INGESTION_HEAVY_ACQUIRE_TIMEOUT_SECS:-1800}
   IRONRAG_INGESTION_EMBEDDING_PARALLELISM: ${IRONRAG_INGESTION_EMBEDDING_PARALLELISM:-8}
@@ -199,14 +199,14 @@ x-ironrag-runtime-env: &ironrag-runtime-env
   OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
   OTEL_EXPORTER_OTLP_METRICS_TEMPORALITY_PREFERENCE: ${OTEL_EXPORTER_OTLP_METRICS_TEMPORALITY_PREFERENCE:-cumulative}
 
-# ─── Memory containment (Docling-capable local baseline, swap = 0) ────────────
+# ─── Memory containment (native parsing baseline, swap = 0) ──────────────────
 # The steady-state sum of `memory` LIMITS is the real lever here: Compose does
 # NOT enforce `reservations` (only Swarm / k8s does), and cgroup v2 lets the
 # sum of caps exceed physical RAM. On a swapless host a combined resident set
 # above physical RAM trips the kernel's GLOBAL OOM killer, which then SIGKILLs
 # the largest-RSS bystander instead of the rebuildable worker. The defaults
-# below are sized so the local stack can run one bounded embedded Docling
-# extractor and still fail fast before pressure turns into SIGKILL loops.
+# below budget native parsing/rendering, not a local OCR model. Image text
+# recognition uses the configured extract_text Vision binding.
 #
 #   anchor    default  services            counts toward steady Σ?
 #   frontend   128M    frontend            yes
@@ -216,14 +216,13 @@ x-ironrag-runtime-env: &ironrag-runtime-env
 #   backend   1024M    backend             yes
 #
 # Steady Σ (repo services, one-shot startup excluded):
-#   1024 + 1024 + 3072 + 128 + 160 = 5408 MiB ≈ 5.3 GiB.
+#   1024 + 1024 + 3072 + 128 + 160 = 5408 MiB on an 8 GiB baseline host.
 # `scripts/ops/check-mem-budget.sh` (wired into `make check`) parses the
-# defaults below and fails the build if this baseline sum is exceeded, so a
+# defaults below and fails above 7208 MiB (8 GiB less 12% host headroom), so a
 # future edit cannot silently make the default stack more memory-hungry. Both
 # the CPU and memory limit of every role scale via the IRONRAG_*_CPUS /
-# IRONRAG_*_MEMORY_LIMIT env overrides without editing this file. Text/native
-# only local stacks may lower the worker cap, but PDF / office / OCR ingest
-# needs the one-process Docling headroom or it will be rejected by the worker.
+# IRONRAG_*_MEMORY_LIMIT env overrides without editing this file. Native rendering
+# and image encoding still need bounded RAM; verify peaks with your workload.
 x-ironrag-resources-frontend: &ironrag-resources-frontend
   limits:
     cpus: ${IRONRAG_FRONTEND_CPUS:-0.50}
@@ -251,12 +250,8 @@ x-ironrag-resources-db: &ironrag-resources-db
     cpus: "0.25"
     memory: 256M
 
-# Ingest worker. The default is sized for one bounded embedded Docling
-# extractor process plus Rust worker headroom; application-side concurrency and
-# cgroup headroom gates still prevent parallel extractor fanout and SIGKILL
-# retry loops under pressure. For text/native-only local stacks this can be
-# lowered, but PDF / office / OCR ingest should keep at least one-process
-# Docling headroom.
+# Ingest worker: bounded native parsing/rendering plus Rust worker headroom.
+# Remote Vision removes local OCR models, not native conversion memory costs.
 x-ironrag-resources-worker: &ironrag-resources-worker
   limits:
     cpus: ${IRONRAG_WORKER_CPUS:-2.00}
@@ -265,7 +260,7 @@ x-ironrag-resources-worker: &ironrag-resources-worker
     cpus: "0.50"
     memory: 256M
 
-# API backend. Answer path only — no docling spawned here. The 1024M default is
+# API backend. Answer path only — no extractor spawned here. The 1024M default is
 # enough for light concurrency; heavy concurrent grounded-answer turns can peak
 # higher, so raise IRONRAG_BACKEND_MEMORY_LIMIT on a bigger host.
 x-ironrag-resources-backend: &ironrag-resources-backend
@@ -452,7 +447,7 @@ services:
     volumes:
       - content_storage_data:/var/lib/ironrag/content-storage
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8080/v1/ready"]
+      test: ["CMD", "ironrag-cli", "probe", "--endpoint", "ready"]
       interval: 10s
       timeout: 5s
       retries: 6
@@ -467,7 +462,7 @@ services:
     restart: unless-stopped
     stop_signal: SIGTERM
     stop_grace_period: 10m
-    # First sacrifice under memory pressure: the worker (and its docling/python
+    # First sacrifice under memory pressure: the worker (and its native extractor
     # extraction children) is the largest non-stateful consumer, and its ingest
     # job simply requeues after a kill. +800 puts it firmly at the top of the
     # kernel's OOM-victim list, ahead of frontend (+400) and backend (+200).
@@ -487,7 +482,7 @@ services:
     volumes:
       - content_storage_data:/var/lib/ironrag/content-storage
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8080/v1/ready"]
+      test: ["CMD", "ironrag-cli", "probe", "--endpoint", "ready"]
       interval: 10s
       timeout: 5s
       retries: 6

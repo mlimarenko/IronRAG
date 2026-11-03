@@ -2,10 +2,36 @@ use sqlx::{Executor, PgPool, Postgres};
 use uuid::Uuid;
 
 use super::super::query_fragments::{
-    admitted_runtime_graph_nodes_query, runtime_graph_node_columns,
+    admitted_runtime_graph_nodes_query, current_graph_target, runtime_graph_node_columns,
+    runtime_graph_nodes_by_ids_or_document_type_select_query,
 };
 use super::super::types::{RuntimeGraphNodeRow, RuntimeGraphQueryNodeRow};
 use super::scan_transaction::begin_topology_scan_tx;
+
+/// Lists only canonical document identities admitted by the current-source fence.
+///
+/// # Errors
+/// Returns any `SQLx` error raised while querying document identities.
+pub async fn list_admitted_runtime_graph_document_keys_with_executor<'e, E>(
+    executor: E,
+    library_id: Uuid,
+    projection_version: i64,
+) -> Result<Vec<String>, sqlx::Error>
+where
+    E: Executor<'e, Database = Postgres>,
+{
+    sqlx::query_scalar::<_, String>(concat!(
+        "select node.\u{63}anonical_key from runtime_graph_node as node
+         where node.library_id = $1 and node.projection_version = $2
+           and node.node_type = 'document' and ",
+        current_graph_target!("node", "node"),
+        " order by node.node_type asc, node.label asc, node.created_at asc, node.id asc"
+    ))
+    .bind(library_id)
+    .bind(projection_version)
+    .fetch_all(executor)
+    .await
+}
 
 /// Lists admitted runtime graph nodes for one projection version.
 ///
@@ -52,13 +78,14 @@ pub async fn count_admitted_runtime_graph_entities_by_library(
     library_id: Uuid,
     projection_version: i64,
 ) -> Result<i64, sqlx::Error> {
-    sqlx::query_scalar::<_, i64>(
+    sqlx::query_scalar::<_, i64>(concat!(
         "select count(*)::bigint
-         from runtime_graph_node
+         from runtime_graph_node as node
          where library_id = $1
            and projection_version = $2
-           and node_type <> 'document'",
-    )
+           and node_type <> 'document' and ",
+        current_graph_target!("node", "node")
+    ))
     .bind(library_id)
     .bind(projection_version)
     .fetch_one(pool)
@@ -80,11 +107,13 @@ pub async fn list_top_admitted_runtime_graph_entities_by_library(
         "select ",
         runtime_graph_node_columns!(),
         "
-         from runtime_graph_node
+         from runtime_graph_node as node
          where library_id = $1
            and projection_version = $2
            and node_type <> 'document'
-         order by support_count desc, label asc, created_at asc, id asc
+           and ",
+        current_graph_target!("node", "node"),
+        " order by support_count desc, label asc, created_at asc, id asc
          limit $3"
     ))
     .bind(library_id)
@@ -138,7 +167,7 @@ where
 
 /// Fetches slim node rows for a pre-computed set of admitted ids plus every
 /// `document`-type node. Mirrors
-/// `list_runtime_graph_nodes_by_ids_or_document_type` but selects only the
+/// `list_runtime_graph_topology_nodes_by_ids_or_document_type` but selects only the
 /// columns consumed by the query-time graph index, omitting `metadata_json`.
 ///
 /// # Errors
@@ -149,15 +178,12 @@ pub async fn list_runtime_graph_query_nodes_by_ids_or_document_type(
     projection_version: i64,
     admitted_ids: &[Uuid],
 ) -> Result<Vec<RuntimeGraphQueryNodeRow>, sqlx::Error> {
-    sqlx::query_as::<_, RuntimeGraphQueryNodeRow>(
-        "select id, library_id, \u{63}anonical_key, label, node_type, aliases_json,
-            summary, support_count, projection_version, created_at, updated_at
-         from runtime_graph_node
-         where library_id = $1
-           and projection_version = $2
-           and (node_type = 'document' or id = any($3::uuid[]))
-         order by node_type asc, label asc, created_at asc, id asc",
-    )
+    sqlx::query_as::<_, RuntimeGraphQueryNodeRow>(sqlx::AssertSqlSafe(
+        runtime_graph_nodes_by_ids_or_document_type_select_query(
+            "id, library_id, canonical_key, label, node_type, aliases_json,
+             summary, support_count, projection_version, created_at, updated_at",
+        ),
+    ))
     .bind(library_id)
     .bind(projection_version)
     .bind(admitted_ids)
@@ -165,28 +191,48 @@ pub async fn list_runtime_graph_query_nodes_by_ids_or_document_type(
     .await
 }
 
-/// Fetches the full node rows for a pre-computed set of admitted ids
+/// Topology fields only; arbitrary node metadata must never enter the prewarm
+/// allocation. JSON metadata scalars retain their original types so malformed
+/// values have the same omission/default semantics as the graph wire mapper.
+#[derive(Debug, sqlx::FromRow)]
+pub struct RuntimeGraphTopologyNodeRow {
+    pub id: Uuid,
+    #[sqlx(rename = "canonical_key")]
+    pub identity_key: String,
+    pub label: String,
+    pub node_type: String,
+    pub aliases_json: serde_json::Value,
+    pub summary: Option<String>,
+    pub support_count: i32,
+    pub document_id_json: Option<serde_json::Value>,
+    pub sub_type_json: Option<serde_json::Value>,
+    pub confidence_json: Option<serde_json::Value>,
+    pub entity_state_json: Option<serde_json::Value>,
+    pub relation_state_json: Option<serde_json::Value>,
+}
+
+/// Fetches topology node rows for a pre-computed set of admitted ids
 /// plus every `document`-type node in the library+projection bucket.
-/// Replaces `list_admitted_runtime_graph_nodes_by_library` on the
-/// topology path so the node query no longer duplicates the edge scan
-/// via the `admitted_edges` CTE — the caller derives the admitted ids
-/// once from the compact edge list and passes them through here.
-pub async fn list_runtime_graph_nodes_by_ids_or_document_type(
+/// The caller derives incident ids from the admitted compact edge list.
+/// Each selected node, including every document fallback, must independently
+/// retain complete current-source evidence.
+pub async fn list_runtime_graph_topology_nodes_by_ids_or_document_type(
     pool: &PgPool,
     library_id: Uuid,
     projection_version: i64,
     admitted_ids: &[Uuid],
-) -> Result<Vec<RuntimeGraphNodeRow>, sqlx::Error> {
+) -> Result<Vec<RuntimeGraphTopologyNodeRow>, sqlx::Error> {
     let mut tx = begin_topology_scan_tx(pool).await?;
-    let rows = sqlx::query_as::<_, RuntimeGraphNodeRow>(
-        "select id, library_id, \u{63}anonical_key, label, node_type, aliases_json,
-            summary, metadata_json, support_count, projection_version, created_at, updated_at
-         from runtime_graph_node
-         where library_id = $1
-           and projection_version = $2
-           and (node_type = 'document' or id = any($3::uuid[]))
-         order by node_type asc, label asc, created_at asc, id asc",
-    )
+    let rows = sqlx::query_as::<_, RuntimeGraphTopologyNodeRow>(sqlx::AssertSqlSafe(
+        runtime_graph_nodes_by_ids_or_document_type_select_query(
+            "id, canonical_key, label, node_type, aliases_json, summary, support_count,
+             metadata_json->'document_id' as document_id_json,
+             metadata_json->'sub_type' as sub_type_json,
+             metadata_json->'confidence' as confidence_json,
+             metadata_json->'entity_state' as entity_state_json,
+             metadata_json->'relation_state' as relation_state_json",
+        ),
+    ))
     .bind(library_id)
     .bind(projection_version)
     .bind(admitted_ids)
@@ -198,7 +244,8 @@ pub async fn list_runtime_graph_nodes_by_ids_or_document_type(
 
 /// Fetches runtime graph nodes by id for one projection version without
 /// re-evaluating the admitted-edge predicate. Use this only when the caller
-/// already proved the ids came from an admitted graph edge/entity query.
+/// already proved the nodes themselves have current evidence as well as
+/// membership in an admitted graph edge/entity query.
 ///
 /// # Errors
 /// Returns any `SQLx` error raised while querying graph nodes.

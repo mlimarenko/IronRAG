@@ -1,6 +1,33 @@
-use super::{
-    extract_html_main_content, extract_html_preferred_url, payload_looks_like_html_document,
-};
+use super::{extract_html_preferred_url, payload_looks_like_html_document};
+
+// Test the product projection with real native conversion, never a second parser.
+fn extract_html_main_content(
+    bytes: &[u8],
+    mime: Option<&str>,
+) -> anyhow::Result<crate::shared::extraction::ExtractionOutput> {
+    let prepared = super::prepare_html_main_content(bytes, mime)?;
+    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
+    let content = runtime.block_on(async {
+        let config = xberg::ExtractionConfig {
+            use_cache: false,
+            output_format: xberg::OutputFormat::Markdown,
+            ..Default::default()
+        };
+        let mut result = Box::pin(xberg::engine::Engine::new_default().extract(
+            xberg::ExtractInput::from_bytes(prepared.source.into_bytes(), "text/html", None),
+            &config,
+        ))
+        .await?;
+        anyhow::ensure!(
+            result.errors.is_empty() && result.results.len() == 1,
+            "native HTML result"
+        );
+        Ok::<_, anyhow::Error>(
+            result.results.pop().ok_or_else(|| anyhow::anyhow!("missing native HTML"))?.content,
+        )
+    })?;
+    super::extract_html_main_content(bytes, mime, &content)
+}
 
 mod media;
 

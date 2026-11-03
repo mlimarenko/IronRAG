@@ -24,7 +24,8 @@ use crate::{
     services::{
         ai_catalog_service::ResolvedRuntimeBinding,
         ops::billing::ReserveExecutionProviderCallCommand,
-        query::{provider_billing::PendingQueryProviderCallCompletion, support::RerankCandidate},
+        ops::billing::provider_reservation::PendingQueryProviderCallCompletion,
+        query::support::RerankCandidate,
     },
 };
 

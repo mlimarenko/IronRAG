@@ -80,7 +80,9 @@ async fn orphan_create_refuses_owned_or_ambiguous_state_without_writes() -> Resu
                 "mutation" => {
                     content_lifecycle_support::seed_pending_content_mutation(pool,content_lifecycle_support::PendingContentMutationSeed {
                         workspace_id:fixture.workspace_id,library_id:fixture.library_id,operation_kind:"replace",request_surface:"rest",mutation_state:"accepted",
-                        request_identity:&serde_json::json!({"target":{"kind":"existing","documentId":document_id}}),
+                        request_identity:&serde_json::json!({"workspaceId":fixture.workspace_id,"libraryId":fixture.library_id,
+                            "operationKind":"replace","sourceIdentity":null,"materializationToken":null,
+                            "target":{"kind":"existing","documentId":document_id},"revision":null,"replacement":null}),
                     }).await?;
                 }
                 "history" => { sqlx::query("insert into content_revision (document_id,workspace_id,library_id,revision_number,parent_revision_id,content_source_kind,checksum,mime_type,byte_size) values ($1,$2,$3,2,$4,'upload','sha256:history','text/plain',1)").bind(document_id).bind(fixture.workspace_id).bind(fixture.library_id).bind(revision_id).execute(pool).await?; }
@@ -517,6 +519,14 @@ async fn visibility_contract_payload_replay_preserves_original_artifact() -> Res
                 .into_bundle();
         let counts = admission_row_counts(&fixture).await?;
         let mut retry = request.clone();
+        let receipt = fixture
+            .state
+            .application_services
+            .content
+            .get_mutation_admission(&fixture.state, first.mutation.id)
+            .await?;
+        assert_eq!(receipt.visibility_intent_id, None);
+        assert_eq!(receipt.result_revision_id, first.revision.as_ref().map(|row| row.id));
         retry.revision.as_mut().context("revision")?.storage_key =
             Some("different/staged/artifact".to_owned());
         let repeated =
@@ -524,6 +534,9 @@ async fn visibility_contract_payload_replay_preserves_original_artifact() -> Res
         assert!(matches!(repeated, AdmissionOutcome::Replayed(_)));
         let repeated = repeated.into_bundle();
         assert_eq!(repeated.mutation.id, first.mutation.id);
+        assert_eq!(repeated.async_operation.id, first.async_operation.id);
+        assert_eq!(repeated.item.as_ref().map(|row| row.id), first.item.as_ref().map(|row| row.id));
+        assert_eq!(repeated.document.id, first.document.id);
         assert_eq!(
             repeated.revision.as_ref().map(|row| row.id),
             first.revision.as_ref().map(|row| row.id)
@@ -603,9 +616,9 @@ async fn visibility_contract_bound_payload_requires_current_exact_intent() -> Re
         }
         payload.revision.as_mut().context("replacement")?.replacement.mime_type = " TEXT/PLAIN ".to_owned();
         let created = admit_content_with_failpoint(postgres, &payload, None).await?.into_bundle();
-        let bound: Option<Uuid> = sqlx::query_scalar("select visibility_intent_id from content_mutation_item where id=$1")
-            .bind(created.item.as_ref().context("item")?.id).fetch_one(postgres).await?;
-        assert_eq!(bound, Some(accepted.receipt.visibility_intent_id));
+        let bound = fixture.state.application_services.content
+            .get_mutation_admission(&fixture.state, created.mutation.id).await?;
+        assert_eq!(bound.visibility_intent_id, Some(accepted.receipt.visibility_intent_id));
         let after_created = admission_row_counts(&fixture).await?;
         let mut foreign_replay = payload.clone();
         foreign_replay.source_identity = Some("different source under same accepted key".to_owned());
@@ -629,6 +642,11 @@ async fn visibility_contract_bound_payload_requires_current_exact_intent() -> Re
         let head_intent: Option<Uuid> = sqlx::query_scalar("select visibility_intent_id from content_document_head where document_id=$1")
             .bind(initial.document.id).fetch_one(postgres).await?;
         assert_eq!(head_intent, Some(next.receipt.visibility_intent_id));
+        let original_receipt = fixture.state.application_services.content
+            .get_mutation_admission(&fixture.state, created.mutation.id).await?;
+        assert_eq!(original_receipt.visibility_intent_id, bound.visibility_intent_id);
+        assert_eq!(original_receipt.result_revision_id, bound.result_revision_id);
+        assert_eq!(original_receipt.result_checksum, bound.result_checksum);
         payload.idempotency_key = Some("stale-binding-new-key".to_owned());
         let stale = admit_content_with_failpoint(postgres, &payload, None).await;
         assert!(matches!(stale, Err(AdmissionError::VisibilityIntentSuperseded { .. })));
@@ -1206,7 +1224,6 @@ async fn visibility_contract_http_replacement_owns_complete_bytes_and_metadata()
         let created = router.clone().oneshot(request(payload.clone())).await?;
         assert_eq!(created.status(), StatusCode::ACCEPTED);
         let admission: serde_json::Value = serde_json::from_slice(&axum::body::to_bytes(created.into_body(), 64*1024).await?)?;
-        let mutation_id: Uuid = serde_json::from_value(admission["mutation"]["id"].clone())?;
         let revision_id: Uuid = serde_json::from_value(admission["items"][0]["result_revision_id"].clone())?;
         let stored = ironrag_backend::infra::repositories::content_revision_repository::get_revision_replacement_identity(
             &fixture.state.persistence.postgres, revision_id).await?.context("snapshot")?;
@@ -1225,9 +1242,8 @@ async fn visibility_contract_http_replacement_owns_complete_bytes_and_metadata()
         let artifact: String = sqlx::query_scalar("select storage_key from content_revision where id=$1")
             .bind(revision_id).fetch_one(&fixture.state.persistence.postgres).await?;
         assert_eq!(fixture.state.content_storage.read_revision_source(&artifact).await?, bytes);
-        let bound: Option<Uuid> = sqlx::query_scalar("select visibility_intent_id from content_mutation_item where mutation_id=$1")
-            .bind(mutation_id).fetch_one(&fixture.state.persistence.postgres).await?;
-        assert_eq!(bound, Some(receipt.visibility_intent_id));
+        assert_eq!(admission["visibilityIntentId"], serde_json::json!(receipt.visibility_intent_id));
+        assert_eq!(repeated["visibilityIntentId"], admission["visibilityIntentId"]);
         // The same wire body on multipart must replay the original bundle.
         let multipart = format!("--boundary\r\nContent-Disposition: form-data; name=\"idempotency_key\"\r\n\r\nhttp-bound-key\r\n--boundary\r\nContent-Disposition: form-data; name=\"visibility_intent_id\"\r\n\r\n{}\r\n--boundary\r\nContent-Disposition: form-data; name=\"language_code\"\r\n\r\nru\r\n--boundary\r\nContent-Disposition: form-data; name=\"source_uri\"\r\n\r\nhttps://example.invalid/safe\r\n--boundary\r\nContent-Disposition: form-data; name=\"document_hint\"\r\n\r\nsafe hint\r\n--boundary\r\nContent-Disposition: form-data; name=\"file\"; filename=\"safe.txt\"\r\nContent-Type: text/plain\r\n\r\nsafe replacement\r\n--boundary--\r\n", receipt.visibility_intent_id);
         let multipart_request = |body: String| Request::post(&path).header("content-type", "multipart/form-data; boundary=boundary")
@@ -2179,7 +2195,12 @@ async fn incomplete_content_replay_fails_closed_without_recreating_a_job() -> Re
 #[ignore = "requires local postgres with required extensions"]
 async fn web_admission_commits_run_seed_and_discovery_job_as_one_replayable_graph() -> Result<()> {
     let fixture = ContentLifecycleFixture::create().await?;
-    let request = Arc::new(web_request(&fixture, "web-concurrent"));
+    let mut request = web_request(&fixture, "web-concurrent");
+    request.crawl_allow_patterns =
+        serde_json::json!([{"kind":"path_prefix","value":"/docs","source":"request"}]);
+    request.materialization_block_patterns =
+        serde_json::json!([{"kind":"path_prefix","value":"/private"}]);
+    let request = Arc::new(request);
     let barrier = Arc::new(Barrier::new(12));
     let mut tasks = Vec::new();
     for _ in 0..12 {
@@ -2198,6 +2219,18 @@ async fn web_admission_commits_run_seed_and_discovery_job_as_one_replayable_grap
     }
     let first = outcomes.first().context("no web admission outcomes")?.bundle();
     assert!(first.is_complete());
+    let stored_identity: serde_json::Value =
+        sqlx::query_scalar("select request_identity from content_mutation where id=$1")
+            .bind(first.mutation.id)
+            .fetch_one(&fixture.state.persistence.postgres)
+            .await?;
+    assert_eq!(
+        Some(ironrag_backend::infra::repositories::admission_repository::fingerprint(
+            &stored_identity
+        )?),
+        first.mutation.request_fingerprint,
+        "nested web patterns must retain their exact admitted digest after JSONB"
+    );
     assert!(outcomes.iter().all(|outcome| {
         let bundle = outcome.bundle();
         bundle.mutation.id == first.mutation.id

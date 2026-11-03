@@ -23,7 +23,8 @@ pub(crate) use parse::repair_graph_extraction_candidate_set;
 pub(crate) use parse::repair_graph_extraction_normalized_json;
 pub(crate) use prompt::{GRAPH_EXTRACTION_CONTRACT_VERSION, GRAPH_EXTRACTION_VERSION};
 pub(crate) use recovery::{
-    extraction_lifecycle_from_record, extraction_recovery_summary_from_record,
+    extraction_lifecycle_from_json, extraction_lifecycle_from_record,
+    extraction_recovery_summary_from_json, extraction_recovery_summary_from_record,
 };
 pub(crate) use types::{
     GraphEntityCandidate, GraphExtractionCandidateSet, GraphExtractionExecutionError,

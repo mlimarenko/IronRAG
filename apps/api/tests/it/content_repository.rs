@@ -76,13 +76,23 @@ pub(crate) async fn create_imported_fixture_revision(
     .await?)
 }
 
+#[derive(sqlx::FromRow)]
+struct ImportedRevisionSource {
+    checksum: String,
+    byte_size: i64,
+    mime_type: String,
+    title: Option<String>,
+    source_uri: Option<String>,
+    document_hint: Option<String>,
+}
+
 pub(crate) async fn imported_knowledge_revision_admission(
     postgres: &PgPool,
     revision_id: Uuid,
     file_name: &str,
 ) -> anyhow::Result<serde_json::Value> {
-    let (checksum, byte_size, mime_type, title, source_uri, document_hint):
-        (String, i64, String, Option<String>, Option<String>, Option<String>) = sqlx::query_as(
+    let ImportedRevisionSource { checksum, byte_size, mime_type, title, source_uri, document_hint } =
+        sqlx::query_as::<_, ImportedRevisionSource>(
             "select checksum, byte_size, mime_type, title, source_uri, document_hint from knowledge_revision where revision_id=$1",
         ).bind(revision_id).fetch_one(postgres).await?;
     let admission =
@@ -2312,7 +2322,9 @@ async fn operational_list_preserves_unpublished_deleted_and_hidden_documents() -
             assert!(grid_page(&pool, fixture.library_id, snapshot, GridPageArgs { cursor: cursor.as_ref(), ..Default::default() }).await?.rows.is_empty());
         }
         let accepted = content_mutation_repository::create_mutation(&pool, &NewContentMutation {
-            request_identity: &serde_json::json!({"target":{"kind":"existing","documentId":empty}}),
+            request_identity: &serde_json::json!({"workspaceId":fixture.workspace_id,"libraryId":fixture.library_id,
+                "operationKind":"replace","sourceIdentity":null,"materializationToken":null,
+                "target":{"kind":"existing","documentId":empty},"revision":null,"replacement":null}),
             workspace_id: fixture.workspace_id, library_id: fixture.library_id,
             operation_kind: "replace", requested_by_principal_id: Some(fixture.principal_id),
             request_surface: "internal", idempotency_key: None, source_identity: None,
@@ -2512,7 +2524,7 @@ fn replacement_mutation_identity(
 ) -> serde_json::Value {
     serde_json::json!({
         "workspaceId":revision.workspace_id,"libraryId":revision.library_id,"operationKind":"replace",
-        "sourceIdentity":source_identity,"target":{"kind":"existing","documentId":revision.document_id},
+        "sourceIdentity":source_identity,"materializationToken":null,"target":{"kind":"existing","documentId":revision.document_id},
         "revision":{"contentSourceKind":revision.content_source_kind,"baseRevisionId":base_revision_id,"visibilityIntentId":null},
         "replacement":{"checksum":revision.checksum,"byteSize":revision.byte_size,"mimeType":revision.mime_type,"fileName":file_name,
             "title":revision.title,"languageCode":revision.language_code,"sourceUri":revision.source_uri,"documentHint":revision.document_hint},
@@ -3054,6 +3066,105 @@ async fn assert_accounting_sort_orders(
         }
     }
     Ok(())
+}
+
+/// IRG-270: billing rows are aggregated once per list statement, rather than
+/// rescanned by a correlated lateral aggregate for every document considered
+/// before the page limit. The security-barrier view counts rows visited by the
+/// native Postgres plan while preserving the real table's values.
+#[tokio::test]
+#[ignore = "requires local postgres service"]
+async fn document_page_scans_billing_rollups_once_before_pagination() -> anyhow::Result<()> {
+    let settings = Settings::from_env()?;
+    let (pool, temp_database) = connect_postgres(&settings).await?;
+    let fixture = ContentRepositoryFixture::create(&pool).await?;
+    let result = async {
+        const DOCUMENT_COUNT: i64 = 32;
+        for index in 0..DOCUMENT_COUNT {
+            let document_id = seed_grid_document(
+                &pool,
+                &fixture,
+                &format!("bounded-cost-{index:02}"),
+                &format!("bounded-cost-{index:02}.txt"),
+                Some("text/plain"),
+                10,
+            )
+            .await?;
+            sqlx::query(
+                "insert into billing_execution_cost
+                 (owning_execution_kind, owning_execution_id, workspace_id, library_id,
+                  knowledge_document_id, total_cost, currency_code, provider_call_count,
+                  unpriced_provider_call_count)
+                 values ('ingest_attempt', $1, $2, $3, $4, 1, 'USD', 1, 0)",
+            )
+            .bind(Uuid::now_v7())
+            .bind(fixture.workspace_id)
+            .bind(fixture.library_id)
+            .bind(document_id)
+            .execute(&pool)
+            .await?;
+        }
+
+        let test_pool =
+            PgPoolOptions::new().max_connections(1).connect(&temp_database.database_url).await?;
+        sqlx::query("create temporary sequence billing_row_visits").execute(&test_pool).await?;
+        sqlx::query(
+            "create function pg_temp.count_billing_row() returns boolean
+             language sql volatile as $$
+                 select nextval('billing_row_visits') is not null
+             $$",
+        )
+        .execute(&test_pool)
+        .await?;
+        sqlx::query(
+            "create temporary view billing_execution_cost with (security_barrier = true) as
+             select * from public.billing_execution_cost
+             where pg_temp.count_billing_row()",
+        )
+        .execute(&test_pool)
+        .await?;
+
+        let filters = content_document_list_repository::DocumentListFilters::default();
+        let ranges = content_document_list_repository::DocumentListSearchRanges::default();
+        let page = content_document_list_repository::list_document_page_rows(
+            &test_pool,
+            content_document_list_repository::DocumentListPageQuery {
+                library_id: fixture.library_id,
+                include_deleted: false,
+                cursor: None,
+                limit: 2,
+                search: None,
+                normalized_search: None,
+                search_statuses: &[],
+                filters: &filters,
+                search_ranges: &ranges,
+                snapshot_at: Utc::now(),
+                sort: content_document_list_repository::DocumentListSortColumn::CreatedAt,
+                sort_desc: true,
+                status_filter: &[],
+                id_filter: None,
+            },
+        )
+        .await?;
+        assert_eq!(page.rows.len(), 2);
+        assert!(page.has_more);
+        assert!(page.rows.iter().all(|row| row.cost_total == Some(rust_decimal::Decimal::ONE)));
+
+        let visits: i64 = sqlx::query_scalar("select last_value from billing_row_visits")
+            .fetch_one(&test_pool)
+            .await?;
+        assert_eq!(
+            visits, DOCUMENT_COUNT,
+            "the list statement must make one pass over the library billing rows"
+        );
+        test_pool.close().await;
+        Ok::<_, anyhow::Error>(())
+    }
+    .await;
+    fixture.cleanup(&pool).await?;
+    pool.close().await;
+    temp_database.drop().await?;
+    result
 }
 
 #[tokio::test]

@@ -20,21 +20,26 @@ IronRAG нормализует документы перед разбиение�
 исходный код, JSON, YAML, JSONL/NDJSON, TOML, PDF, изображения, DOCX, PPTX,
 CSV, TSV, XLS, XLSX, XLSB, ODS и веб-страницы. Видео не поддерживается.
 
-Новые библиотеки используют значение
-`IRONRAG_RECOGNITION_DEFAULT_RASTER_IMAGE_ENGINE`: `docling` или `vision`;
-значение по умолчанию — `vision`. Политику библиотеки меняет
-`PUT /v1/catalog/libraries/{libraryId}/recognition-policy`. Если для `vision`
-не настроена совместимая привязка модели, приём завершается ошибкой.
+Текущая policy каждой библиотеки - `{"rasterImageEngine":"vision"}`.
+`IRONRAG_RECOGNITION_DEFAULT_RASTER_IMAGE_ENGINE` принимает только `vision`.
+`PUT /v1/catalog/libraries/{libraryId}/recognition-policy` принимает только этот
+singleton JSON; `xberg` отклоняется, а не считается alias. Инспектор библиотеки
+показывает требование Vision и открывает настройки привязки `extract_text`.
+OCR изображений и сканов использует существующую Vision-привязку `extract_text`.
+Если её нет, визуальная обработка завершается явной ошибкой. Детерминированный
+разбор нативного текста и структуры не требует Vision-модели.
 
-PDF, DOCX и PPTX обрабатываются Docling на CPU. Для PDF доступны:
+Xberg обрабатывает PDF, DOCX, PPTX, текст, Markdown/RST, HTML, CSV/TSV и обычные
+электронные таблицы. Доменные проекции сохраняют именованные XLSX Tables и
+типизированные записи JSON/JSONL/YAML/TOML.
 
-- `IRONRAG_DOCLING_PAGE_BATCH_SIZE`
-- `IRONRAG_DOCLING_PAGE_STREAM_WINDOW_PAGES` (по умолчанию `40`)
-- `IRONRAG_DOCLING_MAX_CONCURRENCY`
-- `IRONRAG_INGESTION_HEAVY_PIPELINE_PARALLELISM=auto`
-
-Параметры ограничивают параллельную обработку больших PDF. При нехватке памяти
-документ завершается с ошибкой `docling_insufficient_memory`.
+- `IRONRAG_XBERG_PAGE_BATCH_SIZE` задаёт размер возобновляемого пакета страниц
+  (по умолчанию `10`).
+- `IRONRAG_XBERG_TIMEOUT_SECS` ограничивает один запрос к дочернему процессу
+  (по умолчанию и максимум `300` секунд).
+Xberg извлекает только нативный текст и структуру документов. Локальные OCR-модели
+и флаги включения OCR удалены. Бюджеты worker и хоста описаны в
+[планировании ресурсов](./CAPACITY-PLANNING.md).
 
 PostgreSQL хранит пользователей, рабочие пространства, библиотеки, документы,
 данные поиска, события аудита и векторы pgvector. Байты исходников хранятся в
@@ -82,6 +87,13 @@ PostgreSQL хранит пользователей, рабочие простр�
 эту замену, а не наследует поля предыдущей revision. Повторная отправка использует
 тот же ключ и identity.
 
+Fingerprint принятого запроса состоит из префикса `v1:sha256:` и SHA-256 от
+полной нормализованной identity в компактном UTF-8 JSON. Ключи объектов на каждом
+уровне сортируются по байтам UTF-8, порядок массивов сохраняется, числа схемы -
+целые. Сохраненная identity должна быть уже нормализована, а fingerprint - ей
+соответствовать. Повтор возвращает проверенный исходный receipt и ID bundle.
+Snapshot сохраняет исходные identity и fingerprint при переносе владения.
+
 Приём очищает публичный head и фиксирует retained revision floor. Matching
 replacement передаёт `visibilityIntentId` из receipt; первый bound payload key
 остаётся неизменным. Успех unrelated или superseded работы не снимает обязательство.
@@ -127,23 +139,27 @@ Body: raw .tar.zst архив
 восстановить во вторую библиотеку, пока исходная библиотека существует в том же
 развёртывании: операция завершается ошибкой `snapshot_source_already_present`.
 
-Схема архива версии 3 сохраняет счётчик ревизий, текущий visibility intent и его
+Схема архива версии 6 сохраняет счётчик ревизий, текущий visibility intent и его
 floor, неизменяемую идентичность запроса и fingerprint, привязку payload к intent
-и точного владельца опубликованной ревизии — mutation item. Полный inventory и
+и revision-owned admission опубликованной ревизии. Полный inventory и
 замкнутость ссылок проверяются до записи в целевую библиотеку. Отсутствующая
 идентичность, ссылки в чужую область, неоднозначная lineage intent, неверное
 соотношение counter/floor и поддельный readable owner приводят к отказу.
 Владельца, идентичность и решение о видимости не восстанавливают из истории.
-Удалённые `visibility_policy` и `visibilityPolicy` в схему 3 не входят и
-отвергаются при проверке архива.
+Удалённые `visibility_policy` и `visibilityPolicy` в схему 6 не входят и
+отвергаются при проверке архива. Текущая recognition policy принимает только
+`vision`; исторический extraction provenance сохраняется без изменений.
 
 Backup принадлежит источнику, а не публичной проекции: при выборе `blobs` архив
 включает также ограниченные исторические и ещё обрабатываемые исходные байты.
 Запрет сохраняется после restore и ремонта пустых head; публичной становится
 только точная привязанная READY-ревизия. Chunk-векторы сохраняют current-only
 жизненный цикл, счётчики отражают фактические строки. Архивы библиотек и workspace
-поддерживают только схему 3; версии 1 и 2 отвергаются с
+поддерживают только схему 6; предыдущие версии отвергаются с
 `snapshot_unsupported_schema_version`, без преобразования или fallback.
-Выгрузите библиотеку из развёртывания этой версии заново или переиндексируйте источники.
+Сохраните исходный архив и его immutable creator runtime. Восстановите старый
+архив этим runtime в изоляции, выполните guarded native baseline transitions,
+включая `vision-recognition-schema`, затем экспортируйте schema 6 текущим runtime.
+Xberg policies из schema 5 не подменяются молча. Compatibility parser отсутствует.
 Экспорт библиотек и workspace требует существующих полномочий системного
 администратора; document/library read и workspace admin не дают доступа к истории.

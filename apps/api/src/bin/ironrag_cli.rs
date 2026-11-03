@@ -1,8 +1,9 @@
 use anyhow::{Context, Result, bail};
 use chrono::{DateTime, Utc};
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use ironrag_backend::app::config::Settings;
 use sqlx::{FromRow, PgPool};
+use std::time::Duration;
 use uuid::Uuid;
 
 #[derive(Parser)]
@@ -78,6 +79,60 @@ enum Commands {
 
     /// Print CLI build version
     Version,
+
+    /// Check a local API liveness or readiness endpoint without loading settings
+    Probe {
+        #[arg(long, value_enum, default_value = "health")]
+        endpoint: ProbeEndpoint,
+        #[arg(long, default_value_t = 8080, value_parser = clap::value_parser!(u16).range(1..))]
+        port: u16,
+    },
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum ProbeEndpoint {
+    Health,
+    Ready,
+}
+
+impl ProbeEndpoint {
+    fn path(self) -> &'static str {
+        match self {
+            Self::Health => "/v1/health",
+            Self::Ready => "/v1/ready",
+        }
+    }
+}
+
+const PROBE_TIMEOUT: Duration = Duration::from_secs(2);
+const PROBE_BODY_LIMIT: usize = 64 * 1024;
+
+async fn cmd_probe(endpoint: ProbeEndpoint, port: u16) -> Result<()> {
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(PROBE_TIMEOUT)
+        .build()
+        .context("failed to create local probe client")?;
+    let mut response = client
+        .get(format!("http://127.0.0.1:{port}{}", endpoint.path()))
+        .send()
+        .await
+        .context("local probe request failed")?;
+    if !response.status().is_success() {
+        bail!("local probe returned HTTP {}", response.status());
+    }
+    if response.content_length().is_some_and(|length| length > PROBE_BODY_LIMIT as u64) {
+        bail!("local probe response body exceeds 64 KiB");
+    }
+    let mut remaining = PROBE_BODY_LIMIT;
+    while let Some(chunk) = response.chunk().await.context("failed to read local probe body")? {
+        if chunk.len() > remaining {
+            bail!("local probe response body exceeds 64 KiB");
+        }
+        remaining -= chunk.len();
+    }
+    Ok(())
 }
 
 #[derive(Debug, FromRow)]
@@ -457,6 +512,9 @@ async fn main() -> Result<()> {
         println!("ironrag-cli {}", env!("CARGO_PKG_VERSION"));
         return Ok(());
     }
+    if let Commands::Probe { endpoint, port } = cli.command {
+        return cmd_probe(endpoint, port).await;
+    }
 
     let mut settings = Settings::from_env().context("failed to load settings")?;
     settings.discard_credential_master_key();
@@ -485,6 +543,221 @@ async fn main() -> Result<()> {
             cmd_backfill_document_parents(&pool, &library).await
         }
 
-        Commands::Version => unreachable!("handled before pool init"),
+        Commands::Version | Commands::Probe { .. } => unreachable!("handled before pool init"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+    use tokio::sync::oneshot;
+    use tokio::time::{Instant, timeout};
+
+    const TEST_TIMEOUT: Duration = Duration::from_secs(10);
+
+    async fn probe_response(
+        endpoint: ProbeEndpoint,
+        response: Vec<u8>,
+        stall: bool,
+    ) -> Result<(Result<()>, Vec<u8>)> {
+        timeout(TEST_TIMEOUT, async move {
+            let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).await?;
+            let port = listener.local_addr()?.port();
+            let (release, released) = oneshot::channel();
+            let server = tokio::spawn(async move {
+                let (mut socket, _) = listener.accept().await?;
+                let mut request = Vec::new();
+                while !request.ends_with(b"\r\n\r\n") {
+                    if request.len() >= 4096 {
+                        bail!("test request headers exceed fixture bound");
+                    }
+                    request.push(socket.read_u8().await?);
+                }
+                socket.write_all(&response).await?;
+                if stall {
+                    released.await.context("fixture release dropped")?;
+                }
+                Ok::<_, anyhow::Error>(request)
+            });
+            let result = cmd_probe(endpoint, port).await;
+            // Closing the sender also releases a stalled fixture on an early error.
+            let released = release.send(());
+            let request = server.await??;
+            if stall && released.is_err() {
+                bail!("stalled fixture exited before probe completion");
+            }
+            Ok((result, request))
+        })
+        .await
+        .context("outer test deadline expired; native probe timeout did not complete")?
+    }
+
+    #[test]
+    fn probe_defaults() -> Result<()> {
+        let cli = Cli::try_parse_from(["ironrag-cli", "probe"])?;
+        assert!(matches!(
+            cli.command,
+            Commands::Probe { endpoint: ProbeEndpoint::Health, port: 8080 }
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn probe_rejects_invalid_arguments() {
+        for port in ["0", "65536", "-1", "not-a-port"] {
+            assert!(Cli::try_parse_from(["ironrag-cli", "probe", "--port", port]).is_err());
+        }
+        for endpoint in ["unknown", "/v1/health", "http://example.com"] {
+            assert!(Cli::try_parse_from(["ironrag-cli", "probe", "--endpoint", endpoint]).is_err());
+        }
+        assert!(
+            Cli::try_parse_from(["ironrag-cli", "probe", "--url", "http://example.com"]).is_err()
+        );
+    }
+
+    #[test]
+    fn probe_accepts_port_boundaries_and_ready() -> Result<()> {
+        for port in ["1", "65535"] {
+            let cli = Cli::try_parse_from([
+                "ironrag-cli",
+                "probe",
+                "--endpoint",
+                "ready",
+                "--port",
+                port,
+            ])?;
+            assert!(matches!(cli.command, Commands::Probe { endpoint: ProbeEndpoint::Ready, .. }));
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn probe_health_complete_response() -> Result<()> {
+        let (result, request) = probe_response(
+            ProbeEndpoint::Health,
+            b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok".to_vec(),
+            false,
+        )
+        .await?;
+        result?;
+        assert!(request.starts_with(b"GET /v1/health HTTP/1.1\r\n"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn probe_ready_complete_chunked_response() -> Result<()> {
+        let (result, request) = probe_response(
+            ProbeEndpoint::Ready,
+            b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n2\r\nok\r\n0\r\n\r\n".to_vec(),
+            false,
+        )
+        .await?;
+        result?;
+        assert!(request.starts_with(b"GET /v1/ready HTTP/1.1\r\n"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn probe_rejects_unsuccessful_statuses() -> Result<()> {
+        for status in ["503 Service Unavailable", "404 Not Found"] {
+            let (result, _) = probe_response(
+                ProbeEndpoint::Ready,
+                format!("HTTP/1.1 {status}\r\nContent-Length: 0\r\n\r\n").into_bytes(),
+                false,
+            )
+            .await?;
+            let error = result.err().context("unsuccessful status was accepted")?;
+            assert!(error.to_string().contains(status));
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn probe_refuses_redirects() -> Result<()> {
+        let (result, _) = probe_response(
+            ProbeEndpoint::Health,
+            b"HTTP/1.1 302 Found\r\nLocation: /v1/ready\r\nContent-Length: 0\r\n\r\n".to_vec(),
+            false,
+        )
+        .await?;
+        let error = result.err().context("redirect was accepted")?;
+        assert!(error.to_string().contains("HTTP 302"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn probe_rejects_refused_connection() -> Result<()> {
+        // Reserve the port without listening, avoiding a free-port rebind race.
+        let socket = tokio::net::TcpSocket::new_v4()?;
+        socket.bind((std::net::Ipv4Addr::LOCALHOST, 0).into())?;
+        let result =
+            timeout(TEST_TIMEOUT, cmd_probe(ProbeEndpoint::Health, socket.local_addr()?.port()))
+                .await?;
+        let error = result.err().context("connection without a listener was accepted")?;
+        assert!(error.downcast_ref::<reqwest::Error>().is_some_and(reqwest::Error::is_connect));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn probe_rejects_malformed_and_truncated_bodies() -> Result<()> {
+        for response in [
+            &b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\ninvalid\r\n"[..],
+            &b"HTTP/1.1 200 OK\r\nContent-Length: 10\r\n\r\nshort"[..],
+        ] {
+            let (result, _) =
+                probe_response(ProbeEndpoint::Health, response.to_vec(), false).await?;
+            let error = result.err().context("invalid body was accepted")?;
+            assert!(error.downcast_ref::<reqwest::Error>().is_some());
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn probe_body_limit() -> Result<()> {
+        let mut response =
+            format!("HTTP/1.1 200 OK\r\nContent-Length: {PROBE_BODY_LIMIT}\r\n\r\n").into_bytes();
+        response.extend(vec![b'x'; PROBE_BODY_LIMIT]);
+        probe_response(ProbeEndpoint::Health, response, false).await?.0?;
+
+        for response in [
+            format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n", PROBE_BODY_LIMIT + 1)
+                .into_bytes(),
+            {
+                let mut response = format!(
+                    "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n{:x}\r\n",
+                    PROBE_BODY_LIMIT + 1
+                )
+                .into_bytes();
+                response.extend(vec![b'x'; PROBE_BODY_LIMIT + 1]);
+                response.extend_from_slice(b"\r\n0\r\n\r\n");
+                response
+            },
+        ] {
+            let (result, _) = probe_response(ProbeEndpoint::Health, response, false).await?;
+            let error = result.err().context("oversized body was accepted")?;
+            assert!(error.to_string().contains("exceeds 64 KiB"));
+        }
+        Ok(())
+    }
+
+    async fn assert_native_timeout(response: Vec<u8>) -> Result<()> {
+        let started = Instant::now();
+        let (result, _) = probe_response(ProbeEndpoint::Health, response, true).await?;
+        let error = result.err().context("stalled response was accepted")?;
+        assert!(error.downcast_ref::<reqwest::Error>().is_some_and(reqwest::Error::is_timeout));
+        assert!(started.elapsed() >= PROBE_TIMEOUT);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn probe_stalled_headers_use_native_timeout() -> Result<()> {
+        assert_native_timeout(Vec::new()).await
+    }
+
+    #[tokio::test]
+    async fn probe_stalled_body_uses_native_timeout() -> Result<()> {
+        assert_native_timeout(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\no".to_vec()).await
     }
 }

@@ -311,6 +311,144 @@ struct QueryGroundingAppFixture {
     conversation_id: Uuid,
 }
 
+#[test]
+#[ignore = "requires PostgreSQL and Redis"]
+fn admitted_query_turns_fit_the_default_worker_stack() -> Result<()> {
+    use ironrag_backend::interfaces::http::{query, router_support::ApiError};
+
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(1)
+        .thread_stack_size(2 * 1024 * 1024)
+        .enable_all()
+        .build()?;
+    runtime.block_on(async {
+        let fixture = QueryGroundingAppFixture::create().await?;
+        let actor = iam_repository::create_principal(
+            &fixture.state.persistence.postgres,
+            "user",
+            "Bounded query worker",
+            None,
+        )
+        .await?;
+        let auth = crate::iam_token_support::scoped_workspace_auth(
+            actor.id,
+            fixture.workspace_id,
+            &["query_run"],
+        );
+        // Exercise readiness rejection and then the readable-library pipeline
+        // through its typed missing-binding failure, without provider credentials.
+        for expected_failure in ["knowledge_not_ready", "query_binding_not_configured"] {
+            if expected_failure == "query_binding_not_configured" {
+                let chunk_id = Uuid::now_v7();
+                let fact = sample_technical_fact_row(TechnicalFactRowSeed {
+                    workspace_id: fixture.workspace_id,
+                    library_id: fixture.library_id,
+                    document_id: Uuid::now_v7(),
+                    revision_id: Uuid::now_v7(),
+                    fact_kind: TechnicalFactKind::ConfigurationKey,
+                    normalized_value: "250 ms",
+                    display_value: "250 ms",
+                    support_block_ids: Vec::new(),
+                    support_chunk_ids: vec![chunk_id],
+                });
+                let seed = AuthoritativeEvidenceSeed {
+                    query_text: "The request latency budget is 250 ms.",
+                    verification_state: "verified",
+                    verification_warnings: json!([]),
+                    chunk_ids: vec![chunk_id],
+                    entity_ids: Vec::new(),
+                    relation_ids: Vec::new(),
+                    structured_blocks: Vec::new(),
+                    technical_facts: vec![fact],
+                };
+                let revisions = fixture
+                    .seed_authoritative_document_revisions(&seed, Utc::now())
+                    .await?;
+                fixture.seed_authoritative_chunks(&seed, &revisions).await?;
+                let fingerprint = repositories::content_fingerprint_repository::get_library_readable_content_fingerprint(
+                    &fixture.state.persistence.postgres,
+                    fixture.library_id,
+                ).await?;
+                assert!(fingerprint.has_readable_content, "fixture must pass the real readable-content guard");
+            }
+            // Reuse the worker after each controlled failure.
+            for _ in 0..2 {
+                let state = fixture.state.clone();
+                let auth = auth.clone();
+                let conversation_id = fixture.conversation_id;
+                let payload = serde_json::from_value::<query::CreateSessionTurnRequest>(json!({
+                    "contentText": "What is the request latency budget?",
+                    "includeDebug": false,
+                    "topK": 5,
+                }))?;
+                let error = tokio::spawn(async move {
+                    Box::pin(query::create_session_turn(
+                        auth,
+                        axum::extract::State(state),
+                        axum::extract::Path(conversation_id),
+                        axum::http::HeaderMap::new(),
+                        axum::Json(payload),
+                    ))
+                    .await
+                })
+                .await
+                .context("query worker must survive the admitted turn")?
+                .expect_err("the fixture must stop before a model provider");
+                match expected_failure {
+                    "knowledge_not_ready" => {
+                        assert!(matches!(error, ApiError::KnowledgeNotReady(_)))
+                    }
+                    _ => assert!(
+                        matches!(
+                            error,
+                            ApiError::ServiceUnavailable { kind: "query_binding_not_configured", .. }
+                        ),
+                        "expected a typed missing-binding failure, got {error:?}"
+                    ),
+                }
+            }
+        }
+
+        let state = fixture.state.clone();
+        let conversation_id = fixture.conversation_id;
+        let error = tokio::spawn(async move {
+            state
+                .application_services
+                .query
+                .execute_grounded_answer_turn(
+                    &state,
+                    ironrag_backend::services::query::service::ExecuteConversationTurnCommand {
+                        conversation_id,
+                        author_principal_id: None,
+                        surface_kind:
+                            ironrag_backend::domains::agent_runtime::RuntimeSurfaceKind::Mcp,
+                        content_text: "What is the request latency budget?".to_owned(),
+                        external_prior_turns: Vec::new(),
+                        top_k: 5,
+                        include_debug: false,
+                    },
+                )
+                .await
+        })
+        .await
+        .context("grounded-query worker must survive admission")?
+        .expect_err("a missing binding must stop before retrieval providers");
+        // Direct retrieval treats the missing embedding binding as an unproven
+        // vector inventory, so it fails closed with a state conflict.
+        assert!(matches!(error, ApiError::Conflict(_)), "expected an inventory conflict, got {error:?}");
+        let failure_codes: Vec<String> = sqlx::query_scalar(
+            "select runtime.failure_code from query_execution execution
+             join runtime_execution runtime on runtime.id = execution.runtime_execution_id
+             where execution.conversation_id = $1 order by runtime.failure_code",
+        )
+        .bind(fixture.conversation_id)
+        .fetch_all(&fixture.state.persistence.postgres)
+        .await?;
+        assert_eq!(failure_codes, ["query_binding_not_configured", "query_binding_not_configured", "query_state_conflict"]);
+        fixture.cleanup().await
+    })
+}
+
 impl QueryGroundingAppFixture {
     async fn create() -> Result<Self> {
         let mut settings =
@@ -530,7 +668,12 @@ impl QueryGroundingAppFixture {
         let now = Utc::now();
         let revision_document_ids = self.seed_authoritative_document_revisions(&seed, now).await?;
         self.seed_authoritative_chunks(&seed, &revision_document_ids).await?;
-        self.seed_authoritative_runtime_graph(&seed.entity_ids, &seed.relation_ids).await?;
+        self.seed_authoritative_runtime_graph(
+            &seed.entity_ids,
+            &seed.relation_ids,
+            &revision_document_ids,
+        )
+        .await?;
         let AuthoritativeEvidenceSeed {
             verification_state,
             verification_warnings,
@@ -777,6 +920,7 @@ impl QueryGroundingAppFixture {
         &self,
         entity_ids: &[Uuid],
         relation_ids: &[Uuid],
+        revision_document_ids: &std::collections::BTreeMap<Uuid, Uuid>,
     ) -> Result<()> {
         // Graph node/edge references hydrate from the bundle's entity/relation
         // edges, which only persist for ids present in the runtime graph
@@ -806,6 +950,30 @@ impl QueryGroundingAppFixture {
                     runtime_projection_version,
                 )
                 .await?;
+            }
+        }
+        if !entity_ids.is_empty() || !relation_ids.is_empty() {
+            let (&revision_id, &document_id) = revision_document_ids
+                .iter()
+                .next()
+                .context("graph references require an authoritative source revision")?;
+            for (target_kind, targets) in [("node", entity_ids), ("edge", relation_ids)] {
+                for target_id in targets {
+                    sqlx::query(
+                        "insert into runtime_graph_evidence
+                         (library_id, evidence_identity_key, target_kind, target_id, document_id, revision_id, evidence_text)
+                         values ($1, $2, $3, $4, $5, $6, 'grounding fixture source')",
+                    )
+                    .bind(self.library_id)
+                    .bind(format!("grounding:{target_kind}:{target_id}"))
+                    .bind(target_kind)
+                    .bind(target_id)
+                    .bind(document_id)
+                    .bind(revision_id)
+                    .execute(&self.state.persistence.postgres)
+                    .await
+                    .context("failed to seed authoritative graph evidence")?;
+                }
             }
         }
         Ok(())

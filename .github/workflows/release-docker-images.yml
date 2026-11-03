@@ -1,34 +1,35 @@
 name: Release Docker Images
-run-name: ${{ github.event.release.tag_name || github.event.inputs.tag || github.ref_name }}
+run-name: ${{ github.event.release.tag_name }}
 
 on:
   release:
     types: [published]
-  workflow_dispatch:
-    inputs:
-      tag:
-        description: "Docker tag for both images (e.g. v0.1.0)"
-        required: true
-        type: string
-      push_latest:
-        description: "Also push the latest tag"
-        required: false
-        type: boolean
-        default: false
 
 permissions:
   contents: read
 
 concurrency:
-  group: release-docker-images-${{ github.event.release.tag_name || github.event.inputs.tag }}
+  group: ironrag-public-images
+  queue: max
   cancel-in-progress: false
 
 jobs:
-  quality:
-    uses: ./.github/workflows/quality.yml
+  provenance:
+    if: github.event.release.prerelease == false && github.event.release.author.id == 82709956
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.release.tag_name }}
+          persist-credentials: false
+      - name: Refuse foreign image versions before building any role
+        run: python3 scripts/public_images.py all
+        env:
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
 
   publish:
-    needs: quality
+    needs: provenance
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -90,6 +91,20 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.release.tag_name }}
+          persist-credentials: false
+
+      - name: Check immutable image and latest provenance
+        id: provenance
+        run: python3 scripts/public_images.py prepare --image "${IMAGE#pipingspace/}"
+        env:
+          IMAGE: ${{ matrix.image }}
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v4
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
@@ -100,16 +115,21 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
+      - name: Read selected source descriptor
+        id: descriptor
+        run: |
+          echo "json=$(python3 -c 'import json; print(json.dumps(json.load(open(".public-release.json")), separators=(",", ":")))')" >> "$GITHUB_OUTPUT"
+
       - name: Prepare Docker metadata
         id: meta
         uses: docker/metadata-action@v6
         with:
           images: ${{ matrix.image }}
           tags: |
-            type=raw,value=${{ github.event_name == 'release' && github.event.release.tag_name || github.event.inputs.tag }}
-            type=raw,value=latest,enable=${{ (github.event_name == 'release' && github.event.release.prerelease == false) || (github.event_name == 'workflow_dispatch' && github.event.inputs.push_latest) }}
+            type=raw,value=${{ github.event.release.tag_name }}
 
       - name: Build and push ${{ matrix.name }} image
+        if: steps.provenance.outputs.build == 'true'
         uses: docker/build-push-action@v7
         with:
           context: ${{ matrix.context }}
@@ -122,8 +142,33 @@ jobs:
           platforms: ${{ matrix.platforms }}
           push: true
           tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
+          labels: |
+            ${{ steps.meta.outputs.labels }}
+            io.ironrag.source-commit=${{ fromJSON(steps.descriptor.outputs.json).source_commit }}
+            io.ironrag.pipeline-id=${{ fromJSON(steps.descriptor.outputs.json).pipeline_id }}
           build-args: |
-            APP_VERSION=${{ github.event_name == 'release' && github.event.release.tag_name || github.event.inputs.tag }}
+            APP_VERSION=${{ github.event.release.tag_name }}
           cache-from: type=gha,scope=${{ matrix.gha_scope }}
           cache-to: type=gha,mode=max,scope=${{ matrix.gha_scope }}
+
+      - name: Verify published version and all runnable platforms
+        run: python3 scripts/public_images.py verify --image "${IMAGE#pipingspace/}"
+        env:
+          IMAGE: ${{ matrix.image }}
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Reconcile latest after the build
+        id: advance
+        run: python3 scripts/public_images.py prepare --image "${IMAGE#pipingspace/}"
+        env:
+          IMAGE: ${{ matrix.image }}
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Advance stable latest without rebuilding
+        if: steps.advance.outputs.latest == 'true'
+        run: docker buildx imagetools create --tag "$IMAGE:latest" "$IMAGE:$VERSION"
+        env:
+          IMAGE: ${{ matrix.image }}
+          VERSION: ${{ github.event.release.tag_name }}

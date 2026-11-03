@@ -56,7 +56,7 @@ use crate::{
         llm_context_debug::{
             AgentLoopMetadata, AgentStopReason, LlmIterationDebug, ResponseToolCallDebug,
         },
-        provider_billing::{QueryProviderCallReservation, QueryProviderExecutionContext},
+        provider_billing::QueryProviderExecutionContext,
         service::ExternalConversationTurn,
     },
     shared::text_tokens::backtick_literal_spans,
@@ -95,6 +95,7 @@ use state_machine::*;
 use tool_argument_defaults::*;
 use tool_arguments::*;
 use tool_dispatch::*;
+pub(crate) use tool_result::native_document_read_reference;
 use tool_result::*;
 use tool_scope::*;
 use types::*;

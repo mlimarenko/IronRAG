@@ -4,6 +4,67 @@ use sqlx::{Executor, FromRow, PgPool, Postgres};
 use uuid::Uuid;
 
 #[derive(Debug, Clone, FromRow)]
+pub(crate) struct BillingKnowledgeSearchRow {
+    pub id: Uuid,
+    pub workspace_id: Uuid,
+    pub library_id: Uuid,
+}
+
+pub(crate) async fn create_knowledge_search(
+    pool: &PgPool,
+    search: &BillingKnowledgeSearchRow,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "insert into billing_knowledge_search (id, workspace_id, library_id) values ($1, $2, $3)",
+    )
+    .bind(search.id)
+    .bind(search.workspace_id)
+    .bind(search.library_id)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+pub(crate) async fn get_knowledge_search(
+    pool: &PgPool,
+    id: Uuid,
+) -> Result<Option<BillingKnowledgeSearchRow>, sqlx::Error> {
+    sqlx::query_as(
+        "select id, workspace_id, library_id from billing_knowledge_search where id = $1",
+    )
+    .bind(id)
+    .fetch_optional(pool)
+    .await
+}
+
+#[derive(Debug, Clone, FromRow)]
+pub(crate) struct BillingDocumentReadRow {
+    pub id: Uuid,
+    pub workspace_id: Uuid,
+    pub library_id: Uuid,
+    pub document_id: Uuid,
+    pub revision_id: Uuid,
+}
+
+pub(crate) async fn create_document_read(
+    pool: &PgPool,
+    read: &BillingDocumentReadRow,
+) -> Result<(), sqlx::Error> {
+    sqlx::query("insert into billing_document_read (id,workspace_id,library_id,document_id,revision_id) values ($1,$2,$3,$4,$5)")
+        .bind(read.id).bind(read.workspace_id).bind(read.library_id).bind(read.document_id).bind(read.revision_id)
+        .execute(pool).await?;
+    Ok(())
+}
+
+pub(crate) async fn get_document_read(
+    pool: &PgPool,
+    id: Uuid,
+) -> Result<Option<BillingDocumentReadRow>, sqlx::Error> {
+    sqlx::query_as("select id,workspace_id,library_id,document_id,revision_id from billing_document_read where id=$1")
+        .bind(id).fetch_optional(pool).await
+}
+
+#[derive(Debug, Clone, FromRow)]
 pub struct BillingProviderCallRow {
     pub id: Uuid,
     pub workspace_id: Uuid,

@@ -321,7 +321,6 @@ class MemoryIronRag:
                 document.update(
                     visibilityIntentId=intent_id,
                     readableRevisionId=None,
-                    readableMutationItemId=None,
                 )
         return receipt
 
@@ -334,7 +333,6 @@ class MemoryIronRag:
             document_hint=document["documentHint"],
             visibility_intent_id=document.get("visibilityIntentId"),
             readable_revision_id=document.get("readableRevisionId"),
-            readable_mutation_item_id=document.get("readableMutationItemId"),
             admission=document.get("admission"),
         )
 
@@ -354,7 +352,6 @@ class MemoryIronRag:
         library_id: UUID,
         *,
         search: str | None = None,
-        external_key: str | None = None,
         status: Sequence[str] = (),
         include_deleted: bool = False,
         limit: int = 200,
@@ -362,8 +359,6 @@ class MemoryIronRag:
         for key in sorted(self.documents):
             document = self.documents[key]
             if document["libraryId"] != str(library_id):
-                continue
-            if external_key and key != external_key:
                 continue
             if search and search not in key:
                 continue
@@ -396,7 +391,6 @@ class MemoryIronRag:
         document.update(
             admission=admission,
             readableRevisionId=admission.result_revision_id,
-            readableMutationItemId=admission.mutation_item_id,
         )
         return self._resource(document)
 
@@ -442,7 +436,6 @@ class MemoryIronRag:
                     title=request.get("title"),
                     documentHint=request.get("document_hint"),
                     readableRevisionId=handle.result_revision_id,
-                    readableMutationItemId=handle.mutation_item_id,
                 )
                 self.payload_handles[idempotency_key] = handle
                 self.payload_bodies[idempotency_key] = body

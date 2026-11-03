@@ -1,6 +1,9 @@
 use std::collections::BTreeMap;
 
-use super::table_markdown::{normalize_table_cell_text, normalize_table_headers};
+use super::table_markdown::{
+    SemanticTableContext, escape_semantic_segment, normalize_table_cell_text, plain_table_headers,
+    split_semantic_key_value, split_semantic_segments, unescape_semantic_segment,
+};
 
 pub const TABLE_SUMMARY_PREFIX: &str = "Table Summary";
 
@@ -44,6 +47,7 @@ impl TableSummaryValueShape {
 pub struct TableColumnSummary {
     pub sheet_name: Option<String>,
     pub table_name: Option<String>,
+    pub table_ref: Option<i32>,
     pub column_name: String,
     pub value_kind: TableSummaryValueKind,
     pub value_shape: TableSummaryValueShape,
@@ -66,8 +70,7 @@ pub fn is_table_summary_text(text: &str) -> bool {
 
 #[must_use]
 pub fn build_table_column_summaries(
-    sheet_name: Option<&str>,
-    table_name: Option<&str>,
+    context: SemanticTableContext<'_>,
     headers: &[String],
     rows: &[Vec<String>],
 ) -> Vec<TableColumnSummary> {
@@ -76,7 +79,7 @@ pub fn build_table_column_summaries(
     }
 
     let width = headers.len().max(rows.iter().map(Vec::len).max().unwrap_or(0));
-    let headers = normalize_table_headers(headers, width);
+    let headers = plain_table_headers(headers, width);
     let mut summaries = Vec::new();
 
     for (column_index, header) in headers.iter().enumerate() {
@@ -114,15 +117,18 @@ pub fn build_table_column_summaries(
         let most_frequent_values = all_most_frequent_values.into_iter().take(5).collect::<Vec<_>>();
 
         summaries.push(TableColumnSummary {
-            sheet_name: sheet_name
+            sheet_name: context
+                .sheet_name
                 .map(str::trim)
                 .filter(|value| !value.is_empty())
                 .map(str::to_string),
-            table_name: table_name
+            table_name: context
+                .table_name
                 .map(str::trim)
                 .filter(|value| !value.is_empty())
                 .map(str::to_string),
-            column_name: header.replace("\\|", "|"),
+            table_ref: context.table_ref,
+            column_name: header.clone(),
             value_kind: if is_numeric {
                 TableSummaryValueKind::Numeric
             } else {
@@ -161,13 +167,15 @@ pub fn build_table_column_summaries(
 #[must_use]
 pub fn render_table_column_summary(summary: &TableColumnSummary) -> String {
     let mut segments = vec![TABLE_SUMMARY_PREFIX.to_string()];
-    if let Some(sheet_name) = summary.sheet_name.as_deref() {
-        segments.push(format!("Sheet: {sheet_name}"));
-    }
-    if let Some(table_name) = summary.table_name.as_deref() {
-        segments.push(format!("Table: {table_name}"));
-    }
-    segments.push(format!("Column: {}", summary.column_name));
+    segments.extend(
+        SemanticTableContext {
+            sheet_name: summary.sheet_name.as_deref(),
+            table_name: summary.table_name.as_deref(),
+            table_ref: summary.table_ref,
+        }
+        .segments(),
+    );
+    segments.push(format!("Column: {}", escape_semantic_segment(&summary.column_name)));
     segments.push(format!("Value Kind: {}", summary.value_kind.as_str()));
     segments.push(format!("Value Shape: {}", summary.value_shape.as_str()));
     segments.push(format!("Aggregation Priority: {}", summary.aggregation_priority));
@@ -192,10 +200,13 @@ pub fn render_table_column_summary(summary: &TableColumnSummary) -> String {
             if (summary.most_frequent_count > 1 || summary.most_frequent_values.len() <= 5)
                 && !summary.most_frequent_values.is_empty()
             {
-                segments.push(format!(
-                    "Most Frequent Values: {}",
-                    summary.most_frequent_values.join("; ")
-                ));
+                let values = summary
+                    .most_frequent_values
+                    .iter()
+                    .map(|value| escape_semantic_segment(value))
+                    .collect::<Vec<_>>()
+                    .join("; ");
+                segments.push(format!("Most Frequent Values: {values}"));
             }
         }
     }
@@ -210,6 +221,7 @@ pub fn parse_table_column_summary(text: &str) -> Option<TableColumnSummary> {
 
     let mut sheet_name = None::<String>;
     let mut table_name = None::<String>;
+    let mut table_ref = None;
     let mut column_name = None::<String>;
     let mut value_kind = None::<TableSummaryValueKind>;
     let mut value_shape = None::<TableSummaryValueShape>;
@@ -224,27 +236,30 @@ pub fn parse_table_column_summary(text: &str) -> Option<TableColumnSummary> {
     let mut most_frequent_count = 0usize;
     let mut most_frequent_tie_count = 0usize;
 
-    for segment in text.split(" | ") {
+    for segment in split_semantic_segments(text) {
         let trimmed = segment.trim();
         if trimmed == TABLE_SUMMARY_PREFIX {
             continue;
         }
-        let Some((key, value)) = trimmed.split_once(": ") else {
+        let Some((key, value)) = split_semantic_key_value(trimmed) else {
             continue;
         };
+        let raw_value = value.trim();
+        let value = unescape_semantic_segment(raw_value);
         match key.trim() {
-            "Sheet" => sheet_name = Some(value.trim().to_string()),
-            "Table" => table_name = Some(value.trim().to_string()),
-            "Column" => column_name = Some(value.trim().to_string()),
+            "Sheet" => sheet_name = Some(value),
+            "Table" => table_name = Some(value),
+            "Table Ref" => table_ref = Some(value.parse::<i32>().ok().filter(|value| *value >= 0)?),
+            "Column" => column_name = Some(value),
             "Value Kind" => {
-                value_kind = match value.trim() {
+                value_kind = match value.as_str() {
                     "numeric" => Some(TableSummaryValueKind::Numeric),
                     "categorical" => Some(TableSummaryValueKind::Categorical),
                     _ => None,
                 };
             }
             "Value Shape" => {
-                value_shape = match value.trim() {
+                value_shape = match value.as_str() {
                     "label" => Some(TableSummaryValueShape::Label),
                     "identifier" => Some(TableSummaryValueShape::Identifier),
                     "url" => Some(TableSummaryValueShape::Url),
@@ -253,26 +268,26 @@ pub fn parse_table_column_summary(text: &str) -> Option<TableColumnSummary> {
                 };
             }
             "Aggregation Priority" => {
-                aggregation_priority = value.trim().parse::<u8>().ok();
+                aggregation_priority = value.parse::<u8>().ok();
             }
-            "Row Count" => row_count = value.trim().parse::<usize>().ok(),
-            "Non-empty Count" => non_empty_count = value.trim().parse::<usize>().ok(),
-            "Distinct Count" => distinct_count = value.trim().parse::<usize>().ok(),
-            "Average" => average = parse_numeric_value(value),
-            "Min" => min = parse_numeric_value(value),
-            "Max" => max = parse_numeric_value(value),
+            "Row Count" => row_count = value.parse::<usize>().ok(),
+            "Non-empty Count" => non_empty_count = value.parse::<usize>().ok(),
+            "Distinct Count" => distinct_count = value.parse::<usize>().ok(),
+            "Average" => average = parse_numeric_value(&value),
+            "Min" => min = parse_numeric_value(&value),
+            "Max" => max = parse_numeric_value(&value),
             "Most Frequent Count" => {
-                most_frequent_count = value.trim().parse::<usize>().ok().unwrap_or(0);
+                most_frequent_count = value.parse::<usize>().ok().unwrap_or(0);
             }
             "Most Frequent Tie Count" => {
-                most_frequent_tie_count = value.trim().parse::<usize>().ok().unwrap_or(0);
+                most_frequent_tie_count = value.parse::<usize>().ok().unwrap_or(0);
             }
             "Most Frequent Values" => {
-                most_frequent_values = value
-                    .split(';')
+                most_frequent_values = super::table_markdown::split_semantic_list(raw_value)
+                    .into_iter()
                     .map(str::trim)
                     .filter(|entry| !entry.is_empty())
-                    .map(str::to_string)
+                    .map(unescape_semantic_segment)
                     .collect();
             }
             _ => {}
@@ -282,6 +297,7 @@ pub fn parse_table_column_summary(text: &str) -> Option<TableColumnSummary> {
     Some(TableColumnSummary {
         sheet_name,
         table_name,
+        table_ref,
         column_name: column_name?,
         value_kind: value_kind?,
         value_shape: value_shape.unwrap_or(TableSummaryValueShape::Label),
@@ -450,12 +466,12 @@ mod tests {
         TableSummaryValueKind, TableSummaryValueShape, build_table_column_summaries,
         parse_table_column_summary, render_table_column_summary,
     };
+    use crate::shared::extraction::table_markdown::SemanticTableContext;
 
     #[test]
     fn builds_numeric_and_categorical_table_summaries() {
         let summaries = build_table_column_summaries(
-            Some("products"),
-            None,
+            SemanticTableContext { sheet_name: Some("products"), ..Default::default() },
             &["Category".to_string(), "Stock".to_string()],
             &[
                 vec!["Books".to_string(), "10".to_string()],
@@ -478,8 +494,11 @@ mod tests {
     #[test]
     fn renders_and_parses_summary_round_trip() {
         let summary = build_table_column_summaries(
-            Some("organizations"),
-            None,
+            SemanticTableContext {
+                sheet_name: Some("organizations"),
+                table_ref: Some(7),
+                ..Default::default()
+            },
             &["Country".to_string()],
             &[vec!["Sweden".to_string()], vec!["Benin".to_string()], vec!["Sweden".to_string()]],
         )
@@ -490,6 +509,7 @@ mod tests {
         let parsed = parse_table_column_summary(&rendered).expect("parsed");
 
         assert_eq!(parsed.column_name, "Country");
+        assert_eq!(parsed.table_ref, Some(7));
         assert_eq!(parsed.most_frequent_values, vec!["Sweden".to_string()]);
         assert_eq!(parsed.most_frequent_count, 2);
         assert_eq!(parsed.value_shape, TableSummaryValueShape::Label);
@@ -499,8 +519,7 @@ mod tests {
     #[test]
     fn classifies_identifier_url_and_narrative_columns_as_low_priority() {
         let summaries = build_table_column_summaries(
-            Some("organizations"),
-            None,
+            SemanticTableContext { sheet_name: Some("organizations"), ..Default::default() },
             &[
                 "Organization Id".to_string(),
                 "Website".to_string(),
@@ -536,8 +555,7 @@ mod tests {
     #[test]
     fn classifies_email_phone_and_temporal_columns_as_identifier_shape() {
         let summaries = build_table_column_summaries(
-            Some("people"),
-            None,
+            SemanticTableContext { sheet_name: Some("people"), ..Default::default() },
             &["Email".to_string(), "Phone".to_string(), "Date of birth".to_string()],
             &[
                 vec![

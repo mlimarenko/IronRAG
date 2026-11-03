@@ -430,40 +430,116 @@ async fn list_by_document_scopes_to_the_document_and_extraction_version() -> Res
 #[ignore = "requires local postgres service"]
 async fn list_by_library_scopes_to_the_library_and_extraction_version() -> Result<()> {
     let fixture = Fixture::create().await?;
-    let mut first_input = fixture.new_record_input(Uuid::now_v7(), "ready");
-    first_input.extraction_version = "v1".to_string();
-    let first = runtime_graph_repository::create_runtime_graph_extraction_record(
-        &fixture.pool,
-        &first_input,
-    )
-    .await?;
-
-    let mut second_input = fixture.new_record_input(Uuid::now_v7(), "processing");
-    second_input.extraction_version = "v1".to_string();
-    let second = runtime_graph_repository::create_runtime_graph_extraction_record(
-        &fixture.pool,
-        &second_input,
-    )
-    .await?;
-
-    let records = runtime_graph_repository::list_runtime_graph_extraction_records_by_library(
-        &fixture.pool,
+    let mut input = fixture.new_record_input(Uuid::now_v7(), "ready");
+    input.extraction_version = "v1".to_string();
+    input.raw_output_json = serde_json::json!({"lifecycle": {"revision_id": Uuid::now_v7()},
+        "recovery_summary": "malformed", "provider_payload": "must not be fetched"});
+    let first =
+        runtime_graph_repository::create_runtime_graph_extraction_record(&fixture.pool, &input)
+            .await?;
+    // Server-side seed: tied timestamps, reverse insertion, multiple FETCHes.
+    let expected = sqlx::query_scalar::<_, Uuid>(
+        "insert into runtime_graph_extraction
+         (id, runtime_execution_id, library_id, document_id, chunk_id, provider_kind,
+          model_name, extraction_version, prompt_hash, status, raw_output_json,
+          normalized_output_json, glean_pass_count, created_at)
+         select md5(i::text)::uuid, runtime_execution_id, library_id, document_id,
+           md5(('chunk' || i)::text)::uuid, provider_kind, model_name, extraction_version,
+           prompt_hash, status, raw_output_json, normalized_output_json, glean_pass_count, created_at
+         from runtime_graph_extraction cross join generate_series(1,70) i
+         where id=$1 order by i desc returning id")
+        .bind(first.id).fetch_all(&fixture.pool).await?;
+    let mut expected = expected.into_iter().chain([first.id]).collect::<Vec<_>>();
+    expected.sort_unstable();
+    // Timestamp priority must win even when UUID order points the other way.
+    for (id, seconds) in [(Uuid::from_u128(u128::MAX), -3600), (Uuid::nil(), 3600)] {
+        let mut timed = input.clone();
+        timed.id = id;
+        timed.chunk_id = Uuid::now_v7();
+        runtime_graph_repository::create_runtime_graph_extraction_record(&fixture.pool, &timed)
+            .await?;
+        sqlx::query(
+            "update runtime_graph_extraction set created_at=(
+            select created_at from runtime_graph_extraction where id=$1)+make_interval(secs => $3)
+            where id=$2",
+        )
+        .bind(first.id)
+        .bind(id)
+        .bind(f64::from(seconds))
+        .execute(&fixture.pool)
+        .await?;
+    }
+    expected.insert(0, Uuid::from_u128(u128::MAX));
+    expected.push(Uuid::nil());
+    let mut stale = input.clone();
+    stale.id = Uuid::now_v7();
+    stale.extraction_version = "stale".to_string();
+    runtime_graph_repository::create_runtime_graph_extraction_record(&fixture.pool, &stale).await?;
+    let consumer = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&fixture.database.database_url)
+        .await?;
+    let mut connection = consumer.acquire().await?;
+    sqlx::query("begin isolation level repeatable read").execute(&mut *connection).await?;
+    let mut cursor = runtime_graph_repository::RuntimeGraphRebuildExtractionCursor::open(
+        &mut connection,
         fixture.library_id,
         "v1",
     )
-    .await
-    .context("failed to list runtime graph extraction records by library")?;
-    assert_eq!(records.iter().map(|row| row.id).collect::<Vec<_>>(), vec![first.id, second.id]);
-
-    let unmatched_version =
-        runtime_graph_repository::list_runtime_graph_extraction_records_by_library(
-            &fixture.pool,
-            fixture.library_id,
-            "v-does-not-exist",
+    .await?;
+    let first_batch = cursor.next_batch(&mut connection).await?;
+    let first_fetched = first_batch.first().context("first cursor record")?;
+    assert_eq!(first_fetched.id, expected[0]);
+    assert_eq!(first_fetched.lifecycle, Some(input.raw_output_json["lifecycle"].clone()));
+    assert_eq!(first_fetched.recovery_summary, Some(serde_json::json!("malformed")));
+    // Separate connection commits after the snapshot is pinned by the first FETCH.
+    sqlx::query("update runtime_graph_extraction set status='failed' where id=$1")
+        .bind(expected[1])
+        .execute(&fixture.pool)
+        .await?;
+    let mut later = input.clone();
+    later.id = Uuid::now_v7();
+    runtime_graph_repository::create_runtime_graph_extraction_record(&fixture.pool, &later).await?;
+    let mut actual = Vec::new();
+    sqlx::query("create temporary table cursor_merge_receipt (id uuid)")
+        .execute(&mut *connection)
+        .await?;
+    let mut batch = first_batch;
+    while !batch.is_empty() {
+        for record in batch {
+            assert_eq!(record.status, "ready");
+            actual.push(record.id);
+            sqlx::query("select 1").execute(&mut *connection).await?;
+            sqlx::query("insert into cursor_merge_receipt values ($1)")
+                .bind(record.id)
+                .execute(&mut *connection)
+                .await?;
+        }
+        batch = cursor.next_batch(&mut connection).await?;
+    }
+    assert_eq!(actual, expected);
+    assert!(cursor.next_batch(&mut connection).await?.is_empty());
+    cursor.close(&mut connection).await?;
+    for (library_id, version) in [(fixture.library_id, "missing"), (Uuid::now_v7(), "v1")] {
+        let mut empty = runtime_graph_repository::RuntimeGraphRebuildExtractionCursor::open(
+            &mut connection,
+            library_id,
+            version,
         )
         .await?;
-    assert!(unmatched_version.is_empty());
-
+        assert!(empty.next_batch(&mut connection).await?.is_empty());
+        empty.close(&mut connection).await?;
+    }
+    sqlx::query("rollback").execute(&mut *connection).await?;
+    drop(connection);
+    consumer.close().await;
+    let raw = sqlx::query_scalar::<_, serde_json::Value>(
+        "select raw_output_json from runtime_graph_extraction where id=$1",
+    )
+    .bind(first.id)
+    .fetch_one(&fixture.pool)
+    .await?;
+    assert_eq!(raw, input.raw_output_json);
     fixture.cleanup().await
 }
 

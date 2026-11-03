@@ -522,20 +522,37 @@ async fn resolve_hybrid_search_context(
     };
     drop(_vector_guard);
 
-    let embedding = state
-        .llm_gateway
-        .embed(EmbeddingRequest {
-            provider_kind: binding.provider_kind.clone(),
-            model_name: binding.model_name.clone(),
-            input: query_text.to_string(),
-            api_key_override: binding.api_key.clone(),
-            base_url_override: binding.provider_base_url.clone(),
-            extra_parameters_json: binding.extra_parameters_json.clone(),
-        })
-        .await
-        .map_err(|error| {
-            ApiError::ProviderFailure(format!("failed to embed knowledge search query: {error}"))
-        })?;
+    let mut provider_call = crate::services::ops::billing::provider_reservation::ProviderCallReservation::reserve_knowledge_search(
+        state,
+        library_id,
+        &binding,
+    ).await?;
+    let embedding = match crate::integrations::retry::with_single_provider_attempt(
+        crate::observability::with_provider_call_id(
+            provider_call.provider_call_id(),
+            state.llm_gateway.embed(EmbeddingRequest {
+                provider_kind: binding.provider_kind.clone(),
+                model_name: binding.model_name.clone(),
+                input: query_text.to_string(),
+                api_key_override: binding.api_key.clone(),
+                base_url_override: binding.provider_base_url.clone(),
+                extra_parameters_json: binding.extra_parameters_json.clone(),
+            }),
+        ),
+    )
+    .await
+    {
+        Ok(embedding) => {
+            provider_call.complete(&embedding.usage_json).await?;
+            embedding
+        }
+        Err(error) => {
+            provider_call.fail().await?;
+            return Err(ApiError::ProviderFailure(format!(
+                "failed to embed knowledge search query: {error}"
+            )));
+        }
+    };
     ensure_active_embedding_profile_key(state, library_id, &embedding_profile_key)
         .await
         .map_err(map_runtime_lifecycle_error)?;

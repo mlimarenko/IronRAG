@@ -1,13 +1,12 @@
-use anyhow::{Result, anyhow};
+use anyhow::Result;
 
 use crate::shared::extraction::{
     ExtractionOutput, ExtractionSourceMetadata, build_text_layout_from_content,
 };
 
-pub fn extract_text_like(file_bytes: &[u8]) -> Result<ExtractionOutput> {
-    let raw_text = String::from_utf8(file_bytes.to_vec())
-        .map_err(|_| anyhow!("invalid utf-8 text payload"))?;
-    let layout = build_text_layout_from_content(&raw_text);
+/// Domain line hints over child-produced native content; no application parser.
+pub fn extract_text_like(native_content: &str) -> Result<ExtractionOutput> {
+    let layout = build_text_layout_from_content(native_content);
     Ok(ExtractionOutput {
         extraction_kind: "text_like".into(),
         content_text: layout.content_text,
@@ -35,8 +34,7 @@ mod tests {
 
     #[test]
     fn extracts_utf8_text_without_mutation() {
-        let output =
-            extract_text_like("Graph-ready plain text".as_bytes()).expect("text extraction");
+        let output = extract_text_like("Graph-ready plain text").expect("text extraction");
 
         assert_eq!(output.extraction_kind, "text_like");
         assert_eq!(output.content_text, "Graph-ready plain text");
@@ -46,8 +44,8 @@ mod tests {
 
     #[test]
     fn emits_heading_list_and_code_hints_for_text_like_content() {
-        let output = extract_text_like("# API\n- first item\n```json\n{\n".as_bytes())
-            .expect("text extraction");
+        let output =
+            extract_text_like("# API\n- first item\n```json\n{\n").expect("text extraction");
 
         assert!(
             output

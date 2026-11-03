@@ -1,4 +1,4 @@
-import { render, screen } from '@testing-library/react'
+import { render, screen, waitFor } from '@testing-library/react'
 import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { describe, expect, it, vi } from 'vitest'
@@ -8,6 +8,7 @@ import userEvent from '@testing-library/user-event'
 import {
   Badge,
   Button,
+  Drawer,
   Modal,
   PageHeader,
   Panel,
@@ -18,6 +19,34 @@ import {
 } from './ui'
 
 const componentsStyles = readFileSync(resolve(process.cwd(), 'src/styles/components.css'), 'utf8')
+
+function ExampleDrawer() {
+  const [open, setOpen] = useState(false)
+  return (
+    <>
+      <Button onClick={() => setOpen(true)}>Show evidence</Button>
+      <Drawer title="Evidence" open={open} onOpenChange={setOpen}>
+        <Button>Source</Button>
+      </Drawer>
+    </>
+  )
+}
+
+describe('Controlled drawer keyboard focus', () => {
+  it('returns focus to its external opener after Escape', async () => {
+    const user = userEvent.setup()
+    render(<ExampleDrawer />)
+    const opener = screen.getByRole('button', { name: 'Show evidence' })
+    await user.tab()
+    expect(opener).toHaveFocus()
+    await user.keyboard('{Enter}')
+    expect(screen.getByRole('dialog', { name: 'Evidence' })).toBeInTheDocument()
+    expect(opener).not.toHaveFocus()
+    await user.keyboard('{Escape}')
+    await waitFor(() => expect(opener).toHaveFocus())
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+  })
+})
 
 function ExampleTabs() {
   const [value, setValue] = useState('first')

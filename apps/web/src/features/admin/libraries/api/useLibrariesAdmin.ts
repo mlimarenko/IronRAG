@@ -312,10 +312,6 @@ export function useLibraryAdminMutations() {
             includeDocumentHintInMcpAnswers: draft.includeDocumentHintInMcpAnswers,
           },
         }).then((result) => unwrap(result)),
-        Catalog.updateCatalogLibraryRecognitionPolicy({
-          path: { libraryId },
-          body: { rasterImageEngine: draft.recognitionEngine },
-        }).then((result) => unwrap(result)),
         Catalog.updateCatalogLibraryRetrievalConfig({
           path: { libraryId },
           body: { lexical: { textSearchConfig: draft.textSearchConfig.trim() } },

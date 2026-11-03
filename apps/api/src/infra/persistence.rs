@@ -879,10 +879,129 @@ pub(crate) const REQUIRED_BASELINE_OBJECT_GROUPS_CONTENT_VISIBILITY_INTENT: &[&[
     REQUIRED_BASELINE_OBJECTS_CONTENT_VISIBILITY_INTENT,
 ];
 
-/// Readiness validates the current intent revision, not retired predecessor
-/// objects. Historical group constants remain exact migration certificates.
+const REQUIRED_BASELINE_OBJECTS_XBERG_RECOGNITION: &[(&str, &str)] = &[
+    (
+        "exactly one successful baseline migration record",
+        crate::services::maintenance::xberg_recognition_schema::BASELINE_HISTORY_CERTIFICATE,
+    ),
+    (
+        "recognition policy storage, vision default and object constraint",
+        crate::services::maintenance::xberg_recognition_schema::POLICY_STORAGE_CERTIFICATE,
+    ),
+    (
+        "canonical Xberg recognition constraint and current policies",
+        crate::services::maintenance::xberg_recognition_schema::CURRENT_POLICY_CERTIFICATE,
+    ),
+];
+
+pub(crate) const REQUIRED_BASELINE_OBJECT_GROUPS_XBERG_RECOGNITION: &[&[(&str, &str)]] = &[
+    REQUIRED_BASELINE_OBJECTS_IRG75,
+    REQUIRED_BASELINE_OBJECTS_PROVISIONING,
+    REQUIRED_BASELINE_OBJECTS_IRG112,
+    REQUIRED_BASELINE_OBJECTS_IRG173,
+    REQUIRED_BASELINE_OBJECTS_QUERY_RERANK,
+    REQUIRED_BASELINE_OBJECTS_DECISION_CATALOG,
+    REQUIRED_BASELINE_OBJECTS_CONTENT_VISIBILITY_INTENT,
+    REQUIRED_BASELINE_OBJECTS_XBERG_RECOGNITION,
+];
+
+const REQUIRED_BASELINE_OBJECTS_VISION_RECOGNITION: &[(&str, &str)] = &[
+    (
+        "exactly one successful baseline migration record",
+        crate::services::maintenance::xberg_recognition_schema::BASELINE_HISTORY_CERTIFICATE,
+    ),
+    (
+        "recognition policy storage, vision default and object constraint",
+        crate::services::maintenance::xberg_recognition_schema::POLICY_STORAGE_CERTIFICATE,
+    ),
+    (
+        "singleton Vision recognition constraint and current policies",
+        crate::services::maintenance::vision_recognition_schema::CURRENT_POLICY_CERTIFICATE,
+    ),
+];
+
+pub(crate) const REQUIRED_BASELINE_OBJECT_GROUPS_VISION_RECOGNITION: &[&[(&str, &str)]] = &[
+    REQUIRED_BASELINE_OBJECTS_IRG75,
+    REQUIRED_BASELINE_OBJECTS_PROVISIONING,
+    REQUIRED_BASELINE_OBJECTS_IRG112,
+    REQUIRED_BASELINE_OBJECTS_IRG173,
+    REQUIRED_BASELINE_OBJECTS_QUERY_RERANK,
+    REQUIRED_BASELINE_OBJECTS_DECISION_CATALOG,
+    REQUIRED_BASELINE_OBJECTS_CONTENT_VISIBILITY_INTENT,
+    REQUIRED_BASELINE_OBJECTS_VISION_RECOGNITION,
+];
+
+const REQUIRED_BASELINE_OBJECTS_BILLING_DOCUMENT_READ: &[(&str, &str)] = &[(
+    "native document-read billing owner enum",
+    crate::services::maintenance::billing_document_read_schema::ENUM_CERTIFICATE,
+)];
+
+// Attribution survives later additions to the shared owner enum. Its table
+// certificates are unchanged; each revision separately certifies its enum.
+const REQUIRED_BASELINE_OBJECTS_DOCUMENT_READ_ATTRIBUTION: &[(&str, &str)] = &[
+    (
+        "native document-read attribution columns and primary key",
+        crate::services::maintenance::billing_document_read_schema::TABLE_CERTIFICATE,
+    ),
+    (
+        "native document-read tenant scope and retained source identity",
+        crate::services::maintenance::billing_document_read_schema::SCOPE_CERTIFICATE,
+    ),
+    (
+        "native document-read referencing scope index",
+        crate::services::maintenance::billing_document_read_schema::INDEX_CERTIFICATE,
+    ),
+];
+
+pub(crate) const REQUIRED_BASELINE_OBJECT_GROUPS_BILLING_DOCUMENT_READ: &[&[(&str, &str)]] = &[
+    REQUIRED_BASELINE_OBJECTS_IRG75,
+    REQUIRED_BASELINE_OBJECTS_PROVISIONING,
+    REQUIRED_BASELINE_OBJECTS_IRG112,
+    REQUIRED_BASELINE_OBJECTS_IRG173,
+    REQUIRED_BASELINE_OBJECTS_QUERY_RERANK,
+    REQUIRED_BASELINE_OBJECTS_DECISION_CATALOG,
+    REQUIRED_BASELINE_OBJECTS_CONTENT_VISIBILITY_INTENT,
+    REQUIRED_BASELINE_OBJECTS_VISION_RECOGNITION,
+    REQUIRED_BASELINE_OBJECTS_BILLING_DOCUMENT_READ,
+    REQUIRED_BASELINE_OBJECTS_DOCUMENT_READ_ATTRIBUTION,
+];
+
+const REQUIRED_BASELINE_OBJECTS_BILLING_KNOWLEDGE_SEARCH: &[(&str, &str)] = &[
+    (
+        "knowledge-search billing owner enum",
+        crate::services::maintenance::billing_knowledge_search_schema::ENUM_CERTIFICATE,
+    ),
+    (
+        "knowledge-search attribution columns and primary key",
+        crate::services::maintenance::billing_knowledge_search_schema::TABLE_CERTIFICATE,
+    ),
+    (
+        "knowledge-search tenant scope",
+        crate::services::maintenance::billing_knowledge_search_schema::SCOPE_CERTIFICATE,
+    ),
+    (
+        "knowledge-search referencing scope index",
+        crate::services::maintenance::billing_knowledge_search_schema::INDEX_CERTIFICATE,
+    ),
+];
+
+pub(crate) const REQUIRED_BASELINE_OBJECT_GROUPS_BILLING_KNOWLEDGE_SEARCH: &[&[(&str, &str)]] = &[
+    REQUIRED_BASELINE_OBJECTS_IRG75,
+    REQUIRED_BASELINE_OBJECTS_PROVISIONING,
+    REQUIRED_BASELINE_OBJECTS_IRG112,
+    REQUIRED_BASELINE_OBJECTS_IRG173,
+    REQUIRED_BASELINE_OBJECTS_QUERY_RERANK,
+    REQUIRED_BASELINE_OBJECTS_DECISION_CATALOG,
+    REQUIRED_BASELINE_OBJECTS_CONTENT_VISIBILITY_INTENT,
+    REQUIRED_BASELINE_OBJECTS_VISION_RECOGNITION,
+    REQUIRED_BASELINE_OBJECTS_DOCUMENT_READ_ATTRIBUTION,
+    REQUIRED_BASELINE_OBJECTS_BILLING_KNOWLEDGE_SEARCH,
+];
+
+/// Readiness validates the current revision, including unchanged document-read
+/// attribution and the exact current enum. Frozen predecessors stay exact.
 pub(crate) const REQUIRED_BASELINE_OBJECT_GROUPS: &[&[(&str, &str)]] =
-    REQUIRED_BASELINE_OBJECT_GROUPS_CONTENT_VISIBILITY_INTENT;
+    REQUIRED_BASELINE_OBJECT_GROUPS_BILLING_KNOWLEDGE_SEARCH;
 
 /// Fails when the recorded baseline checksum is current but an object that
 /// baseline declares is absent.

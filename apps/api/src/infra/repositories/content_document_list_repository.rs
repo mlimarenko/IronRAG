@@ -527,7 +527,25 @@ fn document_list_base_cte_sql() -> String {
         document_list_search_fields_sql("$4"),
     );
     format!(
-        "with {DOCUMENT_LIST_BILLING_HEALTH_CTE_SQL}, joined as (
+        "with {DOCUMENT_LIST_BILLING_HEALTH_CTE_SQL}, document_costs as materialized (
+            select
+                bec.knowledge_document_id,
+                case
+                    when count(distinct bec.currency_code) <= 1
+                    then sum(bec.total_cost)
+                end as cost_total,
+                case
+                    when count(distinct bec.currency_code) <= 1
+                    then min(bec.currency_code)
+                end as cost_currency_code
+            from billing_health
+            join billing_execution_cost bec
+              on not billing_health.rollup_dirty
+             and billing_health.terminal_error_code is null
+             and bec.library_id = $1
+             and bec.knowledge_document_id is not null
+            group by bec.knowledge_document_id
+        ), joined as (
             select
                 d.id,
                 d.workspace_id,
@@ -563,8 +581,18 @@ fn document_list_base_cte_sql() -> String {
                 a.heartbeat_at as attempt_heartbeat_at,
                 a.failure_message as attempt_failure_message,
                 a.progress_percent as attempt_progress_percent,
-                c.cost_total,
-                c.cost_currency_code,
+                case
+                    when billing_health.rollup_dirty
+                      or billing_health.terminal_error_code is not null then null
+                    when c.knowledge_document_id is null then 0
+                    else c.cost_total
+                end as cost_total,
+                case
+                    when billing_health.rollup_dirty
+                      or billing_health.terminal_error_code is not null then null
+                    when c.knowledge_document_id is null then 'USD'
+                    else c.cost_currency_code
+                end as cost_currency_code,
                 billing_health.rollup_dirty as billing_rollup_dirty,
                 billing_health.terminal_error_code as billing_rollup_terminal_error_code,
                 case
@@ -598,21 +626,7 @@ fn document_list_base_cte_sql() -> String {
                 limit 1
             ) a on true
             cross join billing_health
-            left join lateral (
-                select
-                    case
-                        when count(distinct bec.currency_code) <= 1
-                        then coalesce(sum(bec.total_cost), 0)
-                    end as cost_total,
-                    case
-                        when count(distinct bec.currency_code) <= 1
-                        then coalesce(min(bec.currency_code), 'USD')
-                    end as cost_currency_code
-                from billing_execution_cost bec
-                where bec.library_id = d.library_id
-                  and bec.knowledge_document_id = d.id
-            ) c on not billing_health.rollup_dirty
-                  and billing_health.terminal_error_code is null
+            left join document_costs c on c.knowledge_document_id = d.id
             where d.library_id = $1
               and ($2::bool or (d.document_state = 'active' and d.deleted_at is null))
         ), base as (

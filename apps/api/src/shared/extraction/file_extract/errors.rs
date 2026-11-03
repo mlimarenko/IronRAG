@@ -51,6 +51,7 @@ pub struct UploadAdmissionError {
     /// the class the extraction producer decided in
     /// [`FileExtractError::failure_class`].
     extraction_failure_class: Option<ExtractionFailureClass>,
+    pub vision_calls: Vec<crate::shared::extraction::image::VisionCallReceipt>,
 }
 
 impl UploadAdmissionError {
@@ -60,6 +61,7 @@ impl UploadAdmissionError {
             error_kind: "multipart_stream_failure",
             message: "multipart upload stream failed".to_string(),
             extraction_failure_class: None,
+            vision_calls: Vec::new(),
             details: Box::new(UploadRejectionDetails {
                 file_name: None,
                 rejection_kind: Some("multipart_stream_failure".to_string()),
@@ -102,6 +104,7 @@ impl UploadAdmissionError {
             error_kind: "invalid_file_body",
             message,
             extraction_failure_class: None,
+            vision_calls: Vec::new(),
             details: Box::new(UploadRejectionDetails {
                 file_name: file_name.map(str::to_string),
                 rejection_kind: Some("invalid_file_body".to_string()),
@@ -133,6 +136,7 @@ impl UploadAdmissionError {
             error_kind: "multipart_stream_failure",
             message,
             extraction_failure_class: None,
+            vision_calls: Vec::new(),
             details: Box::new(UploadRejectionDetails {
                 file_name: file_name.map(str::to_string),
                 rejection_kind: Some("multipart_stream_failure".to_string()),
@@ -161,6 +165,7 @@ impl UploadAdmissionError {
             error_kind: "upload_limit_exceeded",
             message: format!("file {file_name} exceeds the {upload_limit_mb} MB upload limit"),
             extraction_failure_class: None,
+            vision_calls: Vec::new(),
             details: Box::new(UploadRejectionDetails {
                 file_name: Some(file_name.to_string()),
                 rejection_kind: Some("upload_limit_exceeded".to_string()),
@@ -183,6 +188,7 @@ impl UploadAdmissionError {
             error_kind: "upload_limit_exceeded",
             message: format!("upload batch exceeds the {upload_limit_mb} MB upload limit"),
             extraction_failure_class: None,
+            vision_calls: Vec::new(),
             details: Box::new(UploadRejectionDetails {
                 file_name: None,
                 rejection_kind: Some("upload_limit_exceeded".to_string()),
@@ -206,6 +212,7 @@ impl UploadAdmissionError {
             error_kind: "upload_limit_exceeded",
             message: format!("request body exceeded the {upload_limit_mb} MB upload limit"),
             extraction_failure_class: None,
+            vision_calls: Vec::new(),
             details: Box::new(UploadRejectionDetails {
                 file_name: None,
                 rejection_kind: Some("upload_limit_exceeded".to_string()),
@@ -239,6 +246,7 @@ impl UploadAdmissionError {
             error_kind: "upload_limit_exceeded",
             message,
             extraction_failure_class: None,
+            vision_calls: Vec::new(),
             details: Box::new(UploadRejectionDetails {
                 file_name: file_name.map(str::to_string),
                 rejection_kind: Some("upload_limit_exceeded".to_string()),
@@ -263,6 +271,7 @@ impl UploadAdmissionError {
             error_kind: "missing_upload_file",
             message: message.clone(),
             extraction_failure_class: None,
+            vision_calls: Vec::new(),
             details: Box::new(UploadRejectionDetails {
                 file_name: None,
                 rejection_kind: Some("missing_upload_file".to_string()),
@@ -287,6 +296,7 @@ impl UploadAdmissionError {
         let message = error.to_string();
         Self {
             error_kind,
+            vision_calls: error.vision_calls().to_vec(),
             extraction_failure_class: Some(error.failure_class()),
             details: Box::new(UploadRejectionDetails {
                 file_name: Some(file_name.to_string()),
@@ -337,6 +347,12 @@ impl std::error::Error for UploadAdmissionError {}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FileExtractError {
+    VisionFailed {
+        file_kind: UploadFileKind,
+        class: ExtractionFailureClass,
+        message: String,
+        calls: Vec<crate::shared::extraction::image::VisionCallReceipt>,
+    },
     UnsupportedBinary,
     InvalidUtf8,
     ExtractionFailed {
@@ -358,7 +374,9 @@ impl fmt::Display for FileExtractError {
             Self::InvalidUtf8 => {
                 write!(f, "selected file is treated as text-like but could not be decoded as utf-8")
             }
-            Self::ExtractionFailed { message, .. } => write!(f, "{message}"),
+            Self::ExtractionFailed { message, .. } | Self::VisionFailed { message, .. } => {
+                write!(f, "{message}")
+            }
         }
     }
 }
@@ -366,12 +384,20 @@ impl fmt::Display for FileExtractError {
 impl std::error::Error for FileExtractError {}
 
 impl FileExtractError {
+    pub fn vision_calls(&self) -> &[crate::shared::extraction::image::VisionCallReceipt] {
+        match self {
+            Self::VisionFailed { calls, .. } => calls,
+            _ => &[],
+        }
+    }
     #[must_use]
     pub const fn detected_kind(&self) -> UploadFileKind {
         match self {
             Self::UnsupportedBinary => UploadFileKind::Binary,
             Self::InvalidUtf8 => UploadFileKind::TextLike,
-            Self::ExtractionFailed { file_kind, .. } => *file_kind,
+            Self::ExtractionFailed { file_kind, .. } | Self::VisionFailed { file_kind, .. } => {
+                *file_kind
+            }
         }
     }
 
@@ -384,7 +410,7 @@ impl FileExtractError {
     pub const fn failure_class(&self) -> ExtractionFailureClass {
         match self {
             Self::UnsupportedBinary | Self::InvalidUtf8 => ExtractionFailureClass::ContentInvalid,
-            Self::ExtractionFailed { class, .. } => *class,
+            Self::ExtractionFailed { class, .. } | Self::VisionFailed { class, .. } => *class,
         }
     }
 
@@ -393,7 +419,7 @@ impl FileExtractError {
         match self {
             Self::UnsupportedBinary => "unsupported_upload_type",
             Self::InvalidUtf8 => "invalid_text_encoding",
-            Self::ExtractionFailed { .. } => "upload_extraction_failed",
+            Self::ExtractionFailed { .. } | Self::VisionFailed { .. } => "upload_extraction_failed",
         }
     }
 
@@ -406,7 +432,9 @@ impl FileExtractError {
             Self::InvalidUtf8 => {
                 "The file was detected as text-like but could not be decoded as UTF-8.".to_string()
             }
-            Self::ExtractionFailed { message, .. } => message.clone(),
+            Self::ExtractionFailed { message, .. } | Self::VisionFailed { message, .. } => {
+                message.clone()
+            }
         }
     }
 
@@ -419,7 +447,7 @@ impl FileExtractError {
             Self::InvalidUtf8 => {
                 "Re-save the file as UTF-8 text or upload a format with a dedicated parser."
             }
-            Self::ExtractionFailed { .. } => {
+            Self::ExtractionFailed { .. } | Self::VisionFailed { .. } => {
                 "Retry the upload; if it keeps failing, inspect the file parser path for this format."
             }
         }

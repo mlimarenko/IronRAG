@@ -65,6 +65,9 @@ impl ContentMutationGraph {
             "operationKind": "upload",
             "target": {"kind": "existing", "documentId": document_id},
             "sourceIdentity": null,
+            "materializationToken": null,
+            "revision": null,
+            "replacement": null,
         });
         let mutation_id = crate::content_lifecycle_support::seed_pending_content_mutation(
             pool,

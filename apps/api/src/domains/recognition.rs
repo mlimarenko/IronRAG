@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 #[serde(rename_all = "snake_case")]
 pub enum RecognitionEngine {
     Native,
-    Docling,
+    Xberg,
     Vision,
 }
 
@@ -15,7 +15,7 @@ impl RecognitionEngine {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Native => "native",
-            Self::Docling => "docling",
+            Self::Xberg => "xberg",
             Self::Vision => "vision",
         }
     }
@@ -33,7 +33,7 @@ impl FromStr for RecognitionEngine {
     fn from_str(value: &str) -> Result<Self, Self::Err> {
         match value {
             "native" => Ok(Self::Native),
-            "docling" => Ok(Self::Docling),
+            "xberg" => Ok(Self::Xberg),
             "vision" => Ok(Self::Vision),
             other => Err(format!("unsupported recognition engine: {other}")),
         }
@@ -93,11 +93,30 @@ pub struct RecognitionProfile {
     pub structure_tier: RecognitionStructureTier,
 }
 
+/// Current raster policy. Extraction provenance uses `RecognitionEngine` instead.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum RasterImageEngine {
+    #[default]
+    Vision,
+}
+
+impl FromStr for RasterImageEngine {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "vision" => Ok(Self::Vision),
+            _ => Err("rasterImageEngine must be vision".to_string()),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 #[serde(deny_unknown_fields)]
 pub struct LibraryRecognitionPolicy {
-    pub raster_image_engine: RecognitionEngine,
+    pub raster_image_engine: RasterImageEngine,
 }
 
 impl Default for LibraryRecognitionPolicy {
@@ -131,17 +150,12 @@ impl LibraryRecognitionPolicy {
     /// # Errors
     /// Returns a human-readable validation error when an engine is not allowed.
     pub fn validate(&self) -> Result<(), String> {
-        match self.raster_image_engine {
-            RecognitionEngine::Docling | RecognitionEngine::Vision => Ok(()),
-            RecognitionEngine::Native => {
-                Err("rasterImageEngine must be either docling or vision".to_string())
-            }
-        }
+        Ok(())
     }
 }
 
-const fn default_raster_image_engine() -> RecognitionEngine {
-    RecognitionEngine::Vision
+const fn default_raster_image_engine() -> RasterImageEngine {
+    RasterImageEngine::Vision
 }
 
 #[cfg(test)]
@@ -152,20 +166,23 @@ mod tests {
     fn default_policy_uses_vision_for_static_raster_images() {
         assert_eq!(
             LibraryRecognitionPolicy::default().raster_image_engine,
-            RecognitionEngine::Vision
+            RasterImageEngine::Vision
         );
     }
 
     #[test]
     fn policy_rejects_native_for_raster_images() {
-        let policy = LibraryRecognitionPolicy { raster_image_engine: RecognitionEngine::Native };
-
-        assert!(policy.validate().is_err());
+        assert!(
+            LibraryRecognitionPolicy::from_json(serde_json::json!({
+                "rasterImageEngine": "native"
+            }))
+            .is_err()
+        );
     }
 
     #[test]
     fn policy_round_trips_camel_case_json() {
-        let policy = LibraryRecognitionPolicy { raster_image_engine: RecognitionEngine::Vision };
+        let policy = LibraryRecognitionPolicy { raster_image_engine: RasterImageEngine::Vision };
         let json = policy.to_json().expect("policy should serialize");
 
         assert_eq!(json["rasterImageEngine"], serde_json::json!("vision"));
@@ -175,10 +192,31 @@ mod tests {
     #[test]
     fn policy_rejects_unknown_json_fields() {
         let json = serde_json::json!({
-            "rasterImageEngine": "docling",
+            "rasterImageEngine": "xberg",
             "legacyMode": "ignored",
         });
 
         assert!(LibraryRecognitionPolicy::from_json(json).is_err());
+    }
+
+    #[test]
+    fn current_policy_rejects_xberg_without_collapsing_provenance() {
+        assert!(
+            LibraryRecognitionPolicy::from_json(serde_json::json!({
+                "rasterImageEngine": "xberg"
+            }))
+            .is_err()
+        );
+        assert_eq!(
+            "xberg".parse::<RecognitionEngine>().expect("historical engine"),
+            RecognitionEngine::Xberg
+        );
+        assert!("docling".parse::<RecognitionEngine>().is_err());
+        assert!(
+            LibraryRecognitionPolicy::from_json(serde_json::json!({
+                "rasterImageEngine": "docling"
+            }))
+            .is_err()
+        );
     }
 }

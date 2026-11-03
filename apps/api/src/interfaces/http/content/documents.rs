@@ -3,6 +3,79 @@ use chrono::{DateTime, Utc};
 
 use crate::domains::billing::CostRollupFreshness;
 
+#[derive(Debug, serde::Deserialize, utoipa::IntoParams)]
+#[serde(rename_all = "camelCase")]
+#[into_params(parameter_in = Query)]
+pub struct ExternalKeyQuery {
+    pub external_key: String,
+}
+
+/// Look up one active document by its exact connector identity.
+#[utoipa::path(
+    get,
+    path = "/v1/content/libraries/{libraryId}/documents/by-external-key",
+    tag = "content",
+    operation_id = "getContentDocumentByExternalKey",
+    params(("libraryId" = uuid::Uuid, Path), ExternalKeyQuery),
+    responses(
+        (status = 200, description = "Document list item", body = ContentDocumentListItem),
+        (status = 400, description = "Invalid external key"),
+        (status = 401, description = "Caller is not authenticated or authorized for the library"),
+        (status = 404, description = "Document not found"),
+    ),
+)]
+pub async fn get_document_by_external_key(
+    auth: AuthContext,
+    State(state): State<AppState>,
+    Path(library_id): Path<Uuid>,
+    Query(query): Query<ExternalKeyQuery>,
+) -> Result<Json<ContentDocumentListItem>, ApiError> {
+    let library =
+        load_library_and_authorize(&auth, &state, library_id, POLICY_LIBRARY_READ).await?;
+    if query.external_key.is_empty() || query.external_key.contains('\0') {
+        return Err(ApiError::BadRequest(
+            "externalKey must be nonempty and contain no NUL".to_string(),
+        ));
+    }
+    let id = state
+        .application_services
+        .content
+        .get_active_document_id_by_external_key(&state, library.id, &query.external_key)
+        .await?
+        .ok_or_else(|| ApiError::resource_not_found("document", &query.external_key))?;
+    let result = state
+        .application_services
+        .content
+        .list_documents_page(
+            &state,
+            ListDocumentsPageCommand {
+                library_id: library.id,
+                include_deleted: false,
+                cursor: None,
+                limit: 1,
+                search: None,
+                normalized_search: None,
+                search_statuses: Vec::new(),
+                filters: Default::default(),
+                search_ranges: Default::default(),
+                snapshot_at: Utc::now(),
+                sort: DocumentListSortColumn::CreatedAt,
+                sort_desc: true,
+                status_filter: Vec::new(),
+                id_filter: Some(vec![id]),
+                include_status_counts: false,
+            },
+        )
+        .await?;
+    result
+        .items
+        .into_iter()
+        .next()
+        .map(map_document_list_entry)
+        .map(Json)
+        .ok_or_else(|| ApiError::resource_not_found("document", id))
+}
+
 /// Primary slim paginated document list.
 ///
 /// Response shape is `DocumentListPageResponse { items, next_cursor, total_count }`.

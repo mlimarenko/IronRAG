@@ -53,6 +53,66 @@ struct CachedQueryResult {
 }
 
 const ANSWER_RUNTIME_FINGERPRINT_SOURCES: &[(&str, &str)] = &[
+    ("mcp/access/documents/read.rs", include_str!("../mcp/access/documents/read.rs")),
+    ("agent_loop/grounded_state.rs", include_str!("agent_loop/grounded_state.rs")),
+    ("agent_loop/tool_dispatch.rs", include_str!("agent_loop/tool_dispatch.rs")),
+    ("agent_loop/iteration.rs", include_str!("agent_loop/iteration.rs")),
+    ("agent_loop/grounding.rs", include_str!("agent_loop/grounding.rs")),
+    ("agent_loop/types.rs", include_str!("agent_loop/types.rs")),
+    ("agent_loop/tool_result.rs", include_str!("agent_loop/tool_result.rs")),
+    ("agent_loop/state_machine.rs", include_str!("agent_loop/state_machine.rs")),
+    ("agent_loop/fixed_context.rs", include_str!("agent_loop/fixed_context.rs")),
+    (
+        "agent_runtime/tasks/query_answer.rs",
+        include_str!("../../agent_runtime/tasks/query_answer.rs"),
+    ),
+    (
+        "contracts/assistant/semantic_verification.rs",
+        include_str!("../../../../../crates/contracts/src/assistant/semantic_verification.rs"),
+    ),
+    ("integrations/llm/types.rs", include_str!("../../integrations/llm/types.rs")),
+    ("integrations/llm/response.rs", include_str!("../../integrations/llm/response.rs")),
+    ("integrations/llm/streaming.rs", include_str!("../../integrations/llm/streaming.rs")),
+    ("integrations/llm/gateway_impl.rs", include_str!("../../integrations/llm/gateway_impl.rs")),
+    ("integrations/llm/request.rs", include_str!("../../integrations/llm/request.rs")),
+    ("ai_catalog_service/runtime.rs", include_str!("../ai_catalog_service/runtime.rs")),
+    (
+        "execution/semantic_verification/mod.rs",
+        include_str!("execution/semantic_verification/mod.rs"),
+    ),
+    (
+        "execution/semantic_verification/preparation.rs",
+        include_str!("execution/semantic_verification/preparation.rs"),
+    ),
+    (
+        "execution/semantic_verification/response.rs",
+        include_str!("execution/semantic_verification/response.rs"),
+    ),
+    (
+        "execution/semantic_verification/provider.rs",
+        include_str!("execution/semantic_verification/provider.rs"),
+    ),
+    (
+        "execution/semantic_verification/evidence.rs",
+        include_str!("execution/semantic_verification/evidence.rs"),
+    ),
+    (
+        "execution/semantic_verification/orchestration.rs",
+        include_str!("execution/semantic_verification/orchestration.rs"),
+    ),
+    (
+        "execution/semantic_verification/policy.rs",
+        include_str!("execution/semantic_verification/policy.rs"),
+    ),
+    (
+        "execution/semantic_verification/persistence.rs",
+        include_str!("execution/semantic_verification/persistence.rs"),
+    ),
+    (
+        "execution/answer_pipeline/selected_answer.rs",
+        include_str!("execution/answer_pipeline/selected_answer.rs"),
+    ),
+    ("service/turn/agent_semantic.rs", include_str!("service/turn/agent_semantic.rs")),
     ("domains/query.rs", include_str!("../../domains/query.rs")),
     ("domains/query_ir.rs", include_str!("../../domains/query_ir.rs")),
     ("domains/query_ir/schema.rs", include_str!("../../domains/query_ir/schema.rs")),
@@ -611,6 +671,8 @@ pub(crate) fn answer_runtime_fingerprint() -> &'static str {
         update_str(&mut hasher, env!("CARGO_PKG_VERSION"));
         update_str(&mut hasher, "database-migrations");
         update_str(&mut hasher, env!("IRONRAG_MIGRATIONS_FINGERPRINT"));
+        update_str(&mut hasher, "semantic-verification-protocol");
+        update_str(&mut hasher, &ironrag_contracts::assistant::semantic_verification::SEMANTIC_VERIFICATION_PROTOCOL_VERSION.to_string());
         for (path, source) in ANSWER_RUNTIME_FINGERPRINT_SOURCES {
             update_str(&mut hasher, path);
             update_str(&mut hasher, source);

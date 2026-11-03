@@ -105,6 +105,18 @@ pub const BASELINE_REVISION_ADMISSION_VISIBILITY_POLICY_SHA384: &str = "bc9ee0ed
 /// SHA-384 of the content visibility intent baseline, after the frozen policy hop.
 pub const BASELINE_REVISION_CONTENT_VISIBILITY_INTENT_SHA384: &str = "47e765cbe7705219d6590fc2870971f19fc06d12f380de220ac90c6484e6ec98b78b28112a65d71fa5a370f0e1ff7c58";
 
+/// Frozen IRG-269 baseline: current raster policies use Xberg, never Docling.
+pub const BASELINE_REVISION_XBERG_RECOGNITION_SHA384: &str = "eb822d7bf07c194659bf092841341e850995fc4b487486a2a112baeb59dc43d6a799afd3930f8e63e18a831ea3e4c4e8";
+
+/// Frozen IRG-294 baseline: current raster policies require Vision only.
+pub const BASELINE_REVISION_VISION_RECOGNITION_SHA384: &str = "52d2734052d7ebbbfa4a239935387d385cc0a6c89c85f7ed06ad39e7e3502351df7083b3b9cd82a478c17ac61e653215";
+
+/// Frozen IRG-315 baseline: durable native document-read billing attribution.
+pub const BASELINE_REVISION_BILLING_DOCUMENT_READ_SHA384: &str = "464d53698e9b4a52de78c3972e387aa69d35a4f0ebd63c8381f97cfe3b1a35faff1638daa2cd70e2007c172b5d317984";
+
+/// Frozen IRG-311 baseline: real standalone knowledge-search billing ownership.
+pub const BASELINE_REVISION_BILLING_KNOWLEDGE_SEARCH_SHA384: &str = "7ba1decf37763a53effe39c692b70bcf5281ecb22f7753b67670dde4638611845bd382ae2e7eb55074b3363423e94a95";
+
 /// Serialises every baseline transition in the instance. One key, not one per
 /// delta: two different transitions racing on the same checksum row would each
 /// read a predecessor the other is about to replace.
@@ -149,7 +161,8 @@ pub(crate) struct AdditiveBaselineDeltaSpec {
     pub(crate) prerequisite_object_groups: BaselineObjectCertificate,
     /// Additive DDL, idempotent or guarded by `delta_present`.
     pub(crate) additive_sql: &'static str,
-    /// `(predicate, message)` required in both dry-run and apply mode.
+    /// `(predicate, message)` required at the exact predecessor in both modes.
+    /// Recorded target/later revisions use their own object certificates.
     pub(crate) precondition: Option<(&'static str, &'static str)>,
     /// `(predicate, message)`; `true` with a stale checksum means the DDL is
     /// partially or fully pre-applied and must be inspected, never stamped.
@@ -168,6 +181,10 @@ pub(crate) const BASELINE_DELTA_SPECS: &[AdditiveBaselineDeltaSpec] = &[
     crate::services::maintenance::decision_catalog_schema::DECISION_CATALOG_DELTA,
     crate::services::maintenance::admission_visibility_policy_schema::ADMISSION_VISIBILITY_POLICY_DELTA,
     crate::services::maintenance::content_visibility_intent_schema::CONTENT_VISIBILITY_INTENT_DELTA,
+    crate::services::maintenance::xberg_recognition_schema::XBERG_RECOGNITION_DELTA,
+    crate::services::maintenance::vision_recognition_schema::VISION_RECOGNITION_DELTA,
+    crate::services::maintenance::billing_document_read_schema::BILLING_DOCUMENT_READ_DELTA,
+    crate::services::maintenance::billing_knowledge_search_schema::BILLING_KNOWLEDGE_SEARCH_DELTA,
 ];
 
 /// Derives the ordered revision chain from the specs alone. A predecessor that
@@ -373,8 +390,8 @@ async fn stamp_delta(
     Ok(())
 }
 
-/// Read and lock the recorded state before checking its delta-specific closure.
-/// Dry-run uses the same precondition as apply, never a weaker readiness claim.
+/// Read the recorded state and check delta-specific closure at its predecessor.
+/// Both modes use the same precondition; later revisions own their certificates.
 async fn validate_delta_precondition(
     transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     delta: &AdditiveBaselineDeltaSpec,
@@ -386,8 +403,26 @@ async fn validate_delta_precondition(
     anyhow::ensure!(history.get::<bool, _>("success"), "baseline migration version 1 is dirty");
     let checksum: Vec<u8> = history.get("checksum");
     let current_hex = hex::encode(&checksum);
+    if current_hex == delta.predecessor_sha384_hex
+        && delta.target_sha384_hex == BASELINE_REVISION_XBERG_RECOGNITION_SHA384
+    {
+        crate::services::maintenance::xberg_recognition_schema::lock_preservation_owners(
+            transaction,
+        )
+        .await?;
+    }
     lock_visibility_predecessor_owners(transaction, &current_hex, delta).await?;
-    if let Some((predicate, message)) = delta.precondition {
+    if current_hex == delta.predecessor_sha384_hex
+        && delta.target_sha384_hex == BASELINE_REVISION_VISION_RECOGNITION_SHA384
+    {
+        crate::services::maintenance::vision_recognition_schema::lock_policy_owner(transaction)
+            .await?;
+    }
+    // An already-recorded later revision owns its current certificate, not an
+    // obsolete enum/policy precondition of a historical command.
+    if current_hex == delta.predecessor_sha384_hex
+        && let Some((predicate, message)) = delta.precondition
+    {
         let satisfied: bool = sqlx::query_scalar(sqlx::AssertSqlSafe(predicate))
             .fetch_one(&mut **transaction)
             .await?;
@@ -424,10 +459,13 @@ mod tests {
     use super::{
         AdditiveBaselineDeltaSpec, BASELINE_DELTA_SPECS,
         BASELINE_REVISION_ADMISSION_VISIBILITY_POLICY_SHA384,
+        BASELINE_REVISION_BILLING_DOCUMENT_READ_SHA384,
+        BASELINE_REVISION_BILLING_KNOWLEDGE_SEARCH_SHA384,
         BASELINE_REVISION_CONTENT_VISIBILITY_INTENT_SHA384,
         BASELINE_REVISION_DECISION_CATALOG_SHA384, BASELINE_REVISION_IRG75_SHA384,
         BASELINE_REVISION_IRG112_SHA384, BASELINE_REVISION_IRG173_SHA384,
         BASELINE_REVISION_PROVISIONING_SHA384, BASELINE_REVISION_QUERY_RERANK_SHA384,
+        BASELINE_REVISION_VISION_RECOGNITION_SHA384, BASELINE_REVISION_XBERG_RECOGNITION_SHA384,
         baseline_revision_chain, recorded_revision_object_groups, revision_chain_for,
         shipped_baseline_sha384_hex,
     };
@@ -447,6 +485,10 @@ mod tests {
                 BASELINE_REVISION_DECISION_CATALOG_SHA384,
                 BASELINE_REVISION_ADMISSION_VISIBILITY_POLICY_SHA384,
                 BASELINE_REVISION_CONTENT_VISIBILITY_INTENT_SHA384,
+                BASELINE_REVISION_XBERG_RECOGNITION_SHA384,
+                BASELINE_REVISION_VISION_RECOGNITION_SHA384,
+                BASELINE_REVISION_BILLING_DOCUMENT_READ_SHA384,
+                BASELINE_REVISION_BILLING_KNOWLEDGE_SEARCH_SHA384,
             ]
         );
         let shipped = shipped_baseline_sha384_hex();
@@ -475,7 +517,7 @@ mod tests {
     }
 
     #[test]
-    fn each_specs_target_retains_its_prerequisites_except_the_retired_policy() {
+    fn each_specs_target_retains_its_prerequisites_except_replaced_certificates() {
         for spec in BASELINE_DELTA_SPECS {
             assert!(
                 !spec.prerequisite_object_groups.is_empty(),
@@ -504,6 +546,18 @@ mod tests {
                 assert!(
                     spec.additive_sql.contains("DROP TYPE public.admission_visibility_policy;")
                 );
+            } else if spec.target_sha384_hex == BASELINE_REVISION_VISION_RECOGNITION_SHA384 {
+                assert_eq!(
+                    &spec.required_object_groups[..7],
+                    &spec.prerequisite_object_groups[..7]
+                );
+                assert!(
+                    !spec.required_object_groups.contains(
+                        spec.prerequisite_object_groups.last().expect("predecessor policy")
+                    )
+                );
+            } else if spec.target_sha384_hex == BASELINE_REVISION_BILLING_KNOWLEDGE_SEARCH_SHA384 {
+                assert_knowledge_search_replaces_only_owner_enum(spec);
             } else {
                 assert!(
                     spec.required_object_groups.starts_with(spec.prerequisite_object_groups),
@@ -512,6 +566,12 @@ mod tests {
                 );
             }
         }
+    }
+
+    fn assert_knowledge_search_replaces_only_owner_enum(spec: &AdditiveBaselineDeltaSpec) {
+        assert_eq!(&spec.required_object_groups[..8], &spec.prerequisite_object_groups[..8]);
+        assert!(!spec.required_object_groups.contains(&spec.prerequisite_object_groups[8]));
+        assert!(spec.required_object_groups.contains(&spec.prerequisite_object_groups[9]));
     }
 
     #[test]

@@ -54,6 +54,7 @@ fn variant_coverage_warning_routes_single_shot_to_agent_path() {
     let accepted_verification = super::super::types::AnswerVerificationStage {
         generation: generation.clone(),
         verification: RuntimeAnswerVerification {
+            semantic_verification: None,
             state: QueryVerificationState::Verified,
             warnings: Vec::new(),
             unsupported_literals: Vec::new(),
@@ -62,6 +63,7 @@ fn variant_coverage_warning_routes_single_shot_to_agent_path() {
     let incomplete_verification = super::super::types::AnswerVerificationStage {
         generation,
         verification: RuntimeAnswerVerification {
+            semantic_verification: None,
             state: QueryVerificationState::PartiallySupported,
             warnings: vec![crate::domains::query::QueryVerificationWarning {
                 code: "variant_coverage_incomplete".to_string(),

@@ -21,10 +21,7 @@ use crate::{
 use super::{
     attempt::IngestStageContext,
     errors::{ContentExtractionError, JobLeaseLost, map_stage_error},
-    extraction::{
-        ExtractedContent, resolve_ingest_content,
-        sync_resumable_pdf_extract_stage_progress_from_units,
-    },
+    extraction::{ExtractedContent, resolve_ingest_content},
     limits::acquire_heavy_revision_pipeline_slot,
 };
 
@@ -32,12 +29,13 @@ pub(super) struct PreparedContent {
     pub(super) revision: crate::infra::knowledge_rows::KnowledgeRevisionRow,
 }
 
-pub(super) fn vision_billing_usage_items(usage_json: &serde_json::Value) -> Vec<serde_json::Value> {
-    usage_json
-        .get("embedded_picture_ocr_usage")
-        .and_then(serde_json::Value::as_array)
-        .filter(|items| !items.is_empty())
-        .map_or_else(|| vec![usage_json.clone()], Clone::clone)
+pub(super) fn vision_billing_usage_items(
+    usage_json: &serde_json::Value,
+) -> Result<Vec<crate::shared::extraction::image::VisionCallReceipt>, serde_json::Error> {
+    match usage_json.get("vision_calls") {
+        Some(calls) => serde_json::from_value(calls.clone()),
+        None => Ok(Vec::new()), // Native-only extraction has no provider calls.
+    }
 }
 
 pub(super) fn extract_artifact_text_and_checksum(plan: &FileExtractionPlan) -> (String, String) {
@@ -196,7 +194,8 @@ pub(super) async fn prepare_ingest_content(
             .await
             .context("failed to load knowledge revision from postgres")?
             .with_context(|| format!("knowledge revision {revision_id} not found in postgres"))?;
-    sync_extract_progress_before_admission(context, authority).await?;
+    // Durable progress is restored only after source and current extraction
+    // identity have been validated by resolve_ingest_content.
     let heavy_revision_pipeline_permit = acquire_revision_admission(context, &revision_row).await?;
     let heavy_revision_pipeline_limited = heavy_revision_pipeline_permit.is_some();
 
@@ -233,8 +232,6 @@ pub(super) async fn prepare_ingest_content(
     }
 
     let extract_content_elapsed_ms = Some(extract_content_start.elapsed().as_millis() as i64);
-
-    capture_extraction_billing(context, &extracted_content).await;
 
     state
         .application_services
@@ -521,35 +518,10 @@ async fn mark_extract_content_failed(
     }
 }
 
-async fn sync_extract_progress_before_admission(
-    context: &IngestStageContext<'_>,
-    authority: IngestRevisionWriteAuthority,
-) -> anyhow::Result<()> {
-    match sync_resumable_pdf_extract_stage_progress_from_units(
-        context.state,
-        authority,
-        context.cancellation.token,
-    )
-    .await
-    {
-        Ok(IngestAttemptMutationOutcome::Applied(())) => Ok(()),
-        Ok(IngestAttemptMutationOutcome::AuthorityLost) => {
-            Err(anyhow::Error::new(JobLeaseLost { job_id: context.job.id }))
-        }
-        Err(error) => {
-            context.cancellation.check(context.job.id)?;
-            warn!(attempt_id = %context.attempt_id, revision_id = %context.revision_id, ?error,
-                "failed to sync resumable extract_content progress before heavy revision wait");
-            Ok(())
-        }
-    }
-}
-
 async fn acquire_revision_admission(
     context: &IngestStageContext<'_>,
     revision_row: &content_revision_repository::ContentRevisionRow,
 ) -> anyhow::Result<Option<tokio::sync::OwnedSemaphorePermit>> {
-    // Keep biased cancellation ahead of bounded admission, including when both are ready.
     let permit = tokio::select! {
         biased;
         () = context.cancellation.token.cancelled() => return Err(context.cancellation.error(context.job.id)),
@@ -590,6 +562,15 @@ async fn resolve_revision_content(
         }
         Err(error) => {
             context.cancellation.check(context.job.id)?;
+            if matches!(
+                error.failure_code.as_str(),
+                "extract_checkpoint_identity_mismatch" | "extract_unit_read_failed"
+            ) {
+                // This is a refusal to mutate a historical revision, not an
+                // extraction failure of its original readable content. The
+                // caller must use the controlled new-revision reprocess path.
+                return Err(anyhow::Error::new(error));
+            }
             let failure_outcome = record_extract_content_failure(
                 context.state,
                 authority,
@@ -605,35 +586,33 @@ async fn resolve_revision_content(
     }
 }
 
-async fn capture_extraction_billing(
-    context: &IngestStageContext<'_>,
-    extracted_content: &ExtractedContent,
+/// Capture each returned raw call once, before artifact publication or failure conversion.
+/// Resumed artifacts carry historical usage for reporting, never new billing.
+pub(super) async fn capture_vision_call_receipts(
+    state: &AppState,
+    authority: IngestRevisionWriteAuthority,
+    calls: &[crate::shared::extraction::image::VisionCallReceipt],
 ) {
-    let Some(provider_kind) = extracted_content.provider_kind.clone() else {
-        return;
-    };
-    let model_name = extracted_content.model_name.clone().unwrap_or_default();
-    for usage_json in vision_billing_usage_items(&extracted_content.usage_json) {
-        if let Err(e) = context
-            .state
+    for call in calls {
+        if let Err(error) = state
             .application_services
             .billing
             .capture_ingest_attempt(
-                context.state,
+                state,
                 crate::services::ops::billing::CaptureIngestAttemptBillingCommand {
-                    workspace_id: context.job.workspace_id,
-                    library_id: context.job.library_id,
-                    attempt_id: context.attempt_id,
+                    workspace_id: authority.workspace_id,
+                    library_id: authority.library_id,
+                    attempt_id: authority.attempt_id,
                     binding_id: None,
-                    provider_kind: provider_kind.clone(),
-                    model_name: model_name.clone(),
-                    call_kind: "vision_extract".to_string(),
-                    usage_json,
+                    provider_kind: call.provider_kind.clone(),
+                    model_name: call.model_name.clone(),
+                    call_kind: "vision_extract".to_owned(),
+                    usage_json: call.usage_json.clone(),
                 },
             )
             .await
         {
-            warn!(worker_id = %context.worker_id, job_id = %context.job.id, ?e, "document-understanding billing capture failed");
+            warn!(attempt_id = %authority.attempt_id, ?error, "document-understanding billing capture failed");
         }
     }
 }

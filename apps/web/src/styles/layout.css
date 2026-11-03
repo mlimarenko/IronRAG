@@ -374,6 +374,7 @@
   padding: 8px 16px;
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 16px;
   border-top: 1px solid var(--border);
   color: var(--muted);
@@ -384,15 +385,38 @@
   align-items: center;
   gap: 4px;
 }
-.shell-footer > span {
+.shell-footer__version {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
   min-width: 0;
-  max-width: 40ch;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
-.shell-footer .update-badge {
-  margin-left: auto;
+.shell-footer__version a {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.shell-footer__tag {
+  color: var(--accent);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+.shell-footer__tag:hover {
+  color: var(--accent-hover);
+}
+.shell-footer__tag:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 3px;
+  border-radius: var(--radius-sm);
+}
+.shell-footer__tag svg {
+  flex: none;
+}
+.shell-footer__version .badge {
+  white-space: normal;
+}
+.shell-footer__version .badge__label {
+  overflow: visible;
 }
 /* Button primitives load later, so the shell's visibility selector is specific. */
 .topbar .mobile-menu,

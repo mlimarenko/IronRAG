@@ -250,6 +250,8 @@ pub struct ContentMutationAdmission {
     pub operation_status: Option<String>,
     pub result_revision_id: Option<Uuid>,
     pub result_checksum: Option<String>,
+    /// Exact result revision admission binding; null means explicitly unbound.
+    pub visibility_intent_id: Option<Uuid>,
     pub request_fingerprint: Option<String>,
 }
 

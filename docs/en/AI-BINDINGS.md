@@ -52,7 +52,7 @@ The normal configuration surface is deliberately small:
 | Query Understanding    |      yes | `query_compile`     | typed `QueryIR`, HyDE expansion, and query consolidation                                                                                           |
 | Semantic Rerank        |       no | `query_rerank`      | provider-backed semantic reranking of retrieved candidates, bound separately from query compilation                                                |
 | Graph Entity Typing    |       no | `graph_entity_type` | typed classification of extracted entities, resolved before node identity and edges; served by a decision provider's endpoint or a fast chat model |
-| Answer Generation      |      yes | `query_answer`      | grounded, citation-aware answer generation                                                                                                         |
+| Answer Generation      |      yes | `query_answer`      | grounded generation, bounded repair, and structured semantic verification of the selected answer                                                  |
 | AI Assistant           |      yes | `agent`             | tool-calling UI/MCP host                                                                                                                           |
 | Document Understanding |       no | `extract_text`      | complex text/OCR/visual understanding after deterministic parsers                                                                                  |
 
@@ -68,7 +68,7 @@ profiles:
 | `embed_chunk`       | ingest and query: index segments and embed questions                     | one shared Embeddings profile and vector space                                                                                                     |
 | `query_compile`     | query: compile the typed `QueryIR`, expand HyDE, and consolidate queries | one Query Understanding profile                                                                                                                    |
 | `query_rerank`      | query: provider-backed semantic rerank of retrieved candidates           | one Semantic Rerank profile; an unbound purpose degrades to the deterministic lexical fallback, never to `query_compile`                           |
-| `query_answer`      | query: grounded answer over retrieved bundle                             | citation-aware long-form generation; instruction following                                                                                         |
+| `query_answer`      | query: grounded answer and selected-answer semantic verification          | citation-aware generation and strict structured verification; no separate verifier binding                                                         |
 | `agent`             | UI in-product agent + MCP `grounded_answer` host                         | tool-calling chat model with good instruction following                                                                                            |
 
 Model eligibility comes from typed catalog capability/modality metadata. It is
@@ -244,11 +244,17 @@ scores remain intact.
 
 ### `query_answer`
 
-- Long-form generation with inline citations. Output dominates latency.
-- Streaming helps; the UI assistant and the MCP grounded-answer tool
-  both consume the streamed deltas.
-- A higher-quality model usually pays for itself here because the
-  user-visible answer is the product.
+- This binding owns grounded generation, bounded answer repair, and the
+  structured semantic check of the selected answer. Verification is not a ninth
+  independently resolved purpose and must not fall back to another binding.
+- Semantic verification requires structured JSON-schema or JSON-object output.
+  Prompt-only or unsupported structured transport cannot count as a completed
+  check. A provider refusal, timeout or invalid report is distinct from an
+  unsupported claim or missing caveat.
+- Generation and semantic verification retain separate provider-call identities
+  and usage. Formal evidence checks and final answer readiness remain separate
+  from the semantic report; a valid-looking JSON verdict alone cannot upgrade
+  an answer to verified.
 
 ### Embeddings (one profile for indexing and query vectors)
 
@@ -505,10 +511,10 @@ Qwen are in this group.
 only the purposes used by each enabled workflow. Bindings are scoped to
 instance, workspace, or library.
 
-The raster-image engine named `vision` uses the active multimodal `extract_text`
-binding. Switch a library to the `docling` engine to OCR images locally with no
-visual-model calls. Selecting `vision` without a compatible `extract_text`
-binding fails loudly.
+All image OCR uses the active multimodal `extract_text` binding. The current
+raster policy is fixed to `vision`; there is no local OCR engine choice.
+Visual work without a compatible binding fails explicitly. Native document
+text/structure parsing does not require a Vision model.
 
 Bootstrap provider keys from `.env`: [INSTALL.md](./INSTALL.md).
 

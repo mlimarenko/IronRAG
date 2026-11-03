@@ -11,6 +11,44 @@ const documents = {
   revisions: [],
 }
 
+async function openDocumentGrid(page: Page, width: number, path: string) {
+  const issues = watchBrowserIssues(page, { readOnly: true })
+  const requests: URL[] = []
+  page.on('request', (request) => {
+    const url = new URL(request.url())
+    if (url.pathname.endsWith('/documents')) requests.push(url)
+  })
+  await page.setViewportSize({ width, height: 844 })
+  await openMockedApp(page, path, {
+    authenticated: true,
+    documents,
+    libraries: ['Default Library', 'Other Library'].map((displayName, index) =>
+      catalogLibrary({
+        id: index === 0 ? 'library-demo-1' : 'library-demo-2',
+        displayName,
+        workspaceId: 'workspace-alpha',
+        slug: `library-${index}`,
+      }),
+    ),
+  })
+  const table = page.getByRole('table')
+  await expect(table).toBeVisible()
+  return { issues, requests, table }
+}
+
+async function filterByPipelineTime(page: Page, table: Locator) {
+  const durationHeader = table.getByRole('columnheader', {
+    name: /Pipeline time.*sort and filter/i,
+  })
+  await durationHeader.getByRole('button').click()
+  await page.getByRole('searchbox', { name: 'Search values', exact: true }).fill('1m 30s')
+  await expect(page.getByRole('menuitemcheckbox', { name: '1m 30s', exact: true })).toBeVisible()
+  await expect(page.getByRole('menuitemcheckbox')).toHaveCount(1)
+  await page.getByRole('menuitemcheckbox', { name: '1m 30s', exact: true }).click()
+  await page.keyboard.press('Escape')
+  await expect(table.locator('tbody tr')).toHaveCount(1)
+}
+
 const expenseScenarios: {
   name: string
   costSummaries?: DocumentsMockConfig['costSummaries']
@@ -202,30 +240,12 @@ for (const [viewport, width] of [
     await expect(pdf).toHaveAttribute('aria-checked', 'true')
     await expect(plain).toHaveAttribute('aria-checked', 'true')
   })
-  test(`documents keep server-wide search, sort and multi-value filters on ${viewport}`, async ({
-    page,
-  }, testInfo) => {
-    const issues = watchBrowserIssues(page, { readOnly: true })
-    const requests: URL[] = []
-    page.on('request', (request) => {
-      const url = new URL(request.url())
-      if (url.pathname.endsWith('/documents')) requests.push(url)
-    })
-    await page.setViewportSize({ width, height: 844 })
-    await openMockedApp(page, '/documents?pageSize=25&snapshotAt=2020-01-01T00%3A00%3A00Z', {
-      authenticated: true,
-      documents,
-      libraries: ['Default Library', 'Other Library'].map((displayName, index) =>
-        catalogLibrary({
-          id: index === 0 ? 'library-demo-1' : 'library-demo-2',
-          displayName,
-          workspaceId: 'workspace-alpha',
-          slug: `library-${index}`,
-        }),
-      ),
-    })
-    const table = page.getByRole('table')
-    await expect(table).toBeVisible()
+  test(`documents keep server-wide typed search on ${viewport}`, async ({ page }) => {
+    const { issues, requests, table } = await openDocumentGrid(
+      page,
+      width,
+      '/documents?pageSize=25&snapshotAt=2020-01-01T00%3A00%3A00Z',
+    )
     await expect(table.getByText('Needle document.pdf', { exact: true })).toHaveCount(0)
     const search = page.getByRole('searchbox').first()
     await expect(search).toBeVisible()
@@ -272,7 +292,17 @@ for (const [viewport, width] of [
       .toBe(true)
     await search.fill('')
     await expect(table.getByText('Needle document.pdf', { exact: true })).toHaveCount(0)
+    await issues.assertClean()
+  })
 
+  test(`documents keep server-wide sort and multi-value filters on ${viewport}`, async ({
+    page,
+  }) => {
+    const { issues, requests, table } = await openDocumentGrid(
+      page,
+      width,
+      '/documents?pageSize=25',
+    )
     const nameHeader = table.getByRole('columnheader', { name: /Name|Document/i }).first()
     await nameHeader.getByRole('button').click()
     const menu = page.getByRole('menu')
@@ -330,17 +360,20 @@ for (const [viewport, width] of [
     await expect(table.getByRole('columnheader', { name: /Cost.*sort and filter/i })).toBeVisible()
     await expect(table.getByRole('row').nth(1)).toContainText('$99.125')
     await expect(table.getByRole('row').nth(1)).toContainText('1m 30s')
-    const durationHeader = table.getByRole('columnheader', {
-      name: /Pipeline time.*sort and filter/i,
-    })
-    await durationHeader.getByRole('button').click()
-    await page.getByRole('searchbox', { name: 'Search values', exact: true }).fill('1m 30s')
-    await expect(page.getByRole('menuitemcheckbox', { name: '1m 30s', exact: true })).toBeVisible()
-    await expect(page.getByRole('menuitemcheckbox')).toHaveCount(1)
-    await page.getByRole('menuitemcheckbox', { name: '1m 30s', exact: true }).click()
-    await page.keyboard.press('Escape')
-    await expect(table.locator('tbody tr')).toHaveCount(1)
+    await filterByPipelineTime(page, table)
+    await issues.assertClean()
+  })
 
+  test(`documents reset selection and refresh snapshot across libraries on ${viewport}`, async ({
+    page,
+  }, testInfo) => {
+    const { issues, requests, table } = await openDocumentGrid(
+      page,
+      width,
+      '/documents?pageSize=25&sort=file_name%3Aasc',
+    )
+    await page.getByRole('button', { name: 'Additional columns', exact: true }).click()
+    await filterByPipelineTime(page, table)
     // Library changes are not a page change: selections and inspector state
     // must not cross scopes, even when the new scope has matching row ids.
     await table.locator('tbody').getByRole('checkbox').first().check()

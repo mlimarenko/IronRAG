@@ -1,5 +1,23 @@
 use super::*;
 
+pub(super) fn retain_document_read_reference(
+    grounding: &mut AssistantGroundingEvidence,
+    reference: Option<&super::super::assistant_grounding::AssistantGroundingDocumentReference>,
+) {
+    let Some(reference) = reference else { return };
+    if grounding.document_references.iter().any(|prior| {
+        prior.document_id == reference.document_id
+            && prior.revision_id == reference.revision_id
+            && prior.slice_start_offset == reference.slice_start_offset
+            && prior.slice_end_offset == reference.slice_end_offset
+    }) {
+        return;
+    }
+    let mut reference = reference.clone();
+    reference.rank = i32::try_from(grounding.document_references.len() + 1).unwrap_or(i32::MAX);
+    grounding.document_references.push(reference);
+}
+
 pub(super) fn agent_tool_limit_cap(tool_name: &str) -> Option<usize> {
     match tool_name {
         SEARCH_DOCUMENTS_TOOL_NAME | "search_entities" => Some(12),
@@ -283,6 +301,7 @@ fn tool_execution_error_with_kind(
             .map(ToString::to_string),
         result_json: Some(result_json),
         grounding_text: None,
+        document_reference: None,
         grounded_answer_body: None,
         grounded_answer_outcome: None,
         grounded_answer_ready: false,

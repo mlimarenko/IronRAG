@@ -157,7 +157,7 @@ pub(super) fn normalize_token_usage(
                 usage_json,
                 &["cache_read_input_tokens", "cached_input_tokens", "input_cached_tokens"],
             );
-            let context_input_tokens = sum_positive_quantities([
+            let context_input_tokens = sum_observed_quantities([
                 ordinary_input_tokens,
                 cache_creation_tokens,
                 cached_input_tokens,
@@ -179,18 +179,14 @@ pub(super) fn normalize_token_usage(
                 match (total_input_tokens, reported_cached_input_tokens) {
                     (Some(total), Some(cached)) => {
                         let effective_cached = if cached > total { total } else { cached };
-                        (
-                            positive_quantity(total - effective_cached),
-                            positive_quantity(effective_cached),
-                            cached > total,
-                        )
+                        (Some(total - effective_cached), Some(effective_cached), cached > total)
                     }
                     (Some(total), None) => (Some(total), None, false),
                     (None, Some(cached)) => (None, Some(cached), false),
                     (None, None) => (None, None, false),
                 };
             let context_input_tokens = total_input_tokens
-                .or_else(|| sum_positive_quantities([ordinary_input_tokens, cached_input_tokens]));
+                .or_else(|| sum_observed_quantities([ordinary_input_tokens, cached_input_tokens]));
             NormalizedTokenUsage {
                 ordinary_input_tokens,
                 output_tokens,
@@ -212,7 +208,7 @@ pub(super) fn parse_usage_quantity(usage_json: &Value, keys: &[&str]) -> Option<
             Value::String(text) => text.parse::<i64>().ok().map(Decimal::from),
             _ => None,
         };
-        quantity.filter(|quantity| *quantity > Decimal::ZERO)
+        quantity.filter(|quantity| *quantity >= Decimal::ZERO)
     })
 }
 
@@ -230,14 +226,11 @@ pub(super) fn parse_subset_cached_input_quantity(usage_json: &Value) -> Option<D
         })
 }
 
-pub(super) fn positive_quantity(value: Decimal) -> Option<Decimal> {
-    (value > Decimal::ZERO).then_some(value)
-}
-
-pub(super) fn sum_positive_quantities<const N: usize>(
+pub(super) fn sum_observed_quantities<const N: usize>(
     values: [Option<Decimal>; N],
 ) -> Option<Decimal> {
-    positive_quantity(values.into_iter().flatten().sum())
+    // None means no observed counter; an explicitly reported zero stays known.
+    values.into_iter().flatten().reduce(|left, right| left + right)
 }
 
 pub(super) fn decimal_to_i32(value: Decimal) -> Option<i32> {

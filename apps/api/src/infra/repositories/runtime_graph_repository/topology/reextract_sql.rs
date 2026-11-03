@@ -23,6 +23,11 @@ const GRAPH_COMPLETION_EVENTS_CTES: &str = "with ready_documents as (
          select d.workspace_id, h.document_id, h.active_revision_id
          from content_document_head h
          join content_document d on d.id = h.document_id
+         join content_current_revision current_revision
+           on current_revision.document_id = d.id
+          and current_revision.workspace_id = d.workspace_id
+          and current_revision.library_id = d.library_id
+          and current_revision.revision_id = h.active_revision_id
          join catalog_library library
            on library.id = d.library_id
           and library.lifecycle_state = 'active'::catalog_library_lifecycle_state

@@ -150,17 +150,31 @@ pub async fn graph_projection_is_current(
     postgres: &PgPool,
     selected: super::RuntimeGraphProjectionIdentity,
 ) -> Result<bool, sqlx::Error> {
+    // Keep stale-target existence checks as keyed probes: unrelated libraries
+    // must not become a full-table hashed subplan for this library's request.
     sqlx::query_scalar(
         "with selected_snapshot as materialized (
              select library_id, projection_version from runtime_graph_snapshot
              where library_id = $1 and projection_version = $2
                and topology_generation = $3 and graph_status in ('ready', 'empty')
+         ), current_revisions as materialized (
+             select document_id, revision_id, library_id from content_current_revision
+             where library_id = $1 and exists (select 1 from selected_snapshot)
+         ), evidence_targets as materialized (
+             select evidence.target_id, evidence.target_kind,
+                    bool_or(coalesce((evidence.document_id, evidence.revision_id, evidence.library_id)
+                        in (select document_id, revision_id, library_id from current_revisions), false)) as has_current,
+                    bool_or(not coalesce((evidence.document_id, evidence.revision_id, evidence.library_id)
+                        in (select document_id, revision_id, library_id from current_revisions), false)) as has_stale
+             from runtime_graph_evidence evidence
+             where evidence.library_id = $1 and exists (select 1 from selected_snapshot)
+             group by evidence.target_id, evidence.target_kind
          )
          select exists (select 1 from selected_snapshot) and not exists (
             select 1 from selected_snapshot snapshot
             join runtime_graph_node node on node.library_id = snapshot.library_id
              and node.projection_version = snapshot.projection_version
-            left join content_current_revision current_revision
+            left join current_revisions current_revision
               on current_revision.document_id = node.document_id
              and current_revision.library_id = node.library_id
             where snapshot.library_id = $1 and node.node_type = 'document'
@@ -172,39 +186,26 @@ pub async fn graph_projection_is_current(
                     and evidence.revision_id = current_revision.revision_id
               ))
          ) and not exists (
-            select 1 from selected_snapshot snapshot
-            cross join lateral (
-                select node.id, 'node'::text as kind from runtime_graph_node node
-                where node.library_id = snapshot.library_id
-                  and node.projection_version = snapshot.projection_version
-                union all
-                select edge.id, 'edge'::text as kind from runtime_graph_edge edge
-                where edge.library_id = snapshot.library_id
-                  and edge.projection_version = snapshot.projection_version
-            ) target
-            where snapshot.library_id = $1 and not exists (
-                select 1 from runtime_graph_evidence evidence
-                join content_current_revision current_revision
-                  on current_revision.document_id = evidence.document_id
-                 and current_revision.revision_id = evidence.revision_id
-                 and current_revision.library_id = evidence.library_id
-                where evidence.target_id = target.id and evidence.target_kind = target.kind
-                  and evidence.library_id = snapshot.library_id
-            )
+            (select node.id from runtime_graph_node node
+             where node.library_id = $1 and node.projection_version = $2)
+            except
+            (select evidence.target_id from evidence_targets evidence
+             where evidence.target_kind = 'node' and evidence.has_current)
          ) and not exists (
-            select 1 from runtime_graph_evidence evidence
-            join selected_snapshot snapshot on snapshot.library_id = evidence.library_id
-            left join content_current_revision current_revision
-              on current_revision.document_id = evidence.document_id
-             and current_revision.revision_id = evidence.revision_id
-             and current_revision.library_id = evidence.library_id
-            where evidence.library_id = $1 and current_revision.revision_id is null
-              and (exists (select 1 from runtime_graph_node node
-                   where node.id = evidence.target_id and evidence.target_kind = 'node'
-                     and node.projection_version = snapshot.projection_version)
-                or exists (select 1 from runtime_graph_edge edge
-                   where edge.id = evidence.target_id and evidence.target_kind = 'edge'
-                     and edge.projection_version = snapshot.projection_version))
+            (select edge.id from runtime_graph_edge edge
+             where edge.library_id = $1 and edge.projection_version = $2)
+            except
+            (select evidence.target_id from evidence_targets evidence
+             where evidence.target_kind = 'edge' and evidence.has_current)
+         ) and not exists (
+            select 1 from evidence_targets evidence
+            where evidence.has_stale and exists (select 1 from selected_snapshot)
+              and ((evidence.target_kind = 'node' and exists (
+                    select 1 from runtime_graph_node node
+                    where node.id = evidence.target_id and node.projection_version = $2 offset 0))
+                or (evidence.target_kind = 'edge' and exists (
+                    select 1 from runtime_graph_edge edge
+                    where edge.id = evidence.target_id and edge.projection_version = $2 offset 0)))
          )",
     )
     .bind(selected.library_id)

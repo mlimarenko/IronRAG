@@ -1,4 +1,5 @@
 mod content;
+mod identity;
 mod materialization;
 mod types;
 mod web;
@@ -15,7 +16,6 @@ pub use types::{
 };
 pub use web::admit_web_run_with_failpoint;
 
-use sha2::{Digest as _, Sha256};
 use sqlx::{Postgres, Transaction};
 use uuid::Uuid;
 
@@ -89,10 +89,7 @@ pub async fn has_bound_content_key(
         .await
 }
 
-pub(super) fn fingerprint(value: &serde_json::Value) -> Result<String, AdmissionError> {
-    let encoded = serde_json::to_vec(value)?;
-    Ok(format!("v1:sha256:{}", hex::encode(Sha256::digest(encoded))))
-}
+pub use identity::{fingerprint, verify_fingerprint};
 
 fn check_failpoint(
     requested: Option<AdmissionFailpoint>,
@@ -138,7 +135,7 @@ async fn find_mutation_for_update(
         return Err(AdmissionError::IdempotencyConflict { mutation_id: first.0 });
     }
     let query = format!(
-        "select {MUTATION_COLUMNS}
+        "select {MUTATION_COLUMNS}, m.request_identity
          from content_mutation m join content_mutation_reference r on r.id=m.id
          where m.id=$1 for update of m"
     );
@@ -189,7 +186,7 @@ async fn insert_mutation(
          ) values (
             $1, $2, $3, $4::content_mutation_operation_kind,
             $5, $6, 'accepted', now(), $7, $8
-         ) returning *) select {MUTATION_COLUMNS} from inserted m
+         ) returning *) select {MUTATION_COLUMNS}, m.request_identity from inserted m
          join content_mutation_reference r on r.id=m.id"
     );
     let mutation = sqlx::query_as::<_, MutationIdentityRow>(sqlx::AssertSqlSafe(query))
@@ -359,7 +356,13 @@ mod tests {
 
     #[test]
     fn fingerprint_is_stable_and_uses_versioned_sha256_format() {
-        let value = serde_json::json!({ "target": "alpha", "count": 2 });
+        let value = serde_json::json!({
+            "workspaceId": Uuid::nil(), "libraryId": Uuid::max(),
+            "operationKind": "delete", "sourceIdentity": null,
+            "materializationToken": null,
+            "target": {"kind": "existing", "documentId": Uuid::nil()},
+            "revision": null, "replacement": null,
+        });
 
         let computed_fingerprint = fingerprint(&value).unwrap();
 

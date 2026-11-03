@@ -138,13 +138,11 @@ pub async fn get_revision_by_id(
     get_revision_by_id_with_executor(postgres, revision_id).await
 }
 
-/// Reads the immutable replacement snapshot from the exact revision's owning
-/// mutation item. Ambiguous or missing ownership never falls back to mutable
-/// document metadata or a generated artifact path.
-pub async fn get_revision_replacement_identity(
+/// Reads the typed immutable admission stored on the exact revision.
+pub async fn get_revision_admission_identity(
     postgres: &PgPool,
     revision_id: Uuid,
-) -> Result<Option<ironrag_contracts::documents::ReplacementIdentity>, sqlx::Error> {
+) -> Result<Option<ironrag_contracts::documents::RevisionAdmissionIdentity>, sqlx::Error> {
     let identity: Option<Option<serde_json::Value>> =
         sqlx::query_scalar("select admission_identity from content_revision where id = $1")
             .bind(revision_id)
@@ -154,8 +152,18 @@ pub async fn get_revision_replacement_identity(
         return Ok(None);
     };
     serde_json::from_value::<ironrag_contracts::documents::RevisionAdmissionIdentity>(identity)
-        .map(|identity| Some(identity.replacement().clone()))
+        .map(Some)
         .map_err(|error| sqlx::Error::Decode(Box::new(error)))
+}
+
+/// Reads the immutable replacement snapshot from the exact revision admission.
+pub async fn get_revision_replacement_identity(
+    postgres: &PgPool,
+    revision_id: Uuid,
+) -> Result<Option<ironrag_contracts::documents::ReplacementIdentity>, sqlx::Error> {
+    Ok(get_revision_admission_identity(postgres, revision_id)
+        .await?
+        .map(|identity| identity.replacement().clone()))
 }
 
 pub async fn get_revision_by_id_with_executor<'e, E>(

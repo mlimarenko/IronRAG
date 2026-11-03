@@ -5,7 +5,7 @@ import * as Dialog from '@radix-ui/react-dialog'
 import {
   AlertTriangle,
   ChevronsUpDown,
-  Code2,
+  ExternalLink,
   Command,
   Languages,
   LogOut,
@@ -21,7 +21,7 @@ import { NavLink, useNavigate } from 'react-router-dom'
 import { useTranslation } from 'react-i18next'
 import { versionApi } from '@/shared/api/version'
 import { useApp } from '@/shared/contexts/app-context'
-import { BUILD_VERSION_LABEL, formatVersionTag } from '@/shared/lib/build-version'
+import { BUILD_VERSION_TAG, formatVersionTag } from '@/shared/lib/build-version'
 import { Badge, Button, IconButton } from '@/shared/ui'
 import { Brand } from './Brand'
 import { CommandPalette } from './CommandPalette'
@@ -31,6 +31,17 @@ import { ScopeSwitcherContext } from './scope-switcher-context'
 import { usePreferences } from './preferences-context'
 
 const REMEMBERED_RELEASE_MS = 12 * 60 * 60 * 1000
+const REPOSITORY_URL = 'https://github.com/mlimarenko/IronRAG'
+const RELEASES_URL = `${REPOSITORY_URL}/releases`
+
+function releaseDestination(value: string | null | undefined): string {
+  try {
+    const url = new URL(value ?? '')
+    return url.protocol === 'https:' || url.protocol === 'http:' ? url.href : RELEASES_URL
+  } catch {
+    return RELEASES_URL
+  }
+}
 
 export function AppShell({ children }: Readonly<{ children: ReactNode }>) {
   const { t } = useTranslation()
@@ -52,6 +63,7 @@ export function AppShell({ children }: Readonly<{ children: ReactNode }>) {
     refetchInterval: REMEMBERED_RELEASE_MS,
     staleTime: REMEMBERED_RELEASE_MS,
   })
+  const latestVersion = release.data?.latestVersion?.trim()
 
   const initials = (user?.displayName ?? user?.login ?? '?')
     .split(/\s+/)
@@ -263,24 +275,24 @@ export function AppShell({ children }: Readonly<{ children: ReactNode }>) {
             </div>
           </main>
           <footer className="shell-footer">
-            <span title={BUILD_VERSION_LABEL}>{BUILD_VERSION_LABEL}</span>
-            <a href="/swagger.html">{t('shell.apiDocs')}</a>
-            <a href="https://github.com/mlimarenko/IronRAG" target="_blank" rel="noreferrer">
-              <Code2 size={14} />
-              {t('shell.github')}
-            </a>
-            {release.data?.status === 'update_available' && release.data.latestVersion && (
-              <a
-                className="update-badge"
-                href={release.data.releaseUrl ?? '#'}
-                target="_blank"
-                rel="noreferrer"
-              >
-                <Badge tone="warning">
-                  {t('shell.update')} {formatVersionTag(release.data.latestVersion)}
-                </Badge>
+            <div className="shell-footer__version" aria-live="polite">
+              <a className="shell-footer__tag" href={RELEASES_URL} target="_blank" rel="noreferrer">
+                {BUILD_VERSION_TAG}
+                <ExternalLink size={12} aria-hidden="true" />
               </a>
-            )}
+              {!release.isError && release.data?.status === 'update_available' && latestVersion && (
+                <a
+                  href={releaseDestination(release.data.releaseUrl)}
+                  target="_blank"
+                  rel="noreferrer"
+                >
+                  <Badge tone="ready">
+                    {t('shell.update', { version: formatVersionTag(latestVersion) })}
+                  </Badge>
+                </a>
+              )}
+            </div>
+            <a href="/swagger.html">{t('shell.apiDocs')}</a>
           </footer>
         </div>
         <CommandPalette open={paletteOpen} onOpenChange={setPaletteOpen} />

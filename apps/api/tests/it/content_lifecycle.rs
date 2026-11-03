@@ -3,6 +3,7 @@ use crate::{content_lifecycle_support, web_ingest_support};
 #[cfg(feature = "test-support")]
 use anyhow::{Context, Result};
 use chrono::Utc;
+use serde_json::Value;
 use uuid::Uuid;
 
 use ironrag_backend::{
@@ -20,6 +21,9 @@ use ironrag_backend::{
             UpdateMutationCommand, UploadInlineDocumentCommand,
         },
         knowledge::service::PromoteKnowledgeDocumentCommand,
+        maintenance::knowledge_projection_metadata::{
+            KnowledgeProjectionMetadataAction, knowledge_projection_metadata,
+        },
     },
 };
 
@@ -93,8 +97,6 @@ async fn irg57_source_snapshot(
 #[tokio::test]
 #[ignore = "requires local postgres with required extensions"]
 async fn irg57_projection_repair_restores_source_lifecycle_idempotently() -> Result<()> {
-    use ironrag_backend::services::maintenance::knowledge_projection_metadata::knowledge_projection_metadata;
-
     let fixture = ContentLifecycleFixture::create().await?;
     let result = async {
         let pool = &fixture.state.persistence.postgres;
@@ -132,7 +134,7 @@ async fn irg57_projection_repair_restores_source_lifecycle_idempotently() -> Res
         let controls_before: serde_json::Value = sqlx::query_scalar("select jsonb_agg(to_jsonb(k) order by document_id) from knowledge_document k where document_id = any($1)")
             .bind(vec![healthy_id, deleted_id, wrong_scope_id]).fetch_one(pool).await?;
         let generation_before = repositories::get_library_source_truth_version(pool, fixture.library_id).await?;
-        let dry = knowledge_projection_metadata(&fixture.state, Some(fixture.library_id), true).await?;
+        let dry = knowledge_projection_metadata(&fixture.state, Some(fixture.library_id), KnowledgeProjectionMetadataAction::Preview).await?;
         assert_eq!(dry.document_rows_updated, 3, "dry-run must count lifecycle-only drift");
         assert_eq!(dry.revision_rows_updated, 0);
         assert_eq!(dry.libraries_reconciled, 1);
@@ -140,7 +142,9 @@ async fn irg57_projection_repair_restores_source_lifecycle_idempotently() -> Res
             .bind(vec![document_id, timestamp_only_id]).fetch_one(pool).await?;
         assert_eq!(still_drifted, 2, "dry-run must not write");
         assert_eq!(repositories::get_library_source_truth_version(pool, fixture.library_id).await?, generation_before);
-        let applied = knowledge_projection_metadata(&fixture.state, Some(fixture.library_id), false).await?;
+        let applied = knowledge_projection_metadata(&fixture.state, Some(fixture.library_id), KnowledgeProjectionMetadataAction::Apply {
+            expected_plan: dry.plans.first().context("missing preview plan")?.sha256.clone(),
+        }).await?;
         assert_eq!(applied.document_rows_updated, 3);
         assert_eq!(applied.revision_rows_updated, 0);
         let restored: i64 = sqlx::query_scalar("select count(*) from knowledge_document where document_id = any($1) and document_state = 'active' and deleted_at is null")
@@ -151,15 +155,21 @@ async fn irg57_projection_repair_restores_source_lifecycle_idempotently() -> Res
         let controls_after: serde_json::Value = sqlx::query_scalar("select jsonb_agg(to_jsonb(k) order by document_id) from knowledge_document k where document_id = any($1)")
             .bind(vec![healthy_id, deleted_id, wrong_scope_id]).fetch_one(pool).await?;
         assert_eq!(controls_after, controls_before);
-        for dry_run in [true, false] {
-            let wrong_scope = knowledge_projection_metadata(&fixture.state, Some(other_library.id), dry_run).await?;
+        let wrong_preview = knowledge_projection_metadata(&fixture.state, Some(other_library.id), KnowledgeProjectionMetadataAction::Preview).await?;
+        for action in [KnowledgeProjectionMetadataAction::Preview, KnowledgeProjectionMetadataAction::Apply {
+            expected_plan: wrong_preview.plans.first().context("missing scope plan")?.sha256.clone(),
+        }] {
+            let wrong_scope = knowledge_projection_metadata(&fixture.state, Some(other_library.id), action).await?;
             assert_eq!(wrong_scope.document_rows_updated, 0, "cross-library source must not be copied");
             assert_eq!(wrong_scope.revision_rows_updated, 0);
         }
         let generation_after = repositories::get_library_source_truth_version(pool, fixture.library_id).await?;
         assert!(generation_after > generation_before);
-        for dry_run in [true, false] {
-            let rerun = knowledge_projection_metadata(&fixture.state, Some(fixture.library_id), dry_run).await?;
+        let empty_preview = knowledge_projection_metadata(&fixture.state, Some(fixture.library_id), KnowledgeProjectionMetadataAction::Preview).await?;
+        for action in [KnowledgeProjectionMetadataAction::Preview, KnowledgeProjectionMetadataAction::Apply {
+            expected_plan: empty_preview.plans.first().context("missing empty plan")?.sha256.clone(),
+        }] {
+            let rerun = knowledge_projection_metadata(&fixture.state, Some(fixture.library_id), action).await?;
             assert_eq!(rerun.document_rows_updated, 0);
             assert_eq!(rerun.revision_rows_updated, 0);
             assert_eq!(rerun.libraries_reconciled, 0);
@@ -169,6 +179,180 @@ async fn irg57_projection_repair_restores_source_lifecycle_idempotently() -> Res
     }.await;
     fixture.cleanup().await?;
     result
+}
+
+#[tokio::test]
+#[ignore = "requires local postgres with required extensions"]
+async fn irg57_exact_plan_refuses_stale_values_and_membership() -> Result<()> {
+    let fixture = ContentLifecycleFixture::create().await?;
+    let result = async {
+        let pool = &fixture.state.persistence.postgres;
+        let first = irg57_seed_document(&fixture).await?;
+        let second = irg57_seed_document(&fixture).await?;
+        let source_first = irg57_source_snapshot(&fixture, first).await?;
+        let source_second = irg57_source_snapshot(&fixture, second).await?;
+        sqlx::query("update knowledge_document set document_state = 'deleted', deleted_at = now() where document_id = $1")
+            .bind(first).execute(pool).await?;
+        let preview = knowledge_projection_metadata(&fixture.state, Some(fixture.library_id), KnowledgeProjectionMetadataAction::Preview).await?;
+        let original_digest = preview.plans.first().context("missing plan")?.sha256.clone();
+        let repeated = knowledge_projection_metadata(&fixture.state, Some(fixture.library_id), KnowledgeProjectionMetadataAction::Preview).await?;
+        anyhow::ensure!(repeated.plans.first().context("missing repeat plan")?.sha256 == original_digest, "unchanged preview must be deterministic");
+
+        sqlx::query("update knowledge_document set deleted_at = deleted_at + interval '1 second' where document_id = $1")
+            .bind(first).execute(pool).await?;
+        let before_values: Value = sqlx::query_scalar("select jsonb_agg(to_jsonb(k) order by document_id) from knowledge_document k where library_id = $1")
+            .bind(fixture.library_id).fetch_one(pool).await?;
+        let generation = repositories::get_library_source_truth_version(pool, fixture.library_id).await?;
+        let stale = knowledge_projection_metadata(&fixture.state, Some(fixture.library_id), KnowledgeProjectionMetadataAction::Apply { expected_plan: original_digest }).await;
+        anyhow::ensure!(stale.is_err(), "a changed before value must invalidate the plan");
+        let after_values: Value = sqlx::query_scalar("select jsonb_agg(to_jsonb(k) order by document_id) from knowledge_document k where library_id = $1")
+            .bind(fixture.library_id).fetch_one(pool).await?;
+        anyhow::ensure!(after_values == before_values, "stale-value refusal changed projection rows");
+        anyhow::ensure!(repositories::get_library_source_truth_version(pool, fixture.library_id).await? == generation, "stale-value refusal advanced source truth");
+
+        let revised = knowledge_projection_metadata(&fixture.state, Some(fixture.library_id), KnowledgeProjectionMetadataAction::Preview).await?;
+        let revised_digest = revised.plans.first().context("missing revised plan")?.sha256.clone();
+        sqlx::query("update knowledge_document set document_state = 'deleted', deleted_at = now() where document_id = $1")
+            .bind(second).execute(pool).await?;
+        let before_cohort: Value = sqlx::query_scalar("select jsonb_agg(to_jsonb(k) order by document_id) from knowledge_document k where library_id = $1")
+            .bind(fixture.library_id).fetch_one(pool).await?;
+        let stale = knowledge_projection_metadata(&fixture.state, Some(fixture.library_id), KnowledgeProjectionMetadataAction::Apply { expected_plan: revised_digest }).await;
+        anyhow::ensure!(stale.is_err(), "an additional unapproved row must invalidate the plan");
+        let after_cohort: Value = sqlx::query_scalar("select jsonb_agg(to_jsonb(k) order by document_id) from knowledge_document k where library_id = $1")
+            .bind(fixture.library_id).fetch_one(pool).await?;
+        anyhow::ensure!(after_cohort == before_cohort, "stale-cohort refusal changed projection rows");
+        anyhow::ensure!(repositories::get_library_source_truth_version(pool, fixture.library_id).await? == generation, "stale-cohort refusal advanced source truth");
+        let unscoped = knowledge_projection_metadata(&fixture.state, None, KnowledgeProjectionMetadataAction::Apply { expected_plan: "0".repeat(64) }).await;
+        anyhow::ensure!(unscoped.is_err(), "apply must not accept an unbound library scope");
+        let malformed = knowledge_projection_metadata(&fixture.state, Some(fixture.library_id), KnowledgeProjectionMetadataAction::Apply { expected_plan: "not-a-digest".to_string() }).await;
+        anyhow::ensure!(malformed.is_err(), "malformed approval must refuse");
+
+        let current = knowledge_projection_metadata(&fixture.state, Some(fixture.library_id), KnowledgeProjectionMetadataAction::Preview).await?;
+        let plan = current.plans.first().context("missing current plan")?;
+        anyhow::ensure!(plan.documents.len() == 2 && plan.revisions.is_empty(), "preview must identify the complete current cohort");
+        let applied = knowledge_projection_metadata(&fixture.state, Some(fixture.library_id), KnowledgeProjectionMetadataAction::Apply { expected_plan: plan.sha256.clone() }).await?;
+        anyhow::ensure!(applied.document_rows_updated == 2 && applied.revision_rows_updated == 0, "apply must match the approved cohort");
+        anyhow::ensure!(irg57_source_snapshot(&fixture, first).await? == source_first, "repair changed protected first source state");
+        anyhow::ensure!(irg57_source_snapshot(&fixture, second).await? == source_second, "repair changed protected second source state");
+        Ok::<_, anyhow::Error>(())
+    }.await;
+    let cleanup = fixture.cleanup().await;
+    result?;
+    cleanup
+}
+
+#[tokio::test]
+#[ignore = "requires local postgres with required extensions"]
+async fn irg57_exact_plan_refuses_a_concurrent_lifecycle_change() -> Result<()> {
+    let fixture = ContentLifecycleFixture::create().await?;
+    let result = async {
+        let pool = &fixture.state.persistence.postgres;
+        let first = irg57_seed_document(&fixture).await?;
+        let second = irg57_seed_document(&fixture).await?;
+        sqlx::query("update knowledge_document set document_state = 'deleted', deleted_at = now() where document_id = $1")
+            .bind(first).execute(pool).await?;
+        let preview = knowledge_projection_metadata(&fixture.state, Some(fixture.library_id), KnowledgeProjectionMetadataAction::Preview).await?;
+        let expected_plan = preview.plans.first().context("missing plan")?.sha256.clone();
+        let mut writer = pool.begin().await?;
+        let locked = repositories::catalog_repository::lock_library_for_lifecycle_event_with_executor(&mut *writer, fixture.workspace_id, fixture.library_id).await?;
+        anyhow::ensure!(locked, "fixture library lock failed");
+        let writer_pid: i32 = sqlx::query_scalar("select pg_backend_pid()")
+            .fetch_one(&mut *writer).await?;
+        let state = fixture.state.clone();
+        let library_id = fixture.library_id;
+        let mut repairs = tokio::task::JoinSet::new();
+        repairs.spawn(async move {
+            knowledge_projection_metadata(&state, Some(library_id), KnowledgeProjectionMetadataAction::Apply { expected_plan }).await
+        });
+        // Observe the actual database lock wait before committing the writer;
+        // task scheduling alone must not decide which refusal this test proves.
+        tokio::time::timeout(std::time::Duration::from_secs(15), async {
+            let mut observations = tokio::time::interval(std::time::Duration::from_millis(10));
+            loop {
+                observations.tick().await;
+                let blocked: bool = sqlx::query_scalar(
+                    "select exists(select 1 from pg_stat_activity
+                     where datname = current_database() and $1 = any(pg_blocking_pids(pid)))",
+                ).bind(writer_pid).fetch_one(pool).await?;
+                if blocked {
+                    return Ok::<_, anyhow::Error>(());
+                }
+            }
+        }).await.context("repair did not block on the native lifecycle lock")??;
+        sqlx::query("update knowledge_document set document_state = 'deleted', deleted_at = now() where document_id = $1")
+            .bind(second).execute(&mut *writer).await?;
+        repositories::catalog_repository::touch_library_source_truth_version_with_executor(&mut *writer, fixture.library_id).await?;
+        let expected_projection: Value = sqlx::query_scalar("select jsonb_agg(to_jsonb(k) order by document_id) from knowledge_document k where library_id = $1")
+            .bind(fixture.library_id).fetch_one(&mut *writer).await?;
+        let expected_generation: i64 = sqlx::query_scalar("select coalesce(source_truth_version, 1) from catalog_library where id = $1")
+            .bind(fixture.library_id).fetch_one(&mut *writer).await?;
+        writer.commit().await?;
+        let refused = tokio::time::timeout(std::time::Duration::from_secs(15), repairs.join_next()).await
+            .context("concurrent repair did not finish")?.context("concurrent repair task disappeared")?.context("concurrent repair task panicked")?;
+        let refusal = refused.err().context("concurrent lifecycle change unexpectedly applied")?;
+        let serialization_refusal = matches!(refusal.downcast_ref::<sqlx::Error>(),
+            Some(sqlx::Error::Database(error)) if error.code().as_deref() == Some("40001"));
+        anyhow::ensure!(serialization_refusal, "expected native serialization refusal, got {refusal:#}");
+        let actual_projection: Value = sqlx::query_scalar("select jsonb_agg(to_jsonb(k) order by document_id) from knowledge_document k where library_id = $1")
+            .bind(fixture.library_id).fetch_one(pool).await?;
+        anyhow::ensure!(actual_projection == expected_projection, "refused repair modified the writer's committed rows");
+        anyhow::ensure!(repositories::get_library_source_truth_version(pool, fixture.library_id).await? == expected_generation, "refused repair advanced source truth");
+        Ok::<_, anyhow::Error>(())
+    }.await;
+    let cleanup = fixture.cleanup().await;
+    result?;
+    cleanup
+}
+
+#[tokio::test]
+#[ignore = "requires local postgres with required extensions"]
+async fn irg57_exact_plan_repairs_only_approved_revision_metadata() -> Result<()> {
+    let fixture = ContentLifecycleFixture::create().await?;
+    let result = async {
+        let pool = &fixture.state.persistence.postgres;
+        let document_id = irg57_seed_document(&fixture).await?;
+        let original = irg57_source_snapshot(&fixture, document_id).await?;
+        sqlx::query(
+            "update knowledge_revision set title = 'stale metadata' where document_id = $1",
+        )
+        .bind(document_id)
+        .execute(pool)
+        .await?;
+        let preview = knowledge_projection_metadata(
+            &fixture.state,
+            Some(fixture.library_id),
+            KnowledgeProjectionMetadataAction::Preview,
+        )
+        .await?;
+        let plan = preview.plans.first().context("missing revision plan")?;
+        anyhow::ensure!(
+            plan.documents.is_empty() && plan.revisions.len() == 1,
+            "revision-only drift must not approve document changes"
+        );
+        anyhow::ensure!(
+            plan.revisions[0].fields == vec!["title".to_string()],
+            "preview must report only the actual title difference"
+        );
+        let applied = knowledge_projection_metadata(
+            &fixture.state,
+            Some(fixture.library_id),
+            KnowledgeProjectionMetadataAction::Apply { expected_plan: plan.sha256.clone() },
+        )
+        .await?;
+        anyhow::ensure!(
+            applied.document_rows_updated == 0 && applied.revision_rows_updated == 1,
+            "apply did not match the approved revision"
+        );
+        anyhow::ensure!(
+            irg57_source_snapshot(&fixture, document_id).await? == original,
+            "revision repair did not restore exactly the authoritative metadata"
+        );
+        Ok::<_, anyhow::Error>(())
+    }
+    .await;
+    let cleanup = fixture.cleanup().await;
+    result?;
+    cleanup
 }
 
 #[tokio::test]

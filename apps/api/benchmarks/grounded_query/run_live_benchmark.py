@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import html
 import json
 import math
 import mimetypes
@@ -13,10 +14,12 @@ import re
 import sys
 import time
 import urllib.parse
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime, timezone
+from decimal import Decimal, InvalidOperation, localcontext
 from pathlib import Path
-from typing import Any, Mapping, Sequence
+from typing import Any, Mapping, Sequence, TypedDict
+from uuid import UUID
 
 import requests
 
@@ -61,13 +64,6 @@ DEFAULT_MAX_HOST_MEMORY_PSI_SOME_AVG10 = 1.0
 DEFAULT_MAX_HOST_MEMORY_PSI_FULL_AVG10 = 0.5
 DEFAULT_MAX_HOST_IO_PSI_SOME_AVG10 = 5.0
 DEFAULT_MAX_HOST_IO_PSI_FULL_AVG10 = 1.0
-DEFAULT_SUITE_MATRIX = [
-    "golden_api_baseline_suite.json",
-    "golden_workflow_strict_suite.json",
-    "golden_layout_noise_suite.json",
-    "golden_graph_multihop_suite.json",
-    "golden_upload_surface_suite.json",
-]
 
 
 def utc_now_iso() -> str:
@@ -83,6 +79,28 @@ def normalize_match_text(value: str | None) -> str:
     normalized = re.sub(r"[\u2010-\u2015\u2212]+", " ", normalized)
     normalized = re.sub(r"\s+", " ", normalized)
     return normalized.strip()
+
+
+ANSWER_ITEM_POLICY_VERSION = "source-backed-inline-markdown-v2"
+
+
+def normalize_answer_item_text(value: str) -> str:
+    """Normalize inline presentation, not words, numbers or sentence order.
+
+    This deliberately handles only paired inline Markdown. Unmatched delimiters
+    and underscores inside identifiers remain literal; link targets are not
+    answer prose. Retrieval and strict answer assertions keep their own contract.
+    """
+    text = html.unescape(value)
+    text = re.sub(r"\[([^\]\n]+)\]\([^\s()]+\)", r"\1", text)
+    for delimiter in ("**", "__", "`", "*", "_"):
+        edge = r"(?<!\w)" if delimiter.endswith("_") else ""
+        end = r"(?!\w)" if delimiter.endswith("_") else ""
+        text = re.sub(
+            edge + re.escape(delimiter) + r"([^\n]+?)" + re.escape(delimiter) + end,
+            r"\1", text,
+        )
+    return "\n".join(normalize_match_text(line) for line in text.splitlines())
 
 
 def contains_all(haystack: str | None, needles: list[str]) -> bool:
@@ -330,6 +348,16 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
+class AnswerItem(TypedDict):
+    id: str
+    fixture: str
+    sourceExcerpt: str
+    sourceSha256: str
+    requiredAll: list[str]
+    requiredAny: list[str]
+    requiredRegexAny: list[str]
+
+
 @dataclass
 class BenchmarkCase:
     case_id: str
@@ -353,6 +381,255 @@ class BenchmarkCase:
     relevant_chunks: list[str]
     answer_forbidden_regex_any: list[str] = field(default_factory=list)
     answer_required_regex_any: list[str] = field(default_factory=list)
+    expected_facts: list[AnswerItem] = field(default_factory=list)
+    mandatory_caveats: list[AnswerItem] = field(default_factory=list)
+    preceding_turns: list[dict[str, Any]] = field(default_factory=list)
+    expected_clarification: bool | None = None
+
+
+def validate_expected_clarification(value: Any) -> bool | None:
+    if value is not None and not isinstance(value, bool):
+        raise ValueError("expectedClarification must be boolean or null")
+    return value
+
+
+def clarification_expectation_matches(
+    expected: Any, execution_detail: Mapping[str, Any]
+) -> bool:
+    expected = validate_expected_clarification(expected)
+    return expected is None or (
+        execution_detail.get("clarification") or {}
+    ).get("required") is expected
+
+
+TURN_EXPECTATIONS = {
+    "answerRequiredAll": "answer_required_all",
+    "answerRequiredAny": "answer_required_any",
+    "answerRequiredRegexAny": "answer_required_regex_any",
+    "answerOpeningRequiredAny": "answer_opening_required_any",
+    "answerForbiddenAny": "answer_forbidden_any",
+    "answerForbiddenRegexAny": "answer_forbidden_regex_any",
+    "allowedVerificationStates": "allowed_verification_states",
+}
+
+
+def validate_preceding_turns(
+    turns: Any,
+    *,
+    root: Path,
+    documents: list[Path] | None = None,
+    final_id: str | None = None,
+) -> None:
+    if not isinstance(turns, list):
+        raise ValueError("precedingTurns must be an array")
+    seen = {final_id}
+    for turn in turns:
+        if not isinstance(turn, dict) or set(turn) - (
+            {"id", "question", "expectedFacts", "mandatoryCaveats"}
+            | TURN_EXPECTATIONS.keys()
+        ):
+            raise ValueError("invalid preceding turn schema")
+        turn_id = turn.get("id")
+        if not isinstance(turn_id, str) or not turn_id.strip() or turn_id in seen:
+            raise ValueError("empty or duplicate turn id")
+        seen.add(turn_id)
+        if not isinstance(turn.get("question"), str) or not turn["question"].strip():
+            raise ValueError("empty turn question")
+        for key in TURN_EXPECTATIONS:
+            values = turn.get(key, [])
+            if not isinstance(values, list) or any(
+                not isinstance(value, str) or not value.strip() for value in values
+            ):
+                raise ValueError("turn expectations must be arrays of nonempty strings")
+            if "Regex" in key:
+                for pattern in values:
+                    try:
+                        compiled = re.compile(pattern, re.IGNORECASE)
+                    except re.error as error:
+                        raise ValueError("invalid turn regex") from error
+                    if compiled.search(""):
+                        raise ValueError("turn regex matches empty text")
+        if "allowedVerificationStates" in turn and (
+            not turn["allowedVerificationStates"]
+            or set(turn["allowedVerificationStates"])
+            - {"verified", "partially_supported"}
+        ):
+            raise ValueError("turn verification expectations must be successful states")
+        if not any(
+            turn.get(key)
+            for key in TURN_EXPECTATIONS
+            if key != "allowedVerificationStates"
+        ) and not (turn.get("expectedFacts") or turn.get("mandatoryCaveats")):
+            raise ValueError("preceding turn requires answer expectations")
+        validate_answer_items(
+            turn.get("expectedFacts", []),
+            turn.get("mandatoryCaveats", []),
+            root=root,
+            documents=documents,
+        )
+
+
+def preceding_turn_case(case: BenchmarkCase, turn: dict[str, Any]) -> BenchmarkCase:
+    """Use the canonical case evaluator, without the final question's retrieval policy."""
+    return replace(
+        case,
+        case_id=turn["id"],
+        question=turn["question"],
+        search_query=turn["question"],
+        preceding_turns=[],
+        expected_clarification=None,
+        expected_documents_contains=[],
+        search_required_all=[],
+        relevant_documents=[],
+        relevant_chunks=[],
+        min_chunk_reference_count=0,
+        min_prepared_segment_reference_count=0,
+        min_technical_fact_reference_count=0,
+        min_entity_reference_count=0,
+        min_relation_reference_count=0,
+        expected_entity_reference_labels_contains=[],
+        expected_relation_reference_text_contains=[],
+        expected_facts=turn.get("expectedFacts", []),
+        mandatory_caveats=turn.get("mandatoryCaveats", []),
+        **{
+            attribute: turn.get(
+                key, ["verified"] if key == "allowedVerificationStates" else []
+            )
+            for key, attribute in TURN_EXPECTATIONS.items()
+        },
+    )
+
+
+def validate_answer_items(
+    facts: Any,
+    caveats: Any,
+    *,
+    root: Path,
+    documents: list[Path] | None = None,
+) -> None:
+    """Validate annotations against real UTF-8 source bytes before evaluating them."""
+    seen: set[str] = set()
+    for items in (facts, caveats):
+        if not isinstance(items, list):
+            raise TypeError("answer items must be arrays")
+        for item in items:
+            if not isinstance(item, dict) or set(item) != set(AnswerItem.__annotations__):
+                raise ValueError("incomplete answer item schema")
+            item_id = item["id"]
+            if not isinstance(item_id, str) or not item_id.strip() or item_id in seen:
+                raise ValueError("empty or duplicate answer item id")
+            seen.add(item_id)
+            for key in ("fixture", "sourceExcerpt", "sourceSha256"):
+                if not isinstance(item[key], str) or not item[key].strip():
+                    raise ValueError(f"missing answer item {key}")
+            relative = Path(item["fixture"])
+            if (
+                relative.is_absolute()
+                or ".." in relative.parts
+                or relative.parts[:1] != ("corpus",)
+            ):
+                raise ValueError("answer item fixture must be a corpus-relative path")
+            source = (root / relative).resolve()
+            if not source.is_relative_to(root.resolve() / "corpus"):
+                raise ValueError("answer item fixture escapes corpus")
+            if documents is not None and source not in documents:
+                raise ValueError("answer item fixture is outside suite documents")
+            try:
+                raw = source.read_bytes()
+                text = raw.decode("utf-8")
+            except (OSError, UnicodeError) as error:
+                raise ValueError("answer item fixture must be readable UTF-8 text") from error
+            if hashlib.sha256(raw).hexdigest() != item["sourceSha256"]:
+                raise ValueError("answer item source digest mismatch")
+            if item["sourceExcerpt"] not in text:
+                raise ValueError("answer item source excerpt is not verbatim fixture text")
+            for key in ("requiredAll", "requiredAny", "requiredRegexAny"):
+                matchers = item[key]
+                if not isinstance(matchers, list) or any(
+                    not isinstance(value, str) or not normalize_match_text(value)
+                    for value in matchers
+                ):
+                    raise ValueError("answer item matchers must be nonempty strings")
+            if not any(item[key] for key in ("requiredAll", "requiredAny", "requiredRegexAny")):
+                raise ValueError("answer item has no matchers")
+            for pattern in item["requiredRegexAny"]:
+                try:
+                    compiled = re.compile(pattern, re.IGNORECASE)
+                except re.error as error:
+                    raise ValueError("invalid answer item regex") from error
+                if compiled.search(""):
+                    raise ValueError("answer item regex matches empty text")
+
+
+def evaluate_answer_items(
+    answer: str, facts: list[AnswerItem], caveats: list[AnswerItem]
+) -> dict[str, Any]:
+    """Literal/regex completeness only; not semantic correctness or citation entailment."""
+    result: dict[str, Any] = {
+        "status": "annotated" if facts or caveats else "not_annotated",
+        "policy": {
+            "version": ANSWER_ITEM_POLICY_VERSION,
+            "sha256": stable_json_sha256({
+                "version": ANSWER_ITEM_POLICY_VERSION, "facts": facts, "caveats": caveats,
+            }),
+        },
+    }
+    answer = normalize_answer_item_text(answer)
+    for name, items in (("facts", facts), ("caveats", caveats)):
+        matched = []
+        missing = []
+        for item in items:
+            ok = contains_all(answer, item["requiredAll"])
+            ok = ok and (
+                not item["requiredAny"] or contains_any(answer, item["requiredAny"])
+            )
+            ok = ok and (
+                not item["requiredRegexAny"]
+                or matches_any_regex(answer, item["requiredRegexAny"])
+            )
+            (matched if ok else missing).append(item["id"])
+        result[name] = {
+            "matchedIds": matched,
+            "missingIds": missing,
+            "matchedCount": len(matched),
+            "totalCount": len(items),
+            "fraction": len(matched) / len(items) if items else None,
+        }
+    return result
+
+
+def answer_item_failures(completeness: dict[str, Any]) -> list[str]:
+    return [
+        f"answer_{name}"
+        for name in ("facts", "caveats")
+        if completeness[name]["missingIds"]
+    ]
+
+
+def build_completeness_summary(cases: list[dict[str, Any]]) -> dict[str, Any]:
+    observations = [case.get("answerCompleteness", {}) for case in cases]
+    annotated = [item for item in observations if item.get("status") == "annotated"]
+    result: dict[str, Any] = {
+        "totalCases": len(cases),
+        "annotatedCases": len(annotated),
+        "notAnnotatedCases": sum(
+            item.get("status") == "not_annotated" for item in observations
+        ),
+        "unavailableCases": sum(
+            item.get("status") not in ("annotated", "not_annotated")
+            for item in observations
+        ),
+        "annotationCoverage": len(annotated) / len(cases) if cases else None,
+    }
+    for name in ("facts", "caveats"):
+        matched = sum(item[name]["matchedCount"] for item in annotated)
+        total = sum(item[name]["totalCount"] for item in annotated)
+        result[name] = {
+            "matchedCount": matched,
+            "totalCount": total,
+            "fraction": matched / total if total else None,
+        }
+    return result
 
 
 def stable_json_sha256(payload: Any) -> str:
@@ -1004,6 +1281,7 @@ def permute_case_ids_for_round(
 
 def case_definition_payload(case: BenchmarkCase) -> dict[str, Any]:
     """Return every suite-controlled input that can affect a case outcome."""
+    validate_expected_clarification(case.expected_clarification)
     return {
         "caseId": case.case_id,
         "question": case.question,
@@ -1033,6 +1311,13 @@ def case_definition_payload(case: BenchmarkCase) -> dict[str, Any]:
         # definition hash just like changing the suite JSON itself.
         "relevantDocuments": case.relevant_documents,
         "relevantChunks": case.relevant_chunks,
+        **({"expectedFacts": case.expected_facts} if case.expected_facts else {}),
+        **({"mandatoryCaveats": case.mandatory_caveats} if case.mandatory_caveats else {}),
+        **({"precedingTurns": case.preceding_turns} if case.preceding_turns else {}),
+        **(
+            {"expectedClarification": case.expected_clarification}
+            if case.expected_clarification is not None else {}
+        ),
     }
 
 
@@ -1273,12 +1558,34 @@ def load_suite(path: Path) -> tuple[list[Path], list[BenchmarkCase], dict[str, A
         documents.append(candidate)
 
     cases = []
+    case_ids: set[str] = set()
     for item in payload["cases"]:
+        if not isinstance(item.get("id"), str) or not item["id"].strip():
+            raise ValueError("empty benchmark case id")
+        if item["id"] in case_ids:
+            raise ValueError("duplicate benchmark case id")
+        case_ids.add(item["id"])
+        if not isinstance(item.get("question"), str) or not item["question"].strip():
+            raise ValueError("empty benchmark question")
+        expected_clarification = validate_expected_clarification(
+            item.get("expectedClarification")
+        )
+        validate_preceding_turns(
+            item.get("precedingTurns", []), root=path.parent, documents=documents,
+            final_id=item["id"],
+        )
+        validate_answer_items(
+            item.get("expectedFacts", []),
+            item.get("mandatoryCaveats", []),
+            root=path.parent,
+            documents=documents,
+        )
         relevance = suite_case_rank_relevance(rank_relevance, suite_id, item["id"])
         cases.append(
             BenchmarkCase(
                 case_id=item["id"],
                 question=item["question"],
+                preceding_turns=item.get("precedingTurns", []),
                 search_query=item.get("searchQuery", item["question"]),
                 expected_documents_contains=item.get("expectedDocumentsContains", []),
                 search_required_all=item.get("searchRequiredAll", []),
@@ -1313,6 +1620,9 @@ def load_suite(path: Path) -> tuple[list[Path], list[BenchmarkCase], dict[str, A
                 ),
                 answer_forbidden_regex_any=item.get("answerForbiddenRegexAny", []),
                 answer_required_regex_any=item.get("answerRequiredRegexAny", []),
+                expected_facts=item.get("expectedFacts", []),
+                mandatory_caveats=item.get("mandatoryCaveats", []),
+                expected_clarification=expected_clarification,
             )
         )
     return documents, cases, payload
@@ -1320,7 +1630,10 @@ def load_suite(path: Path) -> tuple[list[Path], list[BenchmarkCase], dict[str, A
 
 def default_suite_paths() -> list[Path]:
     base = Path(__file__).resolve().parent
-    return [base / item for item in DEFAULT_SUITE_MATRIX]
+    suites = sorted(base.glob("golden_*_suite.json"))
+    if not suites:
+        raise ValueError("no golden benchmark suites are registered")
+    return suites
 
 
 def create_library(client: BenchmarkClient, workspace_id: str, library_name: str) -> dict[str, Any]:
@@ -1791,6 +2104,408 @@ def case_metadata(case: BenchmarkCase) -> dict[str, Any]:
     }
 
 
+def cost_decimal(value: Any) -> Decimal:
+    """Read a nonnegative decimal string without binary floating-point loss."""
+    if not isinstance(value, str) or not value or len(value) > 100:
+        raise ValueError("cost must be a decimal string")
+    if not re.fullmatch(r"[0-9]+(?:\.[0-9]+)?", value):
+        raise ValueError("cost must use plain nonnegative decimal notation")
+    try:
+        amount = Decimal(value)
+    except InvalidOperation as error:
+        raise ValueError("invalid cost decimal") from error
+    if not amount.is_finite() or amount < 0 or abs(amount.as_tuple().exponent) > 100:
+        raise ValueError("cost must be finite, nonnegative and bounded")
+    return amount
+
+
+def validate_execution_cost(payload: Any, execution_id: str) -> dict[str, Any]:
+    if not isinstance(execution_id, str) or not execution_id:
+        raise ValueError("cost evidence requires an execution identity")
+    if not isinstance(payload, dict):
+        raise TypeError("cost evidence must be an object")
+    if (
+        payload.get("owningExecutionKind") != "query_execution"
+        or payload.get("owningExecutionId") != execution_id
+    ):
+        raise ValueError("cost evidence belongs to another execution")
+    amount = cost_decimal(payload.get("totalCost"))
+    currency = payload.get("currencyCode")
+    if not isinstance(currency, str) or not re.fullmatch(r"[A-Z]{3}", currency):
+        raise ValueError("invalid cost currency")
+    calls = payload.get("providerCallCount")
+    unpriced = payload.get("unpricedProviderCallCount")
+    if any(type(value) is not int or value < 0 for value in (calls, unpriced)):
+        raise ValueError("invalid provider call counts")
+    if unpriced > calls:
+        raise ValueError("unpriced provider call count exceeds provider call count")
+    coverage = (
+        "complete" if unpriced == 0 else ("unknown" if unpriced >= calls else "partial")
+    )
+    if payload.get("costCoverage") != coverage:
+        raise ValueError("cost coverage contradicts call counts")
+    if calls == 0 and (amount != 0 or unpriced != 0):
+        raise ValueError("zero-call execution must have complete zero cost")
+    return payload
+
+
+MAX_COST_EXECUTIONS = 64
+MAX_COST_DEPTH = 8
+MAX_COST_REFERENCES = 256
+
+
+def cost_execution_id(value: Any) -> str:
+    if not isinstance(value, str) or str(UUID(value)) != value:
+        raise ValueError("invalid cost execution identity")
+    return value
+
+
+def cost_timestamp(value: Any) -> datetime:
+    if not isinstance(value, str):
+        raise ValueError("missing cost attribution timestamp")
+    timestamp = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    if timestamp.tzinfo is None:
+        raise ValueError("cost attribution timestamp requires timezone")
+    return timestamp
+
+
+def cost_component_lineage(component: Any, execution_id: str) -> list[str]:
+    """Accept only typed snapshot edges, never IDs in messages or tool results."""
+    if not isinstance(component, dict):
+        raise ValueError("invalid cost component")
+    detail = component["executionDetail"]
+    canonical = canonical_turn_payload(detail)
+    execution = detail["execution"]
+    if (
+        canonical["executionId"] != execution_id
+        or canonical["lifecycleState"] != "completed"
+    ):
+        raise ValueError("cost component is not the completed execution")
+    # Cache replay responses point at the historical source execution. They do
+    # not establish a newly incurred call and must not re-bill that source.
+    if (
+        detail["requestTurn"]["id"] != execution["requestTurnId"]
+        or detail["responseTurn"]["id"] != execution["responseTurnId"]
+    ):
+        raise ValueError("replayed execution has ambiguous incurred cost")
+    start = cost_timestamp(execution["startedAt"])
+    end = cost_timestamp(detail["runtimeSummary"]["completedAt"])
+    snapshot = component["llmContext"]
+    if (
+        not isinstance(snapshot, dict)
+        or snapshot.get("executionId") != execution_id
+        or snapshot.get("libraryId") != execution["libraryId"]
+        or not start <= cost_timestamp(snapshot.get("capturedAt")) <= end
+    ):
+        raise ValueError("snapshot attribution is unavailable")
+    iterations = snapshot.get("iterations")
+    if (
+        not isinstance(iterations, list)
+        or len(iterations) > MAX_COST_REFERENCES
+        or type(snapshot.get("totalIterations")) is not int
+        or snapshot["totalIterations"] != len(iterations)
+    ):
+        raise ValueError("incomplete snapshot iterations")
+    children = []
+    for number, iteration in enumerate(iterations, 1):
+        if (
+            not isinstance(iteration, dict)
+            or type(iteration.get("iteration")) is not int
+            or iteration["iteration"] != number
+        ):
+            raise ValueError("invalid snapshot iteration")
+        references = iteration.get("childQueryExecutionIds")
+        if not isinstance(references, list) or len(references) > MAX_COST_REFERENCES:
+            raise ValueError("missing or excessive typed child references")
+        children.extend(cost_execution_id(child) for child in references)
+        if len(children) > MAX_COST_REFERENCES:
+            raise ValueError("excessive typed child references")
+    validate_execution_cost(component["billing"], execution_id)
+    return children
+
+
+def validate_cost_observation(
+    evidence: Any, execution_id: str
+) -> dict[str, dict[str, Any]]:
+    """Recompute lineage closure from native components, not a saved total."""
+    cost_execution_id(execution_id)
+    if (
+        not isinstance(evidence, dict)
+        or evidence.get("rootExecutionId") != execution_id
+    ):
+        raise ValueError("unsupported cost observation")
+    components = evidence.get("components")
+    if (
+        not isinstance(components, list)
+        or not 0 < len(components) <= MAX_COST_EXECUTIONS
+    ):
+        raise ValueError("missing or excessive cost components")
+    indexed = {}
+    edges = {}
+    for component in components:
+        child_id = cost_execution_id(component["billing"]["owningExecutionId"])
+        if child_id in indexed:
+            raise ValueError("duplicate native component")
+        indexed[child_id] = component
+        edges[child_id] = cost_component_lineage(component, child_id)
+    if execution_id not in indexed:
+        raise ValueError("missing root component")
+    root = indexed[execution_id]["executionDetail"]["execution"]
+    visited = set()
+    references = 0
+
+    def visit(current, ancestors):
+        nonlocal references
+        if current in ancestors or len(ancestors) > MAX_COST_DEPTH:
+            raise ValueError("cyclic or excessive cost lineage depth")
+        if current not in indexed:
+            raise ValueError("missing descendant cost component")
+        parent = indexed[current]["executionDetail"]
+        execution = parent["execution"]
+        if any(execution[key] != root[key] for key in ("workspaceId", "libraryId")):
+            raise ValueError("cross-scope cost component")
+        # Check every path, including repeated edges, so a diamond cannot hide
+        # an excessive depth or a back edge behind a previously visited node.
+        visited.add(current)
+        for child in edges[current]:
+            references += 1
+            if references > MAX_COST_REFERENCES or child not in indexed:
+                raise ValueError("unavailable or excessive cost lineage")
+            child_execution = indexed[child]["executionDetail"]["execution"]
+            if not (
+                cost_timestamp(execution["startedAt"])
+                <= cost_timestamp(child_execution["startedAt"])
+                <= cost_timestamp(
+                    indexed[child]["executionDetail"]["runtimeSummary"]["completedAt"]
+                )
+                <= cost_timestamp(parent["runtimeSummary"]["completedAt"])
+            ):
+                raise ValueError("historical child is not attributable to this turn")
+            visit(child, ancestors | {current})
+
+    visit(execution_id, set())
+    if visited != indexed.keys():
+        raise ValueError("unreferenced native cost component")
+    return indexed
+
+
+def fetch_execution_cost(
+    client: BenchmarkClient, execution_id: str, *, execution_detail: Any = None
+) -> dict[str, Any]:
+    evidence = {"rootExecutionId": execution_id, "components": []}
+    try:
+        cost_execution_id(execution_id)
+        pending = [(execution_id, 0)]
+        seen = set()
+        references = 0
+        while pending:
+            current, depth = pending.pop()
+            if depth > MAX_COST_DEPTH:
+                raise ValueError("excessive cost lineage depth")
+            if current in seen:
+                continue
+            if len(seen) >= MAX_COST_EXECUTIONS:
+                raise ValueError("excessive cost components")
+            seen.add(current)
+            component = {}
+            component["billing"] = validate_execution_cost(
+                client.get_json(f"/billing/executions/query_execution/{current}"),
+                current,
+            )
+            evidence["components"].append(component)
+            component["executionDetail"] = (
+                execution_detail
+                if current == execution_id and execution_detail is not None
+                else client.get_json(f"/query/executions/{current}")
+            )
+            component["llmContext"] = client.get_json(
+                f"/query/executions/{current}/llm-context"
+            )
+            children = cost_component_lineage(component, current)
+            references += len(children)
+            if references > MAX_COST_REFERENCES:
+                raise ValueError("excessive cost lineage references")
+            pending.extend((child, depth + 1) for child in children)
+        validate_cost_observation(evidence, execution_id)
+    except Exception as error:  # noqa: BLE001 - cost observability must not discard the answer
+        # Cost observability must not discard an otherwise evaluated answer.
+        # Exception messages can contain authenticated URLs; record only the type.
+        return {
+            "status": "unavailable",
+            "evidence": evidence if evidence["components"] else None,
+            "error": type(error).__name__,
+        }
+    return {"status": "measured", "evidence": evidence, "error": None}
+
+
+def build_cost_summary(cases: list[dict[str, Any]]) -> dict[str, Any]:
+    counts = dict.fromkeys(
+        ("complete", "partial", "unknown", "unavailable", "not_measured"), 0
+    )
+    totals: dict[str, Decimal] = {}
+    invalid: list[str] = []
+    valid = []
+    roots: dict[str, int] = {}
+    shared: dict[str, dict[str, Any]] = {}
+    conflicting = set()
+    for case in cases:
+        observation = case.get("executionCost")
+        if observation is None:
+            counts["not_measured"] += 1
+            continue
+        try:
+            if not isinstance(observation, dict):
+                raise TypeError("invalid cost observation")
+            status = observation.get("status")
+            if status in ("unavailable", "not_measured"):
+                counts[status] += 1
+                continue
+            if status != "measured":
+                raise ValueError("invalid cost status")
+            components = validate_cost_observation(
+                observation.get("evidence"), case.get("executionId")
+            )
+            root = case["executionId"]
+            evaluated_detail = case.get("rawEvaluationEvidence", {}).get(
+                "executionDetail"
+            )
+            if evaluated_detail is not None and (
+                components[root]["executionDetail"]["execution"]
+                != evaluated_detail["execution"]
+            ):
+                raise ValueError("cost root differs from evaluated execution")
+            roots[root] = roots.get(root, 0) + 1
+            for identity, component in components.items():
+                if identity in shared and shared[identity] != component:
+                    conflicting.add(identity)
+                shared[identity] = component
+            valid.append((case, components))
+        except (ValueError, TypeError, KeyError, AttributeError):
+            counts["unavailable"] += 1
+            invalid.append(str(case.get("caseId")))
+    included = set()
+    for case, components in valid:
+        if roots[case["executionId"]] > 1 or conflicting.intersection(components):
+            counts["unavailable"] += 1
+            invalid.append(str(case.get("caseId")))
+            continue
+        calls = sum(
+            item["billing"]["providerCallCount"] for item in components.values()
+        )
+        unpriced = sum(
+            item["billing"]["unpricedProviderCallCount"] for item in components.values()
+        )
+        coverage = (
+            "complete"
+            if unpriced == 0
+            else "unknown"
+            if unpriced == calls
+            else "partial"
+        )
+        counts[coverage] += 1
+        for identity, component in components.items():
+            if identity in included:
+                continue
+            included.add(identity)
+            billing = component["billing"]
+            currency = billing["currencyCode"]
+            with localcontext() as context:
+                context.prec = 256
+                totals[currency] = totals.get(currency, Decimal(0)) + cost_decimal(
+                    billing["totalCost"]
+                )
+    return {
+        "scope": "final_turn_query_execution_tree",
+        "coverageCounts": counts,
+        "observedTotalsByCurrency": {
+            key: format(value, "f") for key, value in sorted(totals.items())
+        },
+        "invalidCaseIds": invalid,
+        "complete": bool(cases) and counts["complete"] == len(cases),
+    }
+
+
+def conversation_cost_records(cases: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Flatten explicit history only; historical final-query cost is not conversation cost."""
+    records = []
+    for case in cases:
+        turns = case.get("turnExecutions")
+        if not isinstance(turns, list) or not turns:
+            records.append({"caseId": case.get("caseId")})
+            continue
+        for turn in turns:
+            records.append(turn)
+    return records
+
+
+def build_conversation_cost_summary(
+    cases: list[dict[str, Any]], *, validated_history_complete: bool | None = None
+) -> dict[str, Any]:
+    """Summarize cost after surface-owned history validation.
+
+    HTTP histories are revalidated here by default. Other surfaces may supply
+    their validation result only after checking every actual exchange; this
+    argument is not a saved capture flag. Cost lineage and accounting remain
+    independently validated by build_cost_summary in either path.
+    """
+    summary = build_cost_summary(conversation_cost_records(cases))
+    summary["scope"] = "conversation_query_execution_union"
+    summary["historyComplete"] = bool(cases) and (
+        all(conversation_history_complete(case) for case in cases)
+        if validated_history_complete is None
+        else validated_history_complete is True
+    )
+    summary["complete"] = summary["complete"] and summary["historyComplete"]
+    return summary
+
+
+def conversation_history_complete(case: dict[str, Any]) -> bool:
+    policy = case.get("casePolicy") or {}
+    definitions = policy.get("preceding_turns", [])
+    history = case.get("turnExecutions")
+    if case.get("conversationHistoryComplete") is not True or not isinstance(
+        history, list
+    ):
+        return False
+    if len(history) != len(definitions) + 1:
+        return False
+    seen: set[str] = set()
+    for index, turn in enumerate(history):
+        expected_id = (
+            definitions[index]["id"] if index < len(definitions) else case.get("caseId")
+        )
+        expected_question = (
+            definitions[index]["question"]
+            if index < len(definitions)
+            else case.get("question")
+        )
+        if turn.get("caseExecutionError") or turn.get("caseId") != expected_id:
+            return False
+        try:
+            raw = turn["rawEvaluationEvidence"]
+            canonical = canonical_turn_payload(
+                raw["turnPayload"], expected_question=expected_question
+            )
+            detail = canonical_turn_payload(
+                raw["executionDetail"], expected_question=expected_question
+            )
+            execution_id = canonical["executionId"]
+            if (
+                execution_id in seen
+                or execution_id != turn.get("executionId")
+                or detail["executionId"] != execution_id
+            ):
+                return False
+            if definitions and raw["turnPayload"]["execution"][
+                "conversationId"
+            ] != case.get("querySessionId"):
+                return False
+            seen.add(execution_id)
+        except (KeyError, ValueError, TypeError):
+            return False
+    return history[-1].get("executionId") == case.get("executionId")
+
+
 def run_case(
     client: BenchmarkClient,
     workspace_id: str,
@@ -1798,6 +2513,86 @@ def run_case(
     session_id: str,
     case: BenchmarkCase,
     query_top_k: int,
+) -> dict[str, Any]:
+    validate_preceding_turns(
+        case.preceding_turns,
+        root=Path(__file__).resolve().parent,
+        final_id=case.case_id,
+    )
+    started = time.monotonic()
+    history: list[dict[str, Any]] = []
+    policies = [preceding_turn_case(case, turn) for turn in case.preceding_turns]
+    policies.append(replace(case, preceding_turns=[]))
+    for index, policy in enumerate(policies):
+        progress: dict[str, Any] = {}
+        try:
+            result = run_turn(
+                client,
+                workspace_id,
+                library_id,
+                session_id,
+                policy,
+                query_top_k,
+                progress=progress,
+                probe_search=index == len(policies) - 1,
+            )
+            if case.preceding_turns:
+                execution = result["rawEvaluationEvidence"]["turnPayload"]["execution"]
+                if execution["conversationId"] != session_id:
+                    raise ValueError("turn belongs to another query session")
+                if any(
+                    turn.get("executionId") == result["executionId"] for turn in history
+                ):
+                    raise ValueError("duplicate actual turn execution")
+        except Exception as error:  # noqa: BLE001 - retain partial conversation evidence
+            if not case.preceding_turns and not isinstance(
+                error, requests.RequestException
+            ):
+                raise
+            result = failed_case_result(policy, error)
+            result.update(progress)
+            result["caseExecutionError"] = type(error).__name__
+            history.append(result)
+            final = failed_case_result(case, error)
+            if index == len(policies) - 1:
+                final.update(progress)
+            final["caseExecutionError"] = type(error).__name__
+            break
+        history.append(result)
+    else:
+        final = dict(history[-1])
+    final["casePolicy"] = asdict(case)
+    final.update(case_metadata(case))
+    final["querySessionId"] = session_id
+    final["turnExecutions"] = history
+    final["conversationHistoryComplete"] = len(history) == len(policies) and not any(
+        turn.get("caseExecutionError") for turn in history
+    )
+    final["conversationLatencyMs"] = round((time.monotonic() - started) * 1000.0, 1)
+    failures = [
+        f"turn:{turn['caseId']}:{failure}"
+        for turn in history[:-1]
+        for failure in turn["failedChecks"]
+    ]
+    if not final["conversationHistoryComplete"]:
+        failures.append("conversation_incomplete")
+    final["failedChecks"] = list(final["failedChecks"]) + failures
+    final["strictCasePass"] = final["strictCasePass"] and not failures
+    final["answerPass"] = final["answerPass"] and not failures
+    final["conversationCost"] = build_conversation_cost_summary([final])
+    return final
+
+
+def run_turn(
+    client: BenchmarkClient,
+    workspace_id: str,
+    library_id: str,
+    session_id: str,
+    case: BenchmarkCase,
+    query_top_k: int,
+    *,
+    progress: dict[str, Any],
+    probe_search: bool = True,
 ) -> dict[str, Any]:
     # The timed answer must run before the auxiliary rank probe. Otherwise the
     # search endpoint can warm Postgres/index/provider caches and make the
@@ -1808,16 +2603,40 @@ def run_case(
         {"contentText": case.question, "topK": query_top_k, "includeDebug": True},
     )
     answer_latency_ms = round((time.monotonic() - answer_started) * 1000.0, 1)
+    progress.update(
+        {
+            "answerLatencyMs": answer_latency_ms,
+            "rawEvaluationEvidence": {
+                "turnPayload": turn_payload,
+                "executionDetail": None,
+                "searchPayload": None,
+            },
+        }
+    )
     canonical_turn = canonical_turn_payload(
         turn_payload,
         expected_question=case.question,
         expected_library_id=library_id,
         expected_workspace_id=workspace_id,
     )
-    execution = turn_payload["execution"]
     answer_text = canonical_turn["answerText"]
     execution_id = canonical_turn["executionId"]
-    execution_detail = client.get_json(f"/query/executions/{execution_id}")
+    progress.update(
+        {
+            "executionId": execution_id,
+            "answer": answer_text,
+            "querySessionId": session_id,
+        }
+    )
+    try:
+        execution_detail = client.get_json(f"/query/executions/{execution_id}")
+    finally:
+        # Preserve observed cost even if the detail read fails after a completed turn.
+        execution_cost = fetch_execution_cost(
+            client, execution_id, execution_detail=turn_payload
+        )
+        progress["executionCost"] = execution_cost
+    progress["rawEvaluationEvidence"]["executionDetail"] = execution_detail
     canonical_detail = canonical_turn_payload(
         execution_detail,
         expected_question=case.question,
@@ -1832,29 +2651,66 @@ def run_case(
         raise ValueError("execution detail belongs to another turn")
 
     search_started = time.monotonic()
-    search_payload = client.post_json(
-        f"/knowledge/libraries/{library_id}/search",
-        {
-            "text": case.search_query,
-            "limit": max(RANK_METRIC_SEARCH_LIMIT, query_top_k),
-            "chunkHitLimitPerDocument": RANK_METRIC_SEARCH_LIMIT,
-            "evidenceSampleLimit": 0,
-        },
+    search_payload = (
+        client.post_json(
+            f"/knowledge/libraries/{library_id}/search",
+            {
+                "text": case.search_query,
+                "limit": max(RANK_METRIC_SEARCH_LIMIT, query_top_k),
+                "chunkHitLimitPerDocument": RANK_METRIC_SEARCH_LIMIT,
+                "evidenceSampleLimit": 0,
+            },
+        )
+        if probe_search
+        else {"documentHits": []}
     )
     search_latency_ms = round((time.monotonic() - search_started) * 1000.0, 1)
+    return {
+        **evaluate_execution_detail(case, execution_detail, search_payload=search_payload),
+        "surface": "http_query_session",
+        "invocationPolicy": "durable_same_conversation",
+        "rawEvaluationEvidence": {
+            "turnPayload": turn_payload,
+            "executionDetail": execution_detail,
+            "searchPayload": {
+                "workspaceId": workspace_id,
+                "libraryId": library_id,
+                "queryText": case.search_query,
+                "responsePayload": search_payload,
+            },
+        },
+        "searchLatencyMs": search_latency_ms,
+        "answerLatencyMs": answer_latency_ms,
+        "executionCost": execution_cost,
+        "querySessionId": session_id,
+    }
+
+
+def evaluate_execution_detail(
+    case: BenchmarkCase,
+    execution_detail: Mapping[str, Any],
+    *,
+    search_payload: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    """Score genuine complete execution evidence independently of transport."""
+    canonical = canonical_turn_payload(execution_detail, expected_question=case.question)
+    answer_text = canonical["answerText"]
     search_summaries, aggregated_chunk_text, ranked_document_keys, ranked_chunk_texts = (
-        summarize_search_hits(search_payload)
+        summarize_search_hits(
+            search_payload if search_payload is not None else {"documentHits": []}
+        )
     )
     top_document_title = search_summaries[0]["title"] if search_summaries else None
-    top_document_ok = (
-        True
-        if not case.expected_documents_contains
-        else any(
+    top_document_ok = search_payload is not None and (
+        not case.expected_documents_contains
+        or any(
             lower_text(needle) in lower_text(top_document_title)
             for needle in case.expected_documents_contains
         )
     )
-    retrieval_contains_required = contains_all(aggregated_chunk_text, case.search_required_all)
+    retrieval_contains_required = search_payload is not None and contains_all(
+        aggregated_chunk_text, case.search_required_all
+    )
     document_rank_metrics = compute_rank_metrics(
         ranked_document_keys,
         normalize_relevant_keys(case.relevant_documents),
@@ -1868,6 +2724,8 @@ def run_case(
         }.items()
         if value is not None
     }
+    if search_payload is None:
+        rank_metrics = {}
 
     answer_has_required = contains_all(answer_text, case.answer_required_all) and (
         True if not case.answer_required_any else contains_any(answer_text, case.answer_required_any)
@@ -1886,6 +2744,13 @@ def run_case(
         answer_text,
         case.answer_forbidden_any,
     ) or matches_any_regex(answer_text, case.answer_forbidden_regex_any)
+    completeness = evaluate_answer_items(
+        answer_text, case.expected_facts, case.mandatory_caveats
+    )
+    completeness_failures = answer_item_failures(completeness)
+    clarification_matches = clarification_expectation_matches(
+        case.expected_clarification, execution_detail
+    )
 
     chunk_reference_count = len(execution_detail.get("chunkReferences", []))
     prepared_segment_reference_count = len(execution_detail.get("preparedSegmentReferences", []))
@@ -1916,6 +2781,7 @@ def run_case(
     )
     verification_pass = verification_state in case.allowed_verification_states
     failed_checks: list[str] = []
+    append_failure_if(search_payload is None, failed_checks, "auxiliary_search_unavailable")
     append_failure_if(not top_document_ok, failed_checks, "top_document")
     append_failure_if(not retrieval_contains_required, failed_checks, "retrieval_contains_required")
     append_failure_if(not answer_has_required, failed_checks, "answer_required")
@@ -1925,6 +2791,7 @@ def run_case(
         "answer_opening_required",
     )
     append_failure_if(answer_has_forbidden, failed_checks, "answer_forbidden")
+    append_failure_if(not clarification_matches, failed_checks, "answer_clarification")
     append_failure_if(chunk_reference_count < case.min_chunk_reference_count, failed_checks, "chunk_references")
     append_failure_if(
         prepared_segment_reference_count < case.min_prepared_segment_reference_count,
@@ -1957,32 +2824,26 @@ def run_case(
         "relation_reference_text",
     )
     append_failure_if(not verification_pass, failed_checks, "verification_state")
+    failed_checks.extend(completeness_failures)
     strict_case_pass = (
-        top_document_ok
+        search_payload is not None
+        and top_document_ok
         and retrieval_contains_required
         and answer_has_required
         and answer_opening_has_required
         and not answer_has_forbidden
+        and clarification_matches
         and graph_usage_pass
         and entity_reference_labels_pass
         and relation_reference_text_pass
         and structured_evidence_pass
         and verification_pass
+        and not completeness_failures
     )
 
     return {
         **case_metadata(case),
         "casePolicy": asdict(case),
-        "rawEvaluationEvidence": {
-            "turnPayload": turn_payload,
-            "executionDetail": execution_detail,
-            "searchPayload": {
-                "workspaceId": workspace_id,
-                "libraryId": library_id,
-                "queryText": case.search_query,
-                "responsePayload": search_payload,
-            },
-        },
         "topSearchDocumentTitle": top_document_title,
         "topSearchDocumentOk": top_document_ok,
         "retrievalContainsRequired": retrieval_contains_required,
@@ -1990,7 +2851,8 @@ def run_case(
         "answerOpening": answer_opening,
         "answerOpeningHasRequired": answer_opening_has_required,
         "answerHasForbidden": answer_has_forbidden,
-        "answerPass": answer_has_required and answer_opening_has_required and not answer_has_forbidden,
+        "answerCompleteness": completeness,
+        "answerPass": answer_has_required and answer_opening_has_required and not answer_has_forbidden and not completeness_failures and clarification_matches,
         "graphUsagePass": graph_usage_pass,
         "entityReferenceLabelsPass": entity_reference_labels_pass,
         "relationReferenceTextPass": relation_reference_text_pass,
@@ -2001,14 +2863,11 @@ def run_case(
         "strictCasePass": strict_case_pass,
         "failedChecks": failed_checks,
         "searchResultCount": len(search_summaries),
-        "searchLatencyMs": search_latency_ms,
         "searchResults": search_summaries,
         "rankMetrics": rank_metrics,
-        "answerLatencyMs": answer_latency_ms,
         "answer": answer_text,
-        "executionId": execution_id,
-        "querySessionId": session_id,
-        "executionState": execution["lifecycleState"],
+        "executionId": canonical["executionId"],
+        "executionState": canonical["lifecycleState"],
         "chunkReferenceCount": chunk_reference_count,
         "preparedSegmentReferenceCount": prepared_segment_reference_count,
         "technicalFactReferenceCount": technical_fact_reference_count,
@@ -2033,6 +2892,9 @@ def failed_case_result(case: BenchmarkCase, error: Exception) -> dict[str, Any]:
         "question": case.question,
         "searchQuery": case.search_query,
         "caseExecutionError": f"{type(error).__name__}: {error}",
+        "executionCost": {
+            "status": "not_measured", "evidence": None, "error": "case_execution_error",
+        },
         "topSearchDocumentTitle": None,
         "topSearchDocumentOk": False,
         "retrievalContainsRequired": False,
@@ -2040,6 +2902,7 @@ def failed_case_result(case: BenchmarkCase, error: Exception) -> dict[str, Any]:
         "answerOpening": None,
         "answerOpeningHasRequired": False,
         "answerHasForbidden": False,
+        "answerCompleteness": {"status": "unavailable"},
         "answerPass": False,
         "graphUsagePass": False,
         "entityReferenceLabelsPass": False,
@@ -2090,6 +2953,9 @@ def build_summary(case_results: list[dict[str, Any]]) -> dict[str, Any]:
     answer_latency_ms = build_answer_latency_summary(case_results)
     return {
         "totalCases": total,
+        "executionCost": build_cost_summary(case_results),
+        "conversationCost": build_conversation_cost_summary(case_results),
+        "answerCompleteness": build_completeness_summary(case_results),
         "topDocumentPassCount": top_doc_pass,
         "retrievalPassCount": retrieval_pass,
         "answerPassCount": answer_pass,
@@ -2197,6 +3063,15 @@ def build_matrix_summary(suite_results: list[dict[str, Any]]) -> dict[str, Any]:
     answer_latency_ms = build_matrix_answer_latency_summary(suite_results)
     return {
         "totalSuites": total_suites,
+        "answerCompleteness": build_completeness_summary(
+            [case for suite in suite_results for case in suite.get("cases", [])]
+        ),
+        "executionCost": build_cost_summary(
+            [case for suite in suite_results for case in suite.get("cases", [])]
+        ),
+        "conversationCost": build_conversation_cost_summary(
+            [case for suite in suite_results for case in suite.get("cases", [])]
+        ),
         "strictBlockingSuites": strict_blocking_suites,
         "strictBlockingSuitesPassed": strict_blocking_suites_passed,
         "totalCases": total_cases,
@@ -2388,6 +3263,11 @@ def main() -> int:
     if args.upload_only and args.skip_upload:
         print("--upload-only cannot be combined with --skip-upload.", file=sys.stderr)
         return 2
+    try:
+        suite_paths = [Path(item).resolve() for item in (args.suite or default_suite_paths())]
+    except ValueError as error:
+        print(str(error), file=sys.stderr)
+        return 2
     host_policy = build_host_eligibility_policy(
         max_load_per_cpu=args.max_host_load_per_cpu,
         min_available_memory_percent=args.min_host_available_memory_percent,
@@ -2442,7 +3322,6 @@ def main() -> int:
         )
         return 2
 
-    suite_paths = [Path(item).resolve() for item in (args.suite or default_suite_paths())]
     suite_payloads = []
     all_documents: list[Path] = []
     missing_paths: list[str] = []

@@ -19,28 +19,28 @@ fn worker_extract_artifact_matches_preparation_fence_without_normalized_text() {
 }
 
 #[test]
-fn vision_billing_usage_items_expand_embedded_picture_calls() {
+fn vision_billing_uses_raw_calls_not_the_aggregate_and_retains_empty_attempts() {
     let usage = serde_json::json!({
-        "prompt_tokens": 30,
-        "completion_tokens": 6,
-        "embedded_picture_ocr_usage": [
-            {"prompt_tokens": 10, "completion_tokens": 2},
-            {"prompt_tokens": 20, "completion_tokens": 4}
-        ]
+        "total_tokens":30,
+        "vision_calls":[
+            {"provider_kind":"openai","model_name":"vision","usage_json":{"total_tokens":10}},
+            {"provider_kind":"openai","model_name":"vision","usage_json":{"total_tokens":20}},
+            {"provider_kind":"openai","model_name":"vision","usage_json":{}},
+        ],
     });
-
-    let items = vision_billing_usage_items(&usage);
-
-    assert_eq!(items.len(), 2);
-    assert_eq!(items[0]["prompt_tokens"], serde_json::json!(10));
-    assert_eq!(items[1]["completion_tokens"], serde_json::json!(4));
+    let items = vision_billing_usage_items(&usage).unwrap();
+    assert_eq!(items.len(), 3);
+    assert_eq!(items[0].usage_json["total_tokens"], 10);
+    assert_eq!(items[1].usage_json["total_tokens"], 20);
+    assert_eq!(items[2].usage_json, serde_json::json!({}));
+    assert_eq!(items[0].provider_kind, "openai");
 }
 
 #[test]
-fn vision_billing_usage_items_keep_single_image_usage() {
-    let usage = serde_json::json!({"prompt_tokens": 10, "completion_tokens": 2});
-
-    let items = vision_billing_usage_items(&usage);
-
-    assert_eq!(items, vec![usage]);
+fn native_only_does_not_fabricate_provider_usage_and_malformed_receipts_fail_closed() {
+    assert!(vision_billing_usage_items(&serde_json::json!({})).unwrap().is_empty());
+    assert!(
+        vision_billing_usage_items(&serde_json::json!({"vision_calls":[{"usage_json":{}}]}))
+            .is_err()
+    );
 }

@@ -1,6 +1,9 @@
 use crate::{iam_token_support, mcp_tool_call_support, temp_postgres_database, web_ingest_support};
 
 #[cfg(feature = "test-support")]
+mod image_accounting;
+
+#[cfg(feature = "test-support")]
 use anyhow::Context;
 use axum::Router;
 use chrono::Utc;
@@ -266,6 +269,18 @@ impl McpReadFixture {
         status: &str,
         extracted_text: Option<&str>,
     ) -> anyhow::Result<(Uuid, Uuid)> {
+        self.create_source_document_state(external_key, status, extracted_text, "text/plain", None)
+            .await
+    }
+
+    async fn create_source_document_state(
+        &self,
+        external_key: &str,
+        status: &str,
+        extracted_text: Option<&str>,
+        mime_type: &str,
+        storage_ref: Option<&str>,
+    ) -> anyhow::Result<(Uuid, Uuid)> {
         let document = content_document_repository::create_document(
             &self.state.persistence.postgres,
             &content_document_repository::NewContentDocument {
@@ -292,14 +307,14 @@ impl McpReadFixture {
                 parent_revision_id: None,
                 content_source_kind: "upload",
                 checksum: &format!("sha256:{}", "7".repeat(64)),
-                mime_type: "text/plain",
+                mime_type,
                 byte_size: i64::try_from(extracted_text.unwrap_or_default().len())
                     .unwrap_or(i64::MAX),
                 title: Some(external_key),
                 language_code: None,
                 source_uri: Some(&format!("{external_key}.txt")),
                 document_hint: None,
-                storage_key: None,
+                storage_key: storage_ref,
                 created_by_principal_id: None,
             },
             &format!("{external_key}.txt"),
@@ -341,15 +356,20 @@ impl McpReadFixture {
                 // Text becomes readable the moment extraction succeeds, even
                 // when a later stage is still running or has failed — that
                 // independence is what several tests here exist to pin down.
-                knowledge_revision_command(KnowledgeRevisionSeed {
-                    workspace_id: self.workspace_id,
-                    library_id: self.library_id,
-                    document_id: document.id,
-                    revision_id: revision.id,
-                    external_key,
-                    status,
-                    extracted_text,
-                }),
+                {
+                    let mut command = knowledge_revision_command(KnowledgeRevisionSeed {
+                        workspace_id: self.workspace_id,
+                        library_id: self.library_id,
+                        document_id: document.id,
+                        revision_id: revision.id,
+                        external_key,
+                        status,
+                        extracted_text,
+                    });
+                    command.mime_type = mime_type.to_string();
+                    command.storage_ref = storage_ref.map(ToString::to_string);
+                    command
+                },
             )
             .await
             .with_context(|| format!("failed to write knowledge revision for {external_key}"))?;

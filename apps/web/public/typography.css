@@ -1,0 +1,10 @@
+/* medeo-font 1.0.0-rc.4.1; upstream license: /medeo/LICENSE.txt. */
+@import url('/medeo/sans.css');
+@import url('/medeo/mono.css');
+
+code,
+pre,
+kbd,
+samp {
+  font-family: var(--font-medeo-mono);
+}

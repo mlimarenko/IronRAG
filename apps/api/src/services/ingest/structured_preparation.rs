@@ -12,14 +12,17 @@ use crate::shared::extraction::{
     ExtractionLineHint, ExtractionLineSignal, ExtractionStructureHints,
     chunking::split_large_code_blocks,
     chunking::{StructuredChunkingProfile, build_structured_chunk_windows},
+    is_canonical_table_start,
     record_jsonl::split_large_record_units,
     structured_document::{
         StructuredBlockData, StructuredBlockKind, StructuredChunkWindow,
         StructuredDocumentRevisionData, StructuredDocumentValidationError, StructuredOutlineEntry,
         StructuredSourceSpan, StructuredTableCoordinates,
     },
+    table_logical::{LogicalTable, TableHeaderOrigin, TableLayoutError, TableProjection},
     table_markdown::{
-        build_semantic_table_row_text, is_markdown_separator_row, parse_markdown_table_row,
+        SemanticTableContext, build_semantic_table_row_text, is_markdown_table_delimiter,
+        parse_markdown_table_row,
     },
     table_summary::{build_table_column_summaries, render_table_column_summary},
 };
@@ -65,6 +68,8 @@ pub enum StructuredPreparationError {
     #[error(transparent)]
     Validation(#[from] StructuredDocumentValidationError),
     #[error(transparent)]
+    TableLayout(#[from] TableLayoutError),
+    #[error(transparent)]
     Cancelled(#[from] StageError),
 }
 
@@ -90,20 +95,24 @@ pub struct StructuredPreparationFailure {
     pub summary: String,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct StructuredPreparationService {
     chunking_profile: StructuredChunkingProfile,
+}
+
+impl Default for StructuredPreparationService {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl StructuredPreparationService {
     #[must_use]
     pub const fn new() -> Self {
-        Self {
-            chunking_profile: StructuredChunkingProfile { max_chars: 2_800, overlap_chars: 280 },
-        }
+        Self::with_template(ChunkingTemplate::Naive)
     }
 
-    /// Create a service with chunking parameters sourced from application config.
+    /// Apply an explicit profile to a model-free preparation or comparison.
     #[must_use]
     pub const fn with_chunking(max_chars: usize, overlap_chars: usize) -> Self {
         Self { chunking_profile: StructuredChunkingProfile { max_chars, overlap_chars } }
@@ -136,6 +145,7 @@ impl StructuredPreparationService {
             ensure_not_cancelled(cancellation_token)?;
             block.ordinal = i32::try_from(i).unwrap_or(i32::MAX);
         }
+        blocks::finalize_table_references(&mut ordered_blocks, cancellation_token)?;
         ensure_not_cancelled(cancellation_token)?;
         let chunk_windows = build_structured_chunk_windows(&ordered_blocks, self.chunking_profile);
         ensure_not_cancelled(cancellation_token)?;

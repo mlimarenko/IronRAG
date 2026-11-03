@@ -8,6 +8,9 @@ pub(super) struct ToolExecutionOutcome {
     pub(super) result_text: Option<String>,
     pub(super) result_json: Option<Value>,
     pub(super) grounding_text: Option<String>,
+    /// Server-produced document identity/slice retained before debug compaction.
+    pub(super) document_reference:
+        Option<Box<super::super::assistant_grounding::AssistantGroundingDocumentReference>>,
     /// Exact structured `answerBody` captured before debug/result compaction.
     /// This is the only text eligible for exact verbatim passthrough.
     pub(super) grounded_answer_body: Option<String>,

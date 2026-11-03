@@ -1,6 +1,98 @@
 use super::*;
 
 #[test]
+fn verify_answer_rejects_inline_identifier_substrings_and_joined_words() {
+    for (literal, source) in [
+        ("Data", "Metadata is stored here."),
+        ("query_turn", "query_turns stores conversation messages."),
+        ("token", "Use access_token for authentication."),
+        ("MetaData", "Meta Data is described here."),
+        ("данные", "Здесь описаны метаданные."),
+    ] {
+        let answer = format!("The documented identifier is `{literal}`.");
+        let verification =
+            verify_answer_against_authoritative_evidence(AnswerVerificationRequest {
+                question: "Which identifier is documented?",
+                answer: &answer,
+                intent_profile: &QueryIntentProfile::default(),
+                evidence: &empty_authoritative_evidence(),
+                chunks: &[runtime_chunk(source)],
+                prompt_context: source,
+                assistant_grounding: &AssistantGroundingEvidence::default(),
+            });
+        assert_eq!(
+            verification.state,
+            QueryVerificationState::InsufficientEvidence,
+            "{literal} from {source}"
+        );
+        assert_eq!(verification.unsupported_literals, vec![literal], "{source}");
+    }
+}
+
+#[test]
+fn verify_answer_preserves_supported_inline_identifier_boundaries() {
+    for (literal, source) in [
+        ("Data", "The Data field holds the result."),
+        ("Data", "Metadata differs from Data."),
+        ("query_turn", "Select from public.query_turn;"),
+        ("query_turn", "The `query_turn` table is documented."),
+        ("query_turn", "The query\\_turn table is documented."),
+        ("Data", "The &#68;ata field is documented."),
+        ("данные", "Здесь описаны данные."),
+    ] {
+        let answer = format!("The documented identifier is `{literal}`.");
+        let verification =
+            verify_answer_against_authoritative_evidence(AnswerVerificationRequest {
+                question: "Which identifier is documented?",
+                answer: &answer,
+                intent_profile: &QueryIntentProfile::default(),
+                evidence: &empty_authoritative_evidence(),
+                chunks: &[runtime_chunk(source)],
+                prompt_context: source,
+                assistant_grounding: &AssistantGroundingEvidence::default(),
+            });
+        assert_eq!(
+            verification.state,
+            QueryVerificationState::PartiallySupported,
+            "{literal} from {source}"
+        );
+        assert!(
+            verification.unsupported_literals.is_empty(),
+            "{source}: {:?}",
+            verification.unsupported_literals
+        );
+    }
+}
+
+#[test]
+fn verify_answer_deduplication_preserves_word_boundaries_in_both_orders() {
+    for (supported, unsupported, source) in [
+        ("Meta Data", "MetaData", "Meta Data is described here."),
+        ("ALLOW ACCESS=true", "ALLOWACCESS=true", "ALLOW ACCESS=true"),
+    ] {
+        for (first, second) in [(supported, unsupported), (unsupported, supported)] {
+            let answer = format!("The documented names are `{first}` and `{second}`.");
+            let verification =
+                verify_answer_against_authoritative_evidence(AnswerVerificationRequest {
+                    question: "Which names are documented?",
+                    answer: &answer,
+                    intent_profile: &QueryIntentProfile::default(),
+                    evidence: &empty_authoritative_evidence(),
+                    chunks: &[runtime_chunk(source)],
+                    prompt_context: source,
+                    assistant_grounding: &AssistantGroundingEvidence::default(),
+                });
+            assert_eq!(
+                verification.state,
+                QueryVerificationState::InsufficientEvidence,
+                "{answer}"
+            );
+            assert_eq!(verification.unsupported_literals, vec![unsupported], "{answer}");
+        }
+    }
+}
+
+#[test]
 fn verify_answer_allows_user_supplied_scope_literals() {
     let verification = verify_answer_against_authoritative_evidence(AnswerVerificationRequest {
         question: "Which `alpha-*` modules exist?",

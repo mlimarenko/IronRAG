@@ -1182,6 +1182,7 @@ async fn seed_accepted_document_mutation(
     let identity = serde_json::json!({
         "workspaceId": workspace_id, "libraryId": library_id, "operationKind": operation_kind,
         "target": {"kind":"existing", "documentId":document_id}, "sourceIdentity":null,
+        "materializationToken":null,"revision":null,"replacement":null,
     });
     Ok(crate::content_lifecycle_support::seed_pending_content_mutation(
         pool,

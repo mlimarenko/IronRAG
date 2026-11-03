@@ -45,8 +45,6 @@ pub(super) const STRUCTURAL_QUESTION_TOKEN_MAX_CHARS: usize = 80;
 
 pub(super) struct PreflightAnswerCandidate {
     pub(super) verification_stage: AnswerVerificationStage,
-    pub(super) debug_iterations: Vec<crate::services::query::llm_context_debug::LlmIterationDebug>,
-    pub(super) total_iterations: usize,
 }
 
 pub(super) enum FastPathOutcome {
@@ -64,6 +62,23 @@ pub(super) async fn persist_llm_context_snapshot(
     )
     .await
     .with_context(|| format!("failed to persist LLM context snapshot {}", snapshot.execution_id))
+}
+
+/// Preserve the original provider/billing error if diagnostic persistence also
+/// fails. No final public body exists on this pre-selection failure path.
+pub(super) async fn persist_failed_answer_snapshot(
+    state: &AppState,
+    context: &super::answer_snapshot::AnswerSnapshotContext,
+) {
+    let result = async {
+        let mut snapshot = context.snapshot("")?;
+        snapshot.final_answer = None;
+        persist_llm_context_snapshot(state, snapshot).await
+    }
+    .await;
+    if let Err(error) = result {
+        tracing::warn!(%error, "failed to retain rejected answer draft transcript");
+    }
 }
 
 /// Inputs for [`prepare_answer_query`]. The compile stage needs the full turn

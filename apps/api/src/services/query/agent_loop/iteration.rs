@@ -613,6 +613,10 @@ pub(super) fn observe_successful_agent_tool_outcome(
     if let Some(grounding_text) = &outcome.grounding_text {
         push_tool_grounding_fragment(&mut state.assistant_grounding, &call.name, grounding_text);
     }
+    retain_document_read_reference(
+        &mut state.assistant_grounding,
+        outcome.document_reference.as_deref(),
+    );
 }
 
 pub(super) fn remember_grounded_answer_outcome(

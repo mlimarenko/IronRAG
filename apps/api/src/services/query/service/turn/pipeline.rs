@@ -426,6 +426,7 @@ impl QueryService {
             graph_edge_references: detail.graph_edge_references,
             verification_state: detail.verification_state,
             verification_warnings: detail.verification_warnings,
+            semantic_verification: detail.semantic_verification,
             answer_disposition: detail.answer_disposition,
             query_ir: None,
             clarification: detail.clarification,
@@ -597,9 +598,51 @@ impl QueryService {
             graph_edge_references: detail.graph_edge_references,
             verification_state: detail.verification_state,
             verification_warnings: detail.verification_warnings,
+            semantic_verification: detail.semantic_verification,
             answer_disposition: detail.answer_disposition,
             query_ir: turn_query_ir,
             clarification: detail.clarification,
         })
+    }
+}
+#[cfg(test)]
+mod stack_tests {
+    use super::*;
+
+    fn future_size<Arguments, F>(_: impl FnOnce(Arguments) -> F) -> usize {
+        std::mem::size_of::<F>()
+    }
+
+    #[test]
+    fn query_turn_stage_futures_fit_worker_stack() {
+        let assistant = future_size(|(service, state, auth, command, activity)| {
+            QueryService::execute_assistant_agent_turn_inner(
+                service, state, auth, command, activity,
+            )
+        });
+        let answer = future_size(execute_agent_answer_stages);
+        let grounded = future_size(|(service, state, command)| {
+            QueryService::execute_grounded_answer_pipeline(service, state, command)
+        });
+        let admitted_assistant = future_size(|(service, state, auth, command, activity)| {
+            let state: &AppState = state;
+            crate::services::query::turn_admission::with_query_turn_admission(
+                state.query_turn_admission.clone(),
+                QueryService::execute_assistant_agent_turn_inner(
+                    service, state, auth, command, activity,
+                ),
+            )
+        });
+        let admitted_grounded = future_size(|(service, state, command)| {
+            let state: &AppState = state;
+            crate::services::query::turn_admission::with_query_turn_admission(
+                state.query_turn_admission.clone(),
+                QueryService::execute_grounded_answer_pipeline(service, state, command),
+            )
+        });
+        assert!(
+            admitted_assistant <= 4096 && admitted_grounded <= 4096,
+            "task-local query scopes inline their pipeline state: admitted_assistant={admitted_assistant}, admitted_grounded={admitted_grounded}; inner assistant={assistant}, answer={answer}, grounded={grounded}"
+        );
     }
 }

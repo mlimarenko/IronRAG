@@ -3,6 +3,64 @@ use super::lease::lease_commands::scope_for_clear_failure;
 use super::*;
 
 #[test]
+fn billing_knowledge_search_migration_requires_explicit_apply() {
+    for apply in [false, true] {
+        let mut args =
+            vec!["ironrag-maintenance", "migrate", "billing-knowledge-search-schema", "--json"];
+        if apply {
+            args.push("--apply");
+        }
+        let cli = Cli::try_parse_from(args).expect("parse knowledge-search billing transition");
+        assert!(matches!(cli.command,
+            Command::Migrate(MigrateCommand::BillingKnowledgeSearchSchema { apply: actual, json: true })
+            if actual == apply));
+    }
+}
+
+#[test]
+fn billing_document_read_migration_requires_explicit_apply() {
+    for apply in [false, true] {
+        let mut args =
+            vec!["ironrag-maintenance", "migrate", "billing-document-read-schema", "--json"];
+        if apply {
+            args.push("--apply");
+        }
+        let cli = Cli::try_parse_from(args).expect("parse native-read billing transition");
+        assert!(matches!(cli.command,
+            Command::Migrate(MigrateCommand::BillingDocumentReadSchema { apply: actual, json: true })
+            if actual == apply));
+    }
+}
+
+#[test]
+fn vision_schema_migration_defaults_to_dry_run_and_requires_explicit_apply() {
+    for apply in [false, true] {
+        let mut args = vec!["ironrag-maintenance", "migrate", "vision-recognition-schema"];
+        if apply {
+            args.push("--apply");
+        }
+        let cli = Cli::try_parse_from(args).expect("parse Vision transition");
+        assert!(matches!(cli.command,
+            Command::Migrate(MigrateCommand::VisionRecognitionSchema { apply: actual, json: false })
+            if actual == apply));
+    }
+}
+
+#[test]
+fn xberg_schema_migration_defaults_to_dry_run_and_requires_explicit_apply() {
+    for apply in [false, true] {
+        let mut args = vec!["ironrag-maintenance", "migrate", "xberg-recognition-schema"];
+        if apply {
+            args.push("--apply");
+        }
+        let cli = Cli::try_parse_from(args).expect("parse Xberg transition");
+        assert!(matches!(cli.command,
+            Command::Migrate(MigrateCommand::XbergRecognitionSchema { apply: actual, json: false })
+            if actual == apply));
+    }
+}
+
+#[test]
 fn accepts_complete_webhook_outbox_audit_cursor() {
     let created_at = chrono::DateTime::UNIX_EPOCH;
     let id = Uuid::nil();

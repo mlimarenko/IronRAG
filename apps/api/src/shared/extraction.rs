@@ -10,6 +10,7 @@ pub mod image;
 pub mod record_jsonl;
 pub mod structured_document;
 pub mod table_graph;
+pub mod table_logical;
 pub mod table_markdown;
 pub mod table_summary;
 pub mod tabular;
@@ -106,6 +107,8 @@ pub fn build_text_layout(pages: &[RawExtractionPage]) -> ExtractionTextLayout {
     let mut offset = 0_i32;
 
     for (page_index, page) in pages.iter().enumerate() {
+        let mut in_code_fence = false;
+        let mut in_canonical_table = false;
         if page_index > 0 && !content_text.is_empty() {
             content_text.push('\n');
             content_text.push('\n');
@@ -120,6 +123,17 @@ pub fn build_text_layout(pages: &[RawExtractionPage]) -> ExtractionTextLayout {
             let start_offset = offset;
             content_text.push_str(line);
             offset = offset.saturating_add(i32::try_from(line.chars().count()).unwrap_or(i32::MAX));
+            let code_fence = is_code_fence_line(line.trim());
+            let indented_code = line.starts_with("    ") || line.starts_with('\t');
+            let mut signals = infer_line_signals(line);
+            if in_code_fence || indented_code || code_fence {
+                signals.retain(|signal| *signal != ExtractionLineSignal::TableRow);
+            } else {
+                in_canonical_table |= is_canonical_table_start(line);
+                if in_canonical_table && !signals.contains(&ExtractionLineSignal::TableRow) {
+                    signals.push(ExtractionLineSignal::TableRow);
+                }
+            }
             line_hints.push(ExtractionLineHint {
                 ordinal,
                 source_ordinals: vec![ordinal],
@@ -127,8 +141,14 @@ pub fn build_text_layout(pages: &[RawExtractionPage]) -> ExtractionTextLayout {
                 text: line.clone(),
                 start_offset: Some(start_offset),
                 end_offset: Some(offset),
-                signals: infer_line_signals(line),
+                signals,
             });
+            if in_canonical_table && line.trim() == "</table>" {
+                in_canonical_table = false;
+            }
+            if code_fence {
+                in_code_fence = !in_code_fence;
+            }
             ordinal = ordinal.saturating_add(1);
         }
     }
@@ -173,7 +193,7 @@ pub fn infer_line_signals(line: &str) -> Vec<ExtractionLineSignal> {
     if is_code_content_line(line, trimmed) {
         signals.push(ExtractionLineSignal::CodeLine);
     }
-    if is_table_row_line(trimmed) {
+    if is_table_row_line(trimmed) && !line.starts_with("    ") && !line.starts_with('\t') {
         signals.push(ExtractionLineSignal::TableRow);
     }
     if is_endpoint_candidate_line(trimmed) {
@@ -189,7 +209,7 @@ pub fn infer_line_signals(line: &str) -> Vec<ExtractionLineSignal> {
 }
 
 fn is_heading_line(line: &str) -> bool {
-    if is_markdown_table_line(line) {
+    if is_table_row_line(line) {
         return false;
     }
     if line.starts_with('#') {
@@ -229,7 +249,17 @@ fn is_code_content_line(original: &str, trimmed: &str) -> bool {
 }
 
 fn is_table_row_line(line: &str) -> bool {
-    is_markdown_table_line(line)
+    is_markdown_table_line(line) || is_canonical_table_start(line)
+}
+
+/// True only for the declared canonical HTML-in-Markdown opening tag.
+///
+/// Arbitrary HTML tables in prose are not a consumer contract; they stay text.
+#[must_use]
+pub fn is_canonical_table_start(line: &str) -> bool {
+    let trimmed = line.trim();
+    trimmed.starts_with("<table data-irg-header-policy=\"")
+        && trimmed.strip_suffix('>').is_some_and(|opening| !opening[1..].contains(['<', '>']))
 }
 
 fn is_markdown_table_line(line: &str) -> bool {

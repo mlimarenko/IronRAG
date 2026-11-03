@@ -13,6 +13,55 @@ use chrono::Utc;
 use uuid::Uuid;
 
 #[test]
+fn content_receipt_mapping_preserves_revision_binding_and_nested_domain_names() {
+    use crate::domains::content::{ContentMutation, ContentMutationItem};
+    use crate::services::content::service::ContentMutationAdmission;
+
+    let document_id = Uuid::from_u128(3);
+    let revision_id = Uuid::from_u128(6);
+    for binding in [None, Some(Uuid::from_u128(9))] {
+        let receipt = types::map_mutation_admission(ContentMutationAdmission {
+            replayed: true,
+            mutation: ContentMutation {
+                id: Uuid::from_u128(4),
+                workspace_id: Uuid::from_u128(1),
+                library_id: Uuid::from_u128(2),
+                operation_kind: "replace".to_owned(),
+                mutation_state: "accepted".to_owned(),
+                requested_at: Utc::now(),
+                completed_at: None,
+                requested_by_principal_id: None,
+                request_surface: "rest".to_owned(),
+                idempotency_key: None,
+                source_identity: None,
+                failure_code: None,
+                conflict_code: None,
+            },
+            items: vec![ContentMutationItem {
+                id: Uuid::from_u128(5),
+                mutation_id: Uuid::from_u128(4),
+                document_id: Some(document_id),
+                base_revision_id: None,
+                result_revision_id: Some(revision_id),
+                item_state: "pending".to_owned(),
+                message: None,
+            }],
+            job_id: None,
+            async_operation_id: Some(Uuid::from_u128(8)),
+            operation_status: Some("accepted".to_owned()),
+            result_revision_id: Some(revision_id),
+            result_checksum: Some(format!("sha256:{}", "a".repeat(64))),
+            visibility_intent_id: binding,
+            request_fingerprint: Some("opaque".to_owned()),
+        });
+        let wire = serde_json::to_value(receipt).expect("serialize receipt");
+        assert_eq!(wire.get("visibilityIntentId"), Some(&serde_json::json!(binding)));
+        assert_eq!(wire["items"][0]["document_id"], serde_json::json!(document_id));
+        assert_eq!(wire["items"][0]["result_revision_id"], wire["resultRevisionId"]);
+    }
+}
+
+#[test]
 fn reprocess_metadata_preserves_active_revision_source_kind() {
     let revision = ContentRevision {
         id: Uuid::now_v7(),

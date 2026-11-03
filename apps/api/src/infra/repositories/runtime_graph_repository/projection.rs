@@ -1,5 +1,6 @@
 use std::collections::BTreeSet;
 
+use futures::TryStreamExt;
 use sqlx::PgPool;
 use uuid::Uuid;
 
@@ -8,6 +9,68 @@ use super::query_fragments::{
     admitted_runtime_graph_counts_query, authorized_runtime_graph_counts_query,
 };
 use super::types::RuntimeGraphProjectionCountsRow;
+
+#[derive(Debug, sqlx::FromRow)]
+pub struct RuntimeGraphRebuildNodeRow {
+    pub id: Uuid,
+    #[sqlx(rename = "canonical_key")]
+    pub identity_key: String,
+    pub node_type: String,
+    pub label: String,
+}
+
+#[derive(Debug, sqlx::FromRow)]
+pub struct RuntimeGraphRebuildEdgeRow {
+    pub id: Uuid,
+    pub from_node_id: Uuid,
+    pub to_node_id: Uuid,
+    pub relation_type: String,
+}
+
+/// Visits admitted rebuild nodes without reading summary, aliases or metadata.
+/// # Errors
+/// Returns database or decoding errors; the caller must roll back on failure.
+pub async fn visit_runtime_graph_rebuild_nodes(
+    connection: &mut sqlx::PgConnection,
+    library_id: Uuid,
+    projection_version: i64,
+    mut visit: impl FnMut(RuntimeGraphRebuildNodeRow),
+) -> Result<(), sqlx::Error> {
+    let query = super::query_fragments::admitted_runtime_graph_nodes_select_query(
+        "node.id, node.canonical_key, node.node_type, node.label",
+        "",
+    );
+    let mut rows = sqlx::query_as(sqlx::AssertSqlSafe(query))
+        .bind(library_id)
+        .bind(projection_version)
+        .fetch(connection);
+    while let Some(row) = rows.try_next().await? {
+        visit(row);
+    }
+    Ok(())
+}
+
+/// Visits admitted rebuild edges without reading their payload columns.
+/// # Errors
+/// Returns database or decoding errors; the caller must roll back on failure.
+pub async fn visit_runtime_graph_rebuild_edges(
+    connection: &mut sqlx::PgConnection,
+    library_id: Uuid,
+    projection_version: i64,
+    mut visit: impl FnMut(RuntimeGraphRebuildEdgeRow),
+) -> Result<(), sqlx::Error> {
+    let query = super::query_fragments::admitted_runtime_graph_edges_select_query(
+        "id, from_node_id, to_node_id, relation_type",
+    );
+    let mut rows = sqlx::query_as(sqlx::AssertSqlSafe(query))
+        .bind(library_id)
+        .bind(projection_version)
+        .fetch(connection);
+    while let Some(row) = rows.try_next().await? {
+        visit(row);
+    }
+    Ok(())
+}
 
 /// Deletes persisted runtime-graph summary rows whose target node or edge no
 /// longer exists in the graph tables.

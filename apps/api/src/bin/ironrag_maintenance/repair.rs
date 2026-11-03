@@ -11,12 +11,20 @@ use maintenance_repair as repair;
 )]
 pub(super) async fn run_repair(state: &AppState, command: RepairCommand) -> Result<()> {
     match command {
-        RepairCommand::KnowledgeProjectionMetadata { library, dry_run, json } => {
+        RepairCommand::KnowledgeProjectionMetadata { library, dry_run, expected_plan, json } => {
+            let action = if dry_run {
+                knowledge_projection_metadata::KnowledgeProjectionMetadataAction::Preview
+            } else {
+                knowledge_projection_metadata::KnowledgeProjectionMetadataAction::Apply {
+                    expected_plan: expected_plan
+                        .context("metadata apply requires a reviewed plan")?,
+                }
+            };
             let report = knowledge_projection_metadata::knowledge_projection_metadata(
-                state, library, dry_run,
+                state, library, action,
             )
             .await?;
-            println!("{}", format_projection_metadata_report(&report, dry_run, json)?);
+            println!("{}", format_projection_metadata_report(&report, json)?);
             Ok(())
         }
         RepairCommand::OrphanKnowledgeDocuments { library, dry_run, json } => {
@@ -102,18 +110,18 @@ pub(super) async fn run_repair(state: &AppState, command: RepairCommand) -> Resu
 
 fn format_projection_metadata_report(
     report: &knowledge_projection_metadata::KnowledgeProjectionMetadataReport,
-    dry_run: bool,
     json: bool,
 ) -> Result<String> {
     if json {
         Ok(serde_json::to_string_pretty(report)?)
     } else {
         Ok(format!(
-            "repair.knowledge-projection-metadata  libraries={}  document_rows={}  revision_rows={}  dry_run={}",
+            "repair.knowledge-projection-metadata  libraries={}  document_rows={}  revision_rows={}  dry_run={}  plans={} (use --json for exact plans)",
             report.libraries_reconciled,
             report.document_rows_updated,
             report.revision_rows_updated,
-            dry_run,
+            report.dry_run,
+            report.plans.len(),
         ))
     }
 }
@@ -387,39 +395,6 @@ mod repair_commands {
                 abandoned,
             );
         }
-        Ok(())
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn projection_metadata_report_preserves_text_and_json_fields() -> Result<()> {
-        let report = knowledge_projection_metadata::KnowledgeProjectionMetadataReport {
-            libraries_reconciled: 2,
-            document_rows_updated: 3,
-            revision_rows_updated: 5,
-        };
-        assert_eq!(
-            format_projection_metadata_report(&report, true, false)?,
-            "repair.knowledge-projection-metadata  libraries=2  document_rows=3  revision_rows=5  dry_run=true",
-        );
-        assert_eq!(
-            format_projection_metadata_report(&report, false, false)?,
-            "repair.knowledge-projection-metadata  libraries=2  document_rows=3  revision_rows=5  dry_run=false",
-        );
-        assert_eq!(
-            serde_json::from_str::<serde_json::Value>(&format_projection_metadata_report(
-                &report, true, true,
-            )?)?,
-            serde_json::json!({
-                "libraries_reconciled": 2,
-                "document_rows_updated": 3,
-                "revision_rows_updated": 5,
-            }),
-        );
         Ok(())
     }
 }

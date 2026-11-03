@@ -47,7 +47,7 @@ use uuid::Uuid;
 
 use crate::{
     app::state::AppState,
-    infra::repositories::{self, RuntimeGraphNodeRow},
+    infra::repositories::{self, RuntimeGraphTopologyNodeRow},
     services::knowledge::error::KnowledgeServiceError,
 };
 
@@ -595,7 +595,7 @@ async fn build_compact_topology(
     let admitted_node_ids_vec = admitted_edge_node_ids(&edge_rows_compact);
 
     let nodes_started_at = std::time::Instant::now();
-    let node_rows = repositories::list_runtime_graph_nodes_by_ids_or_document_type(
+    let node_rows = repositories::list_runtime_graph_topology_nodes_by_ids_or_document_type(
         &state.persistence.postgres,
         library_id,
         projection_version,
@@ -739,14 +739,14 @@ fn admitted_edge_node_ids(edges: &[repositories::RuntimeGraphEdgeCompactRow]) ->
     admitted_node_ids.into_iter().collect()
 }
 
-fn runtime_document_uuid_map(node_rows: &[RuntimeGraphNodeRow]) -> HashMap<Uuid, Uuid> {
+fn runtime_document_uuid_map(node_rows: &[RuntimeGraphTopologyNodeRow]) -> HashMap<Uuid, Uuid> {
     node_rows
         .iter()
         .filter(|row| row.node_type == "document")
         .filter_map(|row| {
             let document_uuid = row
-                .metadata_json
-                .get("document_id")
+                .document_id_json
+                .as_ref()
                 .and_then(Value::as_str)
                 .and_then(|value| value.parse::<Uuid>().ok())?;
             Some((row.id, document_uuid))
@@ -809,7 +809,7 @@ fn build_compact_document_links(
 }
 
 fn append_runtime_only_documents(
-    node_rows: &[RuntimeGraphNodeRow],
+    node_rows: &[RuntimeGraphTopologyNodeRow],
     document_uuid_by_runtime_node: &HashMap<Uuid, Uuid>,
     id_map: &mut HashMap<Uuid, u32>,
     next_num: &mut u32,
@@ -834,7 +834,7 @@ fn append_runtime_only_documents(
     }
 }
 
-fn map_entity(row: &RuntimeGraphNodeRow, num: u32) -> CompactEntity {
+fn map_entity(row: &RuntimeGraphTopologyNodeRow, num: u32) -> CompactEntity {
     let aliases = row
         .aliases_json
         .as_array()
@@ -843,20 +843,19 @@ fn map_entity(row: &RuntimeGraphNodeRow, num: u32) -> CompactEntity {
         })
         .unwrap_or_default();
 
-    let entity_sub_type =
-        row.metadata_json.get("sub_type").and_then(Value::as_str).map(ToOwned::to_owned);
+    let entity_sub_type = row.sub_type_json.as_ref().and_then(Value::as_str).map(ToOwned::to_owned);
 
-    let confidence = row.metadata_json.get("confidence").and_then(Value::as_f64);
+    let confidence = row.confidence_json.as_ref().and_then(Value::as_f64);
 
     // `entity_state` / `relation_state` live inside metadata_json; the
     // projection admits them as "active" unless downstream lifecycle
     // marks them otherwise. The frontend uses this to annotate inactive
     // nodes; defaulting to "active" keeps the wire frame small.
     let entity_state = row
-        .metadata_json
-        .get("entity_state")
+        .entity_state_json
+        .as_ref()
         .and_then(Value::as_str)
-        .or_else(|| row.metadata_json.get("relation_state").and_then(Value::as_str))
+        .or_else(|| row.relation_state_json.as_ref().and_then(Value::as_str))
         .unwrap_or("active")
         .to_string();
 

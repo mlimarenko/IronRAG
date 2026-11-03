@@ -66,6 +66,9 @@ pub(crate) enum AgentAnswerProvenance {
 /// child outcome because the parent finalizer owns their disposition.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct AgentGroundedAnswerOutcome {
+    /// Actual grounded_answer execution metadata, including a cache hit's
+    /// source execution. Never extracted from model prose or a report summary.
+    pub source_execution_id: Option<Uuid>,
     pub disposition: QueryAnswerDisposition,
     pub clarification: QueryClarification,
 }
@@ -78,8 +81,10 @@ pub(crate) struct AgentTurnResult {
     pub usage_json: serde_json::Value,
     /// One immutable attribution record per actual provider response.
     pub provider_calls: Vec<QueryProviderCall>,
-    pub iterations: usize,
     pub assistant_grounding: AssistantGroundingEvidence,
+    /// Collected from actual MCP tool results, not assistant-authored JSON.
+    /// Parent semantic reuse additionally checks the completed durable runtime,
+    /// execution scope and persisted checked-input identities.
     pub child_query_execution_ids: Vec<Uuid>,
     /// Per-iteration capture of the exact LLM request/response chain,
     /// for the assistant debug panel. Populated unconditionally — the

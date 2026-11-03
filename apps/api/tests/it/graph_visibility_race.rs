@@ -214,6 +214,107 @@ async fn publish_snapshot(
 
 #[tokio::test]
 #[ignore = "requires isolated postgres and redis services"]
+async fn cold_graph_currentness_scaled_and_adversarial() -> Result<()> {
+    let fixture = ContentLifecycleFixture::create().await?;
+    let result = Box::pin(async {
+        let pg = &fixture.state.persistence.postgres;
+        let (document_id, nodes, edge_id) = seed_published_graph(&fixture).await?;
+        let revision = content_fingerprint_repository::get_current_revision_id(pg, document_id).await?.context("current source")?;
+        const TARGETS: i32 = 50_000;
+        const DOCUMENTS: i32 = 500;
+        sqlx::query("insert into content_document (id,workspace_id,library_id,external_key,document_state)
+            select md5('scaled-doc-'||i)::uuid,$1,$2,'scaled-doc-'||i,'active' from generate_series(1,$3) i")
+            .bind(fixture.workspace_id).bind(fixture.library_id).bind(DOCUMENTS).execute(pg).await?;
+        sqlx::query("insert into knowledge_document (document_id,workspace_id,library_id,external_key,document_state,created_at,updated_at)
+            select md5('scaled-doc-'||i)::uuid,$1,$2,'scaled-doc-'||i,'active',now(),now() from generate_series(1,$3) i")
+            .bind(fixture.workspace_id).bind(fixture.library_id).bind(DOCUMENTS).execute(pg).await?;
+        sqlx::query("insert into content_revision (id,document_id,workspace_id,library_id,revision_number,content_source_kind,checksum,mime_type,byte_size,title,language_code,source_uri,document_hint,admission_identity)
+            select md5('scaled-revision-'||i)::uuid,md5('scaled-doc-'||i)::uuid,r.workspace_id,r.library_id,1,r.content_source_kind,r.checksum,r.mime_type,r.byte_size,r.title,r.language_code,r.source_uri,r.document_hint,r.admission_identity
+            from content_revision r cross join generate_series(1,$2) i where r.id=$1")
+            .bind(revision).bind(DOCUMENTS).execute(pg).await?;
+        sqlx::query("insert into knowledge_revision (revision_id,workspace_id,library_id,document_id,revision_number,revision_state,revision_kind,mime_type,checksum,byte_size,text_state,vector_state,graph_state,text_readable_at,vector_ready_at,graph_ready_at,created_at)
+            select md5('scaled-revision-'||i)::uuid,k.workspace_id,k.library_id,md5('scaled-doc-'||i)::uuid,1,k.revision_state,k.revision_kind,k.mime_type,k.checksum,k.byte_size,k.text_state,k.vector_state,k.graph_state,k.text_readable_at,k.vector_ready_at,k.graph_ready_at,now()
+            from knowledge_revision k cross join generate_series(1,$2) i where k.revision_id=$1")
+            .bind(revision).bind(DOCUMENTS).execute(pg).await?;
+        sqlx::query("insert into content_document_head (document_id,active_revision_id,readable_revision_id)
+            select md5('scaled-doc-'||i)::uuid,md5('scaled-revision-'||i)::uuid,md5('scaled-revision-'||i)::uuid from generate_series(1,$1) i")
+            .bind(DOCUMENTS).execute(pg).await?;
+        sqlx::query("insert into runtime_graph_node (id,library_id,canonical_key,label,node_type,summary,support_count,projection_version)
+            select md5('scaled-node-'||i)::uuid,$1,'scaled-node-'||i,'Entity '||i,'entity',repeat('x',1300),1,1 from generate_series(1,$2) i")
+            .bind(fixture.library_id).bind(TARGETS).execute(pg).await?;
+        sqlx::query("insert into runtime_graph_node (id,library_id,canonical_key,label,node_type,document_id,metadata_json,support_count,projection_version)
+            select md5('scaled-document-node-'||i)::uuid,$1,'scaled-document-node-'||i,'Document '||i,'document',md5('scaled-doc-'||i)::uuid,
+              jsonb_build_object('document_id',md5('scaled-doc-'||i)::uuid),1,1 from generate_series(1,$2) i")
+            .bind(fixture.library_id).bind(DOCUMENTS).execute(pg).await?;
+        sqlx::query("insert into runtime_graph_edge (id,library_id,from_node_id,to_node_id,relation_type,canonical_key,support_count,projection_version)
+            select md5('scaled-edge-'||i)::uuid,$1,$3,md5('scaled-node-'||i)::uuid,'related','scaled-edge-'||i,1,1 from generate_series(1,$2) i")
+            .bind(fixture.library_id).bind(TARGETS).bind(nodes[0]).execute(pg).await?;
+        sqlx::query("insert into runtime_graph_evidence (library_id,evidence_identity_key,target_kind,target_id,document_id,revision_id,evidence_text)
+            select $1, kind||'-'||i||'-'||j, kind, md5('scaled-'||kind||'-'||i)::uuid,
+              md5('scaled-doc-'||(((i-1)%$3)+1))::uuid,md5('scaled-revision-'||(((i-1)%$3)+1))::uuid,'synthetic evidence'
+            from generate_series(1,$2) i cross join generate_series(1,2) j cross join (values ('node'),('edge')) k(kind)")
+            .bind(fixture.library_id).bind(TARGETS).bind(DOCUMENTS).execute(pg).await?;
+        sqlx::query("insert into runtime_graph_evidence (library_id,evidence_identity_key,target_kind,target_id,document_id,revision_id,evidence_text)
+            select $1,'document-evidence-'||i,'node',md5('scaled-document-node-'||i)::uuid,md5('scaled-doc-'||i)::uuid,md5('scaled-revision-'||i)::uuid,'synthetic evidence' from generate_series(1,$2) i")
+            .bind(fixture.library_id).bind(DOCUMENTS).execute(pg).await?;
+        sqlx::raw_sql("analyze runtime_graph_node; analyze runtime_graph_edge; analyze runtime_graph_evidence")
+            .execute(pg).await?;
+        let snapshot = repositories::get_runtime_graph_snapshot(pg, fixture.library_id).await?.context("snapshot")?;
+        let selected = snapshot.projection_identity();
+        let started = std::time::Instant::now();
+        ensure!(content_fingerprint_repository::graph_projection_is_current(pg, selected).await?, "scaled valid graph refused");
+        let currentness_ms = started.elapsed().as_millis();
+        println!("scaled_currentness_ms={currentness_ms}");
+        let auth = graph_auth(&fixture).await?;
+        let started = std::time::Instant::now();
+        let response = get_graph(auth, State(fixture.state.clone()), Path(fixture.library_id)).await?;
+        let body = axum::body::to_bytes(response.into_body(), 128 * 1024 * 1024).await?;
+        let cold_ms = started.elapsed().as_millis();
+        ensure!(body.len() > 64 * 1024 * 1024, "fixture must exceed the topology cache value limit");
+        let key = format!("graph:{}:v{}:g{}", fixture.library_id, snapshot.projection_version, snapshot.topology_generation);
+        let mut redis = fixture.state.persistence.redis.get_multiplexed_async_connection().await?;
+        let cached: bool = redis.exists(key).await?;
+        ensure!(!cached, "oversized graph must not be retained in Redis");
+        println!("scaled_graph documents={} nodes={} edges={} extra_evidence={} currentness_ms={} cold_http_ms={} body_bytes={}", DOCUMENTS + 1, TARGETS + DOCUMENTS + 2, TARGETS + 1, TARGETS * 4 + DOCUMENTS, currentness_ms, cold_ms, body.len());
+        let stale = Uuid::now_v7();
+        sqlx::query("insert into runtime_graph_evidence (id,library_id,evidence_identity_key,target_kind,target_id,document_id,revision_id,evidence_text) values ($1,$2,'stale-check','node',$3,$4,null,'stale')")
+            .bind(stale).bind(fixture.library_id).bind(nodes[0]).bind(document_id).execute(pg).await?;
+        ensure!(!content_fingerprint_repository::graph_projection_is_current(pg, selected).await?, "stale evidence admitted");
+        sqlx::query("delete from runtime_graph_evidence where id=$1").bind(stale).execute(pg).await?;
+        sqlx::query("insert into runtime_graph_evidence (id,library_id,evidence_identity_key,target_kind,target_id,document_id,revision_id,evidence_text) values ($1,$2,'stale-edge-check','edge',$3,$4,null,'stale')")
+            .bind(stale).bind(fixture.library_id).bind(edge_id).bind(document_id).execute(pg).await?;
+        ensure!(!content_fingerprint_repository::graph_projection_is_current(pg, selected).await?, "stale edge evidence admitted");
+        sqlx::query("delete from runtime_graph_evidence where id=$1").bind(stale).execute(pg).await?;
+        let unsupported = Uuid::now_v7();
+        sqlx::query("insert into runtime_graph_node (id,library_id,canonical_key,label,node_type,projection_version) values ($1,$2,'unsupported','unsupported','entity',1)")
+            .bind(unsupported).bind(fixture.library_id).execute(pg).await?;
+        ensure!(!content_fingerprint_repository::graph_projection_is_current(pg, selected).await?, "unsupported target admitted");
+        sqlx::query("delete from runtime_graph_node where id=$1").bind(unsupported).execute(pg).await?;
+        let document_node = Uuid::now_v7();
+        sqlx::query("insert into runtime_graph_node (id,library_id,canonical_key,label,node_type,document_id,projection_version) values ($1,$2,'document-check','document','document',$3,1)")
+            .bind(document_node).bind(fixture.library_id).bind(document_id).execute(pg).await?;
+        sqlx::query("insert into runtime_graph_evidence (library_id,evidence_identity_key,target_kind,target_id,document_id,revision_id,evidence_text) values ($1,'other-document-check','node',$2,md5('scaled-doc-1')::uuid,md5('scaled-revision-1')::uuid,'synthetic')")
+            .bind(fixture.library_id).bind(document_node).execute(pg).await?;
+        ensure!(!content_fingerprint_repository::graph_projection_is_current(pg, selected).await?, "document with only another current source admitted");
+        sqlx::query("insert into runtime_graph_evidence (library_id,evidence_identity_key,target_kind,target_id,document_id,revision_id,evidence_text) values ($1,'document-check','node',$2,$3,$4,'synthetic')")
+            .bind(fixture.library_id).bind(document_node).bind(document_id).bind(revision).execute(pg).await?;
+        ensure!(content_fingerprint_repository::graph_projection_is_current(pg, selected).await?, "current document evidence refused");
+        let other = repositories::catalog_repository::create_library(pg, fixture.workspace_id,
+            "cross-library-evidence", "Other", None, None).await?;
+        let foreign_target = Uuid::now_v7();
+        sqlx::query("insert into runtime_graph_node (id,library_id,canonical_key,label,node_type,projection_version) values ($1,$2,'foreign','foreign','entity',1)")
+            .bind(foreign_target).bind(other.id).execute(pg).await?;
+        sqlx::query("insert into runtime_graph_evidence (library_id,evidence_identity_key,target_kind,target_id,document_id,revision_id,evidence_text) values ($1,'foreign-stale','node',$2,$3,null,'stale')")
+            .bind(fixture.library_id).bind(foreign_target).bind(document_id).execute(pg).await?;
+        ensure!(!content_fingerprint_repository::graph_projection_is_current(pg, selected).await?, "stale foreign-target evidence weakened the original refusal");
+        Ok::<_, anyhow::Error>(())
+    }).await;
+    fixture.cleanup().await?;
+    result
+}
+
+#[tokio::test]
+#[ignore = "requires isolated postgres and redis services"]
 async fn http_cached_g1_is_denied_after_source_intent_and_clean_g2_publication() -> Result<()> {
     let fixture = ContentLifecycleFixture::create().await?;
     let result = Box::pin(async {

@@ -76,6 +76,421 @@ async fn connect_postgres(
 
 const EVIDENCE_PRUNE_PROJECTION_VERSION: i64 = 1;
 
+async fn seed_admission_source(
+    pool: &PgPool,
+    fixture: &GraphProjectionRepositoryFixture,
+    key: &str,
+) -> anyhow::Result<(Uuid, Uuid)> {
+    let document_id = sqlx::query_scalar::<_, Uuid>(
+        "insert into content_document (workspace_id, library_id, external_key, document_state)
+         values ($1, $2, $3, 'active') returning id",
+    )
+    .bind(fixture.workspace.id)
+    .bind(fixture.library.id)
+    .bind(key)
+    .fetch_one(pool)
+    .await?;
+    let revision_id = crate::content_lifecycle_support::seed_graph_document_revision(
+        pool,
+        document_id,
+        "admission.txt",
+        "Admission source",
+    )
+    .await?;
+    Ok((document_id, revision_id))
+}
+
+async fn seed_admission_evidence(
+    pool: &PgPool,
+    library_id: Uuid,
+    kind: &str,
+    target_id: Uuid,
+    source: (Option<Uuid>, Option<Uuid>),
+) -> anyhow::Result<()> {
+    repositories::create_runtime_graph_evidence(
+        pool,
+        repositories::CreateRuntimeGraphEvidenceInput {
+            library_id,
+            target_kind: kind,
+            target_id,
+            document_id: source.0,
+            revision_id: source.1,
+            activated_by_attempt_id: None,
+            chunk_id: None,
+            source_file_name: Some("admission.txt"),
+            page_ref: None,
+            evidence_text: "Admission evidence",
+            confidence_score: Some(1.0),
+            evidence_context_key: &Uuid::now_v7().to_string(),
+        },
+    )
+    .await?;
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires local postgres service"]
+async fn targeted_admission_requires_every_source_and_scopes_incident_edges() -> anyhow::Result<()>
+{
+    let settings = Settings::from_env()?;
+    let (pool, temp_database) = connect_postgres(&settings).await?;
+    let fixture = GraphProjectionRepositoryFixture::create(&pool).await?;
+    let other = GraphProjectionRepositoryFixture::create(&pool).await?;
+    let result = async {
+        let current = seed_admission_source(&pool, &fixture, "current").await?;
+        let stale = seed_admission_source(&pool, &fixture, "stale").await?;
+        let suppressed = seed_admission_source(&pool, &fixture, "suppressed").await?;
+        let foreign_source = seed_admission_source(&pool, &other, "foreign").await?;
+        // A readable head alone is insufficient: remove the knowledge closure.
+        sqlx::query("update knowledge_revision set text_readable_at = null where revision_id = $1")
+            .bind(stale.1)
+            .execute(&pool)
+            .await?;
+        sqlx::query("update content_document set deleted_at = now() where id = $1")
+            .bind(suppressed.0)
+            .execute(&pool)
+            .await?;
+        let current_source = (Some(current.0), Some(current.1));
+        let document_key = format!("document:{}", current.0);
+        let document_id = sqlx::query_scalar::<_, Uuid>(
+            "insert into runtime_graph_node
+             (library_id, canonical_key, label, node_type, document_id, projection_version)
+             values ($1, $2, 'Unconnected document', 'document', $3, 1) returning id",
+        )
+        .bind(fixture.library.id)
+        .bind(&document_key)
+        .bind(current.0)
+        .fetch_one(&pool)
+        .await?;
+        seed_admission_evidence(&pool, fixture.library.id, "node", document_id, current_source)
+            .await?;
+
+        let mut requested_nodes = vec![document_id];
+        let mut requested_edges = Vec::new();
+        let mut expected_nodes = vec![document_id];
+        let mut expected_edges = Vec::new();
+        let mut expected_current_nodes = vec![document_id];
+        for source in [stale, suppressed] {
+            let rejected_document_id = sqlx::query_scalar::<_, Uuid>(
+                "insert into runtime_graph_node
+                 (library_id, canonical_key, label, node_type, document_id, projection_version)
+                 values ($1, $2, 'Rejected document', 'document', $3, 1) returning id",
+            )
+            .bind(fixture.library.id)
+            .bind(format!("document:{}", source.0))
+            .bind(source.0)
+            .fetch_one(&pool)
+            .await?;
+            // Even one valid source cannot rescue an aggregate with stale support.
+            for evidence_source in [current_source, (Some(source.0), Some(source.1))] {
+                seed_admission_evidence(
+                    &pool, fixture.library.id, "node", rejected_document_id, evidence_source,
+                ).await?;
+            }
+            requested_nodes.push(rejected_document_id);
+        }
+        let cases = [
+            ("incoming", true, None, "related", false, 1),
+            ("outgoing", true, None, "related", false, 1),
+            ("mixed-stale", true, Some((Some(stale.0), Some(stale.1))), "related", false, 1),
+            ("null-lineage", true, Some((None, None)), "related", false, 1),
+            ("missing-document", true, Some((None, Some(current.1))), "related", false, 1),
+            ("missing-revision", true, Some((Some(current.0), None)), "related", false, 1),
+            ("mismatched-lineage", true, Some((Some(current.0), Some(stale.1))), "related", false, 1),
+            ("suppressed", true, Some((Some(suppressed.0), Some(suppressed.1))), "related", false, 1),
+            ("no-evidence", false, None, "related", false, 1),
+            ("blank", true, None, "   ", false, 1),
+            ("self", true, None, "related", true, 1),
+            ("projection", true, None, "related", false, 2),
+        ];
+        for (name, has_current, extra_source, relation, self_edge, version) in cases {
+            let node_id = sqlx::query_scalar::<_, Uuid>(
+                "insert into runtime_graph_node
+                 (library_id, canonical_key, label, node_type, projection_version)
+                 values ($1, $2, $2, 'entity', 1) returning id",
+            )
+            .bind(fixture.library.id)
+            .bind(format!("entity:{name}"))
+            .fetch_one(&pool)
+            .await?;
+            // Separate entity endpoints ensure both incident directions are tested.
+            let peer_id = sqlx::query_scalar::<_, Uuid>(
+                "insert into runtime_graph_node
+                 (library_id, canonical_key, label, node_type, projection_version)
+                 values ($1, $2, $2, 'entity', 1) returning id",
+            )
+            .bind(fixture.library.id)
+            .bind(format!("entity:peer:{name}"))
+            .fetch_one(&pool)
+            .await?;
+            let (from_id, to_id) = if self_edge {
+                (node_id, node_id)
+            } else if name == "outgoing" {
+                (node_id, peer_id)
+            } else {
+                (peer_id, node_id)
+            };
+            let edge_id = sqlx::query_scalar::<_, Uuid>(
+                "insert into runtime_graph_edge
+                 (library_id, canonical_key, from_node_id, to_node_id, relation_type, projection_version)
+                 values ($1, $2, $3, $4, $5, $6) returning id",
+            )
+            .bind(fixture.library.id)
+            .bind(format!("edge:{name}"))
+            .bind(from_id)
+            .bind(to_id)
+            .bind(relation)
+            .bind(version)
+            .fetch_one(&pool)
+            .await?;
+            for (kind, id) in [("node", node_id), ("node", peer_id), ("edge", edge_id)] {
+                if has_current {
+                    seed_admission_evidence(&pool, fixture.library.id, kind, id, current_source).await?;
+                }
+                if let Some(source) = extra_source.filter(|_| id != peer_id) {
+                    seed_admission_evidence(&pool, fixture.library.id, kind, id, source).await?;
+                }
+            }
+            requested_nodes.extend([node_id, peer_id]);
+            requested_edges.push(edge_id);
+            if has_current {
+                expected_current_nodes.push(peer_id);
+                if extra_source.is_none() {
+                    expected_current_nodes.push(node_id);
+                }
+            }
+            if matches!(name, "incoming" | "outgoing") {
+                expected_nodes.extend([node_id, peer_id]);
+                expected_edges.push(edge_id);
+            }
+        }
+
+        // Fully supported foreign candidates test library isolation independently
+        // of the source admission fence.
+        sqlx::query(
+            "insert into runtime_graph_node
+             (library_id, canonical_key, label, node_type, projection_version)
+             select $1, 'unrelated:' || n, 'Unrelated', 'entity', 1
+             from generate_series(1, 2) n",
+        )
+        .bind(other.library.id)
+        .execute(&pool)
+        .await?;
+        let foreign_ids: Vec<Uuid> = sqlx::query_scalar(
+            "select id from runtime_graph_node where library_id = $1 order by canonical_key",
+        )
+        .bind(other.library.id)
+        .fetch_all(&pool)
+        .await?;
+        let foreign_edge_id = sqlx::query_scalar::<_, Uuid>(
+            "insert into runtime_graph_edge
+             (library_id, canonical_key, from_node_id, to_node_id, relation_type, projection_version)
+             values ($1, 'foreign-edge', $2, $3, 'related', 1) returning id",
+        )
+        .bind(other.library.id)
+        .bind(foreign_ids[0])
+        .bind(foreign_ids[1])
+        .fetch_one(&pool)
+        .await?;
+        for (kind, id) in [("node", foreign_ids[0]), ("node", foreign_ids[1]), ("edge", foreign_edge_id)] {
+            seed_admission_evidence(
+                &pool, other.library.id, kind, id,
+                (Some(foreign_source.0), Some(foreign_source.1)),
+            ).await?;
+        }
+        let foreign_edges = repositories::list_admitted_runtime_graph_edges_by_ids(
+            &pool, other.library.id, 1, &[foreign_edge_id],
+        ).await?;
+        assert_eq!(foreign_edges.len(), 1);
+        requested_nodes.push(foreign_ids[0]);
+        requested_edges.push(foreign_edge_id);
+        let nodes = repositories::list_admitted_runtime_graph_nodes_by_ids(
+            &pool, fixture.library.id, 1, &requested_nodes,
+        ).await?;
+        let mut actual_nodes = nodes.iter().map(|node| node.id).collect::<Vec<_>>();
+        actual_nodes.sort_unstable();
+        expected_nodes.sort_unstable();
+        assert_eq!(actual_nodes, expected_nodes);
+        let keys = repositories::list_admitted_runtime_graph_document_keys_with_executor(
+            &pool, fixture.library.id, 1,
+        ).await?;
+        assert_eq!(keys, vec![document_key]);
+        let edge_lists = [
+            repositories::list_admitted_runtime_graph_edges_by_ids(
+                &pool, fixture.library.id, 1, &requested_edges,
+            ).await?,
+            repositories::list_admitted_runtime_graph_edges_by_node_ids(
+                &pool, fixture.library.id, 1, &requested_nodes,
+            ).await?,
+            repositories::list_admitted_runtime_graph_edges_by_library(
+                &pool, fixture.library.id, 1,
+            ).await?,
+            repositories::list_top_admitted_runtime_graph_relations_by_library(
+                &pool, fixture.library.id, 1, 100,
+            ).await?,
+        ];
+        expected_edges.sort_unstable();
+        for edges in edge_lists {
+            let mut ids = edges.iter().map(|edge| edge.id).collect::<Vec<_>>();
+            ids.sort_unstable();
+            assert_eq!(ids, expected_edges);
+        }
+
+        let slim_edges = repositories::list_admitted_runtime_graph_query_edges_by_library(
+            &pool, fixture.library.id, 1,
+        ).await?;
+        let mut slim_edge_ids = slim_edges.iter().map(|edge| edge.id).collect::<Vec<_>>();
+        slim_edge_ids.sort_unstable();
+        assert_eq!(slim_edge_ids, expected_edges);
+        let compact_edges = repositories::list_admitted_runtime_graph_edges_compact_by_library(
+            &pool, fixture.library.id, 1,
+        ).await?;
+        let mut compact = compact_edges.iter().map(|edge| {
+            (edge.from_node_id, edge.to_node_id, edge.relation_type.clone(), edge.support_count)
+        }).collect::<Vec<_>>();
+        let mut slim = slim_edges.iter().map(|edge| {
+            (edge.from_node_id, edge.to_node_id, edge.relation_type.clone(), edge.support_count)
+        }).collect::<Vec<_>>();
+        compact.sort_unstable();
+        slim.sort_unstable();
+        assert_eq!(compact, slim, "streamed compact topology must retain full-row admission");
+
+        // These readers trust supplied incident ids, but must independently
+        // fence node evidence and the automatic document fallback.
+        let slim_nodes = repositories::list_runtime_graph_query_nodes_by_ids_or_document_type(
+            &pool, fixture.library.id, 1, &requested_nodes,
+        ).await?;
+        sqlx::query("update runtime_graph_node set metadata_json=metadata_json || jsonb_build_object(
+            'sub_type','kind','confidence',0.75,'entity_state',42,'relation_state','inactive',
+            'unrelated_payload',repeat('x',262144)) where id=$1")
+            .bind(expected_current_nodes[0]).execute(&pool).await?;
+        let stream_nodes = repositories::list_runtime_graph_topology_nodes_by_ids_or_document_type(
+            &pool, fixture.library.id, 1, &requested_nodes,
+        ).await?;
+        for row in &stream_nodes {
+            let full = repositories::get_runtime_graph_node_by_id(&pool, fixture.library.id, row.id)
+                .await?.context("topology node must retain its source row")?;
+            assert_eq!(row.identity_key, full.identity_key);
+            assert_eq!(row.label, full.label);
+            assert_eq!(row.node_type, full.node_type);
+            assert_eq!(row.aliases_json, full.aliases_json);
+            assert_eq!(row.summary, full.summary);
+            assert_eq!(row.support_count, full.support_count);
+            assert_eq!(row.document_id_json.as_ref(), full.metadata_json.get("document_id"));
+            assert_eq!(row.sub_type_json.as_ref(), full.metadata_json.get("sub_type"));
+            assert_eq!(row.confidence_json.as_ref(), full.metadata_json.get("confidence"));
+            assert_eq!(row.entity_state_json.as_ref(), full.metadata_json.get("entity_state"));
+            assert_eq!(row.relation_state_json.as_ref(), full.metadata_json.get("relation_state"));
+        }
+        let mut slim_node_ids = slim_nodes.iter().map(|node| node.id).collect::<Vec<_>>();
+        let mut stream_node_ids = stream_nodes.iter().map(|node| node.id).collect::<Vec<_>>();
+        expected_current_nodes.sort_unstable();
+        slim_node_ids.sort_unstable();
+        stream_node_ids.sort_unstable();
+        assert_eq!(slim_node_ids, expected_current_nodes);
+        assert_eq!(stream_node_ids, expected_current_nodes);
+        let entity_count = repositories::count_admitted_runtime_graph_entities_by_library(
+            &pool, fixture.library.id, 1,
+        ).await?;
+        let entities = repositories::list_top_admitted_runtime_graph_entities_by_library(
+            &pool, fixture.library.id, 1, 100,
+        ).await?;
+        let mut entity_ids = entities.iter().map(|node| node.id).collect::<Vec<_>>();
+        entity_ids.sort_unstable();
+        let expected_entities = expected_current_nodes.iter().copied()
+            .filter(|id| *id != document_id).collect::<Vec<_>>();
+        assert_eq!(entity_ids, expected_entities);
+        assert_eq!(entity_count, i64::try_from(expected_entities.len())?);
+        let relation_count = repositories::count_admitted_runtime_graph_relations_by_library(
+            &pool, fixture.library.id, 1,
+        ).await?;
+        assert_eq!(relation_count, i64::try_from(expected_edges.len())?);
+
+        // The pre-admitted identity reader remains raw. Its caller must prove
+        // node membership at the owning relation selector, not only edge support.
+        let raw_nodes = repositories::list_runtime_graph_nodes_by_ids(
+            &pool, fixture.library.id, 1, &requested_nodes,
+        ).await?;
+        assert_eq!(raw_nodes.len(), requested_nodes.len() - 1, "only the foreign-library id is excluded");
+        assert!(raw_nodes.len() > stream_nodes.len());
+
+        let endpoint = slim_edges[0].from_node_id;
+        seed_admission_evidence(&pool, fixture.library.id, "node", endpoint, (None, None)).await?;
+        let relations = repositories::list_top_admitted_runtime_graph_relations_by_library(
+            &pool, fixture.library.id, 1, 100,
+        ).await?;
+        assert_eq!(relations.len(), expected_edges.len() - 1,
+            "the raw endpoint consumer must receive only independently admitted nodes");
+        assert!(relations.iter().all(|edge| edge.from_node_id != endpoint && edge.to_node_id != endpoint));
+        let relations_count = repositories::count_admitted_runtime_graph_relations_by_library(
+            &pool, fixture.library.id, 1,
+        ).await?;
+        assert_eq!(relations_count, i64::try_from(relations.len())?);
+        let raw = repositories::list_runtime_graph_nodes_by_ids(
+            &pool, fixture.library.id, 1, &[endpoint],
+        ).await?;
+        assert_eq!(raw.len(), 1);
+        sqlx::query("delete from runtime_graph_evidence where target_kind = 'node'
+                     and target_id = $1 and document_id is null and revision_id is null")
+            .bind(endpoint).execute(&pool).await?;
+
+        // Add a large, genuinely admitted, unrelated graph in the same bucket.
+        // The small explicit-id read must still return only its own exact targets.
+        sqlx::query(
+            "insert into runtime_graph_node
+             (library_id, canonical_key, label, node_type, projection_version)
+             select $1, 'bulk:' || n, 'Bulk entity', 'entity', 1
+             from generate_series(1, 2048) n",
+        )
+        .bind(fixture.library.id)
+        .execute(&pool)
+        .await?;
+        sqlx::query(
+            "insert into runtime_graph_edge
+             (library_id, canonical_key, from_node_id, to_node_id, relation_type, projection_version)
+             select $1, 'bulk-edge:' || id::text, id, next_id, 'related', 1
+             from (select id, lead(id) over (order by id) as next_id
+                   from runtime_graph_node where library_id = $1 and canonical_key like 'bulk:%') n
+             where next_id is not null",
+        )
+        .bind(fixture.library.id)
+        .execute(&pool)
+        .await?;
+        sqlx::query(
+            "insert into runtime_graph_evidence
+             (library_id, evidence_identity_key, target_kind, target_id, document_id, revision_id, evidence_text)
+             select $1, 'bulk:' || kind || ':' || id::text, kind, id, $2, $3, 'Bulk evidence'
+             from (select 'node'::text as kind, id from runtime_graph_node
+                   where library_id = $1 and canonical_key like 'bulk:%'
+                   union all select 'edge'::text, id from runtime_graph_edge
+                   where library_id = $1 and canonical_key like 'bulk-edge:%') targets",
+        )
+        .bind(fixture.library.id)
+        .bind(current.0)
+        .bind(current.1)
+        .execute(&pool)
+        .await?;
+        let nodes = repositories::list_admitted_runtime_graph_nodes_by_ids(
+            &pool, fixture.library.id, 1, &requested_nodes,
+        ).await?;
+        let mut actual_nodes = nodes.iter().map(|node| node.id).collect::<Vec<_>>();
+        actual_nodes.sort_unstable();
+        assert_eq!(actual_nodes, expected_nodes);
+        let edges = repositories::list_admitted_runtime_graph_edges_by_ids(
+            &pool, fixture.library.id, 1, &requested_edges,
+        ).await?;
+        let mut actual_edges = edges.iter().map(|edge| edge.id).collect::<Vec<_>>();
+        actual_edges.sort_unstable();
+        assert_eq!(actual_edges, expected_edges);
+        Ok(())
+    }.await;
+    other.cleanup(&pool).await?;
+    fixture.cleanup(&pool).await?;
+    pool.close().await;
+    temp_database.drop().await?;
+    result
+}
+
 #[derive(Debug, Clone, Copy)]
 enum EvidencePrunePath {
     StandaloneSupportSynchronizer,

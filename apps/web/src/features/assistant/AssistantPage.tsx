@@ -236,8 +236,8 @@ export default function AssistantPage() {
       <SessionRail {...sessionRailProps} />
       <section className="chat-surface">
         <header className="chat-header">
-          <div>
-            <strong>{activeSessionTitle}</strong>
+          <div className="chat-header__title">
+            <strong title={activeSessionTitle}>{activeSessionTitle}</strong>
           </div>
           <div className="chat-header__actions">
             <Button

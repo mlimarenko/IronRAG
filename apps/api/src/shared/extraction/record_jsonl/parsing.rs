@@ -138,55 +138,6 @@ fn parse_yaml_records(raw_text: &str) -> Option<Vec<Map<String, Value>>> {
     (!records.is_empty()).then_some(records)
 }
 
-#[cfg(test)]
-mod yaml_tests {
-    use super::parse_yaml_records;
-    use serde_json::json;
-
-    #[test]
-    fn preserves_yaml_1_2_scalars_and_non_finite_json_values() {
-        let records = parse_yaml_records(
-            "id: sample\non: on\nno: no\nenabled: true\ncount: 7\nmissing: null\nscore: .nan\n",
-        )
-        .expect("YAML record");
-        assert_eq!(
-            records,
-            vec![
-                json!({
-                    "id": "sample", "on": "on", "no": "no", "enabled": true,
-                    "count": 7, "missing": null, "score": null,
-                })
-                .as_object()
-                .expect("object")
-                .clone()
-            ],
-        );
-    }
-
-    #[test]
-    fn preserves_aliases_without_implicitly_applying_merge_keys() {
-        let records = parse_yaml_records("defaults: &base {enabled: true}\nitem: {<<: *base}\n")
-            .expect("aliased record");
-        assert_eq!(records[0]["item"], json!({"<<": {"enabled": true}}));
-    }
-
-    #[test]
-    fn skips_empty_documents_but_rejects_complex_keys_and_duplicates() {
-        let records = parse_yaml_records("---\n---\nid: sample\n---\n").expect("record stream");
-        assert_eq!(records.len(), 1);
-        assert_eq!(records[0]["id"], "sample");
-        assert!(parse_yaml_records("? [one, two]\n: value\n").is_none());
-        assert!(parse_yaml_records("id: first\nid: second\n").is_none());
-    }
-
-    #[test]
-    fn refuses_excessive_depth_and_recursive_aliases() {
-        let nested = format!("value: {}0{}", "[".repeat(200), "]".repeat(200));
-        assert!(parse_yaml_records(&nested).is_none());
-        assert!(parse_yaml_records("value: &recursive [*recursive]\n").is_none());
-    }
-}
-
 fn parse_toml_records(raw_text: &str) -> Option<Vec<Map<String, Value>>> {
     // A TOML document is always a top-level table → exactly one record. TOML
     // datetime values do not map onto serde_json::Value, so such documents
@@ -245,4 +196,53 @@ pub fn extract_record_jsonl(file_bytes: &[u8]) -> Result<ExtractionOutput> {
         return Err(anyhow!("record jsonl payload contains no records"));
     }
     render_record_stream(&records, None)
+}
+
+#[cfg(test)]
+mod yaml_tests {
+    use super::parse_yaml_records;
+    use serde_json::json;
+
+    #[test]
+    fn preserves_yaml_1_2_scalars_and_non_finite_json_values() {
+        let records = parse_yaml_records(
+            "id: sample\non: on\nno: no\nenabled: true\ncount: 7\nmissing: null\nscore: .nan\n",
+        )
+        .expect("YAML record");
+        assert_eq!(
+            records,
+            vec![
+                json!({
+                    "id": "sample", "on": "on", "no": "no", "enabled": true,
+                    "count": 7, "missing": null, "score": null,
+                })
+                .as_object()
+                .expect("object")
+                .clone()
+            ],
+        );
+    }
+
+    #[test]
+    fn preserves_aliases_without_implicitly_applying_merge_keys() {
+        let records = parse_yaml_records("defaults: &base {enabled: true}\nitem: {<<: *base}\n")
+            .expect("aliased record");
+        assert_eq!(records[0]["item"], json!({"<<": {"enabled": true}}));
+    }
+
+    #[test]
+    fn skips_empty_documents_but_rejects_complex_keys_and_duplicates() {
+        let records = parse_yaml_records("---\n---\nid: sample\n---\n").expect("record stream");
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0]["id"], "sample");
+        assert!(parse_yaml_records("? [one, two]\n: value\n").is_none());
+        assert!(parse_yaml_records("id: first\nid: second\n").is_none());
+    }
+
+    #[test]
+    fn refuses_excessive_depth_and_recursive_aliases() {
+        let nested = format!("value: {}0{}", "[".repeat(200), "]".repeat(200));
+        assert!(parse_yaml_records(&nested).is_none());
+        assert!(parse_yaml_records("value: &recursive [*recursive]\n").is_none());
+    }
 }

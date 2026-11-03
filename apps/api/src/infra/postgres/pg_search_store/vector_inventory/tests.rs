@@ -316,6 +316,7 @@ async fn seed_revision_mutation(
         "operationKind": "replace",
         "target": {"kind": "existing", "documentId": revision.document_id},
         "sourceIdentity": null,
+        "materializationToken": null,
         "revision": {
             "contentSourceKind": revision.content_source_kind,
             "baseRevisionId": revision.parent_revision_id,

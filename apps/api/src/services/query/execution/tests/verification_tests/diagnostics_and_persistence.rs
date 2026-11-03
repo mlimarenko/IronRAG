@@ -40,6 +40,7 @@ fn enrich_query_assembly_diagnostics_emits_verification_and_graph_participation(
             "bundleId": Uuid::nil(),
         }),
         &RuntimeAnswerVerification {
+            semantic_verification: None,
             state: QueryVerificationState::Verified,
             warnings: vec![QueryVerificationWarning {
                 code: "grounded".to_string(),

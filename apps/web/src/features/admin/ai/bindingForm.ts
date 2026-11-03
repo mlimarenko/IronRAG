@@ -282,13 +282,11 @@ export function formFromBinding(binding: AIBinding): BindingForm {
  * provider default applies.
  */
 const REQUEST_TUNING_KEYS = {
-  reasoningEffort: 'reasoning_effort',
   serviceTier: 'service_tier',
 } as const
 
 export type RequestTuningKey = keyof typeof REQUEST_TUNING_KEYS
 
-export const REASONING_EFFORTS = ['none', 'low', 'medium', 'high'] as const
 export const SERVICE_TIERS = ['flex'] as const
 
 /** The tuning value in the form's JSON, `''` when absent, `null` when the JSON is invalid. */
@@ -309,13 +307,14 @@ export function withRequestTuning(extraJson: string, key: RequestTuningKey, valu
   return Object.keys(next).length === 0 ? '' : JSON.stringify(next, null, 2)
 }
 
-/** Tuning shown on a binding card: only the keys the dedicated controls own. */
+/** Tuning shown on a binding card, including historical raw reasoning values. */
 export function bindingRequestTuning(
   extraParams: Record<string, unknown> | undefined,
-): Partial<Record<RequestTuningKey, string>> {
-  const tuning: Partial<Record<RequestTuningKey, string>> = {}
-  for (const key of Object.keys(REQUEST_TUNING_KEYS) as RequestTuningKey[]) {
-    const value = extraParams?.[REQUEST_TUNING_KEYS[key]]
+): Partial<Record<RequestTuningKey | 'reasoningEffort', string>> {
+  const keys = { ...REQUEST_TUNING_KEYS, reasoningEffort: 'reasoning_effort' } as const
+  const tuning: Partial<Record<keyof typeof keys, string>> = {}
+  for (const key of Object.keys(keys) as (keyof typeof keys)[]) {
+    const value = extraParams?.[keys[key]]
     if (typeof value === 'string' && value) tuning[key] = value
   }
   return tuning

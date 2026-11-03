@@ -38,6 +38,9 @@ print_stderr = "deny"
 large_futures = "deny"
 
 [dependencies]
+xberg = { git = "https://github.com/xberg-io/xberg.git", rev = "b27b2d848048df778bf32be96fa2cfcccbf3d6ce", default-features = false, features = ["pdf", "office", "excel", "html", "tokio-runtime"] }
+lopdf = { version = "=0.45.0", default-features = false }
+tiff = "=0.11.3"
 axum = { version = "0.8", features = ["macros", "json", "multipart"] }
 chrono = { version = "0.4", features = ["serde"] }
 utoipa.workspace = true
@@ -77,12 +80,11 @@ hmac = "0.13.0"
 subtle = "2"
 hex = "0.4"
 async-trait = "0.1"
-aws-sdk-s3 = { version = "1.137", default-features = false, features = ["behavior-version-latest", "default-https-client", "http-1x", "rt-tokio"] }
+aws-sdk-s3 = { version = "1.155.0", default-features = false, features = ["behavior-version-latest", "default-https-client", "http-1x", "rt-tokio"] }
 rust_decimal = { version = "1", features = ["serde"] }
 cookie = "0.18"
 argon2 = { version = "0.5", features = ["std"] }
 calamine = "0.37.0"
-csv = "1.4.0"
 # Central-directory metadata only: the workbook guard bounds the declared
 # uncompressed size before calamine decompresses anything. calamine already
 # links the same crate for its own readers, so this adds no new dependency.
@@ -128,7 +130,7 @@ zeroize = "1.9.0"
 dhat = { version = "0.3", optional = true }
 percent-encoding = "2"
 rsa = { version = "0.9.10", features = ["getrandom"], optional = true }
-openidconnect = { version = "4.0.1", features = ["reqwest", "rustls-tls"] }
+openidconnect = { git = "https://github.com/ramosbugs/openidconnect-rs.git", rev = "e20ddbb01ca68356f2979bc125f5613ab45b4e7e", features = ["reqwest", "rustls-tls"] }
 
 # Production memory allocator. The default glibc allocator retains freed
 # memory in per-thread arenas and rarely returns it to the OS, which on a
@@ -146,6 +148,10 @@ openidconnect = { version = "4.0.1", features = ["reqwest", "rustls-tls"] }
 tikv-jemallocator = "0.7"
 
 [[bin]]
+name = "ironrag-extract"
+path = "src/bin/ironrag_extract/main.rs"
+
+[[bin]]
 name = "ironrag-cli"
 path = "src/bin/ironrag_cli.rs"
 
@@ -156,6 +162,10 @@ path = "src/bin/emit_openapi.rs"
 [[bin]]
 name = "ironrag-maintenance"
 path = "src/bin/ironrag_maintenance/main.rs"
+
+[[example]]
+name = "lexical_replay"
+path = "benchmarks/grounded_query/lexical_replay/main.rs"
 
 [dev-dependencies]
 tokio = { version = "1.52.3", features = ["test-util"] }

@@ -76,6 +76,7 @@ impl LlmGateway for RecordingGateway {
         });
         // Exactly one prepared candidate is submitted in these tests.
         Ok(ChatResponse {
+            completion_status: crate::integrations::llm::ChatCompletionStatus::Complete,
             provider_kind: std::mem::take(&mut request.provider_kind),
             model_name: std::mem::take(&mut request.model_name),
             output_text: serde_json::json!({"scores": [{"index": 0, "score": 0.9}]}).to_string(),

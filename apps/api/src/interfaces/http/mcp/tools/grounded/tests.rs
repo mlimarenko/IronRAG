@@ -606,6 +606,175 @@ fn compact_profile_exposes_readiness_verifier_warnings_and_bounded_references() 
 }
 
 #[test]
+fn semantic_full_and_compact_keep_aggregate_outcome_and_checked_visible_identity() {
+    use ironrag_contracts::assistant::semantic_verification::{
+        SemanticAssessment, SemanticByteSpan, SemanticClaimSupport, SemanticCompleteness,
+        SemanticEvidenceLink, SemanticMissingCaveat, SemanticResponseClassification,
+        SemanticUnitVerdict, SemanticVerificationOutcome,
+    };
+    let mut detail = sample_execution_detail(ExecutionDetailIds::sequential(91));
+    let mut report = semantic_projection_report();
+    let source = &report.sources[0];
+    let evidence = SemanticEvidenceLink {
+        source_id: source.source_id.clone(),
+        span: SemanticByteSpan { start: 0, end: source.text.len() },
+        quote: source.text.clone(),
+    };
+    report.outcome = SemanticVerificationOutcome::Completed {
+        assessment: SemanticAssessment {
+            claim_support: SemanticClaimSupport::Contradicted,
+            completeness: SemanticCompleteness::MissingEssentialCaveats,
+            missing_caveats: (0..10)
+                .map(|_| SemanticMissingCaveat {
+                    description: "An essential omitted qualification. ".repeat(12),
+                    evidence: vec![evidence.clone()],
+                })
+                .collect(),
+            response_classification: SemanticResponseClassification::FactualAnswer,
+            units: report
+                .answer_units
+                .iter()
+                .enumerate()
+                .map(|(index, unit)| SemanticUnitVerdict {
+                    unit_id: unit.unit_id.clone(),
+                    support: if index == 9 {
+                        SemanticClaimSupport::Contradicted
+                    } else {
+                        SemanticClaimSupport::Supported
+                    },
+                    asserts_document_absence: false,
+                    evidence: vec![evidence.clone()],
+                })
+                .collect(),
+        },
+    };
+    detail.semantic_verification = Some(report.clone());
+    detail.answer_disposition =
+        ironrag_contracts::assistant::AssistantAnswerDisposition::SafeFallback;
+    detail.verification_state =
+        ironrag_contracts::assistant::AssistantVerificationState::Conflicting;
+    let full = grounded_answer_contract_payload_with_profile(
+        "Visible fallback",
+        &detail,
+        McpGroundedAnswerResponseProfile::Full,
+        None,
+    );
+    let compact = grounded_answer_contract_payload_with_profile(
+        "Visible fallback",
+        &detail,
+        McpGroundedAnswerResponseProfile::Compact,
+        Some(1),
+    );
+    let full_report = &full["structuredContent"]["executionDetail"]["semanticVerification"];
+    let summary = &compact["structuredContent"]["semanticVerification"];
+    assert_eq!(full_report, &json!(report));
+    assert_semantic_projection_identity(summary, full_report);
+    assert_semantic_projection_aggregate(summary);
+    assert_semantic_projection_sources(summary);
+    assert_eq!(compact["structuredContent"]["verifier"]["state"], "conflicting");
+}
+
+fn assert_semantic_projection_identity(
+    summary: &serde_json::Value,
+    full_report: &serde_json::Value,
+) {
+    assert_eq!(summary["projection"], "summary");
+    for field in
+        ["questionSha256", "checkedAnswerSha256", "visibleAnswerSha256", "evidenceManifestSha256"]
+    {
+        assert_eq!(summary[field], full_report[field]);
+    }
+    assert_ne!(summary["checkedAnswerSha256"], summary["visibleAnswerSha256"]);
+}
+
+fn assert_semantic_projection_aggregate(summary: &serde_json::Value) {
+    // The contradicted tenth unit is omitted, not erased from the aggregate.
+    assert_eq!(summary["outcome"]["claimSupport"], "contradicted");
+    assert_eq!(summary["outcome"]["unitSummary"]["totalCount"], 10);
+    assert_eq!(summary["outcome"]["unitSummary"]["returnedCount"], 8);
+    assert_eq!(summary["outcome"]["unitSummary"]["truncated"], true);
+    assert_eq!(summary["outcome"]["unitSummary"]["units"][0]["support"], "supported");
+    assert_eq!(summary["outcome"]["unitSummary"]["units"][0]["checkedTextTruncated"], true);
+    assert_eq!(summary["outcome"]["completeness"], "missing_essential_caveats");
+    assert_eq!(summary["outcome"]["missingCaveatSummary"]["totalCount"], 10);
+    assert_eq!(summary["outcome"]["missingCaveatSummary"]["returnedCount"], 8);
+    assert_eq!(summary["outcome"]["missingCaveatSummary"]["truncated"], true);
+    assert_eq!(
+        summary["outcome"]["missingCaveatSummary"]["caveats"][0]["descriptionTruncated"],
+        true
+    );
+}
+
+fn assert_semantic_projection_sources(summary: &serde_json::Value) {
+    assert_eq!(summary["sourceSummary"]["totalCount"], 3);
+    assert_eq!(summary["sourceSummary"]["returnedCount"], 1);
+    assert_eq!(summary["sourceSummary"]["truncated"], true);
+    assert_eq!(summary["sourceSummary"]["sourceTextIncluded"], false);
+    assert_eq!(summary["sourceSummary"]["evidenceQuotesIncluded"], false);
+    assert!(summary["sourceSummary"]["sources"][0].get("text").is_none());
+}
+
+#[test]
+fn semantic_operational_failure_and_not_run_keep_their_meaning_in_both_mcp_profiles() {
+    use ironrag_contracts::assistant::semantic_verification::{
+        SemanticFailureCode, SemanticNotRunReason, SemanticVerificationOutcome,
+    };
+    for outcome in [
+        SemanticVerificationOutcome::NotRun { reason: SemanticNotRunReason::NoEvidence },
+        SemanticVerificationOutcome::Failed { code: SemanticFailureCode::ProviderRefusal },
+    ] {
+        let mut detail = sample_execution_detail(ExecutionDetailIds::sequential(111));
+        let mut report = semantic_projection_report();
+        report.outcome = outcome.clone();
+        detail.semantic_verification = Some(report);
+        let full = grounded_answer_contract_payload_with_profile(
+            "Answer",
+            &detail,
+            McpGroundedAnswerResponseProfile::Full,
+            None,
+        );
+        let compact = grounded_answer_contract_payload_with_profile(
+            "Answer",
+            &detail,
+            McpGroundedAnswerResponseProfile::Compact,
+            Some(1),
+        );
+        assert_eq!(
+            full["structuredContent"]["executionDetail"]["semanticVerification"]["outcome"],
+            json!(outcome)
+        );
+        assert_eq!(compact["structuredContent"]["semanticVerification"]["outcome"], json!(outcome));
+    }
+}
+
+fn semantic_projection_report()
+-> ironrag_contracts::assistant::semantic_verification::SemanticVerificationReport {
+    use crate::services::query::execution::semantic_verification::{
+        AuthorizedSemanticSource, prepare,
+    };
+    use ironrag_contracts::assistant::semantic_verification::{
+        SemanticNotRunReason, SemanticSourceLocator,
+    };
+    let answer = (0..10)
+        .map(|index| format!("Answer block {index}. {}", "Long checked text. ".repeat(24)))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let sources = (0..3)
+        .map(|index| AuthorizedSemanticSource {
+            document_id: Uuid::from_u128(30 + index),
+            document_revision_id: Uuid::from_u128(40 + index),
+            locator: SemanticSourceLocator::Chunk { chunk_id: Uuid::from_u128(50 + index) },
+            text: format!("Source {index}. {}", "Selected canonical prose. ".repeat(40)),
+            complete_document: None,
+        })
+        .collect();
+    let prepared = prepare("Question", &answer, sources).expect("projection fixture preparation");
+    let mut report = prepared.not_run(SemanticNotRunReason::Disabled, 2);
+    report.visible_answer_sha256 = Some("a".repeat(64));
+    report
+}
+
+#[test]
 fn full_and_compact_profiles_fail_closed_on_shared_completion_gap() {
     let detail = sample_execution_detail(ExecutionDetailIds::sequential(71));
     let query_ir = QueryIR {
@@ -925,6 +1094,7 @@ fn sample_execution_detail(ids: ExecutionDetailIds) -> AssistantExecutionDetail 
         reference_summary: None,
         verification_state: AssistantVerificationState::Verified,
         verification_warnings: Vec::new(),
+        semantic_verification: None,
         answer_disposition: AssistantAnswerDisposition::FactualReady,
         clarification: ironrag_contracts::assistant::AssistantClarification::default(),
     }

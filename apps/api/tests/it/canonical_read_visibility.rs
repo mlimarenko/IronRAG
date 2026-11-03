@@ -272,6 +272,87 @@ async fn cached_execution(
     Ok((execution_id, conversation.id, bundle_id))
 }
 
+#[cfg(feature = "test-support")]
+#[tokio::test]
+#[ignore = "requires isolated postgres and redis services"]
+async fn sourced_semantic_report_without_response_is_denied_after_source_withdrawal() -> Result<()>
+{
+    use ironrag_backend::infra::repositories::query_repository;
+    let fixture = ContentLifecycleFixture::create().await?;
+    let result = Box::pin(async {
+        let pg = &fixture.state.persistence.postgres;
+        let a = admission_repository::admit_content_with_failpoint(
+            pg, &request(&fixture, "semantic-a", b"restricted A bytes").await?, None,
+        ).await?.into_bundle();
+        let revision_id = publish(&fixture, &a, "restricted A bytes").await?;
+        let chunk_id: Uuid = sqlx::query_scalar("select chunk_id from knowledge_chunk where revision_id=$1 limit 1")
+            .bind(revision_id).fetch_one(pg).await?;
+        let chunk = fixture.state.document_store.list_chunks_by_ids(&[chunk_id]).await?
+            .pop().context("published canonical source chunk")?;
+        let auth = auth(&fixture).await?;
+        let mut executions = Vec::new();
+        for disposition in ["safe_fallback", "non_terminal"] {
+            let (execution_id, _, _) = cached_execution(&fixture, revision_id).await?;
+            query_repository::update_execution(pg, execution_id, &query_repository::UpdateQueryExecution {
+                request_turn_id: None, response_turn_id: None,
+            }).await?;
+            let report = fixture.state.application_services.query.semantic_failure_report_for_test(
+                "read cached source", "Unchecked candidate", Some(&chunk),
+            )?;
+            let mut bundle = fixture.state.context_store.get_bundle_by_query_execution(execution_id).await?
+                .context("existing selected reference bundle")?;
+            bundle.candidate_summary = serde_json::json!({"answerDisposition":disposition,"semanticVerification":report});
+            bundle.verification_state = "failed".to_owned();
+            fixture.state.context_store.upsert_bundle(&bundle).await?;
+            let initial = ironrag_backend::interfaces::http::query::get_execution(
+                auth.clone(), State(fixture.state.clone()), Path(execution_id),
+            ).await?.0;
+            assert!(initial.response_turn.is_none());
+            assert!(serde_json::to_string(&initial.semantic_verification)?.contains("restricted A bytes"));
+            executions.push(execution_id);
+        }
+        let replacement = request(&fixture, "semantic-c", b"public C bytes").await?;
+        admission_repository::admit_visibility_intent_with_failpoint(pg, &VisibilityAdmissionRequest {
+            workspace_id: fixture.workspace_id, library_id: fixture.library_id, document_id: a.document.id,
+            requested_by_principal_id: None, request_surface: "rest".to_owned(),
+            intent: CreateVisibilityIntentRequest {
+                idempotency_key: "semantic-withdraw-a".to_owned(), source_identity: "canonical-read-source".to_owned(),
+                materialization_token: None,
+                replacement: replacement.revision.as_ref().context("replacement")?.replacement.clone(),
+            },
+        }, None).await?;
+        for execution_id in executions {
+            let denied = ironrag_backend::interfaces::http::query::get_execution(
+                auth.clone(), State(fixture.state.clone()), Path(execution_id),
+            ).await;
+            assert_eq!(denied.expect_err("sourced report must not bypass current-source admission without a response turn")
+                .into_response().status(), StatusCode::NOT_FOUND);
+            let mut bundle = fixture.state.context_store.get_bundle_by_query_execution(execution_id).await?
+                .context("retained nonfactual bundle")?;
+            let source_free = fixture.state.application_services.query.semantic_failure_report_for_test(
+                "read cached source", "A source-free nonfactual statement", None,
+            )?;
+            bundle.candidate_summary = serde_json::json!({"answerDisposition":"safe_fallback","semanticVerification":source_free});
+            fixture.state.context_store.upsert_bundle(&bundle).await?;
+            let stale_references = ironrag_backend::interfaces::http::query::get_execution(
+                auth.clone(), State(fixture.state.clone()), Path(execution_id),
+            ).await;
+            assert_eq!(stale_references.expect_err("ordinary source references also require current-source admission")
+                .into_response().status(), StatusCode::NOT_FOUND);
+            bundle.candidate_summary["answerKind"] = serde_json::json!("missing_explicit_document");
+            fixture.state.context_store.upsert_bundle(&bundle).await?;
+            let permitted = ironrag_backend::interfaces::http::query::get_execution(
+                auth.clone(), State(fixture.state.clone()), Path(execution_id),
+            ).await?.0;
+            assert!(permitted.semantic_verification.context("source-free metadata")?.sources.is_empty());
+            assert!(permitted.chunk_references.is_empty());
+        }
+        Ok(())
+    }).await;
+    fixture.cleanup().await?;
+    result
+}
+
 async fn request(
     fixture: &ContentLifecycleFixture,
     key: &str,
@@ -340,8 +421,8 @@ async fn publish(
         .execute(pg)
         .await?;
     sqlx::query("update knowledge_revision set text_state='text_readable',text_readable_at=now(),
-        vector_state='ready',vector_ready_at=now(),graph_state='ready',graph_ready_at=now(),normalized_text=$2 where revision_id=$1")
-        .bind(revision_id).bind(text).execute(pg).await?;
+        vector_state='ready',vector_ready_at=now(),graph_state='ready',graph_ready_at=now(),normalized_text=$2,text_checksum=$3 where revision_id=$1")
+        .bind(revision_id).bind(text).bind(hex::encode(Sha256::digest(text.as_bytes()))).execute(pg).await?;
     ironrag_backend::infra::repositories::content_document_head_repository::upsert_document_head(
         pg,
         &ironrag_backend::infra::repositories::content_document_head_repository::NewContentDocumentHead {
@@ -374,7 +455,7 @@ async fn publish(
             end_offset: i32::try_from(text.len())?,
             token_count: None,
             normalized_text: text,
-            text_checksum: &format!("sha256:{}", hex::encode(Sha256::digest(text.as_bytes()))),
+            text_checksum: &hex::encode(Sha256::digest(text.as_bytes())),
             occurred_at: None,
             occurred_until: None,
         },
@@ -425,8 +506,13 @@ async fn mcp_read(
     let initialized =
         handle_diagnostics_jsonrpc(auth.clone(), State(fixture.state.clone()), initialize).await;
     assert_eq!(initialized.status(), StatusCode::OK);
-    let session =
-        initialized.headers().get(MCP_SESSION_HEADER).context("MCP session")?.to_str()?.to_owned();
+    let session = if let Some(header) = initialized.headers().get(MCP_SESSION_HEADER) {
+        header.to_str()?.to_owned()
+    } else {
+        let bytes = axum::body::to_bytes(initialized.into_body(), 16 * 1024).await?;
+        let payload: serde_json::Value = serde_json::from_slice(&bytes)?;
+        anyhow::bail!("native MCP initialization returned no session: {:?}", payload.get("error"));
+    };
     let call = Request::post("/v1/mcp/diagnostics")
         .header("content-type", "application/json")
         .header(MCP_PROTOCOL_HEADER, MCP_PROTOCOL_VERSION)
@@ -440,6 +526,43 @@ async fn mcp_read(
         handle_diagnostics_jsonrpc(auth.clone(), State(fixture.state.clone()), call).await;
     serde_json::from_slice(&axum::body::to_bytes(response.into_body(), 128 * 1024).await?)
         .context("MCP response")
+}
+
+#[cfg(feature = "test-support")]
+#[tokio::test]
+#[ignore = "requires isolated postgres and redis services"]
+async fn native_document_read_preserves_canonical_offsets_for_semantic_preparation() -> Result<()> {
+    let _ = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::WARN)
+        .with_test_writer()
+        .try_init();
+    let fixture = ContentLifecycleFixture::create().await?;
+    let result = Box::pin(async {
+        let canonical = "\nAllowed.\n";
+        let a = admission_repository::admit_content_with_failpoint(
+            &fixture.state.persistence.postgres,
+            &request(&fixture, "canonical-offsets", canonical.as_bytes()).await?, None,
+        ).await?.into_bundle();
+        let revision_id = publish(&fixture, &a, canonical).await?;
+        let (execution_id, _, _) = cached_execution(&fixture, revision_id).await?;
+        let response = mcp_read(&fixture, &auth(&fixture).await?, a.document.id).await?;
+        let native = response.pointer("/result/structuredContent").context("native read payload")?.clone();
+        assert_eq!(native["content"], canonical);
+        assert_eq!(native["sliceStartOffset"], 0);
+        assert_eq!(native["sliceEndOffset"], canonical.chars().count());
+        assert_eq!(native["totalContentLength"], canonical.chars().count());
+        let sources = fixture.state.application_services.query.semantic_sources_from_native_read_for_test(
+            &fixture.state, execution_id, native,
+        ).await?;
+        let complete = sources.iter().find(|source| source.scope ==
+            ironrag_contracts::assistant::semantic_verification::SemanticEvidenceScope::CompleteDocument)
+            .context("actual full canonical scope")?;
+        assert_eq!(complete.text, canonical);
+        assert_eq!(complete.document_revision_id, revision_id);
+        Ok(())
+    }).await;
+    fixture.cleanup().await?;
+    result
 }
 
 #[tokio::test]

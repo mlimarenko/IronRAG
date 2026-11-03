@@ -27,7 +27,6 @@ import { useAiAdminMutations, useAvailableProviderModels, useBindingDetail } fro
 import { BindingRoute, ValidationHistory } from './BindingSupport'
 import {
   EMPTY_BINDING_FORM,
-  REASONING_EFFORTS,
   SERVICE_TIERS,
   applyManagedReasoningMode,
   deriveReasoningJournal,
@@ -594,39 +593,6 @@ export function BindingsSection({
                       onRemoveManagedKey={removeManagedKeyFromRaw}
                     />
                   )}
-                  {editingPurpose !== 'embed_chunk' &&
-                    selectedAccount?.provider?.capabilities?.chat === 'supported' && (
-                      <label className="field">
-                        <span>{t('admin.aiPanel.fields.reasoningEffort')}</span>
-                        <select
-                          className="input"
-                          value={requestTuningValue(form.extraJson, 'reasoningEffort') ?? ''}
-                          disabled={requestTuningValue(form.extraJson, 'reasoningEffort') === null}
-                          onChange={(event) =>
-                            setForm({
-                              ...form,
-                              extraJson: withRequestTuning(
-                                form.extraJson,
-                                'reasoningEffort',
-                                event.target.value,
-                              ),
-                            })
-                          }
-                        >
-                          <option value="">
-                            {t('admin.aiPanel.requestTuning.providerDefault')}
-                          </option>
-                          {REASONING_EFFORTS.map((effort) => (
-                            <option key={effort} value={effort}>
-                              {t(`admin.aiPanel.requestTuning.reasoning.${effort}`)}
-                            </option>
-                          ))}
-                        </select>
-                        <small className="field-hint">
-                          {t('admin.aiPanel.requestTuning.reasoningHint')}
-                        </small>
-                      </label>
-                    )}
                   {selectedAccount?.provider?.capabilities?.flexTier === 'supported' && (
                     <label className="field">
                       <span>{t('admin.aiPanel.fields.serviceTier')}</span>

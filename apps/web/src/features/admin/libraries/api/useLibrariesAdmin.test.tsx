@@ -159,9 +159,11 @@ describe('library mutation facet cache', () => {
       name = 'B'
       return { data: library } as never
     })
-    vi.spyOn(Catalog, 'updateCatalogLibraryRecognitionPolicy').mockResolvedValue({
-      data: {},
-    } as never)
+    const policyWrite = vi
+      .spyOn(Catalog, 'updateCatalogLibraryRecognitionPolicy')
+      .mockResolvedValue({
+        data: {},
+      } as never)
     vi.spyOn(Catalog, 'updateCatalogLibraryWebIngestPolicy').mockResolvedValue({
       data: {},
     } as never)
@@ -196,6 +198,7 @@ describe('library mutation facet cache', () => {
       await Promise.resolve()
     })
     expect(retrieval).toHaveBeenCalledOnce()
+    expect(policyWrite).not.toHaveBeenCalled()
     // The failed write does not make the still-running rename safe to refetch.
     const beforeLateWrite = { error, requests: facets.mock.calls.length }
     await act(async () => {

@@ -269,10 +269,10 @@
         "maxParallelJobsGlobal",
         "maxParallelJobsPerWorkspace",
         "maxParallelJobsPerLibrary",
-        "doclingPageBatchSize",
-        "doclingPageStreamWindowPages",
-        "doclingMaxConcurrency",
-        "doclingAcquireTimeoutSecs",
+        "xbergExtractBin",
+        "xbergPageBatchSize",
+        "xbergTimeoutSecs",
+        "xbergAcquireTimeoutSecs",
         "heavyPipelineParallelism",
         "heavyAcquireTimeoutSecs",
         "embeddingParallelism",
@@ -282,13 +282,13 @@
         "maxParallelJobsGlobal": {"type": "integer", "minimum": 1},
         "maxParallelJobsPerWorkspace": {"type": "integer", "minimum": 1},
         "maxParallelJobsPerLibrary": {"type": "integer", "minimum": 1},
-        "doclingPageBatchSize": {"type": "integer", "minimum": 1},
-        "doclingPageStreamWindowPages": {"type": "integer", "minimum": 1},
-        "doclingMaxConcurrency": {"$ref": "#/definitions/positiveIntegerOrAuto"},
-        "doclingAcquireTimeoutSecs": {
+        "xbergExtractBin": {"type": "string", "minLength": 1},
+        "xbergPageBatchSize": {"type": "integer", "minimum": 1, "maximum": 64},
+        "xbergTimeoutSecs": {"type": "integer", "minimum": 1, "maximum": 300},
+        "xbergAcquireTimeoutSecs": {
           "type": "integer",
           "minimum": 1,
-          "maximum": 86400
+          "maximum": 3600
         },
         "heavyPipelineParallelism": {"$ref": "#/definitions/positiveIntegerOrAuto"},
         "heavyAcquireTimeoutSecs": {

@@ -1,6 +1,6 @@
 import * as Dialog from '@radix-ui/react-dialog'
 import { AlertTriangle, ChevronRight, Copy, Inbox, LoaderCircle, Search, X } from 'lucide-react'
-import { useId, useState, type ButtonHTMLAttributes, type ReactNode } from 'react'
+import { useId, useRef, useState, type ButtonHTMLAttributes, type ReactNode } from 'react'
 import { toast } from 'sonner'
 import { useTranslation } from 'react-i18next'
 import type { DemoScenario } from '@/shared/types'
@@ -193,11 +193,25 @@ export function Drawer({
   children: ReactNode
 }>) {
   const { t } = useTranslation()
+  const returnFocus = useRef<HTMLElement | null>(null)
   return (
     <Dialog.Root open={open} onOpenChange={onOpenChange}>
       <Dialog.Portal>
         <Dialog.Overlay className="dialog-overlay drawer-overlay" />
-        <Dialog.Content className="drawer-content">
+        <Dialog.Content
+          className="drawer-content"
+          onOpenAutoFocus={() => {
+            // Controlled drawers have no Dialog.Trigger for Radix to restore.
+            returnFocus.current =
+              document.activeElement instanceof HTMLElement ? document.activeElement : null
+          }}
+          onCloseAutoFocus={(event) => {
+            if (returnFocus.current?.isConnected) {
+              event.preventDefault()
+              returnFocus.current.focus()
+            }
+          }}
+        >
           <div className="dialog-heading">
             <Dialog.Title>{title}</Dialog.Title>
             <Dialog.Close asChild>

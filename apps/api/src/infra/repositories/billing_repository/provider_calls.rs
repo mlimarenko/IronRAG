@@ -411,24 +411,43 @@ pub async fn count_unpriced_provider_calls_by_execution<'e>(
     owning_execution_kind: &str,
     owning_execution_id: Uuid,
 ) -> Result<i64, sqlx::Error> {
+    // Source vision requires input and output; search embedding requires input
+    // only. Neither absent usage nor an unfinished call proves zero liability.
     sqlx::query_scalar::<_, i64>(
         "select count(*)::bigint
          from billing_provider_call provider_call
          where provider_call.owning_execution_kind = $1::billing_owning_execution_kind
            and provider_call.owning_execution_id = $2
-           and exists (
-             select 1
-             from billing_usage usage
+           and (exists (
+              select 1
+              from billing_usage usage
              where usage.provider_call_id = provider_call.id
                and not exists (
                  select 1
                  from billing_charge charge
                  where charge.usage_id = usage.id
                )
-           )",
+            ) or (
+               provider_call.call_kind in ($3, $4)
+              and (
+                provider_call.call_state <> 'completed'
+                or not exists (
+                  select 1 from billing_usage input_usage
+                  where input_usage.provider_call_id = provider_call.id
+                    and input_usage.usage_kind = 'prompt_tokens'
+                )
+                 or (provider_call.call_kind = $3 and not exists (
+                   select 1 from billing_usage output_usage
+                  where output_usage.provider_call_id = provider_call.id
+                    and output_usage.usage_kind = 'completion_tokens'
+                 ))
+              )
+            ))",
     )
     .bind(owning_execution_kind)
     .bind(owning_execution_id)
+    .bind(crate::domains::billing::MCP_SOURCE_IMAGE_DESCRIPTION_CALL_KIND)
+    .bind(crate::domains::billing::KNOWLEDGE_SEARCH_EMBEDDING_CALL_KIND)
     .fetch_one(executor)
     .await
 }

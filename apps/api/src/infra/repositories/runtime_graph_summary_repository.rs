@@ -35,6 +35,41 @@ pub struct UpsertRuntimeGraphTargetSummaryInput {
     pub warning_text: Option<String>,
 }
 
+/// Probes raw candidate identities without admitting or hydrating graph rows.
+/// A result reaching `limit` is only a lower bound on the projection's size.
+///
+/// # Errors
+/// Returns a database error or rejects a non-positive probe limit.
+pub async fn probe_runtime_graph_summary_targets_with_executor<'e, E>(
+    executor: E,
+    library_id: Uuid,
+    projection_version: i64,
+    limit: i64,
+) -> Result<Vec<(String, Uuid)>, sqlx::Error>
+where
+    E: Executor<'e, Database = Postgres>,
+{
+    if limit <= 0 {
+        return Err(sqlx::Error::Protocol("summary candidate limit must be positive".into()));
+    }
+    sqlx::query_as::<_, (String, Uuid)>(
+        "select target_kind, target_id from (
+             (select 'node'::text as target_kind, id as target_id
+              from runtime_graph_node
+              where library_id = $1 and projection_version = $2 limit $3)
+             union all
+             (select 'edge'::text as target_kind, id as target_id
+              from runtime_graph_edge
+              where library_id = $1 and projection_version = $2 limit $3)
+         ) as candidates limit $3",
+    )
+    .bind(library_id)
+    .bind(projection_version)
+    .bind(limit)
+    .fetch_all(executor)
+    .await
+}
+
 pub async fn supersede_runtime_graph_summaries_for_target_with_executor<'e, E>(
     executor: E,
     library_id: Uuid,
@@ -117,17 +152,13 @@ pub async fn upsert_runtime_graph_target_summary_with_connection(
     connection: &mut PgConnection,
     input: &UpsertRuntimeGraphTargetSummaryInput,
 ) -> Result<RuntimeGraphTargetSummaryRow, sqlx::Error> {
-    supersede_runtime_graph_summaries_for_target_with_executor(
-        &mut *connection,
-        input.library_id,
-        &input.target_kind,
-        input.target_id,
-        input.source_truth_version,
-    )
-    .await?;
-
     sqlx::query_as::<_, RuntimeGraphTargetSummaryRow>(
-        "insert into runtime_graph_\u{63}anonical_summary (
+        "with superseded as (
+             delete from runtime_graph_\u{63}anonical_summary
+             where library_id = $3 and target_kind = $4 and target_id = $5
+               and source_truth_version <> $9
+         )
+         insert into runtime_graph_\u{63}anonical_summary (
             id, workspace_id, library_id, target_kind, target_id, summary_text,
             confidence_status, support_count, source_truth_version, generated_from_mutation_id,
             warning_text

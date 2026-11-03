@@ -271,19 +271,24 @@ pub(crate) fn record_graph_runtime_stage(
 pub(crate) fn extraction_lifecycle_from_record(
     record: &RuntimeGraphExtractionRecordRow,
 ) -> GraphExtractionLifecycle {
-    record
-        .raw_output_json
-        .get("lifecycle")
-        .and_then(|value| serde_json::from_value::<GraphExtractionLifecycle>(value.clone()).ok())
-        .unwrap_or_default()
+    extraction_lifecycle_from_json(record.raw_output_json.get("lifecycle"))
 }
 
 #[must_use]
 pub(crate) fn extraction_recovery_summary_from_record(
     record: &RuntimeGraphExtractionRecordRow,
 ) -> Option<ExtractionRecoverySummary> {
-    record
-        .raw_output_json
-        .get("recovery_summary")
-        .and_then(|value| serde_json::from_value::<ExtractionRecoverySummary>(value.clone()).ok())
+    extraction_recovery_summary_from_json(record.raw_output_json.get("recovery_summary"))
+}
+
+pub(crate) fn extraction_lifecycle_from_json(
+    value: Option<&serde_json::Value>,
+) -> GraphExtractionLifecycle {
+    value.and_then(|value| serde_json::from_value(value.clone()).ok()).unwrap_or_default()
+}
+
+pub(crate) fn extraction_recovery_summary_from_json(
+    value: Option<&serde_json::Value>,
+) -> Option<ExtractionRecoverySummary> {
+    value.and_then(|value| serde_json::from_value(value.clone()).ok())
 }

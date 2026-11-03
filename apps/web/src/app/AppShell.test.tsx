@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { render, screen, within } from '@testing-library/react'
+import { render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
@@ -7,6 +7,7 @@ import { MemoryRouter } from 'react-router-dom'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { AppShell } from './AppShell'
+import { BUILD_VERSION_TAG } from '@/shared/lib/build-version'
 
 const layoutStyles = readFileSync(resolve(process.cwd(), 'src/styles/layout.css'), 'utf8')
 
@@ -229,6 +230,63 @@ describe('AppShell compact hierarchy', () => {
     expect(screen.getByRole('status').tagName).toBe('OUTPUT')
     const update = await screen.findByRole('link', { name: /Update available/ })
     expect(update).toHaveAttribute('href', 'https://example.com/release')
+    expect(update).toHaveTextContent('Update available: v9.0.0')
+    const version = screen.getByRole('link', { name: BUILD_VERSION_TAG })
+    expect(version).toHaveAttribute('href', 'https://github.com/mlimarenko/IronRAG/releases')
+    expect(version).toHaveAttribute('target', '_blank')
+    expect(version).toHaveAttribute('rel', 'noreferrer')
+    expect(update).toHaveAttribute('target', '_blank')
+    expect(update).toHaveAttribute('rel', 'noreferrer')
+    expect(version.parentElement).toBe(update.parentElement)
+    expect(version.parentElement).toHaveAttribute('aria-live', 'polite')
+    expect(version.nextElementSibling).toBe(update)
     expect(screen.getByRole('link', { name: 'API docs' })).toHaveAttribute('href', '/swagger.html')
+    expect(screen.queryByRole('link', { name: 'GitHub' })).not.toBeInTheDocument()
+  })
+
+  it('links an update without a release URL to the releases page', async () => {
+    mocks.getLatestVersion.mockResolvedValue({
+      status: 'update_available',
+      latestVersion: '0.6.2',
+      releaseUrl: null,
+    })
+    renderShell()
+    expect(await screen.findByRole('link', { name: /Update available/ })).toHaveAttribute(
+      'href',
+      'https://github.com/mlimarenko/IronRAG/releases',
+    )
+  })
+
+  it.each([
+    { status: 'up_to_date', latestVersion: '0.6.2' },
+    { status: 'unknown', latestVersion: '0.6.2' },
+    { status: 'update_available', latestVersion: null },
+    { status: 'update_available', latestVersion: '  ' },
+  ])('hides update for $status and version $latestVersion', async (response) => {
+    mocks.getLatestVersion.mockResolvedValue(response)
+    renderShell()
+    await waitFor(() => expect(mocks.getLatestVersion).toHaveBeenCalled())
+    expect(screen.queryByRole('link', { name: /Update available/ })).not.toBeInTheDocument()
+  })
+
+  it('keeps the current version visible when the release request fails', async () => {
+    mocks.getLatestVersion.mockRejectedValue(new Error('unavailable'))
+    renderShell()
+    expect(screen.getByRole('link', { name: BUILD_VERSION_TAG })).toBeInTheDocument()
+    await waitFor(() => expect(mocks.getLatestVersion).toHaveBeenCalled())
+    expect(screen.queryByRole('link', { name: /Update available/ })).not.toBeInTheDocument()
+  })
+
+  it('does not navigate to an unsafe release URL', async () => {
+    mocks.getLatestVersion.mockResolvedValue({
+      status: 'update_available',
+      latestVersion: 'v0.6.2',
+      releaseUrl: 'javascript:alert(1)',
+    })
+    renderShell()
+    expect(await screen.findByRole('link', { name: 'Update available: v0.6.2' })).toHaveAttribute(
+      'href',
+      'https://github.com/mlimarenko/IronRAG/releases',
+    )
   })
 })

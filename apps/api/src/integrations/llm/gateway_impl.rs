@@ -46,7 +46,7 @@ impl LlmGateway for UnifiedGateway {
             resolved.reasoning_wire,
         );
         let controls = chat_request_controls(&request, &resolved)?;
-        let (output_text, usage_json) = match resolved.runtime.kind.as_str() {
+        let (output_text, usage_json, completion_status) = match resolved.runtime.kind.as_str() {
             OPENAI_COMPATIBLE_RUNTIME_KIND => {
                 self.call_openai_compatible(
                     openai_compatible_request(
@@ -101,6 +101,7 @@ impl LlmGateway for UnifiedGateway {
             model_name: std::mem::take(&mut request.model_name),
             output_text,
             usage_json,
+            completion_status,
         })
     }
 
@@ -126,12 +127,15 @@ impl LlmGateway for UnifiedGateway {
             }
             return Ok(response);
         }
+        if resolved.runtime.kind != OPENAI_COMPATIBLE_RUNTIME_KIND {
+            return Err(anyhow!("unsupported provider runtime kind"));
+        }
         let upstream_extra = Self::upstream_extra_parameters(
             &request.extra_parameters_json,
             resolved.reasoning_wire,
         );
         let controls = chat_request_controls(&request, &resolved)?;
-        let (output_text, usage_json) = self
+        let (output_text, usage_json, completion_status) = self
             .call_openai_compatible_stream(
                 openai_compatible_request(
                     &request.provider_kind,
@@ -160,6 +164,7 @@ impl LlmGateway for UnifiedGateway {
             model_name: std::mem::take(&mut request.model_name),
             output_text,
             usage_json,
+            completion_status,
         })
     }
 
@@ -473,7 +478,9 @@ impl LlmGateway for UnifiedGateway {
             request.mime_type,
             BASE64_STANDARD.encode(&request.image_bytes)
         );
-        let (output_text, usage_json) = match resolved.runtime.kind.as_str() {
+        // VisionResponse exposes text and usage only; completion metadata remains
+        // available on the canonical chat response used by semantic verification.
+        let (output_text, usage_json, _) = match resolved.runtime.kind.as_str() {
             OPENAI_COMPATIBLE_RUNTIME_KIND => {
                 self.call_openai_compatible(
                     openai_compatible_request(

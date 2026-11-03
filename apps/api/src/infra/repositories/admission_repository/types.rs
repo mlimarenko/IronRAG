@@ -283,9 +283,24 @@ pub(super) struct MutationIdentityRow {
     pub failure_code: Option<String>,
     pub conflict_code: Option<String>,
     pub request_fingerprint: Option<String>,
+    pub request_identity: Option<serde_json::Value>,
 }
 
 impl MutationIdentityRow {
+    pub(super) fn verify_replay(
+        &self,
+        incoming: &serde_json::Value,
+    ) -> Result<(), super::AdmissionError> {
+        let conflict = || super::AdmissionError::IdempotencyConflict { mutation_id: self.id };
+        let identity = self.request_identity.as_ref().ok_or_else(conflict)?;
+        let digest = self.request_fingerprint.as_deref().ok_or_else(conflict)?;
+        super::verify_fingerprint(identity, digest).map_err(|_| conflict())?;
+        if identity != incoming {
+            return Err(conflict());
+        }
+        Ok(())
+    }
+
     pub(super) fn into_row(self) -> content_mutation_repository::ContentMutationRow {
         content_mutation_repository::ContentMutationRow {
             id: self.id,

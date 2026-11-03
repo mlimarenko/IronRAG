@@ -14,7 +14,7 @@ use crate::{
             ServiceRole, StartupAuthorityMode,
         },
         query::SemanticRerankMode,
-        recognition::{LibraryRecognitionPolicy, RecognitionEngine},
+        recognition::{LibraryRecognitionPolicy, RasterImageEngine},
     },
     shared::auth_tokens::is_well_formed_api_token,
 };
@@ -442,8 +442,6 @@ pub struct Settings {
     pub mcp_memory_max_search_limit: usize,
     pub mcp_memory_idempotency_retention_hours: u64,
     pub mcp_memory_audit_enabled: bool,
-    pub chunking_max_chars: usize,
-    pub chunking_overlap_chars: usize,
     /// Maximum concurrent outbound calls to a single provider endpoint
     /// (keyed by `provider_kind` + base URL), shared across the ingest and
     /// query lanes. `0` is an explicit unlimited mode; the production-safe

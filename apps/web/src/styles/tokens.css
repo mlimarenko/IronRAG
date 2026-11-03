@@ -41,13 +41,7 @@
   --sidebar-width: 224px;
   --topbar-height: 48px;
   color-scheme: light;
-  font-family:
-    Inter,
-    ui-sans-serif,
-    -apple-system,
-    BlinkMacSystemFont,
-    'Segoe UI',
-    sans-serif;
+  font-family: var(--font-medeo-sans);
   color: var(--text);
   background: var(--bg);
   font-synthesis: none;

@@ -4,11 +4,11 @@ use super::super::coverage::{
 };
 use super::super::literal_coverage::{answer_generation_question, requires_no_evidence_candidate};
 use super::super::literal_revision::{
-    LiteralRevisionAttempt, LiteralRevisionPath, finalize_verified_answer,
-    revise_answer_literals_if_needed,
+    LiteralRevisionAttempt, LiteralRevisionPath, revise_answer_literals_if_needed,
 };
 use super::super::output_boundary::enforce_hard_output_boundary;
-use super::super::preflight::{PreflightAnswerCandidate, persist_llm_context_snapshot};
+use super::super::preflight::{PreflightAnswerCandidate, persist_failed_answer_snapshot};
+use super::super::selected_answer::{SelectedAnswerContext, finish_selected_answer};
 use super::super::verification::verify_generated_answer;
 use super::super::{AnswerGenerationStage, RuntimeAnswerQueryResult};
 use super::logging::{
@@ -118,7 +118,7 @@ async fn finish_preflight_single_shot(
         },
     )
     .await?;
-    revise_answer_literals_if_needed(
+    let revision_result = revise_answer_literals_if_needed(
         LiteralRevisionAttempt {
             state,
             execution_context,
@@ -132,8 +132,12 @@ async fn finish_preflight_single_shot(
         provider_calls,
         &mut preflight_debug,
     )
-    .await?;
-    verification_stage = finalize_verified_answer(state, execution_id, verification_stage).await?;
+    .await;
+    answer.snapshot_context.record_iterations(preflight_debug)?;
+    if let Err(error) = revision_result {
+        persist_failed_answer_snapshot(state, answer.snapshot_context).await;
+        return Err(error);
+    }
     if single_shot_answer_is_acceptable(
         &verification_stage.generation.answer,
         &verification_stage,
@@ -146,29 +150,23 @@ async fn finish_preflight_single_shot(
             verification_stage.verification.state,
             started.elapsed().as_millis(),
         );
-        let total_iterations = preflight_debug.len();
-        persist_llm_context_snapshot(
-            state,
-            answer.snapshot_context.snapshot_with_iterations(
-                &verification_stage.generation.answer,
-                preflight_debug,
-                total_iterations,
-            ),
+        let selected = finish_selected_answer(
+            SelectedAnswerContext {
+                state,
+                execution: execution_context,
+                question: request.effective_question,
+                snapshot: answer.snapshot_context,
+            },
+            verification_stage,
+            provider_calls,
         )
         .await?;
-        return Ok(PreflightSingleShot::Accepted(Box::new(RuntimeAnswerQueryResult {
-            answer: verification_stage.generation.answer,
-            provider_calls: std::mem::take(provider_calls),
-        })));
+        return Ok(PreflightSingleShot::Accepted(Box::new(selected)));
     }
     let verify_state = verification_stage.verification.state;
     let warning_count = verification_stage.verification.warnings.len();
     log_preflight_single_shot_rejected(execution_id, verify_state, warning_count);
-    Ok(PreflightSingleShot::Candidate(Box::new(PreflightAnswerCandidate {
-        total_iterations: preflight_debug.len(),
-        debug_iterations: preflight_debug,
-        verification_stage,
-    })))
+    Ok(PreflightSingleShot::Candidate(Box::new(PreflightAnswerCandidate { verification_stage })))
 }
 
 /// The deterministic insufficient-evidence candidate finalized when retrieval
@@ -209,11 +207,7 @@ async fn build_no_evidence_candidate(
         },
     )
     .await?;
-    Ok(PreflightAnswerCandidate {
-        verification_stage,
-        debug_iterations: Vec::new(),
-        total_iterations: 0,
-    })
+    Ok(PreflightAnswerCandidate { verification_stage })
 }
 
 /// Finalizes the fixed-evidence answer: runs the preflight single-shot attempt,
@@ -245,13 +239,6 @@ pub(super) async fn finalize_preflight_answer(
             "grounded-answer generation produced no answer candidate for execution {execution_id}"
         );
     };
-    let verification_stage =
-        finalize_verified_answer(state, execution_id, candidate.verification_stage).await?;
-    let candidate = PreflightAnswerCandidate {
-        verification_stage,
-        debug_iterations: candidate.debug_iterations,
-        total_iterations: candidate.total_iterations,
-    };
     tracing::info!(
         stage = "answer.fixed_evidence_finalized",
         %execution_id,
@@ -259,17 +246,15 @@ pub(super) async fn finalize_preflight_answer(
         warning_count = candidate.verification_stage.verification.warnings.len(),
         "finalizing grounded answer from fixed retrieved evidence without a second retrieval pass"
     );
-    persist_llm_context_snapshot(
-        state,
-        answer.snapshot_context.snapshot_with_iterations(
-            &candidate.verification_stage.generation.answer,
-            candidate.debug_iterations,
-            candidate.total_iterations,
-        ),
+    finish_selected_answer(
+        SelectedAnswerContext {
+            state,
+            execution: answer.request.execution_context,
+            question: answer.request.effective_question,
+            snapshot: answer.snapshot_context,
+        },
+        candidate.verification_stage,
+        provider_calls,
     )
-    .await?;
-    Ok(RuntimeAnswerQueryResult {
-        answer: candidate.verification_stage.generation.answer,
-        provider_calls: std::mem::take(provider_calls),
-    })
+    .await
 }

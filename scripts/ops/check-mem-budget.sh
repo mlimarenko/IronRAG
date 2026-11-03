@@ -18,12 +18,12 @@
 # here.
 #
 # Usage: scripts/ops/check-mem-budget.sh [compose-file] [ceiling-MiB]
-#   defaults: docker-compose.yml, 5632 MiB (6 GiB - 0.5 GiB headroom)
+#   defaults: docker-compose.yml, 7208 MiB (8 GiB less 12% host headroom)
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 COMPOSE_FILE="${1:-${ROOT_DIR}/docker-compose.yml}"
-CEILING_MIB="${2:-5632}"
+CEILING_MIB="${2:-7208}"
 
 if [[ ! -f "${COMPOSE_FILE}" ]]; then
   echo "check-mem-budget: compose file not found: ${COMPOSE_FILE}" >&2

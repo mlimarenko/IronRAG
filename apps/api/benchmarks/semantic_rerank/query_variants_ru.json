@@ -1,0 +1,31 @@
+{
+  "version": "2026-10-25.1",
+  "corpusSha256": "488c687de57ee97a23caf6bc4916b91f851e3758c360fbcd2f0281cb3dd1edee",
+  "description": "Authored Russian translations of the original English questions. Candidates, order and grades are inherited unchanged. This panel measures Russian queries over predominantly English sources, not Russian-document retrieval. Grade 3 remains the original English term-overlap proxy, not a new human relevance judgement.",
+  "variants": [
+    {"id":"q01-ru","parentQueryId":"q01","language":"ru","query":"Что такое векторная база данных и для чего она используется?"},
+    {"id":"q02-ru","parentQueryId":"q02","language":"ru","query":"Как генерация с дополнением поиском (RAG) объединяет поиск и языковую модель?"},
+    {"id":"q03-ru","parentQueryId":"q03","language":"ru","query":"Что такое граф знаний?"},
+    {"id":"q04-ru","parentQueryId":"q04","language":"ru","query":"Что такое графовая база данных и как она хранит данные?"},
+    {"id":"q05-ru","parentQueryId":"q05","language":"ru","query":"Что распознавание именованных сущностей выявляет в тексте?"},
+    {"id":"q06-ru","parentQueryId":"q06","language":"ru","query":"Для чего используется оптическое распознавание символов?"},
+    {"id":"q07-ru","parentQueryId":"q07","language":"ru","query":"Что изучает информационный поиск как область исследований?"},
+    {"id":"q08-ru","parentQueryId":"q08","language":"ru","query":"Что такое семантическая паутина?"},
+    {"id":"q09-ru","parentQueryId":"q09","language":"ru","query":"Как работает архитектура трансформера в глубоком обучении?"},
+    {"id":"q10-ru","parentQueryId":"q10","language":"ru","query":"Что такое большая языковая модель?"},
+    {"id":"q11-ru","parentQueryId":"q11","language":"ru","query":"Что такое ответы на вопросы как задача информатики?"},
+    {"id":"q12-ru","parentQueryId":"q12","language":"ru","query":"Как Rust обеспечивает производительность, типобезопасность, конкурентность и безопасность памяти?"},
+    {"id":"q13-ru","parentQueryId":"q13","language":"ru","query":"Что такое Pod в Kubernetes?"},
+    {"id":"q14-ru","parentQueryId":"q14","language":"ru","query":"Что такое Service в Kubernetes?"},
+    {"id":"q15-ru","parentQueryId":"q15","language":"ru","query":"Для чего используется ConfigMap в Kubernetes?"},
+    {"id":"q16-ru","parentQueryId":"q16","language":"ru","query":"Как Deployment в Kubernetes описывает желаемое состояние?"},
+    {"id":"q17-ru","parentQueryId":"q17","language":"ru","query":"Что означает внедрение зависимостей в FastAPI?"},
+    {"id":"q18-ru","parentQueryId":"q18","language":"ru","query":"Как FastAPI обрабатывает ошибки?"},
+    {"id":"q19-ru","parentQueryId":"q19","language":"ru","query":"Как в FastAPI реализована безопасность?"},
+    {"id":"q20-ru","parentQueryId":"q20","language":"ru","query":"Как работает протокол авторизации OAuth 2.0?"},
+    {"id":"q21-ru","parentQueryId":"q21","language":"ru","query":"Как протокол TLS устанавливает защищённое соединение?"},
+    {"id":"q22-ru","parentQueryId":"q22","language":"ru","query":"Как работает протокол WebSocket?"},
+    {"id":"q23-ru","parentQueryId":"q23","language":"ru","query":"Каковы этапы поезда релизов?"},
+    {"id":"q24-ru","parentQueryId":"q24","language":"ru","query":"Что такое стандарт relay twin?"}
+  ]
+}

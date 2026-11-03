@@ -2,6 +2,29 @@ use super::*;
 
 use crate::shared::extraction::file_extract::{ExtractionFailureClass, UploadAdmissionError};
 
+/// Admission only: deterministic native inspection, never a paid recognition pass.
+pub(super) async fn inspect_web_resource(
+    file_name: &str,
+    mime_type: Option<&str>,
+    bytes: &[u8],
+) -> Result<crate::shared::extraction::file_extract::FileExtractionPlan, UploadAdmissionError> {
+    use crate::shared::extraction::file_extract::{
+        build_model_free_file_extraction_plan, validate_upload_file_admission,
+    };
+    let rejection = |error| {
+        UploadAdmissionError::from_file_extract_error(
+            file_name,
+            mime_type,
+            u64::try_from(bytes.len()).unwrap_or(u64::MAX),
+            &error,
+        )
+    };
+    validate_upload_file_admission(Some(file_name), mime_type, bytes).map_err(&rejection)?;
+    build_model_free_file_extraction_plan(Some(file_name), mime_type, bytes.to_vec())
+        .await
+        .map_err(rejection)
+}
+
 #[derive(Default)]
 pub(super) struct MappedCounts {
     pub(super) counts: WebRunCounts,

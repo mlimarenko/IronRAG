@@ -8,28 +8,63 @@ use async_trait::async_trait;
 use image::{DynamicImage, ImageFormat};
 use zip::write::SimpleFileOptions;
 
-use super::picture_ocr::strip_docling_picture_ocr_scaffold;
 use super::*;
+
+// General-format fixtures exercise the same native child route as uploads.
+// The root check runner supplies IRONRAG_XBERG_EXTRACT_BIN for its built binary.
+// A separate thread keeps this synchronous fixture API safe inside Tokio tests.
+fn build_file_extraction_plan(
+    file_name: Option<&str>,
+    mime_type: Option<&str>,
+    bytes: Vec<u8>,
+) -> Result<FileExtractionPlan, FileExtractError> {
+    let kind = detect_upload_file_kind(file_name, mime_type, &bytes);
+    if !matches!(kind, UploadFileKind::TextLike | UploadFileKind::Spreadsheet) {
+        return super::build_file_extraction_plan(file_name, mime_type, bytes);
+    }
+    let file_name = file_name.map(str::to_owned);
+    let mime_type = mime_type.map(str::to_owned);
+    std::thread::spawn(move || {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("native fixture runtime");
+        runtime.block_on(super::build_model_free_file_extraction_plan(
+            file_name.as_deref(),
+            mime_type.as_deref(),
+            bytes,
+        ))
+    })
+    .join()
+    .expect("native fixture thread")
+}
 use crate::integrations::llm::{
     ChatRequest, ChatResponse, EmbeddingBatchRequest, EmbeddingBatchResponse, EmbeddingRequest,
     EmbeddingResponse, VisionRequest, VisionResponse,
 };
-use crate::shared::extraction::ExtractedImage;
 
 #[test]
-fn docling_output_and_resource_faults_never_reject_the_input_bytes() {
-    use crate::integrations::docling::DoclingExtractionError;
+fn xberg_output_and_resource_faults_never_reject_the_input_bytes() {
+    use crate::integrations::xberg::XbergExtractionError;
 
-    let invalid_json = DoclingExtractionError::InvalidJson(
+    let invalid_json = XbergExtractionError::InvalidJson(
         serde_json::from_str::<serde_json::Value>("{").expect_err("invalid JSON fixture"),
     );
-    let invalid_utf8 = DoclingExtractionError::InvalidUtf8(
+    let invalid_utf8 = XbergExtractionError::InvalidUtf8(
         String::from_utf8(vec![0xff]).expect_err("invalid UTF-8 fixture"),
     );
-    for fault in [invalid_json, invalid_utf8, DoclingExtractionError::EmptyOutput] {
-        assert_eq!(docling_failure_class(&fault), ExtractionFailureClass::OperationalTerminal);
+    for fault in [
+        invalid_json,
+        invalid_utf8,
+        XbergExtractionError::EmptyOutput,
+        XbergExtractionError::ProducerRejected {
+            error_code: None,
+            message: "native workbook refused".into(),
+        },
+    ] {
+        assert_eq!(xberg_failure_class(&fault), ExtractionFailureClass::OperationalTerminal);
         assert_eq!(
-            docling_failure_class(&DoclingExtractionError::PageExtractionFailed {
+            xberg_failure_class(&XbergExtractionError::PageExtractionFailed {
                 page: 1,
                 source: Box::new(fault),
             }),
@@ -37,11 +72,11 @@ fn docling_output_and_resource_faults_never_reject_the_input_bytes() {
         );
     }
     assert_eq!(
-        docling_failure_class(&DoclingExtractionError::Timeout(10)),
+        xberg_failure_class(&XbergExtractionError::Timeout(10)),
         ExtractionFailureClass::OperationalRetryable
     );
     assert_eq!(
-        docling_failure_class(&DoclingExtractionError::InsufficientMemory {
+        xberg_failure_class(&XbergExtractionError::InsufficientMemory {
             memory_limit_mib: 1024,
             current_rss_mib: 960,
             available_mib: 64,
@@ -50,6 +85,37 @@ fn docling_output_and_resource_faults_never_reject_the_input_bytes() {
         }),
         ExtractionFailureClass::OperationalTerminal
     );
+}
+
+#[tokio::test]
+async fn runtime_html_dispatch_preserves_declared_cp1251_without_a_meta_tag() {
+    let html = "<html><body><main><h1>Отчёт</h1><p>Проверка кодировки без метатега: Привет, мир.</p></main></body></html>";
+    let (bytes, _, had_errors) = encoding_rs::WINDOWS_1251.encode(html);
+    assert!(!had_errors);
+    let policy = LibraryRecognitionPolicy::default();
+    let plan = build_runtime_file_extraction_plan(FileExtractionRequest {
+        cancellation_token: None,
+        gateway: &FakeGateway,
+        vision_provider: None,
+        vision_api_key: None,
+        vision_base_url: None,
+        vision_extra_parameters_json: None,
+        file_name: Some("report.html"),
+        mime_type: Some("TEXT/HTML; charset=windows-1251"),
+        file_bytes: bytes.into_owned(),
+        recognition_policy: &policy,
+    })
+    .await
+    .expect("production dispatch through the actual model-free native child");
+    let text = plan.normalized_text.as_deref().expect("decoded HTML text");
+    assert!(text.contains("Отчёт"));
+    assert!(text.contains("Проверка кодировки без метатега: Привет, мир."));
+    assert!(!text.contains('\u{fffd}'));
+    assert_eq!(
+        plan.source_map["native_extraction"]["mime_type"],
+        "text/html; charset=windows-1251"
+    );
+    assert_eq!(plan.source_map["native_extraction"]["producer"], xberg::PRODUCER);
 }
 
 fn valid_png_bytes() -> Vec<u8> {
@@ -250,9 +316,6 @@ macro_rules! vision_only_gateway {
 
 struct FakeGateway;
 struct EmptyVisionGateway;
-struct PartialFailureVisionGateway {
-    calls: AtomicUsize,
-}
 struct FlakyVisionGateway {
     calls: AtomicUsize,
 }
@@ -270,7 +333,8 @@ vision_only_gateway!(FakeGateway, |_gateway: &FakeGateway, mut request: VisionRe
     Ok(VisionResponse {
         provider_kind: std::mem::take(&mut request.provider_kind),
         model_name: std::mem::take(&mut request.model_name),
-        output_text: "Acme Corp\nBudget 2026".to_string(),
+        output_text: serde_json::json!({"outcome":"text","text":"Acme Corp\nBudget 2026"})
+            .to_string(),
         usage_json: serde_json::json!({
             "prompt_tokens": 11,
             "completion_tokens": 3,
@@ -298,7 +362,11 @@ vision_only_gateway!(
         Ok(VisionResponse {
             provider_kind: std::mem::take(&mut request.provider_kind),
             model_name: std::mem::take(&mut request.model_name),
-            output_text: if call == 0 { String::new() } else { "Recovered OCR text".to_string() },
+            output_text: if call == 0 {
+                String::new()
+            } else {
+                serde_json::json!({"outcome":"text","text":"Recovered OCR text"}).to_string()
+            },
             usage_json: if call == 0 {
                 serde_json::json!({
                     "prompt_tokens": 100,
@@ -323,7 +391,8 @@ vision_only_gateway!(
         Ok(VisionResponse {
             provider_kind: std::mem::take(&mut request.provider_kind),
             model_name: std::mem::take(&mut request.model_name),
-            output_text: "Counted OCR text".to_string(),
+            output_text: serde_json::json!({"outcome":"text","text":"Counted OCR text"})
+                .to_string(),
             usage_json: serde_json::json!({}),
         })
     }
@@ -346,26 +415,6 @@ vision_only_gateway!(
             model_name: std::mem::take(&mut request.model_name),
             output_text: String::new(),
             usage_json: serde_json::json!({}),
-        })
-    }
-);
-
-vision_only_gateway!(
-    PartialFailureVisionGateway,
-    |gateway: &PartialFailureVisionGateway, mut request: VisionRequest| {
-        let call = gateway.calls.fetch_add(1, Ordering::SeqCst);
-        if call == 1 {
-            return Err(anyhow!("synthetic picture OCR failure"));
-        }
-        Ok(VisionResponse {
-            provider_kind: std::mem::take(&mut request.provider_kind),
-            model_name: std::mem::take(&mut request.model_name),
-            output_text: "First embedded diagram text".to_string(),
-            usage_json: serde_json::json!({
-                "prompt_tokens": 7,
-                "completion_tokens": 2,
-                "total_tokens": 9,
-            }),
         })
     }
 );
@@ -753,7 +802,7 @@ fn irg173_workbook_container_without_sheet_entries_is_operational_not_content_in
 #[test]
 fn irg173_declared_document_kinds_keep_their_route_over_a_zip_container() {
     // The ZIP signature is shared by DOCX/PPTX and workbooks. An explicitly
-    // declared document kind must stay on the docling route; only a text-like,
+    // declared document kind must stay on the xberg route; only a text-like,
     // generic-binary or absent declaration yields to the container signature.
     assert_eq!(
         detect_upload_file_kind(
@@ -790,16 +839,16 @@ fn irg173_plain_text_declaration_stays_text_like_without_a_container() {
 }
 
 #[test]
-fn irg173_declared_text_plain_with_pdf_bytes_routes_to_docling() {
+fn irg173_declared_text_plain_with_pdf_bytes_routes_to_xberg() {
     // A URL without an extension served with `Content-Type: text/plain` can be
     // a real PDF. Declared text is trusted only when the bytes are text; a
-    // `%PDF-` header proves otherwise and must reach the docling route instead
+    // `%PDF-` header proves otherwise and must reach the xberg route instead
     // of a `ContentInvalid` verdict fabricated by the UTF-8 decoder.
     let pdf = b"%PDF-1.7\n%\xE2\xE3\xCF\xD3\n1 0 obj\n<< /Length 4 >>\nstream\n\x00\x01\x02\x03\nendstream\nendobj\n%%EOF\n"
         .to_vec();
     assert_eq!(detect_upload_file_kind(None, Some("text/plain"), &pdf), UploadFileKind::Pdf);
     let error = build_file_extraction_plan(None, Some("text/plain"), pdf)
-        .expect_err("a PDF requires the docling runtime, not the local text parser");
+        .expect_err("a PDF requires the xberg runtime, not the local text parser");
     assert_ne!(error.failure_class(), ExtractionFailureClass::ContentInvalid);
 }
 
@@ -1086,13 +1135,13 @@ fn routes_html_uploads_through_html_main_content_extractor() {
 }
 
 #[test]
-fn local_plan_rejects_docling_owned_pdf_upload() {
+fn local_plan_rejects_xberg_owned_pdf_upload() {
     let error = match build_file_extraction_plan(
         Some("manual.pdf"),
         Some("application/pdf"),
         b"%PDF-1.7\n".to_vec(),
     ) {
-        Ok(plan) => panic!("pdf upload should require runtime docling: {:?}", plan.file_kind),
+        Ok(plan) => panic!("pdf upload should require runtime xberg: {:?}", plan.file_kind),
         Err(error) => error,
     };
 
@@ -1100,7 +1149,7 @@ fn local_plan_rejects_docling_owned_pdf_upload() {
         error,
         FileExtractError::ExtractionFailed { file_kind: UploadFileKind::Pdf, .. }
     ));
-    assert!(error.to_string().contains("docling runtime extraction is required"));
+    assert!(error.to_string().contains("xberg runtime extraction is required"));
 }
 
 #[test]
@@ -1167,6 +1216,7 @@ fn builds_tabular_extraction_plan_for_tsv_upload() {
 async fn runtime_plan_uses_native_tabular_parser_for_xlsx_upload() {
     let policy = LibraryRecognitionPolicy::default();
     let result = build_runtime_file_extraction_plan(FileExtractionRequest {
+        cancellation_token: None,
         gateway: &FakeGateway,
         vision_provider: None,
         vision_api_key: None,
@@ -1184,6 +1234,10 @@ async fn runtime_plan_uses_native_tabular_parser_for_xlsx_upload() {
     assert_eq!(result.extraction_kind, "tabular_text");
     assert_eq!(result.source_format_metadata.source_format, "xlsx");
     assert_eq!(result.source_map["recognition"]["engine"], serde_json::json!("native"));
+    assert!(
+        result.source_map.get("native_extraction").is_none(),
+        "specialized XLSX Table projection must not claim a native child invocation"
+    );
     assert_eq!(result.source_map["recognition"]["capability"], serde_json::json!("tabular_parse"));
     assert!(result.provider_kind.is_none());
     assert!(
@@ -1225,8 +1279,8 @@ fn upload_admission_accepts_spreadsheet_before_persistence() {
 }
 
 #[tokio::test]
-async fn runtime_plan_uses_vision_provider_for_non_docling_images() {
-    let policy = LibraryRecognitionPolicy { raster_image_engine: RecognitionEngine::Vision };
+async fn runtime_plan_uses_vision_provider_for_non_xberg_images() {
+    let policy = LibraryRecognitionPolicy::default();
     let provider = ProviderModelSelection {
         provider_kind: "openai".to_string(),
         model_name: "gpt-5.4-mini".to_string(),
@@ -1236,6 +1290,7 @@ async fn runtime_plan_uses_vision_provider_for_non_docling_images() {
     });
 
     let result = build_runtime_file_extraction_plan(FileExtractionRequest {
+        cancellation_token: None,
         gateway: &FakeGateway,
         vision_provider: Some(&provider),
         vision_api_key: Some("test-key"),
@@ -1272,7 +1327,7 @@ async fn runtime_plan_uses_vision_provider_for_non_docling_images() {
 
 #[tokio::test]
 async fn runtime_plan_uses_vision_policy_for_static_raster_images() {
-    let policy = LibraryRecognitionPolicy { raster_image_engine: RecognitionEngine::Vision };
+    let policy = LibraryRecognitionPolicy::default();
     let provider = ProviderModelSelection {
         provider_kind: "openai".to_string(),
         model_name: "gpt-5.4-mini".to_string(),
@@ -1282,6 +1337,7 @@ async fn runtime_plan_uses_vision_policy_for_static_raster_images() {
     });
 
     let result = build_runtime_file_extraction_plan(FileExtractionRequest {
+        cancellation_token: None,
         gateway: &FakeGateway,
         vision_provider: Some(&provider),
         vision_api_key: Some("test-key"),
@@ -1295,34 +1351,35 @@ async fn runtime_plan_uses_vision_policy_for_static_raster_images() {
     .await
     .expect("vision policy should route static raster image to vision");
 
-    assert_eq!(result.extraction_kind, "vision_image");
+    assert!(result.normalized_text.as_deref().is_some_and(|text| text.contains("Acme Corp")));
     assert_eq!(result.provider_kind.as_deref(), Some("openai"));
     assert_eq!(result.source_map["recognition"]["engine"], serde_json::json!("vision"));
 }
 
-#[test]
-fn vision_image_policy_without_binding_uses_docling_profile() {
-    let policy = LibraryRecognitionPolicy { raster_image_engine: RecognitionEngine::Vision };
-
-    let profile =
-        docling_owned_recognition_profile(UploadFileKind::Image, "png", &policy, false).expect(
-            "missing document-understanding binding should fall back to Docling for Docling-supported images",
-        );
-
-    assert_eq!(profile.engine, RecognitionEngine::Docling);
-    assert_eq!(profile.capability, RecognitionCapability::ImageOcr);
-    assert_eq!(profile.structure_tier, RecognitionStructureTier::Layout);
+#[tokio::test]
+async fn explicit_vision_image_policy_without_binding_is_refused() {
+    let mut native = native_visual_fixture(true);
+    let error = recognize_native_visuals(
+        &mut native,
+        UploadFileKind::Pdf,
+        visual_input(&FakeGateway, None),
+    )
+    .await
+    .err()
+    .expect("binding required for actual visual input");
+    assert_eq!(error.failure_class(), ExtractionFailureClass::OperationalTerminal);
 }
 
 #[tokio::test]
 async fn runtime_plan_rejects_empty_vision_image_text() {
-    let policy = LibraryRecognitionPolicy { raster_image_engine: RecognitionEngine::Vision };
+    let policy = LibraryRecognitionPolicy::default();
     let provider = ProviderModelSelection {
         provider_kind: "openai".to_string(),
         model_name: "gpt-5.4-mini".to_string(),
     };
 
     let error = build_runtime_file_extraction_plan(FileExtractionRequest {
+        cancellation_token: None,
         gateway: &EmptyVisionGateway,
         vision_provider: Some(&provider),
         vision_api_key: Some("test-key"),
@@ -1336,12 +1393,13 @@ async fn runtime_plan_rejects_empty_vision_image_text() {
     .await
     .expect_err("empty image OCR must fail loudly");
 
-    assert!(error.to_string().contains("image recognition produced no readable text"));
+    assert!(error.to_string().contains("invalid recognition outcome"));
+    assert_eq!(error.vision_calls().len(), 2);
 }
 
 #[tokio::test]
 async fn runtime_plan_retries_once_when_vision_returns_empty_then_text() {
-    let policy = LibraryRecognitionPolicy { raster_image_engine: RecognitionEngine::Vision };
+    let policy = LibraryRecognitionPolicy::default();
     let provider = ProviderModelSelection {
         provider_kind: "openai".to_string(),
         model_name: "gpt-5.4-mini".to_string(),
@@ -1349,6 +1407,7 @@ async fn runtime_plan_retries_once_when_vision_returns_empty_then_text() {
     let gateway = FlakyVisionGateway { calls: AtomicUsize::new(0) };
 
     let result = build_runtime_file_extraction_plan(FileExtractionRequest {
+        cancellation_token: None,
         gateway: &gateway,
         vision_provider: Some(&provider),
         vision_api_key: Some("test-key"),
@@ -1368,19 +1427,15 @@ async fn runtime_plan_retries_once_when_vision_returns_empty_then_text() {
         result.normalized_text
     );
     assert_eq!(gateway.calls.load(Ordering::SeqCst), 2);
-    assert_eq!(result.usage_json["prompt_tokens"], serde_json::json!(200));
-    assert_eq!(result.usage_json["completion_tokens"], serde_json::json!(5));
-    assert_eq!(result.usage_json["total_tokens"], serde_json::json!(205));
-    assert!(
-        result.extraction_warnings.iter().any(|warning| warning.contains("recovered on retry")),
-        "recovery warning should be observable: {:?}",
-        result.extraction_warnings
-    );
+    let calls = result.usage_json["vision_calls"].as_array().expect("raw call receipts");
+    assert_eq!(calls.len(), 2);
+    assert_eq!(calls[0]["usage_json"]["total_tokens"], 100);
+    assert_eq!(calls[1]["usage_json"]["total_tokens"], 105);
 }
 
 #[tokio::test]
 async fn runtime_plan_rejects_empty_vision_image_text_after_one_retry() {
-    let policy = LibraryRecognitionPolicy { raster_image_engine: RecognitionEngine::Vision };
+    let policy = LibraryRecognitionPolicy::default();
     let provider = ProviderModelSelection {
         provider_kind: "openai".to_string(),
         model_name: "gpt-5.4-mini".to_string(),
@@ -1388,6 +1443,7 @@ async fn runtime_plan_rejects_empty_vision_image_text_after_one_retry() {
     let gateway = CountingEmptyVisionGateway { calls: AtomicUsize::new(0) };
 
     let error = build_runtime_file_extraction_plan(FileExtractionRequest {
+        cancellation_token: None,
         gateway: &gateway,
         vision_provider: Some(&provider),
         vision_api_key: Some("test-key"),
@@ -1401,7 +1457,8 @@ async fn runtime_plan_rejects_empty_vision_image_text_after_one_retry() {
     .await
     .expect_err("empty image OCR on both attempts must fail loudly");
 
-    assert!(error.to_string().contains("image recognition produced no readable text"));
+    assert!(error.to_string().contains("invalid recognition outcome"));
+    assert_eq!(error.vision_calls().len(), 2);
     assert_eq!(
         error.failure_class(),
         ExtractionFailureClass::OperationalRetryable,
@@ -1417,7 +1474,7 @@ async fn runtime_plan_rejects_empty_vision_image_text_after_one_retry() {
 
 #[tokio::test]
 async fn runtime_plan_does_not_retry_when_vision_returns_text() {
-    let policy = LibraryRecognitionPolicy { raster_image_engine: RecognitionEngine::Vision };
+    let policy = LibraryRecognitionPolicy::default();
     let provider = ProviderModelSelection {
         provider_kind: "openai".to_string(),
         model_name: "gpt-5.4-mini".to_string(),
@@ -1425,6 +1482,7 @@ async fn runtime_plan_does_not_retry_when_vision_returns_text() {
     let gateway = CountingTextVisionGateway { calls: AtomicUsize::new(0) };
 
     let result = build_runtime_file_extraction_plan(FileExtractionRequest {
+        cancellation_token: None,
         gateway: &gateway,
         vision_provider: Some(&provider),
         vision_api_key: Some("test-key"),
@@ -1444,7 +1502,7 @@ async fn runtime_plan_does_not_retry_when_vision_returns_text() {
 
 #[tokio::test]
 async fn runtime_plan_does_not_retry_vision_provider_errors() {
-    let policy = LibraryRecognitionPolicy { raster_image_engine: RecognitionEngine::Vision };
+    let policy = LibraryRecognitionPolicy::default();
     let provider = ProviderModelSelection {
         provider_kind: "openai".to_string(),
         model_name: "gpt-5.4-mini".to_string(),
@@ -1452,6 +1510,7 @@ async fn runtime_plan_does_not_retry_vision_provider_errors() {
     let gateway = ErroringVisionGateway { calls: AtomicUsize::new(0) };
 
     let error = build_runtime_file_extraction_plan(FileExtractionRequest {
+        cancellation_token: None,
         gateway: &gateway,
         vision_provider: Some(&provider),
         vision_api_key: Some("test-key"),
@@ -1465,254 +1524,585 @@ async fn runtime_plan_does_not_retry_vision_provider_errors() {
     .await
     .expect_err("provider errors must stay terminal, not retried");
 
-    assert!(error.to_string().contains("provider exploded"));
+    assert!(error.to_string().contains("Vision request failed"));
+    assert!(!error.to_string().contains("provider exploded"));
+    assert!(error.vision_calls().is_empty());
     assert_eq!(gateway.calls.load(Ordering::SeqCst), 1, "provider errors are not retried");
 }
 
-#[test]
-fn missing_vision_binding_keeps_static_raster_images_on_docling() {
-    let policy = LibraryRecognitionPolicy::default();
-    let profile = docling_owned_recognition_profile(UploadFileKind::Image, "png", &policy, false)
-        .expect("docling-supported static raster image should stay on docling");
-
-    assert_eq!(profile.engine, RecognitionEngine::Docling);
-    assert_eq!(profile.capability, RecognitionCapability::ImageOcr);
-    assert_eq!(profile.structure_tier, RecognitionStructureTier::Layout);
-}
-
-#[test]
-fn docling_embedded_picture_ocr_follows_library_recognition_policy() {
-    let docling_policy =
-        LibraryRecognitionPolicy { raster_image_engine: RecognitionEngine::Docling };
-    let vision_policy = LibraryRecognitionPolicy { raster_image_engine: RecognitionEngine::Vision };
-
-    assert!(!docling_embedded_picture_vision_enabled(&docling_policy, true));
-    assert!(docling_embedded_picture_vision_enabled(&vision_policy, true));
-    assert!(!docling_embedded_picture_vision_enabled(&vision_policy, false));
-}
-
-#[test]
-fn vision_picture_augmentation_strips_docling_picture_ocr_scaffold() {
-    let content = "# Manual\n\n<!-- image -->\n\n> Image OCR: Low confidence glyph soup\n\nBody";
-
-    let stripped = strip_docling_picture_ocr_scaffold(content);
-
-    assert_eq!(stripped, "# Manual\n\nBody");
-}
-
-/// A docling-markdown extraction output for the embedded-picture OCR tests:
-/// only the rendered content, its source map, and the extracted pictures vary.
-fn docling_picture_output(
-    markdown: &str,
-    source_map: serde_json::Value,
-    extracted_images: Vec<ExtractedImage>,
-) -> ExtractionOutput {
-    let layout = crate::shared::extraction::build_text_layout_from_content(markdown);
-    ExtractionOutput {
-        extraction_kind: "docling_markdown".to_string(),
-        content_text: layout.content_text,
-        page_count: Some(1),
-        warnings: Vec::new(),
-        source_metadata: ExtractionSourceMetadata {
-            source_format: "pdf".to_string(),
-            page_count: Some(1),
-            line_count: 1,
-        },
-        structure_hints: layout.structure_hints,
-        source_map,
-        provider_kind: None,
-        model_name: None,
-        usage_json: serde_json::json!({}),
-        extracted_images,
+fn visual_input<'a>(
+    gateway: &'a dyn LlmGateway,
+    provider: Option<&'a ProviderModelSelection>,
+) -> VisualRecognitionInput<'a> {
+    VisualRecognitionInput {
+        gateway,
+        vision_provider: provider,
+        api_key: "test-key",
+        base_url: None,
+        extra_parameters_json: None,
+        cancellation_token: None,
     }
 }
 
-fn png_extracted_image(width: u32, height: u32) -> ExtractedImage {
-    ExtractedImage {
-        page: 1,
-        image_bytes: valid_png_bytes(),
-        mime_type: "image/png".to_string(),
-        width,
-        height,
-    }
-}
-
-/// Run the embedded-picture OCR pass with the shared openai/gpt-5.4-mini
-/// binding every picture-augmentation test uses.
-async fn augment_with_default_vision_provider(
-    output: &mut ExtractionOutput,
-    gateway: &dyn LlmGateway,
-) -> Result<(), FileExtractError> {
-    let provider = ProviderModelSelection {
-        provider_kind: "openai".to_string(),
-        model_name: "gpt-5.4-mini".to_string(),
+fn native_visual_fixture(
+    with_visual: bool,
+) -> crate::integrations::extraction_protocol::Extraction {
+    use crate::integrations::extraction_protocol::{
+        Extraction, Unit, VisualInput, VisualInputKind,
     };
-    augment_docling_output_with_vision_picture_ocr(
-        output,
-        UploadFileKind::Pdf,
-        VisionOcrInput {
-            gateway,
-            vision_provider: Some(&provider),
-            api_key: Some("test-key"),
-            base_url: None,
-            extra_parameters_json: None,
+    use base64::{Engine as _, engine::general_purpose::STANDARD};
+    let bytes = valid_png_bytes();
+    Extraction {
+        source_sha256: "a".repeat(64),
+        text_byte_limit: crate::integrations::extraction_protocol::MAX_TEXT,
+        source_unit_count: 2,
+        unit_kind: "page".into(),
+        selected_start: 1,
+        selected_end: 2,
+        content: "Native page one\n\n".into(),
+        warnings: Vec::new(),
+        units: vec![
+            Unit {
+                ordinal: 1,
+                sheet_name: None,
+                content: "Native page one".into(),
+                tables: serde_json::json!([{ "cells":["keep"] }]),
+            },
+            Unit {
+                ordinal: 2,
+                sheet_name: None,
+                content: String::new(),
+                tables: serde_json::json!([]),
+            },
+        ],
+        visual_inputs: if with_visual {
+            vec![VisualInput {
+                kind: VisualInputKind::PdfPage,
+                ordinal: 0,
+                native_index: 1,
+                source_unit: 2,
+                source_path: None,
+                mime: "image/png".into(),
+                width: 2,
+                height: 2,
+                display_extent_96_dpi: None,
+                content_base64: STANDARD.encode(&bytes),
+                payload_sha256: hex::encode(Sha256::digest(&bytes)),
+            }]
+        } else {
+            Vec::new()
         },
+    }
+}
+
+#[tokio::test]
+async fn native_only_requires_no_binding_and_makes_zero_provider_calls() {
+    let gateway = ErroringVisionGateway { calls: AtomicUsize::new(0) };
+    let mut native = native_visual_fixture(false);
+    let receipt =
+        recognize_native_visuals(&mut native, UploadFileKind::Pdf, visual_input(&gateway, None))
+            .await
+            .unwrap();
+    assert_eq!(gateway.calls.load(Ordering::SeqCst), 0);
+    assert!(receipt.calls.is_empty());
+    assert_eq!(native.units[0].content, "Native page one");
+}
+
+#[tokio::test]
+async fn scan_text_merges_only_into_owning_page_and_retains_native_tables() {
+    let gateway = CountingTextVisionGateway { calls: AtomicUsize::new(0) };
+    let provider =
+        ProviderModelSelection { provider_kind: "openai".into(), model_name: "vision".into() };
+    let mut native = native_visual_fixture(true);
+    let receipt = recognize_native_visuals(
+        &mut native,
+        UploadFileKind::Pdf,
+        visual_input(&gateway, Some(&provider)),
     )
     .await
+    .unwrap();
+    assert_eq!(native.units[0].content, "Native page one");
+    assert_eq!(native.units[0].tables[0]["cells"][0], "keep");
+    assert_eq!(native.units[1].content, "Counted OCR text");
+    assert_eq!(receipt.outcomes[0]["source_unit"], 2);
+    assert_eq!(receipt.outcomes[0]["outcome"]["outcome"], "text");
+    assert!(receipt.outcomes[0].get("content_base64").is_none());
+    assert_eq!(gateway.calls.load(Ordering::SeqCst), 1);
+    // The sole projection persists inventory identity, not the encoded payload.
+    let mut output = xberg::project_native(
+        native,
+        xberg::XbergSource {
+            file_name: Some("hybrid.pdf"),
+            mime_type: Some("application/pdf"),
+            source_format: "pdf",
+        },
+    )
+    .unwrap();
+    receipt.apply(&mut output);
+    assert!(!output.source_map.to_string().contains("contentBase64"));
+    assert!(output.extracted_images.is_empty());
+}
+
+struct OutcomeGateway {
+    responses: std::sync::Mutex<std::collections::VecDeque<Option<&'static str>>>,
+    calls: AtomicUsize,
+}
+
+fn admitted_visual_fixture(
+    native: crate::integrations::extraction_protocol::Extraction,
+    mime: &str,
+) -> crate::integrations::extraction_protocol::Extraction {
+    use crate::integrations::extraction_protocol::{
+        Limits, MAX_OUTPUT, MAX_TEXT, Operation, Request, Response,
+    };
+    let request = Request {
+        path: "/fixture/document".into(),
+        operation: Operation::Extract,
+        mime: mime.into(),
+        source_sha256: native.source_sha256.clone(),
+        limits: Limits { output_bytes: MAX_OUTPUT, text_bytes: MAX_TEXT, ..Limits::default() },
+        start: None,
+        end: None,
+    };
+    xberg::validate_response(Response::new(Ok(native), std::time::Duration::ZERO, None), &request)
+        .expect("native fixture passes the real admitted parent boundary")
 }
 
 #[test]
-fn docling_picture_ocr_fallback_appends_only_when_vision_is_unavailable() {
-    let mut output = docling_picture_output(
-        "# Manual",
-        serde_json::json!({
-            "docling_picture_ocr_text": ["", "Architecture diagram labels"]
-        }),
-        Vec::new(),
+fn pptx_native_tables_survive_plan_and_structured_consumer_without_duplicates() {
+    use crate::services::ingest::structured_preparation::{
+        PrepareStructuredRevisionCommand, StructuredPreparationService,
+    };
+    use crate::shared::extraction::{
+        structured_document::StructuredBlockKind, table_logical::LogicalTable,
+        table_markdown::parse_markdown_table_rows,
+    };
+
+    let mime = "application/vnd.openxmlformats-officedocument.presentationml.presentation";
+    let mut native = native_visual_fixture(false);
+    native.unit_kind = "slide".into();
+    for (unit, (material, stock, bin)) in
+        native.units.iter_mut().zip([("Copper", "7", "AB-0042"), ("Silver", "19", "ZX-0019")])
+    {
+        unit.content = format!(
+            "## Inventory {}\n\n| Material | Stock | Bin |\n| --- | --- | --- |\n| {material} | {stock} | {bin} |",
+            unit.ordinal
+        );
+        unit.tables = serde_json::json!([{
+            "page_number":unit.ordinal,
+            "cells":[["Material","Stock","Bin"],[material,stock,bin]],
+        }]);
+    }
+    native.content =
+        native.units.iter().map(|u| u.content.as_str()).collect::<Vec<_>>().join("\n\n");
+    let expected = native.units.iter().map(|u| u.tables.clone()).collect::<Vec<_>>();
+    let output = xberg::project_native(
+        admitted_visual_fixture(native, mime),
+        xberg::XbergSource {
+            file_name: Some("inventory.pptx"),
+            mime_type: Some(mime),
+            source_format: "pptx",
+        },
+    )
+    .unwrap();
+    let plan = build_plan_from_extraction(
+        UploadFileKind::Pptx,
+        output,
+        xberg_owned_recognition_profile(UploadFileKind::Pptx, "pptx").unwrap(),
     );
-
-    append_docling_picture_ocr_fallback(&mut output);
-
-    assert!(output.content_text.contains("# Manual"));
-    assert!(output.content_text.contains("Architecture diagram labels"));
-    assert_eq!(output.source_metadata.line_count, 4);
-}
-
-#[tokio::test]
-async fn vision_picture_augmentation_records_provider_and_usage() {
-    let mut output = docling_picture_output(
-        "# Manual\n\n<!-- image -->\n\n> Image OCR: stale local OCR",
-        serde_json::json!({
-            "docling_picture_ocr_text": ["stale local OCR"]
-        }),
-        vec![png_extracted_image(32, 32), png_extracted_image(64, 64)],
-    );
-
-    augment_with_default_vision_provider(&mut output, &FakeGateway)
-        .await
-        .expect("embedded pictures should be routed to vision");
-
-    assert_eq!(output.provider_kind.as_deref(), Some("openai"));
-    assert_eq!(output.model_name.as_deref(), Some("gpt-5.4-mini"));
-    assert_eq!(output.usage_json["embedded_picture_ocr_call_count"], serde_json::json!(2));
-    assert_eq!(output.usage_json["prompt_tokens"], serde_json::json!(22));
-    assert_eq!(output.usage_json["completion_tokens"], serde_json::json!(6));
-    assert_eq!(output.usage_json["total_tokens"], serde_json::json!(28));
-    assert_eq!(output.source_map["vision_picture_ocr"]["imageCount"], serde_json::json!(2));
-    assert!(output.content_text.contains("--- Embedded image 1 (32x32) ---"));
-    assert!(!output.content_text.contains("stale local OCR"));
-}
-
-#[tokio::test]
-async fn vision_picture_augmentation_keeps_docling_fallback_when_image_bytes_are_missing() {
-    let mut output = docling_picture_output(
-        "# Manual",
-        serde_json::json!({
-            "docling_picture_ocr_text": ["Diagram label from local extraction"]
-        }),
-        Vec::new(),
-    );
-
-    augment_with_default_vision_provider(&mut output, &FakeGateway)
-        .await
-        .expect("missing embedded image bytes should keep local fallback text");
-
-    assert!(output.content_text.contains("Diagram label from local extraction"));
-    assert!(output.provider_kind.is_none());
-    assert_eq!(output.source_metadata.line_count, 4);
-}
-
-#[tokio::test]
-async fn vision_picture_augmentation_keeps_docling_fallback_when_vision_returns_empty_text() {
-    let mut output = docling_picture_output(
-        "# Manual\n\n<!-- image -->\n\n> Image OCR: local fallback text",
-        serde_json::json!({
-            "docling_picture_ocr_text": ["local fallback text"]
-        }),
-        vec![png_extracted_image(32, 32)],
-    );
-
-    augment_with_default_vision_provider(&mut output, &EmptyVisionGateway)
-        .await
-        .expect("empty embedded picture OCR should keep local fallback text");
-
-    assert_eq!(output.provider_kind.as_deref(), Some("openai"));
-    assert_eq!(output.model_name.as_deref(), Some("gpt-5.4-mini"));
-    assert_eq!(output.usage_json["embedded_picture_ocr_call_count"], serde_json::json!(1));
-    assert_eq!(output.source_map["vision_picture_ocr"]["snippetCount"], serde_json::json!(0));
-    assert!(output.content_text.contains("--- Embedded image 1 ---"));
-    assert!(output.content_text.contains("local fallback text"));
-    assert!(!output.content_text.contains("> Image OCR:"));
-}
-
-#[tokio::test]
-async fn vision_picture_augmentation_keeps_inline_docling_ocr_when_fallback_source_map_is_empty() {
-    let mut output = docling_picture_output(
-        "# Manual\n\n<!-- image -->\n\n> Image OCR: inline fallback only",
-        serde_json::json!({}),
-        vec![png_extracted_image(32, 32)],
-    );
-
-    augment_with_default_vision_provider(&mut output, &EmptyVisionGateway)
-        .await
-        .expect("empty embedded picture OCR should not discard inline local OCR");
-
-    assert_eq!(output.provider_kind.as_deref(), Some("openai"));
-    assert_eq!(output.usage_json["embedded_picture_ocr_call_count"], serde_json::json!(1));
-    assert!(output.content_text.contains("<!-- image -->"));
-    assert!(output.content_text.contains("> Image OCR: inline fallback only"));
-}
-
-#[tokio::test]
-async fn vision_picture_augmentation_preserves_usage_after_partial_picture_failure() {
-    let mut output = docling_picture_output(
-        "# Manual\n\n<!-- image -->\n\n> Image OCR: stale local OCR",
-        serde_json::json!({
-            "docling_picture_ocr_text": ["stale local OCR"]
-        }),
-        vec![png_extracted_image(32, 32), png_extracted_image(64, 64)],
-    );
-    let gateway = PartialFailureVisionGateway { calls: AtomicUsize::new(0) };
-
-    augment_with_default_vision_provider(&mut output, &gateway)
-        .await
-        .expect("partial embedded picture failure should keep successful OCR and usage");
-
-    assert_eq!(output.provider_kind.as_deref(), Some("openai"));
-    assert_eq!(output.usage_json["embedded_picture_ocr_call_count"], serde_json::json!(1));
-    assert_eq!(output.usage_json["prompt_tokens"], serde_json::json!(7));
-    assert_eq!(output.source_map["vision_picture_ocr"]["imageCount"], serde_json::json!(2));
-    assert_eq!(output.source_map["vision_picture_ocr"]["failedImageCount"], serde_json::json!(1));
-    assert!(output.content_text.contains("First embedded diagram text"));
-    assert!(!output.content_text.contains("stale local OCR"));
-    assert!(output.warnings.iter().any(|warning| warning.contains("embedded picture 2")));
-}
-
-#[test]
-fn builds_truncated_content_preview_without_mutating_body() {
-    let preview = build_extracted_content_preview(Some("Alpha Beta Gamma"), 5);
-
-    assert_eq!(preview.text.as_deref(), Some("Alpha"));
-    assert!(preview.truncated);
-}
-
-#[test]
-fn resolves_docling_owned_formats() {
-    assert_eq!(docling_source_format(UploadFileKind::Pdf, Some("manual.pdf"), None), Some("pdf"));
-    assert_eq!(docling_source_format(UploadFileKind::Image, Some("scan.webp"), None), Some("webp"));
-}
-
-#[test]
-fn leaves_non_docling_formats_on_their_standard_paths() {
-    assert_eq!(docling_source_format(UploadFileKind::Spreadsheet, Some("sheet.csv"), None), None);
-    assert_eq!(docling_source_format(UploadFileKind::Spreadsheet, Some("sheet.tsv"), None), None);
+    for (index, table) in expected.iter().enumerate() {
+        assert_eq!(&plan.source_map["units"][index]["tables"], table);
+        assert_eq!(plan.source_map["units"][index]["ordinal"], index + 1);
+    }
+    let normalized = plan.normalized_text.unwrap();
+    for marker in ["Copper", "Silver", "AB-0042", "ZX-0019"] {
+        assert_eq!(normalized.matches(marker).count(), 1);
+    }
+    let prepared = StructuredPreparationService::new()
+        .prepare_revision(
+            PrepareStructuredRevisionCommand {
+                revision_id: uuid::Uuid::now_v7(),
+                document_id: uuid::Uuid::now_v7(),
+                workspace_id: uuid::Uuid::now_v7(),
+                library_id: uuid::Uuid::now_v7(),
+                preparation_state: "prepared".into(),
+                normalization_profile: plan.normalization_profile,
+                source_format: "pptx".into(),
+                language_code: Some("en".into()),
+                source_text: plan.source_text.unwrap(),
+                normalized_text: normalized,
+                structure_hints: plan.structure_hints,
+                typed_fact_count: 0,
+                prepared_at: chrono::Utc::now(),
+            },
+            &tokio_util::sync::CancellationToken::new(),
+        )
+        .unwrap();
+    let tables = prepared
+        .ordered_blocks
+        .iter()
+        .filter(|block| block.block_kind == StructuredBlockKind::Table)
+        .collect::<Vec<_>>();
+    assert_eq!(tables.len(), 2);
+    for (block, material) in tables.into_iter().zip(["Copper", "Silver"]) {
+        let rows = parse_markdown_table_rows(&block.text);
+        let logical = LogicalTable::from_markdown_rows(&rows).unwrap();
+        assert_eq!(logical.cell_at(1, 0).unwrap().text(), material);
+        assert_eq!(logical.rows(), 2);
+        assert_eq!(logical.columns(), 3);
+    }
     assert_eq!(
-        docling_source_format(
-            UploadFileKind::Spreadsheet,
-            Some("sheet.xlsx"),
-            Some("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-        ),
-        None
+        prepared
+            .chunk_windows
+            .iter()
+            .filter(|chunk| chunk.chunk_kind == StructuredBlockKind::TableRow)
+            .count(),
+        2
     );
-    assert_eq!(docling_source_format(UploadFileKind::Image, Some("scan.gif"), None), None);
+}
+
+#[tokio::test]
+async fn review_vision_literals_survive_native_markdown_and_final_projection() {
+    use crate::integrations::extraction_protocol::VisualInputKind;
+    let provider =
+        ProviderModelSelection { provider_kind: "openai".into(), model_name: "vision".into() };
+    let literal = r"C:\_cache &lt;tag&gt; &quot; &amp;lt;";
+    for (kind, mime, format) in [
+        (UploadFileKind::Pdf, "application/pdf", "pdf"),
+        (
+            UploadFileKind::Docx,
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            "docx",
+        ),
+        (
+            UploadFileKind::Pptx,
+            "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+            "pptx",
+        ),
+    ] {
+        let gateway = outcome_gateway(vec![Some(
+            r#"{"outcome":"text","text":"C:\\_cache &lt;tag&gt; &quot; &amp;lt;"}"#,
+        )]);
+        let mut native = native_visual_fixture(true);
+        native.units[0].content = r"Native\_identifier -&gt; value; literal=&amp;quot;".into();
+        if kind == UploadFileKind::Docx {
+            native.units.truncate(1);
+            native.source_unit_count = 1;
+            native.selected_end = 1;
+            native.unit_kind = "document".into();
+            native.visual_inputs[0].source_unit = 1;
+            native.visual_inputs[0].native_index = 0;
+            native.visual_inputs[0].source_path = Some("word/media/image1.png".into());
+            native.visual_inputs[0].kind = VisualInputKind::EmbeddedPicture;
+        } else if kind == UploadFileKind::Pptx {
+            native.unit_kind = "slide".into();
+            native.visual_inputs[0].native_index = 0;
+            native.visual_inputs[0].kind = VisualInputKind::EmbeddedPicture;
+        }
+        native.content =
+            native.units.iter().map(|unit| unit.content.as_str()).collect::<Vec<_>>().join("\n\n");
+        let mut native = admitted_visual_fixture(native, mime);
+        let receipt =
+            recognize_native_visuals(&mut native, kind, visual_input(&gateway, Some(&provider)))
+                .await
+                .unwrap();
+        let mut output = xberg::project_native(
+            native,
+            xberg::XbergSource {
+                file_name: Some("fixture"),
+                mime_type: Some(mime),
+                source_format: format,
+            },
+        )
+        .unwrap();
+        receipt.apply(&mut output);
+        let plan = build_plan_from_extraction(
+            kind,
+            output,
+            xberg_owned_recognition_profile(kind, format).unwrap(),
+        );
+        assert!(plan.source_text.as_deref().unwrap().contains("Native_identifier -> value"));
+        assert!(plan.source_text.as_deref().unwrap().contains("literal=&quot;"));
+        assert!(
+            plan.source_text.as_deref().unwrap().contains(literal),
+            "raw Vision source text for {format}"
+        );
+        assert!(
+            plan.normalized_text.as_deref().unwrap().contains(literal),
+            "published Vision text for {format}"
+        );
+        assert!(
+            plan.structure_hints.lines.iter().any(|line| line.text == literal),
+            "structured preparation text for {format}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn review_recognition_retains_the_runtime_admitted_text_budget_for_both_outcomes() {
+    let provider =
+        ProviderModelSelection { provider_kind: "openai".into(), model_name: "vision".into() };
+    for response in [r#"{"outcome":"text","text":"x"}"#, r#"{"outcome":"no_text"}"#] {
+        let gateway = outcome_gateway(vec![Some(response)]);
+        let mut native = native_visual_fixture(true);
+        native.units[0].content = "n".repeat(40 * 1024 * 1024);
+        native.content =
+            native.units.iter().map(|unit| unit.content.as_str()).collect::<Vec<_>>().join("\n\n");
+        let mut native = admitted_visual_fixture(native, "application/pdf");
+        let receipt = recognize_native_visuals(
+            &mut native,
+            UploadFileKind::Pdf,
+            visual_input(&gateway, Some(&provider)),
+        )
+        .await
+        .expect("both outcomes must retain the admitted 64 MiB budget, not substitute 32 MiB");
+        assert_eq!(receipt.calls.len(), 1);
+        assert!(native.content.len() > 32 * 1024 * 1024);
+        assert!(native.content.len() <= crate::integrations::extraction_protocol::MAX_TEXT);
+    }
+}
+
+#[tokio::test]
+async fn recognized_text_cannot_bypass_the_native_text_budget() {
+    let gateway = CountingTextVisionGateway { calls: AtomicUsize::new(0) };
+    let provider =
+        ProviderModelSelection { provider_kind: "openai".into(), model_name: "vision".into() };
+    let mut native = native_visual_fixture(true);
+    native.text_byte_limit = 64;
+    native.units[0].content = "n".repeat(native.text_byte_limit - 2);
+    native.content =
+        native.units.iter().map(|unit| unit.content.as_str()).collect::<Vec<_>>().join("\n\n");
+    let before = Sha256::digest(native.content.as_bytes());
+    let error = recognize_native_visuals(
+        &mut native,
+        UploadFileKind::Pdf,
+        visual_input(&gateway, Some(&provider)),
+    )
+    .await
+    .err()
+    .expect("Vision must share the document text budget");
+    assert_eq!(error.vision_calls().len(), 1);
+    assert_eq!(gateway.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(Sha256::digest(native.content.as_bytes()), before);
+    assert!(native.units[1].content.is_empty());
+    assert!(error.to_string().contains("text budget"));
+}
+
+#[tokio::test]
+async fn review_over_budget_native_text_is_refused_before_any_provider_call() {
+    let provider =
+        ProviderModelSelection { provider_kind: "openai".into(), model_name: "vision".into() };
+    for with_visual in [false, true] {
+        let gateway = outcome_gateway(vec![Some(r#"{"outcome":"no_text"}"#)]);
+        let mut native = native_visual_fixture(with_visual);
+        native.text_byte_limit = native.content.len() - 1;
+        let error = recognize_native_visuals(
+            &mut native,
+            UploadFileKind::Pdf,
+            visual_input(&gateway, Some(&provider)),
+        )
+        .await
+        .err()
+        .expect("an admitted text ceiling cannot depend on a later no_text outcome");
+        assert!(error.to_string().contains("admitted extraction text budget"));
+        assert!(error.vision_calls().is_empty());
+        assert_eq!(gateway.calls.load(Ordering::SeqCst), 0);
+        assert!(native.units[1].content.is_empty());
+    }
+}
+vision_only_gateway!(OutcomeGateway, |gateway: &OutcomeGateway, request: VisionRequest| {
+    let index = gateway.calls.fetch_add(1, Ordering::SeqCst);
+    let text = gateway.responses.lock().unwrap().pop_front().expect("bounded calls");
+    match text {
+        Some(text) => Ok(VisionResponse {
+            provider_kind: request.provider_kind.clone(),
+            model_name: request.model_name.clone(),
+            output_text: text.into(),
+            usage_json: serde_json::json!({"total_tokens":index + 10}),
+        }),
+        None => Err(anyhow!("sensitive provider error")),
+    }
+});
+
+fn outcome_gateway(responses: Vec<Option<&'static str>>) -> OutcomeGateway {
+    OutcomeGateway {
+        responses: std::sync::Mutex::new(responses.into()),
+        calls: AtomicUsize::new(0),
+    }
+}
+
+#[tokio::test]
+async fn no_text_for_an_image_only_document_fails_with_its_usage_receipt() {
+    let gateway = outcome_gateway(vec![Some(r#"{"outcome":"no_text"}"#)]);
+    let provider =
+        ProviderModelSelection { provider_kind: "openai".into(), model_name: "vision".into() };
+    let policy = LibraryRecognitionPolicy::default();
+    let error = build_runtime_file_extraction_plan(FileExtractionRequest {
+        cancellation_token: None,
+        gateway: &gateway,
+        vision_provider: Some(&provider),
+        vision_api_key: None,
+        vision_base_url: None,
+        vision_extra_parameters_json: None,
+        file_name: Some("blank.gif"),
+        mime_type: Some("image/gif"),
+        file_bytes: valid_png_bytes(),
+        recognition_policy: &policy,
+    })
+    .await
+    .expect_err("a resolved blank image is not a readable document");
+    assert_eq!(error.vision_calls().len(), 1);
+    assert_eq!(gateway.calls.load(Ordering::SeqCst), 1);
+    assert!(error.to_string().contains("no readable text"));
+}
+
+struct CancellingVisionGateway {
+    token: tokio_util::sync::CancellationToken,
+    calls: AtomicUsize,
+}
+vision_only_gateway!(
+    CancellingVisionGateway,
+    |gateway: &CancellingVisionGateway, request: VisionRequest| {
+        gateway.calls.fetch_add(1, Ordering::SeqCst);
+        gateway.token.cancel();
+        Ok(VisionResponse {
+            provider_kind: request.provider_kind.clone(),
+            model_name: request.model_name.clone(),
+            output_text: String::new(),
+            usage_json: serde_json::json!({"total_tokens":17}),
+        })
+    }
+);
+
+#[tokio::test]
+async fn cancellation_does_not_retry_or_discard_an_already_returned_paid_receipt() {
+    let gateway = CancellingVisionGateway {
+        token: tokio_util::sync::CancellationToken::new(),
+        calls: AtomicUsize::new(0),
+    };
+    let provider =
+        ProviderModelSelection { provider_kind: "openai".into(), model_name: "vision".into() };
+    let mut native = native_visual_fixture(true);
+    let mut input = visual_input(&gateway, Some(&provider));
+    input.cancellation_token = Some(&gateway.token);
+    let error =
+        recognize_native_visuals(&mut native, UploadFileKind::Pdf, input).await.err().unwrap();
+    assert_eq!(gateway.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(error.vision_calls().len(), 1);
+    assert_eq!(error.vision_calls()[0].usage_json["total_tokens"], 17);
+    assert!(native.units[1].content.is_empty());
+}
+
+#[tokio::test]
+async fn explicit_no_text_is_a_resolved_visual_not_an_empty_response_retry() {
+    let gateway = outcome_gateway(vec![Some(r#"{"outcome":"no_text"}"#)]);
+    let provider =
+        ProviderModelSelection { provider_kind: "openai".into(), model_name: "vision".into() };
+    let mut native = native_visual_fixture(true);
+    let receipt = recognize_native_visuals(
+        &mut native,
+        UploadFileKind::Pdf,
+        visual_input(&gateway, Some(&provider)),
+    )
+    .await
+    .unwrap();
+    assert_eq!(receipt.outcomes[0]["outcome"]["outcome"], "no_text");
+    assert_eq!(gateway.calls.load(Ordering::SeqCst), 1);
+    assert!(native.units[1].content.is_empty());
+    assert_eq!(native.units[0].content, "Native page one");
+}
+
+#[tokio::test]
+async fn malformed_and_provider_failures_never_publish_partial_recognition() {
+    use crate::integrations::extraction_protocol::VisualInputKind;
+    for last in [Some("malformed"), Some(r#"{"outcome":"text","text":"  "}"#), None] {
+        let gateway =
+            outcome_gateway(vec![Some(r#"{"outcome":"text","text":"first image"}"#), last]);
+        let provider =
+            ProviderModelSelection { provider_kind: "openai".into(), model_name: "vision".into() };
+        let mut native = native_visual_fixture(true);
+        native.visual_inputs[0].kind = VisualInputKind::EmbeddedPicture;
+        let mut second = serde_json::from_value::<
+            crate::integrations::extraction_protocol::VisualInput,
+        >(serde_json::to_value(&native.visual_inputs[0]).unwrap())
+        .unwrap();
+        second.ordinal = 1;
+        second.native_index = 3;
+        native.visual_inputs.push(second);
+        let error = recognize_native_visuals(
+            &mut native,
+            UploadFileKind::Pdf,
+            visual_input(&gateway, Some(&provider)),
+        )
+        .await
+        .err()
+        .unwrap();
+        assert_eq!(error.vision_calls().len(), if last.is_some() { 2 } else { 1 });
+        assert_eq!(native.units[0].content, "Native page one");
+        assert!(native.units[1].content.is_empty());
+        assert_eq!(gateway.calls.load(Ordering::SeqCst), 2);
+        assert!(!error.to_string().contains("sensitive"));
+        let admission = UploadAdmissionError::from_file_extract_error(
+            "scan.pdf",
+            Some("application/pdf"),
+            100,
+            &error,
+        );
+        assert_eq!(admission.vision_calls.len(), error.vision_calls().len());
+    }
+}
+
+#[tokio::test]
+async fn empty_then_provider_failure_preserves_only_the_returned_usage() {
+    let gateway = outcome_gateway(vec![Some(""), None]);
+    let provider =
+        ProviderModelSelection { provider_kind: "openai".into(), model_name: "vision".into() };
+    let mut native = native_visual_fixture(true);
+    let error = recognize_native_visuals(
+        &mut native,
+        UploadFileKind::Pdf,
+        visual_input(&gateway, Some(&provider)),
+    )
+    .await
+    .err()
+    .unwrap();
+    assert_eq!(error.vision_calls().len(), 1);
+    assert_eq!(error.vision_calls()[0].usage_json["total_tokens"], 10);
+    assert_eq!(gateway.calls.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
+async fn double_page_picture_or_tampered_payload_is_rejected_before_paid_calls() {
+    for fault in 0..3 {
+        let gateway = ErroringVisionGateway { calls: AtomicUsize::new(0) };
+        let provider =
+            ProviderModelSelection { provider_kind: "openai".into(), model_name: "vision".into() };
+        let mut native = native_visual_fixture(true);
+        match fault {
+            0 => native.visual_inputs[0].payload_sha256 = "b".repeat(64),
+            1 => native.visual_inputs[0].source_unit = 3,
+            _ => {
+                let mut picture = serde_json::from_value::<
+                    crate::integrations::extraction_protocol::VisualInput,
+                >(
+                    serde_json::to_value(&native.visual_inputs[0]).unwrap()
+                )
+                .unwrap();
+                picture.kind =
+                    crate::integrations::extraction_protocol::VisualInputKind::EmbeddedPicture;
+                picture.ordinal = 1;
+                native.visual_inputs.push(picture);
+            }
+        }
+        assert!(
+            recognize_native_visuals(
+                &mut native,
+                UploadFileKind::Pdf,
+                visual_input(&gateway, Some(&provider))
+            )
+            .await
+            .is_err()
+        );
+        assert_eq!(gateway.calls.load(Ordering::SeqCst), 0);
+    }
 }

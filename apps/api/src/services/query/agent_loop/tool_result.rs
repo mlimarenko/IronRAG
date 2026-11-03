@@ -1,5 +1,52 @@
 use super::*;
 
+/// Consumes only the native dispatcher result, never assistant text, a compact
+/// debug object or a tool wrapper. Canonical source loading later rechecks scope,
+/// the current revision and the exact character slice before semantic use.
+pub(crate) fn native_document_read_reference(
+    tool_name: &str,
+    result: &crate::interfaces::http::mcp::McpToolResult,
+) -> Option<super::super::assistant_grounding::AssistantGroundingDocumentReference> {
+    use crate::{
+        domains::content::ContentSourceAccess,
+        mcp_types::{McpReadDocumentResponse, McpReadabilityState},
+    };
+    if tool_name != READ_DOCUMENT_TOOL_NAME || result.is_error {
+        return None;
+    }
+    let response: McpReadDocumentResponse =
+        serde_json::from_value(result.structured_content.clone()).ok()?;
+    if !matches!(response.readability_state, McpReadabilityState::Readable) {
+        return None;
+    }
+    let revision_id = response.latest_revision_id?;
+    let excerpt = response.content?;
+    let total = response.total_content_length?;
+    let length = response.slice_end_offset.checked_sub(response.slice_start_offset)?;
+    if excerpt.trim().is_empty()
+        || excerpt.chars().count() != length
+        || response.slice_end_offset > total
+    {
+        return None;
+    }
+    let source_access = response
+        .source_access
+        .map(|access| serde_json::from_value::<ContentSourceAccess>(serde_json::json!(access)))
+        .transpose()
+        .ok()?;
+    Some(super::super::assistant_grounding::AssistantGroundingDocumentReference {
+        document_id: response.document_id,
+        revision_id: Some(revision_id),
+        document_title: response.document_title,
+        source_uri: response.source_uri,
+        source_access,
+        slice_start_offset: response.slice_start_offset,
+        slice_end_offset: response.slice_end_offset,
+        excerpt,
+        rank: 1,
+    })
+}
+
 pub(super) fn debug_tool_result_json(
     result: &crate::interfaces::http::mcp::McpToolResult,
 ) -> Value {
@@ -284,6 +331,9 @@ pub(super) fn grounded_answer_typed_outcome(
     tool_name: &str,
     result: &crate::interfaces::http::mcp::McpToolResult,
 ) -> Option<AgentGroundedAnswerOutcome> {
+    // This envelope is only a disposition projection. In particular, compact
+    // semanticVerification summaries are not deserialized as trusted reports;
+    // the selected parent owner loads full metadata by the actual child ID.
     if tool_name != GROUNDED_ANSWER_TOOL_NAME || result.is_error {
         return None;
     }
@@ -313,7 +363,11 @@ pub(super) fn grounded_answer_typed_outcome(
         &result.structured_content,
         matches!(disposition, QueryAnswerDisposition::Clarification),
     )?;
-    Some(AgentGroundedAnswerOutcome { disposition, clarification })
+    let source_execution_id =
+        super::compaction::extract_child_query_execution_ids(tool_name, &result.structured_content)
+            .into_iter()
+            .next();
+    Some(AgentGroundedAnswerOutcome { source_execution_id, disposition, clarification })
 }
 
 pub(super) fn grounded_answer_typed_clarification(

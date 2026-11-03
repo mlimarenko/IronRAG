@@ -23,6 +23,24 @@ the installer carries no provider-name table. On a re-run it preserves the
 existing `.env` secrets and tuned caps, while official IronRAG image pins are
 advanced to the selected release tag.
 
+Image text recognition uses the configured `extract_text` LLM Vision binding in
+every resource profile. Xberg handles native text/structure and rendering; no
+profile installs a local OCR model. Configure a Vision-capable binding under
+**Admin → AI → Bindings** before ingesting images or scanned pages.
+
+The installer recommends `micro` below 8 GiB, `small` below 16 GiB, `medium`
+below 32 GiB, and `large` otherwise. Worker limits are 768 MiB, 1536 MiB,
+3072 MiB and 5120 MiB respectively. It checks the steady-state cap sum with
+max(512 MiB, 12% of host RAM) reserved for the host. Compose defaults to a
+3072 MiB worker; Helm starts one worker with request 768 MiB and limit 3 GiB.
+Native rendering and image encoding still consume bounded RAM; these defaults
+are not a universal workload capacity or recognition quality guarantee.
+
+For a pinned existing resource plan, use `--recompute-resources` to apply the
+worker limits. Otherwise existing secrets and manually pinned caps are kept.
+The backend image builds `ironrag-extract` with the locked Cargo graph; image
+text recognition runs through the remote Vision provider, not bundled models.
+
 Run `./install.sh --help` for the full flag and environment-variable list, or
 `--plan-only` to print the detected profile without writing or deploying
 anything.

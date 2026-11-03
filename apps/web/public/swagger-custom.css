@@ -21,3 +21,18 @@ body {
 .swagger-ui .topbar {
   display: none;
 }
+
+/* Swagger's bundled stylesheet sets fonts on individual descendants. */
+.swagger-ui,
+.swagger-ui * {
+  font-family: var(--font-medeo-sans) !important;
+}
+
+.swagger-ui :is(pre, code, kbd, samp),
+.swagger-ui :is(pre, code, kbd, samp) * {
+  font-family: var(--font-medeo-mono) !important;
+}
+
+.swagger-ui .responses-inner {
+  overflow-x: auto;
+}

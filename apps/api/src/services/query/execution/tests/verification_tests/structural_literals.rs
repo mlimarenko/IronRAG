@@ -70,6 +70,79 @@ fn verify_answer_fully_verifies_an_exact_assignment_answer() {
 }
 
 #[test]
+fn verify_answer_rejects_assignment_substrings_of_other_keys_or_values() {
+    for (literal, source) in [
+        ("TIMEOUT=30", "MAX_TIMEOUT=300"),
+        ("TIMEOUT=30", "MAX_TIMEOUT=30"),
+        ("TIMEOUT=30", "TIMEOUT=300"),
+        ("TIMEOUT=30", "TIMEOUT=30.5"),
+        ("TIMEOUT=30", "TIMEOUT=30ms"),
+        ("TIMEOUT=30", "TIMEOUT=30%"),
+        ("TIMEOUT=30", "client.TIMEOUT=30"),
+        ("mode=false", "mode=false_positive"),
+        ("path=/api/v2", "path=/api/v20"),
+        ("path=/api/v2", "path=/api/v2/users"),
+        ("время=30", "макс_время=30"),
+        ("ALLOWACCESS=true", "ALLOW ACCESS=true"),
+        ("FILTER=level", "FILTER=level=error"),
+        ("level=error", "FILTER=level=error"),
+    ] {
+        let answer = format!("Use `{literal}`.");
+        let verification =
+            verify_answer_against_authoritative_evidence(AnswerVerificationRequest {
+                question: "Which assignment is documented?",
+                answer: &answer,
+                intent_profile: &QueryIntentProfile::default(),
+                evidence: &empty_authoritative_evidence(),
+                chunks: &[runtime_chunk(source)],
+                prompt_context: source,
+                assistant_grounding: &AssistantGroundingEvidence::default(),
+            });
+        assert_eq!(
+            verification.state,
+            QueryVerificationState::InsufficientEvidence,
+            "{literal} from {source}"
+        );
+        assert_eq!(verification.unsupported_literals, vec![literal], "{source}");
+    }
+}
+
+#[test]
+fn verify_answer_preserves_assignment_spacing_and_surrounding_prose() {
+    for (literal, source) in [
+        ("TIMEOUT=30", "TIMEOUT = 30"),
+        ("TIMEOUT = 30", "The documented assignment is TIMEOUT=30."),
+        ("mode=false", "mode = false; retries = 2"),
+        ("[PROD] mode=true", "[PROD] mode = true"),
+        ("TIMEOUT=30", "TIMEOUT=300; TIMEOUT=30"),
+        ("время=30", "Значение время = 30."),
+        ("FILTER=level=error", "FILTER = level=error"),
+    ] {
+        let answer = format!("Use `{literal}`.");
+        let verification =
+            verify_answer_against_authoritative_evidence(AnswerVerificationRequest {
+                question: "Which assignment is documented?",
+                answer: &answer,
+                intent_profile: &QueryIntentProfile::default(),
+                evidence: &empty_authoritative_evidence(),
+                chunks: &[runtime_chunk(source)],
+                prompt_context: source,
+                assistant_grounding: &AssistantGroundingEvidence::default(),
+            });
+        assert_eq!(
+            verification.state,
+            QueryVerificationState::PartiallySupported,
+            "{literal} from {source}"
+        );
+        assert!(
+            verification.unsupported_literals.is_empty(),
+            "{source}: {:?}",
+            verification.unsupported_literals
+        );
+    }
+}
+
+#[test]
 fn verify_answer_accepts_exact_assignment_from_one_structured_fact() {
     let document_id = Uuid::now_v7();
     let revision_id = Uuid::now_v7();

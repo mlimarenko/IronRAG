@@ -1,5 +1,6 @@
 use std::collections::BTreeSet;
 
+use futures::stream::BoxStream;
 use sqlx::{Executor, PgPool, Postgres};
 use uuid::Uuid;
 
@@ -100,6 +101,27 @@ where
     .bind(target_id)
     .fetch_all(executor)
     .await
+}
+
+/// Streams only evidence text for summary composition, without limiting the
+/// evidence considered by the independent current-source admission query.
+pub fn stream_runtime_graph_evidence_text_by_target_with_executor<'e, E>(
+    executor: E,
+    library_id: Uuid,
+    target_kind: &'e str,
+    target_id: Uuid,
+) -> BoxStream<'e, Result<String, sqlx::Error>>
+where
+    E: Executor<'e, Database = Postgres> + 'e,
+{
+    sqlx::query_scalar::<_, String>(
+        "select evidence_text from runtime_graph_evidence
+         where library_id = $1 and target_kind = $2 and target_id = $3",
+    )
+    .bind(library_id)
+    .bind(target_kind)
+    .bind(target_id)
+    .fetch(executor)
 }
 
 /// Lists runtime graph evidence for an ordered set of node / edge targets.
