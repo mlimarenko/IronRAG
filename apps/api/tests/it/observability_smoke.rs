@@ -100,6 +100,44 @@ fn init_tracing_with_fake_endpoint_succeeds() -> anyhow::Result<()> {
 }
 
 #[test]
+fn error_record_carries_type_fingerprint_and_redacted_message() -> anyhow::Result<()> {
+    let output = Command::new(std::env::current_exe()?)
+        .arg("--exact")
+        .arg(format!("{CHILD_PREFIX}emit_error_record_child"))
+        .env(CHILD_MODE_ENV, "error_record")
+        .env_remove("IRONRAG_OTEL_ENABLED")
+        .env_remove("OTEL_EXPORTER_OTLP_PROTOCOL")
+        .env_remove("RUST_BACKTRACE")
+        .output()?;
+
+    assert!(
+        output.status.success(),
+        "error-record smoke child failed: {}\nstdout:\n{}\nstderr:\n{}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+    let logs = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+    for field in ["error.type", "error.message", "error.fingerprint", "error.occurrences"] {
+        assert!(logs.contains(field), "error record is missing {field}; logs:\n{logs}");
+    }
+    assert!(
+        logs.contains("ingest.attempt_failed"),
+        "error record lost its fault class; logs:\n{logs}",
+    );
+    assert!(
+        logs.contains("[REDACTED:token]"),
+        "error record did not redact the secret; logs:\n{logs}",
+    );
+    assert!(!logs.contains("hunter2"), "error record leaked the raw secret; logs:\n{logs}",);
+    Ok(())
+}
+
+#[test]
 fn distribution_defaults_do_not_embed_an_owner_collector() -> anyhow::Result<()> {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let files = [
@@ -133,6 +171,19 @@ fn distribution_defaults_do_not_embed_an_owner_collector() -> anyhow::Result<()>
     let dockerfile = std::fs::read_to_string(root.join("apps/web/Dockerfile"))?;
     assert!(dockerfile.contains("ARG VITE_OTEL_EXPORTER_OTLP_ENDPOINT=\n"));
     assert!(!root.join("apps/api/observability.toml").exists());
+    Ok(())
+}
+
+#[tokio::test]
+async fn emit_error_record_child() -> anyhow::Result<()> {
+    if std::env::var(CHILD_MODE_ENV).as_deref() != Ok("error_record") {
+        return Ok(());
+    }
+
+    ironrag_backend::observability::init_tracing(None)?;
+    let error = std::io::Error::other("provider rejected token=hunter2");
+    ironrag_backend::observability::error_tracking::report_error("ingest.attempt_failed", &error);
+    ironrag_backend::observability::shutdown_tracing().await;
     Ok(())
 }
 

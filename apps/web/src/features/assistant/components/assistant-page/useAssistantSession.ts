@@ -13,6 +13,7 @@ import type { AssistantSessionListItem, QuerySessionListResponse } from '@/share
 import { AssistantTurnFailedEventError } from '@/shared/api/query'
 import type { AssistantTurnExecutionResponse, LlmContextDebugResponse } from '@/shared/api/query'
 import { errorMessage } from '@/shared/lib/errorMessage'
+import { trackEvent } from '@/shared/lib/telemetry/events'
 import type {
   AssistantAgentActivityEvent,
   AssistantMessage,
@@ -638,6 +639,7 @@ export function useAssistantSession({ workspaceId, libraryId, t }: UseAssistantS
       }
     },
     onMutate: async (variables) => {
+      trackEvent('query_submitted', { feature: 'assistant' })
       await queryClient.cancelQueries({ queryKey: variables.sessionsQueryKey })
       const previousSessions = queryClient.getQueryData<QuerySessionListResponse>(
         variables.sessionsQueryKey,

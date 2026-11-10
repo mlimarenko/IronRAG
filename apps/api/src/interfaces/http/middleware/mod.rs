@@ -77,7 +77,7 @@ mod tests {
         },
     };
 
-    use super::apply_browser_transport_security;
+    use super::{apply_browser_transport_security, tracing_layer::TRACE_ID_HEADER};
 
     const CONFIGURED_BROWSER_ORIGIN: &str = "https://console.example";
     const GENERAL_ROUTE: &str = "/v1/health";
@@ -199,7 +199,7 @@ mod tests {
             );
             assert_eq!(
                 response_header_tokens(&response, header::ACCESS_CONTROL_EXPOSE_HEADERS),
-                BTreeSet::from([MCP_SESSION_HEADER.to_string()])
+                BTreeSet::from([MCP_SESSION_HEADER.to_string(), TRACE_ID_HEADER.to_string(),])
             );
         }
     }

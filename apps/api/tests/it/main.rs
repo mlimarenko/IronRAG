@@ -78,6 +78,7 @@ mod greenfield_bootstrap;
 mod greenfield_contracts;
 mod greenfield_support;
 mod grounded_benchmark_technical_suite;
+mod iam_preferences;
 mod iam_user_repository;
 mod incremental_graph_reconcile;
 mod ingest_attempts;

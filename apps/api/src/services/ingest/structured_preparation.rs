@@ -11,7 +11,9 @@ use crate::services::ingest::cancellation::{StageError, ensure_not_cancelled};
 use crate::shared::extraction::{
     ExtractionLineHint, ExtractionLineSignal, ExtractionStructureHints,
     chunking::split_large_code_blocks,
-    chunking::{StructuredChunkingProfile, build_structured_chunk_windows},
+    chunking::{
+        StructuredChunkingError, StructuredChunkingProfile, build_structured_chunk_windows,
+    },
     is_canonical_table_start,
     record_jsonl::split_large_record_units,
     structured_document::{
@@ -66,6 +68,8 @@ pub struct PreparedStructuredRevision {
 #[derive(Debug, Error)]
 pub enum StructuredPreparationError {
     #[error(transparent)]
+    Chunking(#[from] StructuredChunkingError),
+    #[error(transparent)]
     Validation(#[from] StructuredDocumentValidationError),
     #[error(transparent)]
     TableLayout(#[from] TableLayoutError),
@@ -115,14 +119,38 @@ impl StructuredPreparationService {
     /// Apply an explicit profile to a model-free preparation or comparison.
     #[must_use]
     pub const fn with_chunking(max_chars: usize, overlap_chars: usize) -> Self {
-        Self { chunking_profile: StructuredChunkingProfile { max_chars, overlap_chars } }
+        Self {
+            chunking_profile: StructuredChunkingProfile {
+                max_chars,
+                overlap_chars,
+                max_input_bytes: None,
+            },
+        }
     }
 
     /// Create a service whose chunking profile is driven by a `ChunkingTemplate`.
     #[must_use]
     pub const fn with_template(template: ChunkingTemplate) -> Self {
         let (max_chars, overlap_chars) = template.chunking_params();
-        Self { chunking_profile: StructuredChunkingProfile { max_chars, overlap_chars } }
+        Self {
+            chunking_profile: StructuredChunkingProfile {
+                max_chars,
+                overlap_chars,
+                max_input_bytes: None,
+            },
+        }
+    }
+
+    #[must_use]
+    pub const fn with_embedding_input_bounds(
+        mut self,
+        bounds: Option<crate::domains::provider_profiles::EmbeddingInputBounds>,
+    ) -> Self {
+        self.chunking_profile.max_input_bytes = match bounds {
+            Some(bounds) => Some(bounds.max_input_bytes),
+            None => None,
+        };
+        self
     }
 
     pub fn prepare_revision(
@@ -137,7 +165,11 @@ impl StructuredPreparationService {
         ordered_blocks
             .retain(|b| !b.text.trim().is_empty() || !b.normalized_text.trim().is_empty());
         ensure_not_cancelled(cancellation_token)?;
-        ordered_blocks = split_large_code_blocks(&ordered_blocks, self.chunking_profile.max_chars);
+        ordered_blocks = split_large_code_blocks(
+            &ordered_blocks,
+            self.chunking_profile.max_chars,
+            Some(&command.normalized_text),
+        );
         ordered_blocks = split_large_record_units(&ordered_blocks, self.chunking_profile.max_chars);
         ensure_not_cancelled(cancellation_token)?;
         // Re-number ordinals after filtering
@@ -147,7 +179,11 @@ impl StructuredPreparationService {
         }
         blocks::finalize_table_references(&mut ordered_blocks, cancellation_token)?;
         ensure_not_cancelled(cancellation_token)?;
-        let chunk_windows = build_structured_chunk_windows(&ordered_blocks, self.chunking_profile);
+        let chunk_windows = build_structured_chunk_windows(
+            &ordered_blocks,
+            self.chunking_profile,
+            Some(&command.normalized_text),
+        )?;
         ensure_not_cancelled(cancellation_token)?;
         let prepared_revision = StructuredDocumentRevisionData {
             revision_id: command.revision_id,
@@ -163,7 +199,14 @@ impl StructuredPreparationService {
             typed_fact_count: command.typed_fact_count,
             outline: blocks::build_outline(&ordered_blocks),
             blocks: ordered_blocks.clone(),
-            chunk_windows: chunk_windows.clone(),
+            chunk_windows: chunk_windows
+                .iter()
+                .cloned()
+                .map(|mut chunk| {
+                    chunk.runtime_provenance = None;
+                    chunk
+                })
+                .collect(),
             prepared_at: command.prepared_at,
         };
         prepared_revision.validate()?;

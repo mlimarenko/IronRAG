@@ -127,9 +127,7 @@ fn append_code_block(
     let mut code_lines = Vec::<ExtractionLineHint>::new();
     while *index < lines.len() && !is_code_fence(&lines[*index]) {
         ensure_not_cancelled(cancellation_token)?;
-        if !lines[*index].text.trim().is_empty() {
-            code_lines.push(lines[*index].clone());
-        }
+        code_lines.push(lines[*index].clone());
         *index += 1;
     }
     if *index < lines.len() && is_code_fence(&lines[*index]) {
@@ -571,6 +569,10 @@ fn build_block(
         .collect::<Vec<_>>();
     let page_number = lines.iter().find_map(|line| line.page_number);
     let source_span = match (lines.first(), lines.last()) {
+        (Some(first), Some(last)) if block_kind == StructuredBlockKind::CodeBlock => first
+            .start_offset
+            .zip(last.end_offset)
+            .map(|(start_offset, end_offset)| StructuredSourceSpan { start_offset, end_offset }),
         (Some(first), Some(last)) => Some(StructuredSourceSpan {
             start_offset: first.start_offset.unwrap_or_default(),
             end_offset: last.end_offset.unwrap_or_else(|| first.end_offset.unwrap_or_default()),

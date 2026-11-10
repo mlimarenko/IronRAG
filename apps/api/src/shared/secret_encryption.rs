@@ -13,7 +13,7 @@ use base64::{
     engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD},
 };
 use chacha20poly1305::{
-    Key, KeyInit, XChaCha20Poly1305, XNonce,
+    KeyInit, XChaCha20Poly1305, XNonce,
     aead::{Aead, Payload},
 };
 use rand::RngExt as _;
@@ -30,6 +30,10 @@ const MAX_ENVELOPE_BYTES: usize = 8_192;
 const DEFAULT_ACTIVE_KEY_ID: &str = "default";
 const MAX_KEY_ID_BYTES: usize = 32;
 const MAX_PREVIOUS_KEY_MAP_BYTES: usize = 1_024;
+
+#[cfg(test)]
+#[path = "secret_encryption/persisted_compatibility.rs"]
+mod persisted_compatibility;
 
 /// Maximum number of previous keys accepted during one rotation window.
 pub const MAX_PREVIOUS_CREDENTIAL_KEYS: usize = 8;
@@ -281,12 +285,12 @@ impl CredentialCipher {
     ) -> Result<EncryptedSecret, SecretEncryptionError> {
         validate_plaintext(plaintext)?;
         let keyring = &self.keyring;
-        let cipher = XChaCha20Poly1305::new(Key::from_slice(&keyring.active.material.0));
+        let cipher = XChaCha20Poly1305::new((&keyring.active.material.0).into());
         let aad = purpose.row_bound_v3_aad(record_id, &keyring.active.id);
         let mut nonce = [0_u8; NONCE_BYTES];
         rand::rng().fill(&mut nonce);
         let ciphertext = cipher
-            .encrypt(XNonce::from_slice(&nonce), Payload { msg: plaintext.as_bytes(), aad: &aad })
+            .encrypt((&nonce).into(), Payload { msg: plaintext.as_bytes(), aad: &aad })
             .map_err(|_| SecretEncryptionError::EncryptionFailed)?;
         let envelope = format!(
             "{ENVELOPE_PREFIX_V3}{}:{}:{}",
@@ -437,9 +441,10 @@ fn decrypt_with_key(
     ciphertext: &[u8],
     aad: &[u8],
 ) -> Result<Zeroizing<Vec<u8>>, SecretEncryptionError> {
-    let cipher = XChaCha20Poly1305::new(Key::from_slice(&master_key.0));
+    let cipher = XChaCha20Poly1305::new((&master_key.0).into());
+    let nonce = XNonce::try_from(nonce).map_err(|_| SecretEncryptionError::DecryptionFailed)?;
     cipher
-        .decrypt(XNonce::from_slice(nonce), Payload { msg: ciphertext, aad })
+        .decrypt(&nonce, Payload { msg: ciphertext, aad })
         .map(Zeroizing::new)
         .map_err(|_| SecretEncryptionError::DecryptionFailed)
 }
@@ -807,7 +812,7 @@ mod tests {
     #[test]
     fn authenticated_non_utf8_plaintext_is_rejected() {
         use chacha20poly1305::{
-            Key, KeyInit, XChaCha20Poly1305, XNonce,
+            KeyInit, XChaCha20Poly1305,
             aead::{Aead, Payload},
         };
 
@@ -820,10 +825,10 @@ mod tests {
         let record = record_id();
         let aad =
             SecretPurpose::AiAccountApiKey.row_bound_v3_aad(record, super::DEFAULT_ACTIVE_KEY_ID);
-        let aead = XChaCha20Poly1305::new(Key::from_slice(&[key_byte; 32]));
+        let aead = XChaCha20Poly1305::new((&[key_byte; 32]).into());
         let nonce = [31_u8; super::NONCE_BYTES];
         let ciphertext = aead
-            .encrypt(XNonce::from_slice(&nonce), Payload { msg: &[0xff, 0xfe], aad: &aad })
+            .encrypt((&nonce).into(), Payload { msg: &[0xff, 0xfe], aad: &aad })
             .expect("synthetic invalid UTF-8 should encrypt");
         let envelope = format!(
             "{}{}:{}:{}",

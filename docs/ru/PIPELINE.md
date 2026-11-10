@@ -75,7 +75,7 @@ PostgreSQL хранит пользователей, рабочие простр�
 
 ## Видимость источника
 
-Ответ версии объявляет `contentVisibilityContract: "visibility-intent/1"`.
+Ответ версии объявляет `contentVisibilityContract: "visibility-intent/2"`.
 Клиент должен проверить эту capability до отправки работы, зависящей от видимости.
 Её отсутствие не разрешает использовать старую writable policy.
 

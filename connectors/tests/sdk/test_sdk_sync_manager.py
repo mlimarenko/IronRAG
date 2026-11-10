@@ -2987,7 +2987,7 @@ def _problem_client(body: dict[str, object], *, status: int = 400) -> IronRagCli
             base_url="http://ironrag.example.com",
             transport=httpx.MockTransport(
                 lambda request: (
-                    httpx.Response(200, json={"contentVisibilityContract": "visibility-intent/1"})
+                    httpx.Response(200, json={"contentVisibilityContract": "visibility-intent/2"})
                     if request.url.path == "/v1/version"
                     else httpx.Response(status, json=body)
                 )

@@ -177,6 +177,7 @@ pub(super) struct OpenAiCompatibleRequest<'a> {
     pub(super) response_format: Option<&'a serde_json::Value>,
     pub(super) extra_parameters_json: &'a serde_json::Value,
     pub(super) stream: bool,
+    pub(super) dispatch: Option<&'a crate::shared::provider_http::ProviderDispatchContext>,
 }
 
 impl OpenAiCompatibleRequest<'_> {
@@ -196,6 +197,12 @@ impl OpenAiCompatibleRequest<'_> {
             self.token_limit_parameter,
             self.max_output_tokens,
         );
+        let mut extra_parameters_json = self.extra_parameters_json.clone();
+        default_chat_parameters(
+            extra_parameters_json
+                .as_object_mut()
+                .context("provider extra parameters must be an object")?,
+        );
         let payload = OpenAiCompatibleChatCompletionRequest {
             model: self.model_name.to_string(),
             messages: request_messages,
@@ -206,7 +213,7 @@ impl OpenAiCompatibleRequest<'_> {
             response_format: self.response_format.cloned(),
             stream: self.stream.then_some(true),
             stream_options: self.stream.then(|| serde_json::json!({ "include_usage": true })),
-            extra_parameters_json: self.extra_parameters_json.clone(),
+            extra_parameters_json,
         };
         let body =
             serde_json::to_vec(&payload).context("failed to serialize provider request body")?;
@@ -214,6 +221,11 @@ impl OpenAiCompatibleRequest<'_> {
             .context("serialized provider request body was not valid json")?;
         Ok(body)
     }
+}
+
+pub(super) fn default_chat_parameters(extra: &mut serde_json::Map<String, serde_json::Value>) {
+    extra.entry("service_tier").or_insert_with(|| serde_json::json!("default"));
+    extra.entry("n").or_insert_with(|| serde_json::json!(1));
 }
 
 pub(super) const fn openai_compatible_token_limit_fields(

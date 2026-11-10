@@ -313,6 +313,33 @@ fn prepare_extracted_content(
         .expect("prepared revision")
 }
 
+#[test]
+fn fenced_code_blank_lines_keep_source_offsets() {
+    let source = "```\naaaaaaaX\n\nBCDE\n```";
+    let prepared = prepare_extracted_content(
+        "markdown".into(),
+        "default".into(),
+        source.into(),
+        source.into(),
+        ExtractionStructureHints::default(),
+        StructuredPreparationService::with_chunking(4, 0),
+    );
+    let first = &prepared.ordered_blocks[0];
+    let span = first.source_span.as_ref().unwrap();
+    assert_eq!(first.text, "aaaa");
+    assert_eq!((span.start_offset, span.end_offset), (4, 8));
+    for block in &prepared.ordered_blocks {
+        if let Some(span) = &block.source_span {
+            let actual: String = source
+                .chars()
+                .skip(span.start_offset as usize)
+                .take((span.end_offset - span.start_offset) as usize)
+                .collect();
+            assert_eq!(actual, block.text);
+        }
+    }
+}
+
 fn prepare_local_file_extraction(
     payload: &[u8],
     file_name: &str,

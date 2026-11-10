@@ -124,8 +124,19 @@ pub enum DocumentListSortOrder {
 
 #[derive(Debug, Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
+/// One row of the library document collection.
+///
+/// `visibilityIntentId` and `readableRevisionId` are shared with the
+/// by-external-key lookup used for reconciliation. They stay on this type
+/// deliberately: a dedicated response type would be a larger public contract
+/// change, the identifiers are opaque, and only a caller already authorized for
+/// the library can reach this row.
 pub struct ContentDocumentListItem {
     pub id: Uuid,
+    #[schema(required = true)]
+    pub visibility_intent_id: Option<Uuid>,
+    #[schema(required = true)]
+    pub readable_revision_id: Option<Uuid>,
     pub library_id: Uuid,
     pub workspace_id: Uuid,
     #[schema(required = true)]

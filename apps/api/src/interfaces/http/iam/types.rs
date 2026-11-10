@@ -95,6 +95,57 @@ pub enum IamPrincipalKind {
     Bootstrap,
 }
 
+/// The only durable telemetry consent states. An absent row means unset and is
+/// represented as `null` in responses, never as a third stored value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum IamTelemetryConsent {
+    Granted,
+    Denied,
+}
+
+impl IamTelemetryConsent {
+    #[must_use]
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Granted => "granted",
+            Self::Denied => "denied",
+        }
+    }
+
+    #[must_use]
+    pub(crate) fn parse_wire(value: &str) -> Option<Self> {
+        match value {
+            "granted" => Some(Self::Granted),
+            "denied" => Some(Self::Denied),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct IamPreferencesResponse {
+    /// `null` means the account has no stored preference.
+    pub telemetry_consent: Option<IamTelemetryConsent>,
+}
+
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct UpdateIamPreferencesRequest {
+    /// The account expected by the caller; the authenticated session remains authoritative.
+    pub expected_principal_id: Uuid,
+    pub telemetry_consent: IamTelemetryConsent,
+}
+
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct SeedIamPreferencesRequest {
+    /// The account expected by the caller; the authenticated session remains authoritative.
+    pub expected_principal_id: Uuid,
+    pub telemetry_consent: IamTelemetryConsent,
+}
+
 #[derive(Debug, Deserialize, utoipa::ToSchema, utoipa::IntoParams)]
 #[serde(rename_all = "camelCase")]
 #[into_params(parameter_in = Query)]

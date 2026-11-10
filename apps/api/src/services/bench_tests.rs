@@ -65,6 +65,9 @@ pub(crate) fn seeded_binding(
     let mut extra_parameters_json = serde_json::Value::Object(extra_parameters);
     extra_parameters_json["_providerProfile"] = seed.profile;
     ResolvedRuntimeBinding {
+        admission: std::sync::Arc::new(
+            crate::integrations::provider_admission::UnqualifiedTestAdmission,
+        ),
         binding_id: Uuid::now_v7(),
         workspace_id: Uuid::nil(),
         library_id: Uuid::nil(),

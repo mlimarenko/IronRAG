@@ -3,6 +3,8 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use zeroize::Zeroize as _;
 
+use crate::shared::provider_http::DispatchAuthority;
+
 #[derive(Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct ChatRequest {
     pub provider_kind: String,
@@ -18,6 +20,11 @@ pub struct ChatRequest {
     pub max_output_tokens_override: Option<i32>,
     pub response_format: Option<serde_json::Value>,
     pub extra_parameters_json: serde_json::Value,
+    /// Sealed resolver-issued authority. Skipped by serde and private so no
+    /// request body can fabricate it.
+    #[serde(skip)]
+    #[schema(ignore)]
+    pub(crate) dispatch: Option<DispatchAuthority>,
 }
 
 #[derive(Clone, Serialize, Deserialize, utoipa::ToSchema)]
@@ -33,6 +40,9 @@ pub struct ChatRequestSeed {
     pub top_p: Option<f64>,
     pub max_output_tokens_override: Option<i32>,
     pub extra_parameters_json: serde_json::Value,
+    #[serde(skip)]
+    #[schema(ignore)]
+    pub(crate) dispatch: Option<DispatchAuthority>,
 }
 
 #[must_use]
@@ -49,6 +59,7 @@ pub fn build_text_chat_request(mut seed: ChatRequestSeed, prompt: String) -> Cha
         max_output_tokens_override: seed.max_output_tokens_override,
         response_format: None,
         extra_parameters_json: std::mem::take(&mut seed.extra_parameters_json),
+        dispatch: seed.dispatch.take(),
     }
 }
 
@@ -70,6 +81,7 @@ pub fn build_structured_chat_request(
         max_output_tokens_override: seed.max_output_tokens_override,
         response_format: Some(response_format),
         extra_parameters_json: std::mem::take(&mut seed.extra_parameters_json),
+        dispatch: seed.dispatch.take(),
     }
 }
 
@@ -247,6 +259,11 @@ pub struct ToolUseRequest {
     /// callers that want the model to decide whether tools are useful.
     #[serde(default)]
     pub require_tool_call: bool,
+    /// Sealed resolver-issued authority. Tool-use is a real provider caller and
+    /// uses the same single send path as chat and embeddings.
+    #[serde(skip)]
+    #[schema(ignore)]
+    pub(crate) dispatch: Option<DispatchAuthority>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
@@ -276,6 +293,9 @@ pub struct EmbeddingRequest {
     pub api_key_override: Option<String>,
     pub base_url_override: Option<String>,
     pub extra_parameters_json: serde_json::Value,
+    #[serde(skip)]
+    #[schema(ignore)]
+    pub(crate) dispatch: Option<DispatchAuthority>,
 }
 
 #[derive(Clone, Serialize, Deserialize, utoipa::ToSchema)]
@@ -288,6 +308,9 @@ pub struct EmbeddingBatchRequest {
     pub api_key_override: Option<String>,
     pub base_url_override: Option<String>,
     pub extra_parameters_json: serde_json::Value,
+    #[serde(skip)]
+    #[schema(ignore)]
+    pub(crate) dispatch: Option<DispatchAuthority>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
@@ -324,6 +347,9 @@ pub struct VisionRequest {
     pub top_p: Option<f64>,
     pub max_output_tokens_override: Option<i32>,
     pub extra_parameters_json: serde_json::Value,
+    #[serde(skip)]
+    #[schema(ignore)]
+    pub(crate) dispatch: Option<DispatchAuthority>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]

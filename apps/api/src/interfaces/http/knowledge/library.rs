@@ -111,6 +111,7 @@ pub async fn get_library_summary(
     Ok(Json(KnowledgeLibrarySummaryResponse {
         library_id: summary.library_id,
         document_counts_by_readiness: summary.document_counts_by_readiness,
+        graph_status: summary.graph_status,
         node_count: summary.node_count,
         edge_count: summary.edge_count,
         graph_ready_document_count: summary.graph_ready_document_count,

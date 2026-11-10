@@ -174,7 +174,13 @@ async fn record_embedding_failure(
                 stage_name: INGEST_STAGE_EMBED_CHUNK.to_string(),
                 stage_state: "failed".to_string(),
                 message: Some("chunk embedding failed".to_string()),
-                details_json: serde_json::json!({ "error": format!("{error:#}") }),
+                details_json: serde_json::json!({
+                    "error": format!("{error:#}"),
+                    "providerDetailRedacted": match error {
+                        QueryServiceError::Provider(failure) => failure.detail_redacted(),
+                        _ => None,
+                    },
+                }),
                 provider_kind: None,
                 model_name: None,
                 prompt_tokens: None,
@@ -205,6 +211,11 @@ fn embedding_failure(error: &QueryServiceError) -> anyhow::Error {
                 message: format!("chunk embedding failed: {}", failure.message()),
             })
         }
+        QueryServiceError::Provider(failure)
+            if failure.kind() == ProviderFailureKind::RequestRejected =>
+        {
+            anyhow::Error::new(failure.clone())
+        }
         _ => anyhow::anyhow!(format!("chunk embedding failed: {error:#}")),
     }
 }
@@ -220,6 +231,60 @@ mod tests {
     };
     use crate::shared::provider_failure::ProviderFailure;
     use uuid::Uuid;
+
+    #[test]
+    fn rejected_provider_requests_are_terminal_and_metadata_is_safe() {
+        use crate::domains::ops::OpsFailureDisposition;
+        use crate::integrations::retry::{ProviderCallError, provider_http_status_error};
+        use crate::services::ingest::worker::errors::classify_content_ingest_failure;
+        use reqwest::{StatusCode, header::HeaderMap};
+
+        let body = r#"{"error":{"type":"invalid_request_error","code":"context_length_exceeded","param":"input","message":"secret-canary"}}"#;
+        let remote =
+            provider_http_status_error("openai", StatusCode::BAD_REQUEST, &HeaderMap::new(), body);
+        let detail = remote.redacted_detail();
+        assert!(
+            detail.contains("type=invalid_request_error code=context_length_exceeded param=input")
+        );
+        assert!(!format!("{remote:?} {remote} {detail}").contains("secret-canary"));
+        let query = QueryServiceError::from(remote);
+        let worker_error = embedding_failure(&query);
+        let disposition = classify_content_ingest_failure(&worker_error);
+        assert_eq!(disposition.failure_disposition, OpsFailureDisposition::OperationalTerminal);
+        assert!(!disposition.is_retryable());
+        assert!(disposition.operational_defer.is_none());
+
+        let local = ProviderCallError::local_request_rejected();
+        assert_eq!(local.redacted_detail(), "origin=local request_rejected");
+        assert!(
+            !classify_content_ingest_failure(&embedding_failure(&QueryServiceError::from(local)))
+                .is_retryable()
+        );
+
+        let unknown = provider_http_status_error(
+            "openai",
+            StatusCode::BAD_REQUEST,
+            &HeaderMap::new(),
+            r#"{"error":{"type":"secret-canary","code":"secret-canary","param":"secret-canary"}}"#,
+        );
+        assert!(unknown.redacted_detail().contains("type=unknown code=unknown param=unknown"));
+        assert!(!format!("{unknown:?} {unknown}").contains("secret-canary"));
+        let rate = provider_http_status_error(
+            "openai",
+            StatusCode::TOO_MANY_REQUESTS,
+            &HeaderMap::new(),
+            "{}",
+        );
+        assert_eq!(
+            ProviderFailure::from(rate).kind(),
+            crate::shared::provider_failure::ProviderFailureKind::Unavailable
+        );
+        let transport = ProviderCallError::timeout("synthetic");
+        assert_eq!(
+            ProviderFailure::from(transport).kind(),
+            crate::shared::provider_failure::ProviderFailureKind::Unavailable
+        );
+    }
 
     fn embedding_outcome() -> EmbedChunksStageOutcome {
         EmbedChunksStageOutcome {

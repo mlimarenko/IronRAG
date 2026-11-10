@@ -9,8 +9,20 @@ use super::*;
     clippy::print_stderr,
     reason = "operator maintenance commands intentionally stream reports to the terminal"
 )]
+#[expect(
+    clippy::cognitive_complexity,
+    reason = "one flat dispatch table for operator migrations; splitting it would duplicate the command routing"
+)]
 pub(super) async fn run_migrate(state: &AppState, command: MigrateCommand) -> Result<()> {
     match command {
+        MigrateCommand::UserPreferenceSchema { apply, json } => {
+            let report = user_preference_schema::migrate_user_preference_schema(
+                &state.persistence.postgres,
+                apply,
+            )
+            .await?;
+            emit_schema_migration("migrate.user-preference-schema", json, &report)
+        }
         MigrateCommand::BillingKnowledgeSearchSchema { apply, json } => {
             let report = billing_knowledge_search_schema::migrate_billing_knowledge_search_schema(
                 &state.persistence.postgres,
@@ -18,6 +30,15 @@ pub(super) async fn run_migrate(state: &AppState, command: MigrateCommand) -> Re
             )
             .await?;
             emit_schema_migration("migrate.billing-knowledge-search-schema", json, &report)
+        }
+        MigrateCommand::ProviderSourceGenerationFence { apply, json } => {
+            let report =
+                provider_source_generation_fence_schema::migrate_provider_source_generation_fence(
+                    &state.persistence.postgres,
+                    apply,
+                )
+                .await?;
+            emit_schema_migration("migrate.provider-source-generation-fence", json, &report)
         }
         MigrateCommand::BillingDocumentReadSchema { apply, json } => {
             let report = billing_document_read_schema::migrate_billing_document_read_schema(
@@ -139,6 +160,20 @@ trait SchemaMigrationReport {
     fn schema_applied(&self) -> bool;
 }
 
+impl SchemaMigrationReport for user_preference_schema::UserPreferenceSchemaMigrationReport {
+    fn apply(&self) -> bool {
+        self.apply
+    }
+
+    fn already_current(&self) -> bool {
+        self.already_current
+    }
+
+    fn schema_applied(&self) -> bool {
+        self.schema_applied
+    }
+}
+
 impl SchemaMigrationReport
     for billing_knowledge_search_schema::BillingKnowledgeSearchSchemaMigrationReport
 {
@@ -184,6 +219,20 @@ impl SchemaMigrationReport for vision_recognition_schema::VisionRecognitionSchem
 }
 
 impl SchemaMigrationReport for xberg_recognition_schema::XbergRecognitionSchemaMigrationReport {
+    fn apply(&self) -> bool {
+        self.apply
+    }
+    fn already_current(&self) -> bool {
+        self.already_current
+    }
+    fn schema_applied(&self) -> bool {
+        self.schema_applied
+    }
+}
+
+impl SchemaMigrationReport
+    for provider_source_generation_fence_schema::ProviderSourceGenerationFenceMigrationReport
+{
     fn apply(&self) -> bool {
         self.apply
     }

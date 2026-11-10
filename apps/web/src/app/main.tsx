@@ -37,15 +37,9 @@ class RootErrorBoundary extends Component<
   }
 }
 
-// Fire observability lazily on idle so the SDK never bloats the main entry.
-// No-op when VITE_OTEL_EXPORTER_OTLP_ENDPOINT is empty.
-const idle = (cb: () => void) =>
-  typeof window.requestIdleCallback === 'function'
-    ? window.requestIdleCallback(cb)
-    : window.setTimeout(cb, 0)
-idle(() => {
-  void import('@/shared/lib/observability').then((m) => m.initObservability())
-})
+// Telemetry starts from TelemetryConsentBridge after the shell resolves whether
+// a principal is signed in. Starting it here would let a pre-sign-in browser
+// choice emit for an account whose server preference is still unknown.
 
 // Register before the first request so no 401 can slip past the one place
 // that turns "the server stopped accepting this session" into app state.

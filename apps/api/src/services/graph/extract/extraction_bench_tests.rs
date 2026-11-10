@@ -292,8 +292,13 @@ async fn graph_extraction_model_benchmark() {
             .runtime_graph_extract_recovery_max_attempts
             .clamp(1, GRAPH_EXTRACTION_MAX_PROVIDER_ATTEMPTS),
     };
-    let gateway: Arc<dyn LlmGateway> =
-        Arc::new(UnifiedGateway::from_settings(&settings).expect("build chat gateway"));
+    let gateway: Arc<dyn LlmGateway> = Arc::new(
+        UnifiedGateway::from_settings(
+            &settings,
+            Arc::new(crate::integrations::provider_admission::UnqualifiedTestAdmission),
+        )
+        .expect("build chat gateway"),
+    );
 
     // Arms run concurrently, chunks within an arm sequentially, so each arm's
     // latency is its own provider's and the wall time stays bounded.

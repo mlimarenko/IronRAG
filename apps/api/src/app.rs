@@ -63,6 +63,15 @@ pub async fn run() -> anyhow::Result<()> {
     ) {
         critical_tasks.push(supervisor::CriticalTask::new("maintenance-scheduler", handle));
     }
+    if !state.settings.runs_maintenance_scheduler() {
+        critical_tasks.push(supervisor::CriticalTask::new(
+            "db-pool-metrics",
+            crate::services::maintenance::scheduler::spawn_db_pool_metrics_reporter(
+                state.clone(),
+                shutdown.subscribe(),
+            ),
+        ));
+    }
     if let Some(handle) = crate::services::webhook::outbox::spawn_webhook_lifecycle_outbox_relay(
         state.clone(),
         shutdown.subscribe(),

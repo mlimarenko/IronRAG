@@ -135,7 +135,7 @@ fn canonicalize_library_grants(
 }
 
 fn fingerprint(value: serde_json::Value) -> String {
-    let encoded = serde_json::to_vec(&value).expect("JSON Value serialization is infallible");
+    let encoded = serde_json::to_vec(&value).unwrap_or_default();
     hex::encode(Sha256::digest(encoded))
 }
 

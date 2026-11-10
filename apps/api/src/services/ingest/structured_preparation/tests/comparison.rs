@@ -140,6 +140,7 @@ fn native_category_treatment_export() -> Result<()> {
             let settings = StructuredChunkingProfile {
                 max_chars: profile.max_chars,
                 overlap_chars: profile.overlap_chars,
+                max_input_bytes: None,
             };
             ensure!(
                 settings.max_chars > 0 && settings.overlap_chars < settings.max_chars,
@@ -173,7 +174,7 @@ fn native_category_treatment_export() -> Result<()> {
                     } else {
                         (
                             case.blocks.clone(),
-                            build_structured_chunk_windows(&case.blocks, settings),
+                            build_structured_chunk_windows(&case.blocks, settings, None)?,
                             0,
                             Vec::new(),
                         )

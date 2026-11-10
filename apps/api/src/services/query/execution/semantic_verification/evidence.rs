@@ -167,12 +167,8 @@ async fn load_sources_inner(
             reference.revision_id.map(|revision| (reference.document_id, revision))
         }))
         .collect::<BTreeSet<_>>();
-    let allowed_chunks = retained_chunks
-        .iter()
-        .copied()
-        .chain(selected_evidence.iter().filter_map(|row| row.chunk_id))
-        .chain(selected_facts.iter().flat_map(|fact| fact.support_chunk_ids.iter().copied()))
-        .collect::<BTreeSet<_>>();
+    let allowed_chunks =
+        allowed_semantic_chunk_ids(&ids, &retained_chunks, &selected_evidence, &selected_facts);
     anyhow::ensure!(
         ids.is_subset(&allowed_chunks),
         "semantic chunk lacks a selected authoritative reference"
@@ -184,9 +180,11 @@ async fn load_sources_inner(
         rows.iter().all(|row| ids.contains(&row.chunk_id)),
         "semantic chunk owner returned an unselected identity"
     );
-    let allowed_blocks = rows
+    let allowed_blocks = evidence
+        .structured_blocks
         .iter()
-        .flat_map(|row| row.support_block_ids.iter().copied())
+        .map(|block| block.block_id)
+        .chain(rows.iter().flat_map(|row| row.support_block_ids.iter().copied()))
         .chain(selected_evidence.iter().filter_map(|row| row.block_id))
         .chain(selected_facts.iter().flat_map(|fact| fact.support_block_ids.iter().copied()))
         .collect::<BTreeSet<_>>();
@@ -208,8 +206,8 @@ async fn load_sources_inner(
     let mut sources = Vec::new();
     for row in rows {
         validate_selected_chunk(&row, execution, chunks, evidence)?;
-        let referenced =
-            chunk_is_referenced(&row, &retained_chunks, &selected_evidence, &selected_facts);
+        let referenced = ids.contains(&row.chunk_id)
+            || chunk_is_referenced(&row, &retained_chunks, &selected_evidence, &selected_facts);
         anyhow::ensure!(
             referenced,
             "semantic chunk document/revision is not covered by its selected source reference"
@@ -311,6 +309,25 @@ pub(super) fn selected_chunk_source(
         text: super::super::chunk_support::chunk_answer_source_text(row),
         complete_document: None,
     }
+}
+
+/// The answer's own primary chunks and authoritative evidence rows are selected
+/// sources even when the persisted bundle reference set does not repeat every
+/// chunk the answer stage used. Document/revision scope and current-readable
+/// checks still run on each loaded owner.
+fn allowed_semantic_chunk_ids(
+    answer_chunk_ids: &BTreeSet<Uuid>,
+    retained: &BTreeSet<Uuid>,
+    selected_evidence: &[crate::infra::knowledge_rows::KnowledgeEvidenceRow],
+    selected_facts: &[crate::infra::knowledge_rows::KnowledgeTechnicalFactRow],
+) -> BTreeSet<Uuid> {
+    answer_chunk_ids
+        .iter()
+        .copied()
+        .chain(retained.iter().copied())
+        .chain(selected_evidence.iter().filter_map(|row| row.chunk_id))
+        .chain(selected_facts.iter().flat_map(|fact| fact.support_chunk_ids.iter().copied()))
+        .collect()
 }
 
 fn chunk_is_referenced(
@@ -488,4 +505,20 @@ pub(super) fn canonical_document_slice(
     let end = boundary(end_chars).context("selected document end exceeds canonical text")?;
     let selected = text.get(start..end).context("invalid canonical document byte range")?;
     Ok((start, end, selected))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn answer_primary_chunks_are_authorized_without_a_bundle_reference() {
+        let answer_chunk = Uuid::from_u128(1);
+        let allowed =
+            allowed_semantic_chunk_ids(&BTreeSet::from([answer_chunk]), &BTreeSet::new(), &[], &[]);
+        assert!(
+            allowed.contains(&answer_chunk),
+            "the answer's own selected chunk must be authorized even when the persisted bundle does not repeat it"
+        );
+    }
 }

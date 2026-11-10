@@ -169,7 +169,7 @@ pub async fn cancel_ingest_job(postgres: &PgPool, job_id: Uuid) -> Result<u64, s
 pub struct StaleIngestLeaseRecovery {
     /// Jobs pushed back to `queued` for another worker.
     pub requeued: u64,
-    /// Already-terminal jobs whose orphaned leased attempt was failed.
+    /// Orphaned leased attempts failed without requeuing their non-leased jobs.
     pub orphaned: u64,
 }
 
@@ -187,17 +187,9 @@ pub async fn recover_stale_ingest_leases(
     //      `failed` with `lease_expired`/`stale_heartbeat` AND push
     //      the job back to `queued` so another worker picks it up.
     //
-    //   2. Attempt `leased`, but job already reached a terminal state
-    //      (`completed`, `failed`, `canceled`): the previous worker
-    //      crashed between writing the terminal job row and
-    //      finalising its own attempt. The job is done — re-queuing
-    //      would double-process the document. We only clean up the
-    //      orphaned attempt so it stops occupying an `active
-    //      operations` slot on the dashboard and the dedicated
-    //      heartbeat pool. Without this branch such attempts stayed
-    //      `leased` forever (observed in the field: attempt rows
-    //      with multi-hour heartbeat staleness pinned to jobs that
-    //      completed hours earlier).
+    //   2. Attempt `leased`, but job is queued, paused or terminal: fail
+    //      only the stale orphaned attempt, preserving the job and its schedule.
+    //      In particular, paused jobs remain paused until explicitly resumed.
     //
     // Recovery marks stale leased attempts with the standard stale-heartbeat
     // failure metadata. Leased jobs are requeued only after the active-attempt
@@ -210,9 +202,10 @@ pub async fn recover_stale_ingest_leases(
              select 1
              from ingest_attempt a
              where a.job_id = j.id
-               and a.attempt_state = 'leased'
-               and a.heartbeat_at < now() - make_interval(secs => $1::double precision)
-               and j.queue_state in ('leased', 'completed', 'failed', 'canceled')
+                and a.attempt_state = 'leased'
+                and a.finished_at is null
+                and a.heartbeat_at < now() - make_interval(secs => $1::double precision)
+                and j.queue_state in ('leased', 'queued', 'paused', 'completed', 'failed', 'canceled')
          )
          or (
              j.queue_state = 'leased'
@@ -231,26 +224,8 @@ pub async fn recover_stale_ingest_leases(
         return Ok(StaleIngestLeaseRecovery { requeued: 0, orphaned: 0 });
     }
 
-    // Count the already-terminal-job attempts before the attempt UPDATE flips
-    // them from `leased` to `failed`. They are the orphaned half of recovery;
-    // jobs requeued below stay `queued` and are excluded by `j.queue_state`.
-    let orphaned_count: i64 = sqlx::query_scalar(
-        "select count(*)::bigint
-         from ingest_attempt a
-         join ingest_job j on j.id = a.job_id
-         where a.job_id = any($2)
-           and a.attempt_state = 'leased'
-           and a.heartbeat_at < now() - make_interval(secs => $1::double precision)
-           and j.queue_state in ('completed', 'failed', 'canceled')",
-    )
-    .bind(stale_seconds as f64)
-    .bind(&locked_job_ids)
-    .fetch_one(&mut *tx)
-    .await?;
-    let orphaned = u64::try_from(orphaned_count)
-        .map_err(|_| sqlx::Error::Protocol("negative orphaned ingest attempt count".to_string()))?;
-
-    let reaped_attempt_ids = sqlx::query_scalar::<_, Uuid>(
+    // Count actual updated rows, not candidates whose heartbeat may have changed.
+    let reaped_attempts = sqlx::query_as::<_, (Uuid, bool)>(
         "update ingest_attempt a
          set attempt_state = 'failed',
              failure_class = 'lease_expired',
@@ -259,24 +234,26 @@ pub async fn recover_stale_ingest_leases(
              finished_at = now(),
              retryable = true
          where a.job_id = any($2)
-           and a.attempt_state = 'leased'
-           and a.heartbeat_at < now() - make_interval(secs => $1::double precision)
+            and a.attempt_state = 'leased'
+            and a.finished_at is null
+            and a.heartbeat_at < now() - make_interval(secs => $1::double precision)
            and exists (
                select 1
                from ingest_job j
                where j.id = a.job_id
-                 and j.queue_state in ('leased', 'completed', 'failed', 'canceled')
-           )
-         returning a.id",
+                  and j.queue_state in ('leased', 'queued', 'paused', 'completed', 'failed', 'canceled')
+            )
+         returning a.id, (select j.queue_state <> 'leased' from ingest_job j where j.id = a.job_id)",
     )
     .bind(stale_seconds as f64)
     .bind(&locked_job_ids)
     .fetch_all(&mut *tx)
     .await?;
+    let orphaned = reaped_attempts.iter().filter(|(_, orphan)| *orphan).count() as u64;
 
     // The reaped attempts are now failed; close the graph-extraction runtime
     // rows they activated in the same transaction.
-    for attempt_id in reaped_attempt_ids {
+    for (attempt_id, _) in reaped_attempts {
         crate::infra::repositories::runtime_graph_repository::terminalize_runtime_rows_for_attempt(
             &mut tx,
             attempt_id,

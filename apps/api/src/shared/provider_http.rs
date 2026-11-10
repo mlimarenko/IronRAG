@@ -7,9 +7,13 @@ use std::{
 };
 
 use async_trait::async_trait;
-use reqwest::{Client, Method, RequestBuilder, Url};
+use reqwest::{
+    Client, Method, RequestBuilder, Url,
+    header::{HeaderName, HeaderValue},
+};
 use thiserror::Error;
 use tracing::Instrument as _;
+use uuid::Uuid;
 
 use super::outbound_http::{PublicHttpUrlError, is_non_public_ip};
 
@@ -182,6 +186,7 @@ impl ProviderHttpClientFactory for SystemProviderHttpClientFactory {
             .http2_keep_alive_timeout(Duration::from_secs(10))
             .http2_keep_alive_while_idle(true)
             .no_proxy()
+            .retry(reqwest::retry::never())
             .redirect(reqwest::redirect::Policy::none());
         if let Some((host, addresses)) = dns_pin {
             builder = builder.resolve_to_addrs(host, addresses);
@@ -435,6 +440,443 @@ impl PreparedProviderTarget {
     }
 }
 
+/// Upper bound on an inspectable JSON provider request body. Larger bodies are
+/// treated as uninspectable and refused instead of being buffered without limit.
+pub const PROVIDER_REQUEST_BODY_MAX_BYTES: usize = 16 * 1024 * 1024;
+
+/// Who authorized one physical provider send.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProviderDispatchAuthority {
+    /// A resolved runtime binding. The only authority for ordinary traffic.
+    RuntimeBinding,
+    /// The authorized account-creation credential validation, which runs before
+    /// any binding or account row exists. Refused under a required incident scope.
+    AccountValidation,
+    /// Ordinary-mode vision. The incident envelope is text-only, so this is
+    /// never valid under a configured incident scope; it exists so vision keeps
+    /// working in a runtime with no incident scope and still uses the one path.
+    OrdinaryVision,
+}
+
+/// Which provider surface the attested route belongs to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProviderSurface {
+    Chat,
+    Embeddings,
+    Decision,
+}
+
+/// Sealed, non-serializable attestation of the resolved route and credential.
+///
+/// Everything here is derived from the authoritative runtime binding (or the
+/// authorized account-validation operation) before a request is built. It is
+/// deliberately not `Deserialize`, its fields are private, and it is never
+/// included in a provider body, a log line or an embedding profile key.
+#[derive(Clone)]
+pub struct ProviderDispatchContext {
+    authority: ProviderDispatchAuthority,
+    surface: ProviderSurface,
+    provider_kind: String,
+    provider_catalog_id: Uuid,
+    account_id: Option<Uuid>,
+    model_name: String,
+    base_url: String,
+    auth: Option<AttestedCredential>,
+}
+
+/// The exact credential header a resolved binding attaches, reduced to its
+/// name and a digest. The raw secret is never stored twice.
+#[derive(Debug, Clone)]
+struct AttestedCredential {
+    header: HeaderName,
+    value_digest: [u8; 32],
+}
+
+impl std::fmt::Debug for ProviderDispatchContext {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ProviderDispatchContext")
+            .field("authority", &self.authority)
+            .field("surface", &self.surface)
+            .field("provider_kind", &self.provider_kind)
+            .field("model_name", &self.model_name)
+            .finish_non_exhaustive()
+    }
+}
+
+/// The authoritative, credential-free part of a binding's dispatch identity.
+///
+/// The runtime resolver creates it from a [`crate::services::ai_catalog_service::
+/// ResolvedRuntimeBinding`]; provider callers receive it and cannot fabricate it
+/// from request labels because the constructor is crate-visible and the fields
+/// are private.
+#[derive(Debug, Clone)]
+pub struct DispatchAuthority {
+    kind: ProviderDispatchAuthority,
+    provider_kind: String,
+    provider_catalog_id: Uuid,
+    account_id: Option<Uuid>,
+    model_name: String,
+    base_url: String,
+    credential_digest: Option<[u8; 32]>,
+}
+
+/// The route and credential identity a [`DispatchAuthority`] is issued for.
+///
+/// Grouped so the three authority constructors share one digest rule without a
+/// positional argument list that grows with every identity field.
+struct DispatchIdentity {
+    provider_kind: String,
+    provider_catalog_id: Uuid,
+    account_id: Option<Uuid>,
+    model_name: String,
+    base_url: String,
+    credential_digest: Option<[u8; 32]>,
+}
+
+impl DispatchIdentity {
+    fn new(
+        provider_kind: impl Into<String>,
+        provider_catalog_id: Uuid,
+        account_id: Option<Uuid>,
+        model_name: impl Into<String>,
+        base_url: impl Into<String>,
+        credential: Option<&str>,
+    ) -> Self {
+        Self {
+            provider_kind: provider_kind.into(),
+            provider_catalog_id,
+            account_id,
+            model_name: model_name.into(),
+            base_url: base_url.into(),
+            credential_digest: credential
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(credential_digest),
+        }
+    }
+}
+
+impl DispatchAuthority {
+    pub(crate) fn runtime_binding(
+        provider_kind: impl Into<String>,
+        provider_catalog_id: Uuid,
+        account_id: Option<Uuid>,
+        model_name: impl Into<String>,
+        base_url: impl Into<String>,
+        credential: Option<&str>,
+    ) -> Self {
+        Self::new(
+            ProviderDispatchAuthority::RuntimeBinding,
+            DispatchIdentity::new(
+                provider_kind,
+                provider_catalog_id,
+                account_id,
+                model_name,
+                base_url,
+                credential,
+            ),
+        )
+    }
+
+    /// The narrow, authorized account-creation validation authority. It exists
+    /// only because that operation validates a proposed credential before the
+    /// account or any binding exists; admission refuses it under a required scope.
+    pub(crate) fn account_validation(
+        provider_kind: impl Into<String>,
+        provider_catalog_id: Uuid,
+        account_id: Option<Uuid>,
+        model_name: impl Into<String>,
+        base_url: impl Into<String>,
+        credential: Option<&str>,
+    ) -> Self {
+        Self::new(
+            ProviderDispatchAuthority::AccountValidation,
+            DispatchIdentity::new(
+                provider_kind,
+                provider_catalog_id,
+                account_id,
+                model_name,
+                base_url,
+                credential,
+            ),
+        )
+    }
+
+    /// Ordinary-mode vision authority. Never valid under a configured incident
+    /// scope, because the incident envelope is text-only.
+    pub(crate) fn ordinary_vision(
+        provider_kind: impl Into<String>,
+        model_name: impl Into<String>,
+        base_url: impl Into<String>,
+        credential: Option<&str>,
+    ) -> Self {
+        Self::new(
+            ProviderDispatchAuthority::OrdinaryVision,
+            DispatchIdentity::new(
+                provider_kind,
+                Uuid::nil(),
+                None,
+                model_name,
+                base_url,
+                credential,
+            ),
+        )
+    }
+
+    fn new(kind: ProviderDispatchAuthority, identity: DispatchIdentity) -> Self {
+        Self {
+            kind,
+            provider_kind: identity.provider_kind,
+            provider_catalog_id: identity.provider_catalog_id,
+            account_id: identity.account_id,
+            model_name: identity.model_name,
+            base_url: identity.base_url,
+            credential_digest: identity.credential_digest,
+        }
+    }
+
+    #[must_use]
+    pub fn kind(&self) -> ProviderDispatchAuthority {
+        self.kind
+    }
+
+    #[must_use]
+    pub fn provider_kind(&self) -> &str {
+        &self.provider_kind
+    }
+
+    #[must_use]
+    pub fn provider_catalog_id(&self) -> Uuid {
+        self.provider_catalog_id
+    }
+
+    #[must_use]
+    pub fn account_id(&self) -> Option<Uuid> {
+        self.account_id
+    }
+
+    #[must_use]
+    pub fn model_name(&self) -> &str {
+        &self.model_name
+    }
+
+    #[must_use]
+    pub fn base_url(&self) -> &str {
+        &self.base_url
+    }
+
+    #[must_use]
+    pub fn credential_digest(&self) -> Option<[u8; 32]> {
+        self.credential_digest
+    }
+
+    /// Bind this authority to one concrete surface and authentication header.
+    #[must_use]
+    pub fn attest(
+        &self,
+        surface: ProviderSurface,
+        auth_header: Option<(HeaderName, String)>,
+    ) -> ProviderDispatchContext {
+        ProviderDispatchContext {
+            authority: self.kind,
+            surface,
+            provider_kind: self.provider_kind.clone(),
+            provider_catalog_id: self.provider_catalog_id,
+            account_id: self.account_id,
+            model_name: self.model_name.clone(),
+            base_url: self.base_url.clone(),
+            auth: auth_header.map(|(header, value)| AttestedCredential {
+                header,
+                value_digest: credential_digest(&value),
+            }),
+        }
+    }
+}
+
+fn credential_digest(value: &str) -> [u8; 32] {
+    use sha2::{Digest, Sha256};
+    Sha256::digest(value.as_bytes()).into()
+}
+
+/// Digest of a credential, comparable between the resolver and the boundary
+/// without storing the secret twice.
+#[must_use]
+pub(crate) fn credential_fingerprint(value: &str) -> [u8; 32] {
+    credential_digest(value)
+}
+
+impl ProviderDispatchContext {
+    #[must_use]
+    pub fn authority(&self) -> ProviderDispatchAuthority {
+        self.authority
+    }
+
+    #[must_use]
+    pub fn surface(&self) -> ProviderSurface {
+        self.surface
+    }
+
+    #[must_use]
+    pub fn provider_kind(&self) -> &str {
+        &self.provider_kind
+    }
+
+    #[must_use]
+    pub fn provider_catalog_id(&self) -> Uuid {
+        self.provider_catalog_id
+    }
+
+    #[must_use]
+    pub fn account_id(&self) -> Option<Uuid> {
+        self.account_id
+    }
+
+    #[must_use]
+    pub fn model_name(&self) -> &str {
+        &self.model_name
+    }
+
+    /// Whether `endpoint` stays under the resolved base URL this context was
+    /// issued for. A caller cannot redirect an attested binding elsewhere.
+    #[must_use]
+    pub fn authorizes_route(&self, endpoint: &Url) -> bool {
+        let Ok(base) = Url::parse(&self.base_url) else {
+            return false;
+        };
+        endpoint.scheme() == base.scheme()
+            && endpoint.host_str() == base.host_str()
+            && endpoint.port_or_known_default() == base.port_or_known_default()
+            && endpoint.path().starts_with(base.path())
+    }
+
+    /// Whether the credential actually attached to the built request is the one
+    /// this context was issued for. Compares digests; no secret leaves memory.
+    #[must_use]
+    pub fn authorizes_credential(&self, request: &reqwest::Request) -> bool {
+        match &self.auth {
+            None => true,
+            Some(auth) => request
+                .headers()
+                .get(&auth.header)
+                .is_some_and(|value| credential_digest_header(value) == auth.value_digest),
+        }
+    }
+}
+
+fn credential_digest_header(value: &HeaderValue) -> [u8; 32] {
+    credential_digest(value.to_str().unwrap_or_default())
+}
+
+/// Typed refusal of one physical provider attempt. No variant carries a secret
+/// or a provider body.
+#[derive(Debug, Error, Clone, PartialEq, Eq)]
+pub enum ProviderDispatchRefusal {
+    #[error("provider dispatch is not authorized for this configuration")]
+    Authority,
+    #[error("provider dispatch route does not match the resolved binding")]
+    RouteMismatch,
+    #[error("provider dispatch credential does not match the resolved binding")]
+    CredentialMismatch,
+    #[error("provider request body is not an inspectable bounded JSON object")]
+    UninspectableBody,
+    #[error("provider request is outside the admitted request envelope")]
+    Envelope,
+    #[error("financial admission could not durably reserve this attempt")]
+    Admission,
+    #[error("financial allowance exhausted")]
+    Exhausted,
+}
+
+/// One acknowledged durable reservation of a full attempt unit.
+///
+/// The permit is proof, not credit: dropping it never returns allowance.
+pub struct ProviderDispatchPermit {
+    scope_id: Option<Uuid>,
+}
+
+impl ProviderDispatchPermit {
+    #[must_use]
+    pub fn unqualified() -> Self {
+        Self { scope_id: None }
+    }
+
+    #[must_use]
+    pub fn reserved(scope_id: Uuid) -> Self {
+        Self { scope_id: Some(scope_id) }
+    }
+
+    /// The incident scope whose attempt unit this permit reserved, or `None`
+    /// when admission ran without a required scope.
+    #[must_use]
+    pub fn scope_id(&self) -> Option<Uuid> {
+        self.scope_id
+    }
+}
+
+/// The single owner that may admit a built provider request.
+///
+/// Every physical send requires one, so a caller cannot construct a request and
+/// dispatch it directly. Implementations reserve one full attempt unit before
+/// the first byte leaves and never refund it.
+#[async_trait]
+pub trait ProviderDispatchAdmission: Send + Sync {
+    async fn admit(
+        &self,
+        context: &ProviderDispatchContext,
+        evidence: &DispatchRequestEvidence<'_>,
+    ) -> Result<ProviderDispatchPermit, ProviderDispatchRefusal>;
+}
+
+/// What the admission owner may inspect about the built request.
+#[derive(Clone, Copy)]
+pub struct DispatchRequestEvidence<'a> {
+    pub method: &'a Method,
+    pub url: &'a Url,
+    pub body: &'a serde_json::Value,
+}
+
+/// Why one provider attempt did not produce a response.
+#[derive(Debug, Error)]
+pub enum ProviderDispatchError {
+    #[error(transparent)]
+    Refused(#[from] ProviderDispatchRefusal),
+    #[error("provider request could not be built")]
+    Build,
+    #[error(transparent)]
+    Transport(#[from] reqwest::Error),
+}
+
+impl ProviderDispatchError {
+    /// The typed refusal, when this attempt never left the process.
+    #[must_use]
+    pub const fn refusal(&self) -> Option<&ProviderDispatchRefusal> {
+        match self {
+            Self::Refused(refusal) => Some(refusal),
+            Self::Build | Self::Transport(_) => None,
+        }
+    }
+}
+
+/// Extracts the admitted JSON body from the built request, or refuses.
+fn inspect_request_body(
+    request: &reqwest::Request,
+) -> Result<serde_json::Value, ProviderDispatchRefusal> {
+    let bytes = request
+        .body()
+        .and_then(reqwest::Body::as_bytes)
+        .ok_or(ProviderDispatchRefusal::UninspectableBody)?;
+    if bytes.is_empty() || bytes.len() > PROVIDER_REQUEST_BODY_MAX_BYTES {
+        return Err(ProviderDispatchRefusal::UninspectableBody);
+    }
+    let value: serde_json::Value =
+        serde_json::from_slice(bytes).map_err(|_| ProviderDispatchRefusal::UninspectableBody)?;
+    if !value.is_object() {
+        return Err(ProviderDispatchRefusal::UninspectableBody);
+    }
+    Ok(value)
+}
+
 /// Sends a prepared provider request under the canonical provider HTTP span.
 ///
 /// This is the shared dispatch path for the provider integration requests that
@@ -452,34 +894,56 @@ impl PreparedProviderTarget {
 /// deliberately does not route here.
 pub async fn send_provider_http_request(
     request: RequestBuilder,
-    endpoint: &Url,
-    method: &Method,
-    provider_kind: &str,
+    context: &ProviderDispatchContext,
+    admission: &dyn ProviderDispatchAdmission,
     operation: &str,
-) -> Result<reqwest::Response, reqwest::Error> {
-    let server_address = endpoint.host_str().unwrap_or("unknown");
+) -> Result<reqwest::Response, ProviderDispatchError> {
+    let (client, request) = crate::observability::inject_trace_context(request).build_split();
+    let request = request.map_err(|_| ProviderDispatchError::Build)?;
+
+    if request.method() != Method::POST || !context.authorizes_route(request.url()) {
+        return Err(ProviderDispatchRefusal::RouteMismatch.into());
+    }
+    if !context.authorizes_credential(&request) {
+        return Err(ProviderDispatchRefusal::CredentialMismatch.into());
+    }
+    let body = inspect_request_body(&request)?;
+    let evidence =
+        DispatchRequestEvidence { method: request.method(), url: request.url(), body: &body };
+    let _permit = admission.admit(context, &evidence).await?;
+
+    let server_address = request.url().host_str().unwrap_or("unknown").to_owned();
+    let method_label = request.method().as_str().to_owned();
+    let provider_kind = context.provider_kind().to_owned();
     let provider_call_id = crate::observability::current_provider_call_id().unwrap_or_default();
     let span = tracing::info_span!(
         "provider.http.request",
         otel.kind = "client",
-        "http.request.method" = method.as_str(),
+        "http.request.method" = method_label,
         "server.address" = server_address,
         "provider.kind" = provider_kind,
         "provider.operation" = operation,
         "provider.call.id" = provider_call_id,
         "http.response.status_code" = tracing::field::Empty,
     );
-    let response = async move { crate::observability::inject_trace_context(request).send().await }
-        .instrument(span.clone())
-        .await;
+    let started = std::time::Instant::now();
+    let response = async move { client.execute(request).await }.instrument(span.clone()).await;
+    let outcome = if response.is_ok() { "ok" } else { "error" };
+    crate::observability::metrics::record_provider_http_duration(
+        context.provider_kind(),
+        operation,
+        outcome,
+        started.elapsed().as_secs_f64(),
+    );
     if let Ok(response) = &response {
         span.record("http.response.status_code", response.status().as_u16());
     }
-    response
+    Ok(response?)
 }
 
 #[cfg(test)]
 mod tests {
+    use super::*;
     use std::{
         net::{IpAddr, Ipv4Addr, SocketAddr},
         sync::{
@@ -659,21 +1123,39 @@ mod tests {
                 .with_ansi(false)
                 .with_span_events(tracing_subscriber::fmt::format::FmtSpan::NEW),
         );
-        let endpoint = Url::parse("http://127.0.0.1:9/v1/models").expect("test URL");
-        let request = Client::new().get(endpoint.clone());
+        let endpoint = Url::parse("http://127.0.0.1:9/v1/chat/completions").expect("test URL");
+        // Only POST is admissible, so the assertion below proves the span carries
+        // the caller's method (propagation) rather than the absence of a
+        // hardcoded constant.
+        let body = serde_json::json!({
+            "model": "test-model",
+            "messages": [{"role": "user", "content": "hello"}],
+            "service_tier": "default",
+            "n": 1,
+            "max_completion_tokens": 16,
+        });
+        let request = Client::new().post(endpoint.clone()).json(&body);
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .expect("build current-thread runtime");
+        let authority = DispatchAuthority::runtime_binding(
+            "provider-alpha",
+            Uuid::nil(),
+            None,
+            "test-model",
+            "http://127.0.0.1:9",
+            None,
+        );
+        let context = authority.attest(ProviderSurface::Chat, None);
 
         tracing::subscriber::with_default(subscriber, || {
             runtime.block_on(async {
                 let _ = send_provider_http_request(
                     request,
-                    &endpoint,
-                    &Method::GET,
-                    "provider-alpha",
-                    "model-list",
+                    &context,
+                    &crate::integrations::provider_admission::UnqualifiedTestAdmission,
+                    "chat",
                 )
                 .await;
             });
@@ -682,12 +1164,98 @@ mod tests {
         let output = String::from_utf8(captured.lock().expect("capture lock").clone())
             .expect("span output is utf8");
         assert!(
-            output.contains("http.request.method=\"GET\""),
+            output.contains("http.request.method=\"POST\""),
             "the dispatch span must label the caller's method, got: {output}"
         );
         assert!(
-            !output.contains("http.request.method=\"POST\""),
-            "the dispatch span must not hardcode POST, got: {output}"
+            output.contains("provider.operation=\"chat\""),
+            "the dispatch span must label the caller's operation, got: {output}"
         );
+    }
+}
+
+#[cfg(test)]
+mod dispatch_attestation_tests {
+    use super::*;
+
+    fn context(key: &str) -> ProviderDispatchContext {
+        DispatchAuthority::runtime_binding(
+            "openai",
+            Uuid::nil(),
+            None,
+            "gpt-6-luna",
+            "https://api.openai.com/v1",
+            Some(key),
+        )
+        .attest(
+            ProviderSurface::Chat,
+            Some((HeaderName::from_static("authorization"), format!("Bearer {key}"))),
+        )
+    }
+
+    fn built(url: &str, key: &str, body: serde_json::Value) -> reqwest::Request {
+        Client::new()
+            .post(url)
+            .bearer_auth(key)
+            .json(&body)
+            .build()
+            .expect("built provider request")
+    }
+
+    #[test]
+    fn refuses_a_route_outside_the_attested_base_url() {
+        let context = context("key-a");
+        let request = built(
+            "https://api.openai.com.evil.test/v1/chat/completions",
+            "key-a",
+            serde_json::json!({}),
+        );
+        assert!(!context.authorizes_route(request.url()));
+    }
+
+    #[test]
+    fn refuses_a_credential_that_differs_from_the_attested_digest() {
+        let context = context("key-a");
+        let request =
+            built("https://api.openai.com/v1/chat/completions", "key-b", serde_json::json!({}));
+        assert!(context.authorizes_route(request.url()));
+        assert!(!context.authorizes_credential(&request));
+    }
+
+    #[test]
+    fn admits_the_attested_route_and_credential_without_touching_the_body() {
+        let context = context("key-a");
+        let body = serde_json::json!({
+            "model": "gpt-6-luna",
+            "messages": [{"role": "user", "content": "hello"}],
+            "service_tier": "flex",
+            "n": 1,
+            "max_completion_tokens": 1024,
+        });
+        let request = built("https://api.openai.com/v1/chat/completions", "key-a", body.clone());
+        let before =
+            request.body().and_then(reqwest::Body::as_bytes).expect("in-memory body").to_vec();
+
+        assert!(context.authorizes_route(request.url()));
+        assert!(context.authorizes_credential(&request));
+        let inspected = inspect_request_body(&request).expect("inspectable body");
+        assert_eq!(inspected, body);
+
+        let after =
+            request.body().and_then(reqwest::Body::as_bytes).expect("in-memory body").to_vec();
+        assert_eq!(before, after, "attestation and inspection must not rewrite the body");
+    }
+
+    #[test]
+    fn refuses_an_uninspectable_body() {
+        let request = Client::new()
+            .post("https://api.openai.com/v1/chat/completions")
+            .body(String::from("streamed-body-is-not-inspectable"))
+            .build()
+            .expect("provider request");
+        assert!(matches!(
+            inspect_request_body(&request),
+            Err(ProviderDispatchRefusal::UninspectableBody)
+        ));
     }
 }

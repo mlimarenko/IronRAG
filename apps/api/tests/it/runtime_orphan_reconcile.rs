@@ -91,7 +91,9 @@ async fn seed_content_mutation_job(
             workspace_id,
             library_id,
             content_source_kind: "upload",
-            checksum: &format!("sha256:runtime-orphan:{document_id}"),
+            checksum: &crate::content_lifecycle_support::fixture_checksum(&format!(
+                "runtime-orphan:{document_id}"
+            )),
             mime_type: "text/plain",
             byte_size: 0,
             title: Some("Runtime orphan source"),

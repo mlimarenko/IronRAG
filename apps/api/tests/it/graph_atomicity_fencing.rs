@@ -16,7 +16,8 @@ use ironrag_backend::{
         knowledge_plane::{IngestAttemptMutationOutcome, IngestRevisionWriteAuthority},
         persistence::Persistence,
         repositories::{
-            catalog_repository, content_chunk_repository, content_document_repository,
+            admission_repository, catalog_repository, content_chunk_repository,
+            content_document_repository, content_fingerprint_repository,
             content_knowledge_projection_repository, content_revision_repository,
             ingest_repository, query_repository, runtime_graph_repository, runtime_repository,
         },
@@ -192,13 +193,37 @@ impl GraphAtomicityFixture {
     }
 
     async fn reconcile_and_publish(&self, attempt: &GraphAttempt) -> Result<usize> {
-        let authorized = self.reconcile(attempt, &CancellationToken::new()).await?;
+        self.reconcile_and_publish_source(self.document_id, attempt).await
+    }
+
+    async fn reconcile_and_publish_source(
+        &self,
+        document_id: Uuid,
+        attempt: &GraphAttempt,
+    ) -> Result<usize> {
+        let authorized = match GraphService::new()
+            .reconcile_revision_graph(
+                &self.state,
+                attempt.authority,
+                document_id,
+                &CancellationToken::new(),
+            )
+            .await?
+        {
+            IngestAttemptMutationOutcome::Applied(authorized) => authorized,
+            IngestAttemptMutationOutcome::AuthorityLost => {
+                bail!("graph reconcile unexpectedly lost exact attempt authority")
+            }
+        };
         let outcome = authorized.outcome?;
         let contribution = outcome.graph_contribution_count;
         let completed_at = Utc::now();
         let publication = ingest_repository::publish_graph_refresh_success_with_graph_guard(
             authorized.publication_guard,
-            &graph_publication_command(self, attempt, completed_at),
+            &ingest_repository::PublishGraphRefreshSuccess {
+                document_id,
+                ..graph_publication_command(self, attempt, completed_at)
+            },
             &ingest_repository::GraphRefreshPublicationEffects {
                 terminal_stage_events: vec![terminal_graph_event(
                     attempt.attempt_id,
@@ -213,6 +238,140 @@ impl GraphAtomicityFixture {
             ingest_repository::PublishGraphRefreshSuccessOutcome::Applied { .. }
         ));
         Ok(contribution)
+    }
+
+    async fn publish_sibling_graph(&self, label: &str, entities: &[&str]) -> Result<(Uuid, Uuid)> {
+        let document = content_knowledge_projection_repository::create_document_with_projection(
+            self.pool(),
+            &content_document_repository::NewContentDocument {
+                workspace_id: self.workspace_id,
+                library_id: self.library_id,
+                external_key: &format!("graph-source-{label}"),
+                document_state: "active",
+                created_by_principal_id: None,
+                parent_external_key: None,
+                parent_document_id: None,
+                document_role: "primary",
+            },
+            Some("graph-source.txt"),
+        )
+        .await?;
+        let revision = create_prepared_revision(
+            self.pool(),
+            self.workspace_id,
+            self.library_id,
+            document.id,
+            label,
+        )
+        .await?;
+        publish_readable_head(self.pool(), document.id, revision.revision_id).await?;
+        let attempt = create_graph_attempt(GraphAttemptFixture {
+            pool: self.pool(),
+            workspace_id: self.workspace_id,
+            library_id: self.library_id,
+            document_id: document.id,
+            revision_id: revision.revision_id,
+            chunk_id: revision.chunk_id,
+            label,
+            entities,
+        })
+        .await?;
+        assert!(self.reconcile_and_publish_source(document.id, &attempt).await? > 0);
+        Ok((document.id, revision.revision_id))
+    }
+
+    async fn deny_source(&self, document_id: Uuid, revision_id: Uuid) -> Result<()> {
+        let replacement = content_revision_repository::get_revision_replacement_identity(
+            self.pool(),
+            revision_id,
+        )
+        .await?
+        .context("visibility source replacement identity")?;
+        admission_repository::admit_visibility_intent_with_failpoint(
+            self.pool(),
+            &admission_repository::VisibilityAdmissionRequest {
+                workspace_id: self.workspace_id,
+                library_id: self.library_id,
+                document_id,
+                requested_by_principal_id: None,
+                request_surface: "rest".to_owned(),
+                intent: ironrag_contracts::documents::CreateVisibilityIntentRequest {
+                    idempotency_key: format!("graph-denial-{document_id}"),
+                    source_identity: format!("graph-source-{document_id}"),
+                    materialization_token: None,
+                    replacement,
+                },
+            },
+            None,
+        )
+        .await?;
+        assert_eq!(
+            content_fingerprint_repository::get_current_revision_id(self.pool(), document_id)
+                .await?,
+            None,
+            "a completed extraction must not undo an independent later denial"
+        );
+        Ok(())
+    }
+
+    async fn snapshot(&self) -> Result<runtime_graph_repository::RuntimeGraphSnapshotRow> {
+        runtime_graph_repository::get_runtime_graph_snapshot(self.pool(), self.library_id)
+            .await?
+            .context("published graph fixture snapshot")
+    }
+
+    async fn assert_summary_status(
+        &self,
+        expected: ironrag_contracts::graph::GraphStatus,
+    ) -> Result<()> {
+        let summary = self
+            .state
+            .application_services
+            .knowledge
+            .get_library_summary(&self.state, self.library_id)
+            .await?;
+        assert_eq!(summary.graph_status, expected);
+        Ok(())
+    }
+
+    async fn extraction_history_digest(&self, document_id: Uuid) -> Result<String> {
+        sqlx::query_scalar(
+            "select md5(coalesce(jsonb_agg(jsonb_build_array(extraction.xmin::text, to_jsonb(extraction)) order by extraction.id)::text, '[]'))
+             from runtime_graph_extraction extraction
+             where extraction.library_id = $1 and extraction.document_id = $2",
+        )
+        .bind(self.library_id)
+        .bind(document_id)
+        .fetch_one(self.pool())
+        .await
+        .map_err(Into::into)
+    }
+
+    #[cfg(feature = "test-support")]
+    async fn reconcile_projection_through_scheduler(&self) -> Result<()> {
+        use ironrag_backend::services::maintenance::{lease, scheduler};
+        lease::ensure_row(
+            self.pool(),
+            lease::MaintenanceClass::GraphProjection,
+            lease::Scope::Library(self.library_id),
+            None,
+        )
+        .await?;
+        scheduler::process_graph_projection_class_once_for_test(
+            &self.state,
+            "graph-lifecycle-test",
+        )
+        .await;
+        let run = lease::load(
+            self.pool(),
+            lease::MaintenanceClass::GraphProjection,
+            lease::Scope::Library(self.library_id),
+        )
+        .await?
+        .context("graph projection maintenance lease")?;
+        assert_eq!(run.attempts, 0, "projection convergence failed: {:?}", run.error_code);
+        assert!(run.last_completed_at.is_some());
+        Ok(())
     }
 
     async fn query_reference_count(&self) -> Result<i64> {
@@ -916,6 +1075,488 @@ fn assert_attempt_entities(
             "expected one current node-evidence row for {label}: {projection:#?}"
         );
     }
+}
+
+#[cfg(feature = "test-support")]
+#[tokio::test]
+#[ignore = "requires local postgres with the pgvector extensions"]
+async fn late_visibility_then_targeted_refresh_cannot_publish_invalid_snapshot() -> Result<()> {
+    let fixture = GraphAtomicityFixture::create("retained-source").await?;
+    let result = async {
+        let (denied_document, denied_revision) = fixture
+            .publish_sibling_graph("denied-source", &["Denied Entity", "Shared Entity"])
+            .await?;
+        let initial = fixture
+            .create_graph_attempt(
+                fixture.revision_id,
+                fixture.chunk_id,
+                "retained-initial",
+                &["Retained Entity", "Shared Entity"],
+            )
+            .await?;
+        assert!(fixture.reconcile_and_publish(&initial).await? > 0);
+        let before = fixture.snapshot().await?;
+        assert!(content_fingerprint_repository::graph_projection_is_current(
+            fixture.pool(),
+            before.projection_identity(),
+        )
+        .await?);
+        let denied_history = fixture.extraction_history_digest(denied_document).await?;
+        fixture.assert_summary_status(ironrag_contracts::graph::GraphStatus::Ready).await?;
+
+        fixture.deny_source(denied_document, denied_revision).await?;
+        fixture.assert_summary_status(ironrag_contracts::graph::GraphStatus::Stale).await?;
+        assert!(!content_fingerprint_repository::graph_projection_is_current(
+            fixture.pool(),
+            before.projection_identity(),
+        )
+        .await?);
+        let refresh = fixture
+            .create_graph_attempt(
+                fixture.revision_id,
+                fixture.chunk_id,
+                "retained-after-denial",
+                &["Retained Entity", "Shared Entity"],
+            )
+            .await?;
+        assert!(fixture.reconcile_and_publish(&refresh).await? > 0);
+        assert_eq!(
+            fixture.extraction_history_digest(denied_document).await?,
+            denied_history,
+            "denial and another document's publication must preserve retained extraction results"
+        );
+        assert_eq!(
+            content_fingerprint_repository::get_current_revision_id(
+                fixture.pool(),
+                fixture.document_id,
+            )
+            .await?,
+            Some(fixture.revision_id)
+        );
+        let after = fixture.snapshot().await?;
+        let current = content_fingerprint_repository::graph_projection_is_current(
+            fixture.pool(),
+            after.projection_identity(),
+        )
+        .await?;
+        let membership: (i64, i64, i64) = sqlx::query_as(
+            "with targets as (
+                 select id, 'node' as kind from runtime_graph_node
+                 where library_id=$1 and projection_version=$2
+                 union all
+                 select id, 'edge' as kind from runtime_graph_edge
+                 where library_id=$1 and projection_version=$2
+             ), membership as (
+                 select targets.id,
+                        bool_or(current_revision.revision_id is not null) as has_current,
+                        bool_or(evidence.id is not null and current_revision.revision_id is null) as has_stale
+                 from targets
+                 left join runtime_graph_evidence evidence
+                   on evidence.library_id=$1 and evidence.target_id=targets.id
+                  and evidence.target_kind=targets.kind
+                 left join content_current_revision current_revision
+                   on current_revision.library_id=evidence.library_id
+                  and current_revision.document_id=evidence.document_id
+                  and current_revision.revision_id=evidence.revision_id
+                 group by targets.id
+             )
+             select count(*), count(*) filter (where has_stale),
+                    count(*) filter (where has_current and has_stale) from membership",
+        )
+        .bind(fixture.library_id)
+        .bind(after.projection_version)
+        .fetch_one(fixture.pool())
+        .await?;
+        assert!(
+            !matches!(after.graph_status.as_str(), "ready" | "empty") || current,
+            "a later targeted publication must not advertise ready counts while retaining denied sources: \
+             stored={}, stale={}, mixed={}, metadata={}",
+            membership.0,
+            membership.1,
+            membership.2,
+            i64::from(after.node_count) + i64::from(after.edge_count),
+        );
+        fixture.reconcile_projection_through_scheduler().await?;
+        let repaired = fixture.snapshot().await?;
+        assert_eq!(repaired.graph_status, "ready");
+        fixture.assert_summary_status(ironrag_contracts::graph::GraphStatus::Ready).await?;
+        assert!(repaired.projection_version > before.projection_version);
+        assert!(content_fingerprint_repository::graph_projection_is_current(
+            fixture.pool(), repaired.projection_identity(),
+        ).await?);
+        let labels: Vec<String> = sqlx::query_scalar(
+            "select label from runtime_graph_node where library_id=$1 and projection_version=$2",
+        ).bind(fixture.library_id).bind(repaired.projection_version).fetch_all(fixture.pool()).await?;
+        assert!(!labels.iter().any(|label| label == "Denied Entity"));
+        assert!(labels.iter().any(|label| label == "Retained Entity"));
+        assert!(labels.iter().any(|label| label == "Shared Entity"));
+        assert_eq!(fixture.extraction_history_digest(denied_document).await?, denied_history);
+        assert_eq!(content_fingerprint_repository::get_current_revision_id(fixture.pool(), denied_document).await?, None);
+
+        // Rechecking an unchanged healthy graph must not rebuild it again.
+        ironrag_backend::services::maintenance::graph_projection::reconcile(&fixture.state, fixture.library_id).await?;
+        assert_eq!(fixture.snapshot().await?.projection_identity(), repaired.projection_identity());
+        Ok(())
+    }
+    .await;
+    fixture.cleanup().await?;
+    result
+}
+
+#[cfg(feature = "test-support")]
+#[tokio::test]
+#[ignore = "requires local postgres with the pgvector extensions"]
+async fn gc_after_visibility_denial_invalidates_topology_and_preserves_extraction() -> Result<()> {
+    let fixture = GraphAtomicityFixture::create("gc-denied-source").await?;
+    let result = async {
+        let attempt = fixture
+            .create_graph_attempt(
+                fixture.revision_id,
+                fixture.chunk_id,
+                "gc-published",
+                &["GC Source Entity", "GC Second Entity"],
+            )
+            .await?;
+        assert!(fixture.reconcile_and_publish(&attempt).await? > 0);
+        let before = fixture.snapshot().await?;
+        assert!(before.node_count > 0);
+        let history = fixture.extraction_history_digest(fixture.document_id).await?;
+        let healthy = ironrag_backend::services::maintenance::gc::run_runtime_graph_scheduler_batch_with_budget_for_test(
+            &fixture.state, fixture.library_id, None, 4,
+        ).await?;
+        assert_eq!(healthy.physical_rows_removed, 0);
+        assert_eq!(fixture.snapshot().await?.projection_identity(), before.projection_identity());
+
+        fixture.deny_source(fixture.document_id, fixture.revision_id).await?;
+        let mut cursor = None;
+        let mut completed = false;
+        let mut removed = 0;
+        for _ in 0..32 {
+            let batch = ironrag_backend::services::maintenance::gc::run_runtime_graph_scheduler_batch_with_budget_for_test(
+                &fixture.state, fixture.library_id, cursor.as_ref(), 4,
+            ).await?;
+            assert!(batch.physical_rows_removed <= 4, "GC must retain its physical-delete budget");
+            removed += batch.physical_rows_removed;
+            cursor = batch.next_cursor_for_test().cloned();
+            if !batch.work_remaining {
+                completed = true;
+                break;
+            }
+        }
+        assert!(completed && removed > 0, "the finite denied-source GC sequence must complete");
+        let stored: (i64, i64) = sqlx::query_as(
+            "select (select count(*) from runtime_graph_node where library_id=$1 and projection_version=$2),
+                    (select count(*) from runtime_graph_edge where library_id=$1 and projection_version=$2)",
+        )
+        .bind(fixture.library_id)
+        .bind(before.projection_version)
+        .fetch_one(fixture.pool())
+        .await?;
+        assert_eq!(stored, (0, 0), "all targets owned only by the denied source must be removed");
+        assert_eq!(fixture.extraction_history_digest(fixture.document_id).await?, history);
+        let after = fixture.snapshot().await?;
+        assert!(after.topology_generation > before.topology_generation, "GC must retire cached bytes for deleted topology");
+        assert!(
+            !matches!(after.graph_status.as_str(), "ready" | "empty"),
+            "deletion-only GC cannot publish a replacement graph or leave the previous ready snapshot"
+        );
+        fixture.reconcile_projection_through_scheduler().await?;
+        let repaired = fixture.snapshot().await?;
+        assert_eq!(repaired.graph_status, "empty");
+        fixture.assert_summary_status(ironrag_contracts::graph::GraphStatus::Empty).await?;
+        assert_eq!((repaired.node_count, repaired.edge_count), (0, 0));
+        assert!(content_fingerprint_repository::graph_projection_is_current(
+            fixture.pool(), repaired.projection_identity(),
+        ).await?);
+        assert_eq!(fixture.extraction_history_digest(fixture.document_id).await?, history);
+        Ok(())
+    }
+    .await;
+    fixture.cleanup().await?;
+    result
+}
+
+#[cfg(feature = "test-support")]
+async fn seed_candidate_embedding(
+    fixture: &GraphAtomicityFixture,
+    candidate: &crate::ingest_publication::PublicationContentIds,
+) -> Result<String> {
+    use ironrag_backend::infra::{
+        knowledge_plane::SearchStore,
+        knowledge_rows::{KNOWLEDGE_CHUNK_VECTOR_KIND, KnowledgeChunkVectorRow},
+        postgres::pg_search_store::PgSearchStore,
+        repositories::ai_repository,
+    };
+    ironrag_backend::app::seed_clean_v1_ai_catalog(fixture.pool()).await?;
+    let provider = ai_repository::list_provider_catalog(fixture.pool())
+        .await?
+        .into_iter()
+        .find(|row| row.provider_kind == "openai")
+        .context("seeded provider")?;
+    let model = ai_repository::list_model_catalog(fixture.pool(), Some(provider.id))
+        .await?
+        .into_iter()
+        .find(|row| row.allowed_binding_purposes.iter().any(|purpose| purpose == "embed_chunk"))
+        .context("seeded embedding model")?;
+    // Resolve a real local binding with a disposable credential, without any
+    // provider request. Guarded publication validates its exact profile.
+    let account_id = Uuid::now_v7();
+    let credential = fixture.state.credential_cipher.encrypt(
+        ironrag_backend::shared::secret_encryption::SecretPurpose::AiAccountApiKey,
+        account_id,
+        &Uuid::now_v7().to_string(),
+    )?;
+    let account = ai_repository::create_account(
+        fixture.pool(),
+        ai_repository::NewAiAccount {
+            account_id,
+            scope_kind: "workspace",
+            workspace_id: Some(fixture.workspace_id),
+            library_id: None,
+            provider_catalog_id: provider.id,
+            label: "offline graph profile",
+            base_url: None,
+            created_by_principal_id: None,
+        },
+        Some(&credential),
+    )
+    .await?;
+    ai_repository::create_binding(
+        fixture.pool(),
+        ai_repository::CreateAiBindingInput {
+            scope_kind: "library",
+            workspace_id: Some(fixture.workspace_id),
+            library_id: Some(fixture.library_id),
+            binding_purpose: "embed_chunk",
+            account_id: account.id,
+            provider_catalog_id: provider.id,
+            model_catalog_id: model.id,
+            system_prompt: None,
+            temperature: None,
+            top_p: None,
+            max_output_tokens_override: None,
+            extra_parameters_json: json!({"dimensions": 3}),
+            binding_state: "active",
+            updated_by_principal_id: None,
+        },
+    )
+    .await?;
+    let binding = fixture
+        .state
+        .application_services
+        .ai_catalog
+        .resolve_active_runtime_binding(
+            &fixture.state,
+            fixture.library_id,
+            ironrag_backend::domains::ai::AiBindingPurpose::EmbedChunk,
+        )
+        .await?
+        .context("offline embedding profile")?;
+    let profile = binding.embedding_execution_profile_key();
+    PgSearchStore { pool: fixture.pool().clone() }
+        .upsert_chunk_vector(&KnowledgeChunkVectorRow {
+            vector_id: Uuid::now_v7(),
+            workspace_id: fixture.workspace_id,
+            library_id: fixture.library_id,
+            chunk_id: candidate.chunk_id,
+            revision_id: candidate.revision_id,
+            embedding_model_key: profile.clone(),
+            vector_kind: KNOWLEDGE_CHUNK_VECTOR_KIND.to_owned(),
+            dimensions: 3,
+            vector: vec![0.1, 0.2, 0.3],
+            freshness_generation: i64::from(candidate.revision_number),
+            created_at: Utc::now(),
+            occurred_at: None,
+            occurred_until: None,
+        })
+        .await?;
+    Ok(profile)
+}
+
+#[cfg(feature = "test-support")]
+#[tokio::test]
+#[ignore = "requires local postgres with the pgvector extensions"]
+async fn ineligible_content_completion_retains_results_without_publishing_graph() -> Result<()> {
+    for (denied, new_entity_count) in [(true, 1), (true, 501), (false, 1)] {
+        Box::pin(assert_content_completion_summary_boundary(denied, new_entity_count)).await?;
+    }
+    Ok(())
+}
+
+#[cfg(feature = "test-support")]
+async fn canonical_summary_seal(fixture: &GraphAtomicityFixture) -> Result<(i64, String)> {
+    sqlx::query_as(
+        "select count(*)::bigint,
+                md5(coalesce(jsonb_agg(jsonb_build_array(summary.xmin::text, to_jsonb(summary)) order by summary.id)::text, '[]'))
+         from runtime_graph_canonical_summary summary where library_id=$1",
+    ).bind(fixture.library_id).fetch_one(fixture.pool()).await.map_err(Into::into)
+}
+
+#[cfg(feature = "test-support")]
+async fn assert_content_completion_summary_boundary(
+    denied: bool,
+    new_entity_count: usize,
+) -> Result<()> {
+    let fixture = GraphAtomicityFixture::create("healthy-published").await?;
+    let result = async {
+        let healthy = fixture.create_graph_attempt(fixture.revision_id, fixture.chunk_id,
+            "healthy-published", &["Healthy Entity"]).await?;
+        fixture.reconcile_and_publish(&healthy).await?;
+        let source_version: i64 = sqlx::query_scalar("select source_truth_version from catalog_library where id=$1")
+            .bind(fixture.library_id).fetch_one(fixture.pool()).await?;
+        GraphService::new().apply_published_summary_refresh(
+            &fixture.state, fixture.library_id, source_version,
+            &ironrag_backend::services::graph::PendingGraphSummaryRefresh::broad(),
+        ).await?;
+        let summaries_before = canonical_summary_seal(&fixture).await?;
+        assert!(summaries_before.0 > 0, "published summaries must exist before the withheld candidate");
+        let candidate = crate::ingest_publication::seed_publication_content(
+            fixture.pool(), fixture.workspace_id, fixture.library_id, "text_readable", false,
+            "unpublished-candidate",
+        ).await?;
+        let profile = seed_candidate_embedding(&fixture, &candidate).await?;
+        let entities = std::iter::once("Healthy Entity".to_owned())
+            .chain((0..new_entity_count).map(|index| format!("Withheld Entity {index}"))).collect::<Vec<_>>();
+        let entity_refs = entities.iter().map(String::as_str).collect::<Vec<_>>();
+        let attempt = create_graph_attempt(GraphAttemptFixture {
+            pool: fixture.pool(), workspace_id: fixture.workspace_id, library_id: fixture.library_id,
+            document_id: candidate.document_id, revision_id: candidate.revision_id,
+            chunk_id: candidate.chunk_id, label: "unpublished-candidate", entities: &entity_refs,
+        }).await?;
+        sqlx::query("update ingest_job set job_kind='content_mutation', mutation_id=$2, mutation_item_id=$3 where id=$1")
+            .bind(attempt.job_id).bind(candidate.mutation_id).bind(candidate.mutation_item_id)
+            .execute(fixture.pool()).await?;
+        if denied {
+            fixture.deny_source(candidate.document_id, candidate.revision_id).await?;
+        }
+        let history = fixture.extraction_history_digest(candidate.document_id).await?;
+        let before = graph_digest(&fixture, attempt.job_id, attempt.attempt_id, candidate.revision_id).await?;
+        assert!(content_fingerprint_repository::graph_projection_is_current(fixture.pool(), fixture.snapshot().await?.projection_identity()).await?);
+        let denied_head: Value = sqlx::query_scalar("select to_jsonb(head) from content_document_head head where document_id=$1")
+            .bind(candidate.document_id).fetch_one(fixture.pool()).await?;
+        let job = ingest_repository::get_ingest_job_by_id(fixture.pool(), attempt.job_id).await?.context("candidate job")?;
+        let healthy_node: Uuid = sqlx::query_scalar("select id from runtime_graph_node where library_id=$1 and label='Healthy Entity'")
+            .bind(fixture.library_id).fetch_one(fixture.pool()).await?;
+        let authorized = match GraphService::new().reconcile_revision_graph(
+            &fixture.state, attempt.authority, candidate.document_id, &CancellationToken::new(),
+        ).await? {
+            IngestAttemptMutationOutcome::Applied(authorized) => authorized,
+            _ => bail!("candidate lost authority"),
+        };
+        let outcome = authorized.outcome.as_ref().map_err(|error| anyhow::anyhow!("{error}"))?;
+        assert!(outcome.graph_contribution_count > 0, "the retained result must produce staged topology");
+        let pending = outcome.pending_summary_refresh.as_ref().context("staged candidate summary refresh")?;
+        assert!(pending.node_ids.contains(&healthy_node), "candidate must target a shared published summary");
+        if new_entity_count > 500 {
+            assert!(pending.node_ids.len() + pending.edge_ids.len() > 500, "exercise deletion without inline regeneration");
+        }
+        let now = Utc::now();
+        ironrag_backend::services::ingest::worker::finalize_content_readiness_for_test(
+            &fixture.state,
+            &job,
+            &ingest_repository::PublishContentIngestSuccess {
+                workspace_id: fixture.workspace_id, library_id: fixture.library_id,
+                document_id: candidate.document_id, revision_id: candidate.revision_id,
+                mutation_id: candidate.mutation_id, mutation_item_id: candidate.mutation_item_id,
+                attempt_id: attempt.attempt_id, expected_source_truth_version: before.source_truth_version,
+                embedding_profile_key: Some(profile), text_state: "text_readable".to_owned(),
+                graph_state: "ready".to_owned(), text_readable_at: Some(now), graph_ready_at: Some(now), completed_at: now,
+            },
+            ingest_repository::ContentIngestPublicationEffects {
+                document_summary: Some("Retained candidate summary".to_owned()),
+                terminal_stage_events: vec![terminal_graph_event(attempt.attempt_id, outcome.graph_contribution_count, now)],
+            },
+            authorized,
+        ).await?;
+        let summaries_after = canonical_summary_seal(&fixture).await?;
+        let after = graph_digest(&fixture, attempt.job_id, attempt.attempt_id, candidate.revision_id).await?;
+        if denied {
+            assert_eq!(summaries_after, summaries_before, "worker deferred summaries must preserve rows and xmin after denied completion");
+            assert_eq!(after.nodes, before.nodes);
+            assert_eq!(after.edges, before.edges);
+            assert_eq!(after.evidence, before.evidence);
+            assert_eq!(after.snapshot, before.snapshot);
+        } else {
+            assert!(summaries_after.0 > summaries_before.0, "eligible worker completion must still generate summaries for its published targets");
+            assert!(after.nodes.len() > before.nodes.len());
+        }
+        assert_eq!(after.graph_state, "ready");
+        assert_eq!(after.attempt_state, "succeeded");
+        assert_eq!(after.job_state, "completed");
+        assert_eq!(fixture.extraction_history_digest(candidate.document_id).await?, history);
+        let current_head: Value = sqlx::query_scalar("select to_jsonb(head) from content_document_head head where document_id=$1")
+            .bind(candidate.document_id).fetch_one(fixture.pool()).await?;
+        if denied {
+            assert_eq!(current_head, denied_head);
+        }
+        assert_eq!(content_fingerprint_repository::get_current_revision_id(fixture.pool(), candidate.document_id).await?, (!denied).then_some(candidate.revision_id));
+        assert!(content_fingerprint_repository::graph_projection_is_current(fixture.pool(), fixture.snapshot().await?.projection_identity()).await?);
+        Ok(())
+    }.await;
+    fixture.cleanup().await?;
+    result
+}
+
+#[cfg(feature = "test-support")]
+#[tokio::test]
+#[ignore = "requires local postgres with the pgvector extensions"]
+async fn projection_scheduler_coverage_failure_rolls_back_without_model_work() -> Result<()> {
+    use ironrag_backend::services::maintenance::{lease, scheduler};
+    let fixture = GraphAtomicityFixture::create("unknown-completion").await?;
+    let result = async {
+        // The primary revision is readable but has no certified extraction
+        // completion. A stale sibling triggers reconstruction of the library.
+        let (denied_document, denied_revision) =
+            fixture.publish_sibling_graph("denied-coverage-source", &["Denied Entity"]).await?;
+        fixture.deny_source(denied_document, denied_revision).await?;
+        let history = fixture.extraction_history_digest(denied_document).await?;
+        let before = fixture.snapshot().await?;
+        let topology = semantic_graph_projection(fixture.pool(), fixture.library_id).await?;
+        let jobs: i64 = sqlx::query_scalar("select count(*) from ingest_job where library_id=$1")
+            .bind(fixture.library_id)
+            .fetch_one(fixture.pool())
+            .await?;
+        lease::ensure_row(
+            fixture.pool(),
+            lease::MaintenanceClass::GraphProjection,
+            lease::Scope::Library(fixture.library_id),
+            None,
+        )
+        .await?;
+        scheduler::process_graph_projection_class_once_for_test(&fixture.state, "coverage-failure")
+            .await;
+        let run = lease::load(
+            fixture.pool(),
+            lease::MaintenanceClass::GraphProjection,
+            lease::Scope::Library(fixture.library_id),
+        )
+        .await?
+        .context("failed projection lease")?;
+        assert_eq!(run.attempts, 1);
+        assert!(run.error_code.is_some());
+        assert!(run.last_completed_at.is_none());
+        assert_eq!(fixture.snapshot().await?.projection_identity(), before.projection_identity());
+        assert_eq!(semantic_graph_projection(fixture.pool(), fixture.library_id).await?, topology);
+        assert_eq!(fixture.extraction_history_digest(denied_document).await?, history);
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("select count(*) from ingest_job where library_id=$1")
+                .bind(fixture.library_id)
+                .fetch_one(fixture.pool())
+                .await?,
+            jobs
+        );
+        assert!(
+            !content_fingerprint_repository::graph_projection_is_current(
+                fixture.pool(),
+                before.projection_identity()
+            )
+            .await?
+        );
+        Ok(())
+    }
+    .await;
+    fixture.cleanup().await?;
+    result
 }
 
 #[tokio::test]

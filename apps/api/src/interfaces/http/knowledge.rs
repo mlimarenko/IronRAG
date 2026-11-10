@@ -295,7 +295,11 @@ pub struct KnowledgeRelationDetailResponse {
 pub struct KnowledgeLibrarySummaryResponse {
     library_id: Uuid,
     document_counts_by_readiness: BTreeMap<String, i64>,
+    /// Effective publication status, including denial before derived cleanup.
+    graph_status: ironrag_contracts::graph::GraphStatus,
+    /// Last stored count; only usable when graphStatus is ready, partial or empty.
     node_count: i64,
+    /// Last stored count; only usable when graphStatus is ready, partial or empty.
     edge_count: i64,
     graph_ready_document_count: i64,
     graph_sparse_document_count: i64,

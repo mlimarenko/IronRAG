@@ -133,6 +133,8 @@ export type BrowserMockConfig = {
   queryConversations?: Record<string, AssistantHydratedConversation>
   querySessions?: AssistantSessionListItem[]
   session?: GetIamSessionResponse
+  /** Initial account telemetry preference for the mocked browser session. */
+  telemetryConsent?: 'granted' | 'denied' | null
 }
 
 declare global {
@@ -201,7 +203,7 @@ function resolveSessionPayload(
           workspaceId: WORKSPACE_ID,
         },
       ],
-      viewer: shellViewerFixture,
+      viewer: { ...shellViewerFixture, principalId: session.user.principalId },
       workspaces: workspaces ?? [
         {
           id: WORKSPACE_ID,
@@ -227,10 +229,12 @@ function buildDocumentListItem(
     fileType: documents.document.fileName === null ? null : (documents.document.fileType ?? null),
     id: documents.document.id,
     libraryId,
+    readableRevisionId: null,
     readiness: documents.document.readiness ?? 'graph_ready',
     retryable: false,
     status: documents.document.status ?? 'ready',
     uploadedAt: '2026-08-20T09:00:00.000Z',
+    visibilityIntentId: null,
     workspaceId: WORKSPACE_ID,
   }
 }
@@ -818,6 +822,7 @@ export function createBrowserMockHandlers(config: BrowserMockConfig = {}): HttpH
   let querySessions = [...(config.querySessions ?? [])]
   let bootstrapRequired = config.bootstrapRequired ?? false
   let authenticated = config.authenticated ?? false
+  let telemetryConsent = config.telemetryConsent ?? null
   const bootstrapStatus = () => ({
     setupRequired: bootstrapRequired,
     aiSetup: bootstrapRequired
@@ -1027,6 +1032,29 @@ export function createBrowserMockHandlers(config: BrowserMockConfig = {}): HttpH
       ),
     ),
     http.get('/v1/iam/bootstrap', () => HttpResponse.json(bootstrapStatus())),
+    http.get('/v1/iam/preferences', () => HttpResponse.json({ telemetryConsent })),
+    http.put('/v1/iam/preferences', async ({ request }) => {
+      const body = (await request.json()) as {
+        expectedPrincipalId?: string
+        telemetryConsent?: 'granted' | 'denied'
+      }
+      if (!authenticated) return HttpResponse.json({}, { status: 401 })
+      if (body.expectedPrincipalId !== session.user.principalId)
+        return HttpResponse.json({}, { status: 409 })
+      telemetryConsent = body.telemetryConsent ?? telemetryConsent
+      return HttpResponse.json({ telemetryConsent })
+    }),
+    http.post('/v1/iam/preferences/seed', async ({ request }) => {
+      const body = (await request.json()) as {
+        expectedPrincipalId?: string
+        telemetryConsent?: 'granted' | 'denied'
+      }
+      if (!authenticated) return HttpResponse.json({}, { status: 401 })
+      if (body.expectedPrincipalId !== session.user.principalId)
+        return HttpResponse.json({}, { status: 409 })
+      telemetryConsent ??= body.telemetryConsent ?? null
+      return HttpResponse.json({ telemetryConsent })
+    }),
     http.get('/v1/ready', () =>
       HttpResponse.json({
         checkedAt: '2026-05-05T15:30:00.000Z',

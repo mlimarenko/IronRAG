@@ -926,7 +926,13 @@ async fn semantic_rerank_model_benchmark() {
     let settings = Settings::from_env().expect("settings defaults load");
     let policy = rerank_policy(&settings);
     let bench = Bench {
-        gateway: Arc::new(UnifiedGateway::from_settings(&settings).expect("build chat gateway")),
+        gateway: Arc::new(
+            UnifiedGateway::from_settings(
+                &settings,
+                Arc::new(crate::integrations::provider_admission::UnqualifiedTestAdmission),
+            )
+            .expect("build chat gateway"),
+        ),
         budget: Arc::new(
             ProviderBudgetRegistry::uniform(
                 ProviderBudgetConfig::unlimited(),

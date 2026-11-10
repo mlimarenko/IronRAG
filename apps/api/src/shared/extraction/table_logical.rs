@@ -435,7 +435,7 @@ impl LogicalTable {
 
     #[must_use]
     pub fn render_canonical(&self) -> String {
-        self.render_canonical_bounded(usize::MAX).expect("unbounded String rendering")
+        self.render_canonical_bounded(usize::MAX).unwrap_or_default()
     }
 
     /// Renders the same canonical contract without exceeding an admitted budget.
@@ -464,7 +464,9 @@ impl LogicalTable {
         for row in 0..self.rows {
             output.write_str("<tr>")?;
             for column in 0..self.columns {
-                let cell = self.cell_at(row, column).expect("validated table topology");
+                let Some(cell) = self.cell_at(row, column) else {
+                    continue;
+                };
                 if cell.row != row || cell.column != column {
                     continue;
                 }

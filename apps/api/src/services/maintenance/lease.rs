@@ -50,6 +50,7 @@ pub enum MaintenanceClass {
     GcSupersededVectors,
     GcRuntimeGraph,
     GcHistoricalProjection,
+    GraphProjection,
     GraphReextractAdmission,
 }
 
@@ -61,6 +62,7 @@ impl MaintenanceClass {
             Self::GcSupersededVectors => "gc.superseded-vectors",
             Self::GcRuntimeGraph => "gc.runtime-graph",
             Self::GcHistoricalProjection => "gc.historical-projection",
+            Self::GraphProjection => "graph.projection",
             Self::GraphReextractAdmission => "graph.reextract-periodic-admission",
         }
     }
@@ -73,6 +75,7 @@ impl MaintenanceClass {
             "gc.superseded-vectors" => Self::GcSupersededVectors,
             "gc.runtime-graph" => Self::GcRuntimeGraph,
             "gc.historical-projection" => Self::GcHistoricalProjection,
+            "graph.projection" => Self::GraphProjection,
             "graph.reextract-periodic-admission" => Self::GraphReextractAdmission,
             _ => return None,
         })
@@ -718,6 +721,7 @@ mod tests {
             MaintenanceClass::GcSupersededVectors,
             MaintenanceClass::GcRuntimeGraph,
             MaintenanceClass::GcHistoricalProjection,
+            MaintenanceClass::GraphProjection,
             MaintenanceClass::GraphReextractAdmission,
         ] {
             let text = class.as_str();

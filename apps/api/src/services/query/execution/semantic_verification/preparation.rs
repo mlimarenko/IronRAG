@@ -129,6 +129,9 @@ pub(crate) fn prepare(
     let answer_sha256 = sha256(answer.as_bytes());
     let units = prepare_units(answer, &answer_sha256)?;
     let sources = prepare_sources(authorized_sources)?;
+    if sources.is_empty() {
+        return Err(SemanticPreparationError::NoEvidence);
+    }
     let manifest_sha256 = manifest_sha256(&sources);
     Ok(PreparedSemanticVerification {
         question: question.to_owned(),
@@ -191,13 +194,54 @@ pub(crate) fn preparation_failure_report(
     }
 }
 
-pub(super) fn prepare_units(
-    answer: &str,
-    answer_sha256: &str,
-) -> Result<Vec<SemanticAnswerUnit>, SemanticPreparationError> {
+fn sentence_spans(answer: &str) -> Vec<SemanticByteSpan> {
     let mut spans: Vec<SemanticByteSpan> = Vec::new();
-    let mut offset = 0;
-    let mut start = 0;
+    let mut start = 0usize;
+    let mut cursor = 0usize;
+    while cursor < answer.len() {
+        let ch = answer[cursor..].chars().next().expect("cursor is a char boundary");
+        let boundary = matches!(ch, '.' | '!' | '?') || ch == '\n';
+        if !boundary {
+            cursor += ch.len_utf8();
+            continue;
+        }
+        let mut end = cursor + ch.len_utf8();
+        while end < answer.len() {
+            let next = answer[end..].chars().next().expect("end is a char boundary");
+            if next.is_whitespace() {
+                end += next.len_utf8();
+            } else {
+                break;
+            }
+        }
+        // A leading whitespace-only run belongs to the first real sentence,
+        // not to a unit of its own.
+        if !answer[start..end].trim().is_empty() {
+            spans.push(SemanticByteSpan { start, end });
+            start = end;
+        }
+        cursor = end;
+    }
+    if start < answer.len() {
+        if let Some(last) = spans.last_mut() {
+            if answer[start..].trim().is_empty() {
+                last.end = answer.len();
+            } else {
+                spans.push(SemanticByteSpan { start, end: answer.len() });
+            }
+        } else {
+            spans.push(SemanticByteSpan { start, end: answer.len() });
+        }
+    }
+    spans
+}
+
+/// Previous paragraph/line grouping, used when a long answer would exceed the
+/// unit cap. It is contiguous and exhaustive like the sentence pass.
+fn line_spans(answer: &str) -> Vec<SemanticByteSpan> {
+    let mut spans: Vec<SemanticByteSpan> = Vec::new();
+    let mut offset = 0usize;
+    let mut start = 0usize;
     let mut pending_nonempty = false;
     for line in answer.split_inclusive('\n') {
         if !line.trim().is_empty() {
@@ -210,6 +254,17 @@ pub(super) fn prepare_units(
         offset += line.len();
     }
     spans.push(SemanticByteSpan { start, end: answer.len() });
+    spans
+}
+
+pub(super) fn prepare_units(
+    answer: &str,
+    answer_sha256: &str,
+) -> Result<Vec<SemanticAnswerUnit>, SemanticPreparationError> {
+    let mut spans = sentence_spans(answer);
+    if spans.len() > MAX_ANSWER_UNITS {
+        spans = line_spans(answer);
+    }
     if spans.len() > MAX_ANSWER_UNITS {
         return Err(SemanticPreparationError::TooManyUnits);
     }
@@ -238,6 +293,11 @@ fn prepare_sources(
     let mut sources = Vec::with_capacity(authorized_sources.len());
     let mut seen = HashSet::new();
     for source in authorized_sources {
+        // An empty selected source carries no evidence. Dropping it is not a
+        // provenance failure; a set with no usable source becomes NoEvidence.
+        if source.text.trim().is_empty() {
+            continue;
+        }
         total_bytes = total_bytes
             .checked_add(source.text.len())
             .ok_or(SemanticPreparationError::EvidenceTooLarge)?;

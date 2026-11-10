@@ -714,8 +714,24 @@ fn build_library_summary(
     library_id: Uuid,
     inputs: LibrarySummaryInputs<'_>,
 ) -> KnowledgeLibrarySummary {
+    use ironrag_contracts::graph::GraphStatus;
+    let graph_status = match inputs.graph_snapshot {
+        None => GraphStatus::Empty,
+        Some(snapshot) => match snapshot.graph_status.as_str() {
+            "ready" if inputs.graph_sparse_document_count > 0 => GraphStatus::Partial,
+            "ready" => GraphStatus::Ready,
+            "empty" => GraphStatus::Empty,
+            "stale" => GraphStatus::Stale,
+            "building" if snapshot.node_count > 0 || snapshot.edge_count > 0 => {
+                GraphStatus::Rebuilding
+            }
+            "building" => GraphStatus::Building,
+            _ => GraphStatus::Failed,
+        },
+    };
     KnowledgeLibrarySummary {
         library_id,
+        graph_status,
         document_counts_by_readiness: inputs.document_counts_by_readiness,
         node_count: inputs.graph_snapshot.map_or(0, |snapshot| i64::from(snapshot.node_count)),
         edge_count: inputs.graph_snapshot.map_or(0, |snapshot| i64::from(snapshot.edge_count)),

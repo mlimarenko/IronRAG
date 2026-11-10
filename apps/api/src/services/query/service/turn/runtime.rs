@@ -464,6 +464,7 @@ pub(super) fn query_service_failure_code(
         QueryServiceError::Provider(failure) => match failure.kind() {
             ProviderFailureKind::Unavailable => "query_provider_failed",
             ProviderFailureKind::QuotaExhausted => "query_provider_quota_exhausted",
+            ProviderFailureKind::RequestRejected => "query_provider_request_rejected",
         },
         QueryServiceError::CacheUnavailable { .. } => "query_dependency_unavailable",
         QueryServiceError::Cancelled => "query_cancelled",
@@ -730,11 +731,13 @@ pub(super) fn query_execution_api_failure(code: &str) -> QueryExecutionApiFailur
 }
 
 fn log_query_execution_failure(execution_id: &Uuid, failure: &QueryAnswerTaskFailure) {
-    tracing::error!(
-        execution_id = %execution_id,
-        failure_code = %failure.code,
-        failure_summary = %failure.summary,
-        "query execution failed"
+    let detail = failure.detail_redacted.as_deref().unwrap_or("-");
+    crate::observability::error_tracking::report_message(
+        "query.execution_failed",
+        &format!(
+            "execution={execution_id} failure_code={} detail_redacted={detail} failure_summary={}",
+            failure.code, failure.summary
+        ),
     );
 }
 

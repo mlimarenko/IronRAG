@@ -19,6 +19,7 @@ use config_comments::{
     ConfigSyntax, anchor_comment_runs, extract_comment_runs, extract_document_header_text,
 };
 
+pub(crate) use chunking::is_record_unit_excerpt;
 pub use chunking::{focused_record_unit_excerpt, split_large_record_units};
 pub use parsing::{
     StructuredRecordHint, extract_record_jsonl, normalize_structured_records,

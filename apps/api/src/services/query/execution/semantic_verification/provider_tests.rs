@@ -7,6 +7,9 @@ use uuid::Uuid;
 
 fn binding() -> ResolvedRuntimeBinding {
     ResolvedRuntimeBinding {
+        admission: std::sync::Arc::new(
+            crate::integrations::provider_admission::UnqualifiedTestAdmission,
+        ),
         binding_id: Uuid::from_u128(1),
         workspace_id: Uuid::from_u128(2),
         library_id: Uuid::from_u128(3),
@@ -238,6 +241,8 @@ fn assert_gateway_request_body(bytes: &[u8], model_name: &str) -> anyhow::Result
     assert_eq!(body["response_format"]["json_schema"]["schema"], response_json_schema());
     assert_eq!(body["messages"][0]["content"], SYSTEM_PROMPT);
     assert_eq!(body["frequency_penalty"], 0.25);
+    // The gateway machine-owns n=1 by default; ensure the hostile n=4 was not forwarded.
+    assert_eq!(body["n"], 1);
     for forbidden in [
         "max_completion_tokens",
         "max_output_tokens",
@@ -248,7 +253,6 @@ fn assert_gateway_request_body(bytes: &[u8], model_name: &str) -> anyhow::Result
         "num_predict",
         "tools",
         "stream",
-        "n",
         "best_of",
     ] {
         assert!(

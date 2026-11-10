@@ -485,6 +485,15 @@ async fn describe_source_image(
             crate::shared::extraction::image::describe_image_with_provider(
                 state.llm_gateway.as_ref(),
                 crate::shared::extraction::image::VisionProviderInput {
+                    max_output_tokens_override: None,
+                    dispatch: Some(
+                        &crate::shared::provider_http::DispatchAuthority::ordinary_vision(
+                            &binding.provider_kind,
+                            &binding.model_name,
+                            binding.provider_base_url.as_deref().unwrap_or_default(),
+                            binding.api_key.as_deref(),
+                        ),
+                    ),
                     provider_kind: &binding.provider_kind,
                     model_name: &binding.model_name,
                     api_key: binding.api_key.as_deref().unwrap_or_default(),

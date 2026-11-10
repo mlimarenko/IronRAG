@@ -143,8 +143,29 @@ pub struct PublishContentIngestSuccess {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PublishContentIngestSuccessOutcome {
-    Applied { source_truth_version: i64, mutation_completed: bool },
-    AuthorityLost { source_truth_version: i64 },
+    Applied {
+        source_truth_version: i64,
+        mutation_completed: bool,
+        /// Successful retained work can complete without publishing its head.
+        publicly_visible: bool,
+    },
+    AuthorityLost {
+        source_truth_version: i64,
+    },
+}
+
+impl PublishContentIngestSuccessOutcome {
+    /// The generation authorizing deferred writes to published projections.
+    /// A completed but withheld revision authorizes no such writes.
+    #[must_use]
+    pub const fn published_source_truth_version(self) -> Option<i64> {
+        match self {
+            Self::Applied { source_truth_version, publicly_visible: true, .. } => {
+                Some(source_truth_version)
+            }
+            Self::Applied { publicly_visible: false, .. } | Self::AuthorityLost { .. } => None,
+        }
+    }
 }
 
 /// Optional durable side effects that must share the exact content lifecycle

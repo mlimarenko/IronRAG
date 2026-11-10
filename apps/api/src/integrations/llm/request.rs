@@ -11,7 +11,7 @@ use super::{
     openai_compatible::{
         OpenAiCompatibleMessage, OpenAiCompatibleRequest, OpenAiCompatibleToolDef,
         OpenAiCompatibleToolUseChatRequest, OpenAiCompatibleToolUseMessage,
-        openai_compatible_token_limit_fields,
+        default_chat_parameters, openai_compatible_token_limit_fields,
     },
     provider::ResolvedProviderRuntime,
 };
@@ -126,6 +126,7 @@ pub(super) fn openai_compatible_request<'a>(
         response_format: options.response_format,
         extra_parameters_json: options.extra_parameters_json,
         stream: options.stream,
+        dispatch: resolved.dispatch.as_ref(),
     }
 }
 
@@ -147,6 +148,12 @@ pub(super) fn tool_use_request_payload<'a>(
     let (temperature, top_p) =
         resolved.request_policy.sampling_params(request.temperature, request.top_p);
 
+    let mut extra = UnifiedGateway::upstream_extra_parameters(
+        &request.extra_parameters_json,
+        resolved.reasoning_wire,
+    );
+    // upstream_extra_parameters always constructs an object.
+    default_chat_parameters(extra.as_object_mut().expect("upstream extra is an object"));
     OpenAiCompatibleToolUseChatRequest {
         model: &request.model_name,
         messages,
@@ -157,10 +164,7 @@ pub(super) fn tool_use_request_payload<'a>(
         max_tokens,
         tool_choice,
         stream,
-        extra: UnifiedGateway::upstream_extra_parameters(
-            &request.extra_parameters_json,
-            resolved.reasoning_wire,
-        ),
+        extra,
     }
 }
 

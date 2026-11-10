@@ -47,6 +47,19 @@ const DUMMY_API_KEY: &str = "test-dummy-api-key-not-a-secret";
 /// the deadline itself: long enough that millisecond backoffs always fit.
 const DEFAULT_EXECUTION_DEADLINE: Duration = Duration::from_secs(5);
 
+fn synthetic_budget() -> SystemOneBudget {
+    SystemOneBudget {
+        registry: Arc::new(
+            ProviderBudgetRegistry::uniform(
+                ProviderBudgetConfig::unlimited(),
+                ProviderBudgetRegistryOptions::default(),
+            )
+            .expect("synthetic provider budget"),
+        ),
+        identity: ProviderIdentity::new("typesafe", "https://example.test"),
+    }
+}
+
 fn noul_question() -> SystemOneQuestion {
     SystemOneQuestion::Noul {
         instructions: "Decide whether the state is healthy.".to_string(),
@@ -93,6 +106,8 @@ fn test_client_with_base_url(
     budget: Option<SystemOneBudget>,
 ) -> SystemOneClient {
     SystemOneClient::try_new(SystemOneClientConfig {
+        dispatch: test_dispatch_context(base_url.as_str()),
+        admission: test_admission(),
         base_url,
         api_key: Zeroizing::new(DUMMY_API_KEY.to_string()),
         request_timeout,
@@ -101,7 +116,7 @@ fn test_client_with_base_url(
         initial_backoff: Duration::from_millis(1),
         max_backoff: Duration::from_millis(2),
         execution_deadline: DEFAULT_EXECUTION_DEADLINE,
-        budget,
+        budget: budget.unwrap_or_else(synthetic_budget),
     })
     .expect("build systemone client")
 }
@@ -115,6 +130,8 @@ fn test_client_with_deadline(
     execution_deadline: Duration,
 ) -> SystemOneClient {
     SystemOneClient::try_new(SystemOneClientConfig {
+        dispatch: test_dispatch_context(&server.base_url),
+        admission: test_admission(),
         base_url: Url::parse(&server.base_url).expect("parse mock base url"),
         api_key: Zeroizing::new(DUMMY_API_KEY.to_string()),
         request_timeout,
@@ -123,7 +140,7 @@ fn test_client_with_deadline(
         initial_backoff: Duration::from_millis(1),
         max_backoff: Duration::from_millis(2),
         execution_deadline,
-        budget: None,
+        budget: synthetic_budget(),
     })
     .expect("build systemone client")
 }
@@ -138,6 +155,8 @@ fn test_client_with_base_url_and_transport(
     transport: ProviderHttpTransport,
 ) -> SystemOneClient {
     SystemOneClient::try_new(SystemOneClientConfig {
+        dispatch: test_dispatch_context(base_url.as_str()),
+        admission: test_admission(),
         base_url,
         api_key: Zeroizing::new(DUMMY_API_KEY.to_string()),
         request_timeout: Duration::from_secs(2),
@@ -146,7 +165,7 @@ fn test_client_with_base_url_and_transport(
         initial_backoff: Duration::from_millis(1),
         max_backoff: Duration::from_millis(2),
         execution_deadline,
-        budget: None,
+        budget: synthetic_budget(),
     })
     .expect("build systemone client")
     .with_transport(transport)
@@ -161,6 +180,8 @@ fn test_client_with_api_key(
     request_timeout: Duration,
 ) -> Result<SystemOneClient, SystemOneError> {
     SystemOneClient::try_new(SystemOneClientConfig {
+        dispatch: test_dispatch_context(base_url.as_str()),
+        admission: test_admission(),
         base_url,
         api_key: Zeroizing::new(api_key.to_string()),
         request_timeout,
@@ -169,7 +190,7 @@ fn test_client_with_api_key(
         initial_backoff: Duration::from_millis(1),
         max_backoff: Duration::from_millis(2),
         execution_deadline: DEFAULT_EXECUTION_DEADLINE,
-        budget: None,
+        budget: synthetic_budget(),
     })
 }
 
@@ -886,6 +907,8 @@ async fn evaluate_releases_budgeted_permit_when_the_execution_deadline_cancels_t
 
     let budgeted_client = |execution_deadline: Duration| {
         SystemOneClient::try_new(SystemOneClientConfig {
+            dispatch: test_dispatch_context(base_url.as_str()),
+            admission: test_admission(),
             base_url: base_url.clone(),
             api_key: Zeroizing::new(DUMMY_API_KEY.to_string()),
             request_timeout: Duration::from_secs(2),
@@ -894,10 +917,7 @@ async fn evaluate_releases_budgeted_permit_when_the_execution_deadline_cancels_t
             initial_backoff: Duration::from_millis(1),
             max_backoff: Duration::from_millis(2),
             execution_deadline,
-            budget: Some(SystemOneBudget {
-                registry: Arc::clone(&registry),
-                identity: identity.clone(),
-            }),
+            budget: SystemOneBudget { registry: Arc::clone(&registry), identity: identity.clone() },
         })
         .expect("build budgeted systemone client")
     };
@@ -1056,4 +1076,20 @@ fn expected_dns_failure_class(error: &PublicHttpUrlError) -> RuntimeProviderFail
 
 fn assert_no_secret(rendered: &str) {
     assert!(!rendered.contains(DUMMY_API_KEY), "leaked the api key: {rendered}");
+}
+
+fn test_admission() -> Arc<dyn crate::shared::provider_http::ProviderDispatchAdmission> {
+    Arc::new(crate::integrations::provider_admission::UnqualifiedTestAdmission)
+}
+
+fn test_dispatch_context(base_url: &str) -> crate::shared::provider_http::ProviderDispatchContext {
+    crate::shared::provider_http::DispatchAuthority::runtime_binding(
+        "provider-alpha",
+        uuid::Uuid::nil(),
+        None,
+        "test-model",
+        base_url,
+        None,
+    )
+    .attest(crate::shared::provider_http::ProviderSurface::Chat, None)
 }

@@ -60,7 +60,21 @@ impl ContentService {
         let chunking_template = library_row.as_ref().map_or(ChunkingTemplate::Naive, |lib| {
             ChunkingTemplate::from_db_str(&lib.chunking_template)
         });
-        let preparation_service = StructuredPreparationService::with_template(chunking_template);
+        let embedding_bounds = state
+            .application_services
+            .ai_catalog
+            .resolve_active_runtime_binding(
+                state,
+                revision.library_id,
+                AiBindingPurpose::EmbedChunk,
+            )
+            .await
+            .map_err(|error| {
+                ApiError::internal_with_log(error, "cannot resolve embedding input contract")
+            })?
+            .and_then(|binding| binding.embedding_input_bounds());
+        let preparation_service = StructuredPreparationService::with_template(chunking_template)
+            .with_embedding_input_bounds(embedding_bounds);
         let mut prepared = preparation_service
             .prepare_revision(
                 PrepareStructuredRevisionCommand {
@@ -80,10 +94,13 @@ impl ContentService {
                 },
                 cancellation_token,
             )
-            .map_err(|error| {
-                ApiError::BadRequest(format!(
+            .map_err(|error| match error {
+                crate::services::ingest::structured_preparation::StructuredPreparationError::Chunking(error) => {
+                    ContentServiceError::Internal(error.into())
+                }
+                error => ApiError::BadRequest(format!(
                     "structured preparation failed for {revision_id}: {error}"
-                ))
+                )).into(),
             })?;
         let prepare_structure_elapsed_ms = prepare_structure_start.elapsed().as_millis() as i64;
 
@@ -109,6 +126,9 @@ impl ContentService {
         let now = Utc::now();
         let structured_revision_row = build_structured_revision_row(&revision, &prepared, now);
         let structured_block_rows = build_structured_block_rows(&revision, &prepared, now);
+        // Validate every source anchor before replacing any derived artifacts.
+        let pending_chunks = build_pending_chunks(&prepared, &normalized_text, cancellation_token)?;
+        let projected_chunks = build_projected_chunks(&revision, &pending_chunks, revision_id);
         ensure_not_cancelled(cancellation_token)?;
         let structured_artifact = state
             .document_store
@@ -123,8 +143,6 @@ impl ContentService {
             return Ok(IngestAttemptMutationOutcome::AuthorityLost);
         }
 
-        let pending_chunks = build_pending_chunks(&prepared, &normalized_text, cancellation_token)?;
-        let projected_chunks = build_projected_chunks(&revision, &pending_chunks, revision_id);
         ensure_not_cancelled(cancellation_token)?;
         // Fence the delete before it becomes visible; chunk replacement bumps
         // the source version again in its own transaction after it succeeds.
@@ -272,22 +290,32 @@ fn build_structured_block_rows(
         .collect::<Vec<_>>()
 }
 
-/// Locates each prepared chunk window in the normalized text and captures its
-/// temporal bounds, producing the ordered rows to project and persist. Pure
-/// given `prepared` and `normalized_text`; the only shared state is the
-/// monotone `next_search_char` cursor, which keeps the search windows ordered.
+/// Projects freshly validated preparation provenance and temporal bounds.
 fn build_pending_chunks(
     prepared: &crate::services::ingest::structured_preparation::PreparedStructuredRevision,
     normalized_text: &str,
     cancellation_token: &CancellationToken,
 ) -> Result<Vec<PendingChunkInsert>, ContentServiceError> {
-    let mut next_search_char = 0usize;
     let mut pending_chunks = Vec::with_capacity(prepared.chunk_windows.len());
     for chunk in &prepared.chunk_windows {
         ensure_not_cancelled(cancellation_token)?;
-        let (start_offset, end_offset) =
-            locate_chunk_offsets(normalized_text, &chunk.content_text, next_search_char);
-        next_search_char = end_offset;
+        let span = chunk
+            .runtime_provenance
+            .as_ref()
+            .ok_or_else(|| ContentServiceError::StateConflict {
+                message: "prepared chunk is missing validated runtime provenance".into(),
+            })?
+            .span();
+        if span.start_offset < 0
+            || span.end_offset < span.start_offset
+            || usize::try_from(span.end_offset)
+                .ok()
+                .is_none_or(|end| end > normalized_text.chars().count())
+        {
+            return Err(ContentServiceError::StateConflict {
+                message: "prepared chunk source range is outside the normalized revision".into(),
+            });
+        }
         // Shared temporal-bounds extraction. JSONL chats stamp every
         // record with `occurred_at=ISO`; the helper aggregates MIN/MAX
         // across all records that landed in this chunk so retrieval
@@ -303,8 +331,8 @@ fn build_pending_chunks(
             };
         pending_chunks.push(PendingChunkInsert {
             chunk_index: chunk.chunk_index,
-            start_offset: i32::try_from(start_offset).unwrap_or(i32::MAX),
-            end_offset: i32::try_from(end_offset).unwrap_or(i32::MAX),
+            start_offset: span.start_offset,
+            end_offset: span.end_offset,
             token_count: chunk.token_count,
             chunk_kind: Some(chunk.chunk_kind.as_str().to_string()),
             content_text: chunk.content_text.clone(),

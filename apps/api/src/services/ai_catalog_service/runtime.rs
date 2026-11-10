@@ -39,6 +39,9 @@ pub struct ResolvedRuntimeBinding {
     pub top_p: Option<f64>,
     pub max_output_tokens_override: Option<i32>,
     pub extra_parameters_json: serde_json::Value,
+    /// The durable admission owner, carried from the resolver so every
+    /// provider surface draws authority from one origin.
+    pub admission: Arc<dyn crate::shared::provider_http::ProviderDispatchAdmission>,
 }
 
 impl Drop for ResolvedRuntimeBinding {
@@ -129,6 +132,20 @@ impl EmbeddingDimensions {
 }
 
 impl ResolvedRuntimeBinding {
+    /// Input bounds are selected from this trusted resolved embedding binding.
+    #[must_use]
+    pub fn embedding_input_bounds(
+        &self,
+    ) -> Option<crate::domains::provider_profiles::EmbeddingInputBounds> {
+        if self.binding_purpose != AiBindingPurpose::EmbedChunk {
+            return None;
+        }
+        crate::domains::provider_profiles::EmbeddingInputBounds::for_resolved_model(
+            &self.provider_kind,
+            &self.model_name,
+        )
+    }
+
     /// Stable, secret-free identity of the effective request profile that
     /// produces embedding vectors.
     ///
@@ -142,78 +159,14 @@ impl ResolvedRuntimeBinding {
     /// purpose is routing metadata and is not part of the provider request.
     #[must_use]
     pub fn embedding_execution_profile_key(&self) -> String {
-        const PROFILE_DOMAIN: &[u8] = b"ironrag.embedding-execution-profile.v1";
-        const KEY_PREFIX: &str = "embedding-profile:v1:";
-
-        let mut hasher = Sha256::new();
-        update_embedding_profile_field(&mut hasher, b"domain", PROFILE_DOMAIN);
-        update_embedding_profile_field(
-            &mut hasher,
-            b"provider_kind",
-            self.provider_kind.as_bytes(),
-        );
-        let normalized_base_url =
-            normalized_embedding_profile_base_url(self.provider_base_url.as_deref());
-        update_embedding_profile_optional_field(
-            &mut hasher,
-            b"provider_base_url",
-            normalized_base_url.as_deref().map(str::as_bytes),
-        );
-        update_embedding_profile_field(
-            &mut hasher,
-            b"provider_api_style",
-            self.provider_api_style.as_bytes(),
-        );
-        update_embedding_profile_optional_field(
-            &mut hasher,
-            b"provider_runtime_kind",
-            embedding_profile_runtime_string(&self.extra_parameters_json, "kind")
-                .as_deref()
-                .map(str::as_bytes),
-        );
-        update_embedding_profile_optional_field(
-            &mut hasher,
-            b"provider_embeddings_path",
-            embedding_profile_runtime_string(&self.extra_parameters_json, "embeddingsPath")
-                .as_deref()
-                .map(str::as_bytes),
-        );
-        update_embedding_profile_optional_field(
-            &mut hasher,
-            b"provider_private_network_routing",
-            embedding_profile_private_network_routing(&self.extra_parameters_json)
-                .as_deref()
-                .map(str::as_bytes),
-        );
-        update_embedding_profile_field(&mut hasher, b"model_name", self.model_name.as_bytes());
-        update_embedding_profile_json_field(
-            &mut hasher,
-            b"embedding_request_parameters",
-            &self.effective_embedding_request_parameters(),
-        );
-        format!("{KEY_PREFIX}{}", hex::encode(hasher.finalize()))
-    }
-
-    /// Normalized semantic request profile used only for vector-space identity.
-    ///
-    /// Catalog dimensions are inserted into this projection without mutating
-    /// `extra_parameters_json`, so they fence stored vectors but are not sent to
-    /// providers that do not accept an explicit dimensions request parameter.
-    /// Explicit binding dimensions are reinserted from the validated typed
-    /// field, keeping hashing and dimension resolution on one source of truth.
-    fn effective_embedding_request_parameters(&self) -> serde_json::Value {
-        let mut parameters = embedding_request_parameters(&self.extra_parameters_json);
-        let Some(parameters) = parameters.as_object_mut() else {
-            return serde_json::json!({});
-        };
-        parameters.remove("dimensions");
-        if let Some(dimensions) = self.effective_embedding_dimensions {
-            parameters.insert(
-                "dimensions".to_string(),
-                serde_json::Value::Number(serde_json::Number::from(dimensions.get())),
-            );
-        }
-        serde_json::Value::Object(std::mem::take(parameters))
+        embedding_execution_profile_key_for(
+            &self.provider_kind,
+            self.provider_base_url.as_deref(),
+            &self.provider_api_style,
+            &self.extra_parameters_json,
+            &self.model_name,
+            self.effective_embedding_dimensions,
+        )
     }
 
     #[must_use]
@@ -228,7 +181,23 @@ impl ResolvedRuntimeBinding {
             top_p: self.top_p,
             max_output_tokens_override: self.max_output_tokens_override,
             extra_parameters_json: self.extra_parameters_json.clone(),
+            dispatch: Some(self.dispatch_authority()),
         }
+    }
+
+    /// Sealed authority issued by this resolver-only constructor. It carries
+    /// provider/account/model identity and a credential digest, never the raw
+    /// secret a second time, and never enters a provider body or profile key.
+    #[must_use]
+    pub fn dispatch_authority(&self) -> crate::shared::provider_http::DispatchAuthority {
+        crate::shared::provider_http::DispatchAuthority::runtime_binding(
+            self.provider_kind.clone(),
+            self.provider_catalog_id,
+            Some(self.account_id),
+            self.model_name.clone(),
+            self.provider_base_url.clone().unwrap_or_default(),
+            self.api_key.as_deref(),
+        )
     }
 
     /// Ordered relevance levels a SystemOne `Score` question must carry for
@@ -334,6 +303,11 @@ impl ResolvedRuntimeBinding {
             .ok_or(SystemOneClientBuildError::MissingApiKey)?;
         let endpoint =
             reqwest::Url::parse(base_url).map_err(|_| SystemOneClientBuildError::InvalidBaseUrl)?;
+        // Attestation must be built before the config consumes `api_key`.
+        let dispatch = self.dispatch_authority().attest(
+            crate::shared::provider_http::ProviderSurface::Decision,
+            Some(crate::integrations::llm::provider_auth_header_for_binding(api_key.as_str())),
+        );
         SystemOneClient::try_new(SystemOneClientConfig {
             base_url: endpoint,
             api_key: Zeroizing::new(api_key),
@@ -343,13 +317,105 @@ impl ResolvedRuntimeBinding {
             initial_backoff: transport.initial_backoff,
             max_backoff: transport.max_backoff,
             execution_deadline,
-            budget: Some(SystemOneBudget {
+            budget: SystemOneBudget {
                 registry: Arc::clone(provider_budget),
                 identity: ProviderIdentity::new(self.provider_kind.clone(), base_url.to_string()),
-            }),
+            },
+            dispatch,
+            admission: Arc::clone(&self.admission),
         })
         .map_err(|_| SystemOneClientBuildError::Config)
     }
+}
+
+/// Stable, secret-free identity of the effective embedding request profile.
+///
+/// Free function so a caller that only needs the identity does not have to
+/// construct a `ResolvedRuntimeBinding` (and cannot claim dispatch authority it
+/// does not hold). The method above delegates with the same six inputs and the
+/// same helpers, so the produced key is unchanged.
+#[must_use]
+pub(crate) fn embedding_execution_profile_key_for(
+    provider_kind: &str,
+    provider_base_url: Option<&str>,
+    provider_api_style: &str,
+    extra_parameters_json: &serde_json::Value,
+    model_name: &str,
+    effective_embedding_dimensions: Option<EmbeddingDimensions>,
+) -> String {
+    const PROFILE_DOMAIN: &[u8] = b"ironrag.embedding-execution-profile.v1";
+    const KEY_PREFIX: &str = "embedding-profile:v1:";
+
+    let mut hasher = Sha256::new();
+    update_embedding_profile_field(&mut hasher, b"domain", PROFILE_DOMAIN);
+    update_embedding_profile_field(&mut hasher, b"provider_kind", provider_kind.as_bytes());
+    let normalized_base_url = normalized_embedding_profile_base_url(provider_base_url);
+    update_embedding_profile_optional_field(
+        &mut hasher,
+        b"provider_base_url",
+        normalized_base_url.as_deref().map(str::as_bytes),
+    );
+    update_embedding_profile_field(
+        &mut hasher,
+        b"provider_api_style",
+        provider_api_style.as_bytes(),
+    );
+    update_embedding_profile_optional_field(
+        &mut hasher,
+        b"provider_runtime_kind",
+        embedding_profile_runtime_string(extra_parameters_json, "kind")
+            .as_deref()
+            .map(str::as_bytes),
+    );
+    update_embedding_profile_optional_field(
+        &mut hasher,
+        b"provider_embeddings_path",
+        embedding_profile_runtime_string(extra_parameters_json, "embeddingsPath")
+            .as_deref()
+            .map(str::as_bytes),
+    );
+    update_embedding_profile_optional_field(
+        &mut hasher,
+        b"provider_private_network_routing",
+        embedding_profile_private_network_routing(extra_parameters_json)
+            .as_deref()
+            .map(str::as_bytes),
+    );
+    update_embedding_profile_field(&mut hasher, b"model_name", model_name.as_bytes());
+    update_embedding_profile_json_field(
+        &mut hasher,
+        b"embedding_request_parameters",
+        &effective_embedding_request_parameters_for(
+            extra_parameters_json,
+            effective_embedding_dimensions,
+        ),
+    );
+    format!("{KEY_PREFIX}{}", hex::encode(hasher.finalize()))
+}
+
+/// Normalized semantic request profile used only for vector-space identity.
+///
+/// Catalog dimensions are inserted into this projection without mutating
+/// `extra_parameters_json`, so they fence stored vectors but are not sent to
+/// providers that do not accept an explicit dimensions request parameter.
+/// Explicit binding dimensions are reinserted from the validated typed field,
+/// keeping hashing and dimension resolution on one source of truth.
+pub(crate) fn effective_embedding_request_parameters_for(
+    extra_parameters_json: &serde_json::Value,
+    effective_embedding_dimensions: Option<EmbeddingDimensions>,
+) -> serde_json::Value {
+    let mut parameters = embedding_request_parameters(extra_parameters_json);
+    let Some(parameters) = parameters.as_object_mut() else {
+        return serde_json::json!({});
+    };
+    parameters.remove("dimensions");
+    if let Some(dimensions) = effective_embedding_dimensions {
+        parameters.insert(
+            "dimensions".to_string(),
+            serde_json::Value::Number(serde_json::Number::from(dimensions.get())),
+        );
+    }
+    serde_json::Value::Object(std::mem::take(parameters))
 }
 
 fn normalized_embedding_profile_base_url(value: Option<&str>) -> Option<String> {

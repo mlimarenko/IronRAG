@@ -33,5 +33,8 @@ pub(crate) fn systemone_decision_binding_base(base_url: &str) -> ResolvedRuntime
                 "baseUrl": {"allowPrivateNetwork": true},
             }
         }),
+        admission: std::sync::Arc::new(
+            crate::integrations::provider_admission::UnqualifiedTestAdmission,
+        ),
     }
 }

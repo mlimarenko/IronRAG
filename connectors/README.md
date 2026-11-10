@@ -1,11 +1,10 @@
 # IronRAG connectors
 
 Source connectors that push content into IronRAG, and the adapter framework
-they share. Four sources ship today — BookStack, Confluence, Git repositories
-and YouTrack — plus `echo`, a reference implementation the framework's own
-tests run against.
-
-Connectors live in the IronRAG repository and release on the IronRAG version.
+they share. Four sources ship — BookStack, Confluence, Git repositories and
+YouTrack — plus `echo`, a reference implementation the framework's own tests
+run against. Connectors live in this repository and release on the IronRAG
+version.
 
 ## What the framework does
 
@@ -164,7 +163,7 @@ The full field, visibility, deletion and request-cost contracts are in
 Complete replacements synchronize title and citation-hint metadata as well as
 the indexed bytes. Optional fields are normalized from the complete replacement,
 never inherited from an older revision. Synchronization requires the fixed
-`contentVisibilityContract: "visibility-intent/1"` capability before source
+`contentVisibilityContract: "visibility-intent/2"` capability before source
 enumeration. REQUIRED success requires a matching READY operation, current
 readable revision and intent, together with public denial of every historical
 route copy. Mutation-item identity records immutable admission lineage, not

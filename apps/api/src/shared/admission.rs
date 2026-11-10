@@ -106,7 +106,7 @@ fn duration_millis(duration: Duration) -> u64 {
 
 /// Reserves one slot in a bounded wait queue and releases it on drop.
 ///
-/// The reservation is one `fetch_update`, so concurrent callers cannot all
+/// The reservation is one `try_update`, so concurrent callers cannot all
 /// observe room and then overflow the bound the way a separate check followed
 /// by an increment does. The guard lives across the acquisition await, so a
 /// waiter cancelled at its timeout, or panicking, releases its slot on the
@@ -120,7 +120,7 @@ impl<'a> WaitingSlot<'a> {
     /// Reserves a slot when fewer than `max_queue` are already held.
     pub(crate) fn try_reserve(waiting: &'a AtomicUsize, max_queue: usize) -> Option<Self> {
         waiting
-            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |queued| {
+            .try_update(Ordering::SeqCst, Ordering::SeqCst, |queued| {
                 (queued < max_queue).then_some(queued + 1)
             })
             .ok()?;

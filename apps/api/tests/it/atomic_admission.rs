@@ -421,7 +421,7 @@ async fn visibility_contract_http_intent_is_strict_authorized_and_replayable() -
             .bind(document.id).execute(&fixture.state.persistence.postgres).await?;
         assert_eq!(router.oneshot(request(payload)).await?.status(),StatusCode::BAD_REQUEST);
         let version=ironrag_backend::interfaces::http::health::version(axum::extract::State(fixture.state.clone())).await;
-        assert_eq!(version.0.content_visibility_contract,"visibility-intent/1");
+        assert_eq!(version.0.content_visibility_contract,"visibility-intent/2");
         Ok(())
     }.await;
     fixture.cleanup().await?;
@@ -565,7 +565,7 @@ async fn visibility_contract_payload_replay_preserves_original_artifact() -> Res
 #[ignore = "requires local postgres with required extensions"]
 async fn visibility_contract_bound_payload_requires_current_exact_intent() -> Result<()> {
     let fixture = ContentLifecycleFixture::create().await?;
-    let result = async {
+    let result = Box::pin(async {
         let postgres = &fixture.state.persistence.postgres;
         let initial = admit_content_with_failpoint(postgres, &content_request(&fixture, "binding-base"), None).await?.into_bundle();
         sqlx::query("update content_mutation set mutation_state='applied' where id=$1")
@@ -651,7 +651,8 @@ async fn visibility_contract_bound_payload_requires_current_exact_intent() -> Re
         let stale = admit_content_with_failpoint(postgres, &payload, None).await;
         assert!(matches!(stale, Err(AdmissionError::VisibilityIntentSuperseded { .. })));
         Ok(())
-    }.await;
+    })
+    .await;
     fixture.cleanup().await?;
     result
 }

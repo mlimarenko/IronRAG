@@ -1724,6 +1724,15 @@ export type ContentDocumentHead = {
     visibility_intent_id?: string | null;
 };
 
+/**
+ * One row of the library document collection.
+ *
+ * `visibilityIntentId` and `readableRevisionId` are shared with the
+ * by-external-key lookup used for reconciliation. They stay on this type
+ * deliberately: a dedicated response type would be a larger public contract
+ * change, the identifiers are opaque, and only a caller already authorized for
+ * the library can reach this row.
+ */
 export type ContentDocumentListItem = {
     /**
      * Summed cost across every billable execution attributed to this
@@ -1752,6 +1761,7 @@ export type ContentDocumentListItem = {
     processingFinishedAt?: string | null;
     processingStartedAt?: string | null;
     progressPercent?: number | null;
+    readableRevisionId: string | null;
     /**
      * Readiness bucket derived server-side.
      */
@@ -1766,6 +1776,7 @@ export type ContentDocumentListItem = {
      */
     status: DocumentStatus;
     uploadedAt: string;
+    visibilityIntentId: string | null;
     workspaceId: string;
 };
 
@@ -2804,9 +2815,19 @@ export type IamMe = {
 
 export type IamPermissionKind = 'iam_admin' | 'workspace_admin' | 'workspace_read' | 'library_read' | 'library_write' | 'document_read' | 'document_write' | 'connector_admin' | 'credential_admin' | 'binding_admin' | 'query_run' | 'ops_read' | 'audit_read';
 
+export type IamPreferencesResponse = {
+    telemetryConsent?: null | IamTelemetryConsent;
+};
+
 export type IamPrincipalKind = 'user' | 'api_token' | 'worker' | 'bootstrap';
 
 export type IamProvisioningAuthority = 'integration';
+
+/**
+ * The only durable telemetry consent states. An absent row means unset and is
+ * represented as `null` in responses, never as a third stored value.
+ */
+export type IamTelemetryConsent = 'granted' | 'denied';
 
 export type IngestAttempt = {
     attempt_number: number;
@@ -3123,11 +3144,21 @@ export type KnowledgeLibrarySummaryResponse = {
     documentCountsByReadiness: {
         [key: string]: number;
     };
+    /**
+     * Last stored count; only usable when graphStatus is ready, partial or empty.
+     */
     edgeCount: number;
     graphReadyDocumentCount: number;
     graphSparseDocumentCount: number;
+    /**
+     * Effective publication status, including denial before derived cleanup.
+     */
+    graphStatus: GraphStatus;
     latestGeneration?: null | KnowledgeLibraryGeneration;
     libraryId: string;
+    /**
+     * Last stored count; only usable when graphStatus is ready, partial or empty.
+     */
     nodeCount: number;
     typedFactDocumentCount: number;
     updatedAt: string;
@@ -4471,6 +4502,14 @@ export type RuntimeSurfaceKind = 'ui' | 'rest' | 'mcp' | 'worker' | 'internal';
 
 export type RuntimeTaskKind = 'query_compile' | 'query_plan' | 'query_rerank' | 'query_answer' | 'query_verify' | 'graph_extract' | 'structured_prepare' | 'technical_fact_extract';
 
+export type SeedIamPreferencesRequest = {
+    /**
+     * The account expected by the caller; the authenticated session remains authoritative.
+     */
+    expectedPrincipalId: string;
+    telemetryConsent: IamTelemetryConsent;
+};
+
 /**
  * Exhaustive answer block assigned by the server, not by the verifier.
  */
@@ -5226,6 +5265,14 @@ export type UpdateCatalogWorkspaceRequest = {
     displayName?: string | null;
     lifecycleState?: string | null;
     slug?: string | null;
+};
+
+export type UpdateIamPreferencesRequest = {
+    /**
+     * The account expected by the caller; the authenticated session remains authoritative.
+     */
+    expectedPrincipalId: string;
+    telemetryConsent: IamTelemetryConsent;
 };
 
 export type UpdateLibraryRecognitionPolicyRequest = {
@@ -8772,6 +8819,83 @@ export type StartIamOidcLoginErrors = {
      */
     503: unknown;
 };
+
+export type GetIamPreferencesData = {
+    body?: never;
+    path?: never;
+    query?: never;
+    url: '/v1/iam/preferences';
+};
+
+export type GetIamPreferencesErrors = {
+    /**
+     * Caller has no browser session
+     */
+    401: unknown;
+};
+
+export type GetIamPreferencesResponses = {
+    /**
+     * Current account preference; null telemetryConsent means unset
+     */
+    200: IamPreferencesResponse;
+};
+
+export type GetIamPreferencesResponse = GetIamPreferencesResponses[keyof GetIamPreferencesResponses];
+
+export type UpdateIamPreferencesData = {
+    body: UpdateIamPreferencesRequest;
+    path?: never;
+    query?: never;
+    url: '/v1/iam/preferences';
+};
+
+export type UpdateIamPreferencesErrors = {
+    /**
+     * Caller has no browser session
+     */
+    401: unknown;
+    /**
+     * The authenticated account does not match the expected principal
+     */
+    409: unknown;
+};
+
+export type UpdateIamPreferencesResponses = {
+    /**
+     * Stored account preference
+     */
+    200: IamPreferencesResponse;
+};
+
+export type UpdateIamPreferencesResponse = UpdateIamPreferencesResponses[keyof UpdateIamPreferencesResponses];
+
+export type SeedIamPreferencesData = {
+    body: SeedIamPreferencesRequest;
+    path?: never;
+    query?: never;
+    url: '/v1/iam/preferences/seed';
+};
+
+export type SeedIamPreferencesErrors = {
+    /**
+     * Caller has no browser session
+     */
+    401: unknown;
+    /**
+     * The authenticated account does not match the expected principal
+     */
+    409: unknown;
+};
+
+export type SeedIamPreferencesResponses = {
+    /**
+     * Durable account preference after seeding; an existing row is never overwritten
+     */
+    200: IamPreferencesResponse;
+};
+
+export type SeedIamPreferencesResponse = SeedIamPreferencesResponses[keyof SeedIamPreferencesResponses];
 
 export type ListServiceIdentitiesData = {
     body?: never;

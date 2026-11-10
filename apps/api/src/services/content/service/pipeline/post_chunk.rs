@@ -574,14 +574,11 @@ impl ContentService {
         })?;
 
         Ok(match publication {
-            ingest_repository::PublishContentIngestSuccessOutcome::Applied {
-                source_truth_version,
-                ..
-            } => {
+            ingest_repository::PublishContentIngestSuccessOutcome::Applied { .. } => {
                 self.refresh_inline_published_graph_summary(
                     state,
                     context,
-                    source_truth_version,
+                    publication,
                     pending_summary_refresh,
                 )
                 .await;
@@ -597,11 +594,14 @@ impl ContentService {
         &self,
         state: &AppState,
         context: &InlineMutationContext,
-        source_truth_version: i64,
+        publication: ingest_repository::PublishContentIngestSuccessOutcome,
         pending_summary_refresh: Option<
             crate::services::graph::summary::PendingGraphSummaryRefresh,
         >,
     ) {
+        let Some(source_truth_version) = publication.published_source_truth_version() else {
+            return;
+        };
         if let Some(pending_summary_refresh) = pending_summary_refresh
             && let Err(error) = state
                 .application_services

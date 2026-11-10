@@ -417,6 +417,7 @@ async fn embed_rebuild_chunk_batch_rows(
             api_key_override: embedding_binding.api_key.clone(),
             base_url_override: embedding_binding.provider_base_url.clone(),
             extra_parameters_json: embedding_binding.extra_parameters_json.clone(),
+            dispatch: Some(embedding_binding.dispatch_authority()),
         })
         .await
         .with_context(|| {

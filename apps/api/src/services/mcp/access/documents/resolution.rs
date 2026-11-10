@@ -94,6 +94,7 @@ pub(crate) async fn resolve_search_embedding_context(
             api_key_override: binding.api_key.clone(),
             base_url_override: binding.provider_base_url.clone(),
             extra_parameters_json: binding.extra_parameters_json.clone(),
+            dispatch: Some(binding.dispatch_authority()),
         })
         .await
         .map_err(|error| {

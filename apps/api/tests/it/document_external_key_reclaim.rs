@@ -76,6 +76,8 @@ async fn exact_external_key_http_uses_active_collection_and_authorization() -> R
         let item: serde_json::Value = serde_json::from_slice(&axum::body::to_bytes(response.into_body(), 65536).await?)?;
         assert_eq!(item["id"], document.id.to_string());
         assert_eq!(item["externalKey"], key);
+        assert!(item.get("visibilityIntentId").is_some_and(serde_json::Value::is_null));
+        assert!(item.get("readableRevisionId").is_some_and(serde_json::Value::is_null));
         assert!(item["status"].is_string());
         let collection = router.clone().oneshot(
             Request::get(format!("/content/libraries/{}/documents?ids={}", fixture.library_id, document.id))
@@ -113,7 +115,13 @@ async fn exact_external_key_http_uses_active_collection_and_authorization() -> R
         assert_eq!(denied_existing, StatusCode::UNAUTHORIZED);
         assert_eq!(denied_existing, denied_missing);
         content.delete_document(&fixture.state, document.id).await?;
-        assert_eq!(router.oneshot(request("Case%20%2F%3F%23%26%3D%2B", Some(&token.plaintext))).await?.status(), StatusCode::NOT_FOUND);
+        assert_eq!(router.clone().oneshot(request("Case%20%2F%3F%23%26%3D%2B", Some(&token.plaintext))).await?.status(), StatusCode::NOT_FOUND);
+        let reclaimed = content.create_document(&fixture.state, create_command(&fixture, key, "reclaimed.txt")).await?;
+        let response = router.oneshot(request("Case%20%2F%3F%23%26%3D%2B", Some(&token.plaintext))).await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let item: serde_json::Value = serde_json::from_slice(&axum::body::to_bytes(response.into_body(), 65536).await?)?;
+        assert_ne!(reclaimed.id, document.id);
+        assert_eq!(item["id"], reclaimed.id.to_string());
         Ok(())
     }.await;
     fixture.cleanup().await?;

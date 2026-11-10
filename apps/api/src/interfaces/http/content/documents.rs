@@ -725,6 +725,8 @@ fn facet_cursor_from_row(
 fn map_document_list_entry(entry: ContentDocumentListEntry) -> ContentDocumentListItem {
     ContentDocumentListItem {
         id: entry.id,
+        visibility_intent_id: entry.visibility_intent_id,
+        readable_revision_id: entry.readable_revision_id,
         library_id: entry.library_id,
         workspace_id: entry.workspace_id,
         file_name: entry.file_name,

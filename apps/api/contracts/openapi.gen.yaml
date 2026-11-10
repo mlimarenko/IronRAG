@@ -3159,6 +3159,69 @@ paths:
         '503':
           description: OIDC login admission, provider discovery, or OIDC attempt storage is temporarily unavailable
       security: []
+  /v1/iam/preferences:
+    get:
+      tags:
+      - iam
+      summary: Get iam preferences.
+      description: Executes an IronRAG HTTP API operation. The endpoint is bearer-authenticated unless explicitly documented otherwise and returns JSON shaped by the OpenAPI schema. Call it when the caller already has the resource identifier and needs the latest authorized server view.
+      operationId: getIamPreferences
+      responses:
+        '200':
+          description: Current account preference; null telemetryConsent means unset
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/IamPreferencesResponse'
+        '401':
+          description: Caller has no browser session
+    put:
+      tags:
+      - iam
+      summary: Update iam preferences.
+      description: Executes an IronRAG HTTP API operation. The endpoint is bearer-authenticated unless explicitly documented otherwise and returns JSON shaped by the OpenAPI schema. Call it to replace or partially update server-owned configuration. The request body is validated before changes are persisted.
+      operationId: updateIamPreferences
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateIamPreferencesRequest'
+        required: true
+      responses:
+        '200':
+          description: Stored account preference
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/IamPreferencesResponse'
+        '401':
+          description: Caller has no browser session
+        '409':
+          description: The authenticated account does not match the expected principal
+  /v1/iam/preferences/seed:
+    post:
+      tags:
+      - iam
+      summary: Seed iam preferences.
+      description: Executes an IronRAG HTTP API operation. The endpoint is bearer-authenticated unless explicitly documented otherwise and returns JSON shaped by the OpenAPI schema. Call it to create work or submit a command. Some commands complete synchronously, while ingest, mutation, and runtime work can continue asynchronously.
+      operationId: seedIamPreferences
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SeedIamPreferencesRequest'
+        required: true
+      responses:
+        '200':
+          description: Durable account preference after seeding; an existing row is never overwritten
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/IamPreferencesResponse'
+        '401':
+          description: Caller has no browser session
+        '409':
+          description: The authenticated account does not match the expected principal
   /v1/iam/service-identities:
     get:
       tags:
@@ -8348,8 +8411,18 @@ components:
           format: uuid
     ContentDocumentListItem:
       type: object
+      description: |-
+        One row of the library document collection.
+
+        `visibilityIntentId` and `readableRevisionId` are shared with the
+        by-external-key lookup used for reconciliation. They stay on this type
+        deliberately: a dedicated response type would be a larger public contract
+        change, the identifiers are opaque, and only a caller already authorized for
+        the library can reach this row.
       required:
       - id
+      - visibilityIntentId
+      - readableRevisionId
       - libraryId
       - workspaceId
       - fileName
@@ -8430,6 +8503,11 @@ components:
           - integer
           - 'null'
           format: int32
+        readableRevisionId:
+          type:
+          - string
+          - 'null'
+          format: uuid
         readiness:
           $ref: '#/components/schemas/DocumentReadiness'
           description: Readiness bucket derived server-side.
@@ -8457,6 +8535,11 @@ components:
         uploadedAt:
           type: string
           format: date-time
+        visibilityIntentId:
+          type:
+          - string
+          - 'null'
+          format: uuid
         workspaceId:
           type: string
           format: uuid
@@ -10730,6 +10813,14 @@ components:
       - query_run
       - ops_read
       - audit_read
+    IamPreferencesResponse:
+      type: object
+      properties:
+        telemetryConsent:
+          oneOf:
+          - type: 'null'
+          - $ref: '#/components/schemas/IamTelemetryConsent'
+            description: '`null` means the account has no stored preference.'
     IamPrincipalKind:
       type: string
       enum:
@@ -10741,6 +10832,14 @@ components:
       type: string
       enum:
       - integration
+    IamTelemetryConsent:
+      type: string
+      description: |-
+        The only durable telemetry consent states. An absent row means unset and is
+        represented as `null` in responses, never as a third stored value.
+      enum:
+      - granted
+      - denied
     IngestAttempt:
       type: object
       required:
@@ -11738,6 +11837,7 @@ components:
       required:
       - libraryId
       - documentCountsByReadiness
+      - graphStatus
       - nodeCount
       - edgeCount
       - graphReadyDocumentCount
@@ -11755,12 +11855,16 @@ components:
         edgeCount:
           type: integer
           format: int64
+          description: Last stored count; only usable when graphStatus is ready, partial or empty.
         graphReadyDocumentCount:
           type: integer
           format: int64
         graphSparseDocumentCount:
           type: integer
           format: int64
+        graphStatus:
+          $ref: '#/components/schemas/GraphStatus'
+          description: Effective publication status, including denial before derived cleanup.
         latestGeneration:
           oneOf:
           - type: 'null'
@@ -11771,6 +11875,7 @@ components:
         nodeCount:
           type: integer
           format: int64
+          description: Last stored count; only usable when graphStatus is ready, partial or empty.
         typedFactDocumentCount:
           type: integer
           format: int64
@@ -14636,6 +14741,18 @@ components:
       - graph_extract
       - structured_prepare
       - technical_fact_extract
+    SeedIamPreferencesRequest:
+      type: object
+      required:
+      - expectedPrincipalId
+      - telemetryConsent
+      properties:
+        expectedPrincipalId:
+          type: string
+          format: uuid
+          description: The account expected by the caller; the authenticated session remains authoritative.
+        telemetryConsent:
+          $ref: '#/components/schemas/IamTelemetryConsent'
     SemanticAnswerUnit:
       type: object
       description: Exhaustive answer block assigned by the server, not by the verifier.
@@ -15993,6 +16110,18 @@ components:
           type:
           - string
           - 'null'
+    UpdateIamPreferencesRequest:
+      type: object
+      required:
+      - expectedPrincipalId
+      - telemetryConsent
+      properties:
+        expectedPrincipalId:
+          type: string
+          format: uuid
+          description: The account expected by the caller; the authenticated session remains authoritative.
+        telemetryConsent:
+          $ref: '#/components/schemas/IamTelemetryConsent'
     UpdateLibraryRecognitionPolicyRequest:
       type: object
       required:

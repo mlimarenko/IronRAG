@@ -85,6 +85,9 @@ impl QueryServiceError {
             Self::Provider(failure) => match failure.kind() {
                 ProviderFailureKind::Unavailable => "QueryServiceError::ProviderUnavailable",
                 ProviderFailureKind::QuotaExhausted => "QueryServiceError::ProviderQuotaExhausted",
+                ProviderFailureKind::RequestRejected => {
+                    "QueryServiceError::ProviderRequestRejected"
+                }
             },
             Self::CacheUnavailable { .. } => "QueryServiceError::CacheUnavailable",
             Self::Cancelled => "QueryServiceError::Cancelled",
@@ -120,6 +123,7 @@ impl From<RetrievalPlanningError> for QueryServiceError {
 
 impl From<ProviderCallError> for QueryServiceError {
     fn from(error: ProviderCallError) -> Self {
+        error.report_terminal_failure();
         Self::Provider(ProviderFailure::from(error))
     }
 }

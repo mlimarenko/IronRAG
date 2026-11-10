@@ -157,6 +157,7 @@ impl SearchService {
                         api_key_override: embedding_binding.api_key.clone(),
                         base_url_override: embedding_binding.provider_base_url.clone(),
                         extra_parameters_json: embedding_binding.extra_parameters_json.clone(),
+                        dispatch: Some(embedding_binding.dispatch_authority()),
                     })
                     .await
                     .context("failed to rebuild entity vectors")?;

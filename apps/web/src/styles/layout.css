@@ -1,6 +1,16 @@
 /* The shell stays pinned; only the page content scrolls. */
-.app-shell {
+.app-frame {
   height: 100dvh;
+  display: flex;
+  flex-direction: column;
+}
+.app-viewport {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+}
+.app-shell {
+  height: 100%;
   display: grid;
   grid-template-columns: var(--sidebar-width) minmax(0, 1fr);
   transition: grid-template-columns 0.2s ease;
@@ -423,4 +433,50 @@
 .mobile-drawer,
 .mobile-overlay {
   display: none;
+}
+
+/* Consent banner: a first-run notice that never blocks the product surface. */
+.consent-banner {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 14px 16px;
+  border-top: 1px solid var(--border-strong);
+  background: var(--surface);
+  color: var(--text);
+}
+.consent-banner > svg {
+  flex: 0 0 auto;
+  margin-top: 2px;
+  color: var(--accent);
+}
+.consent-banner__body {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+.consent-banner__body p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.8125rem;
+  line-height: 1.45;
+}
+.consent-banner__actions {
+  display: flex;
+  gap: 8px;
+  margin-left: auto;
+  align-self: center;
+}
+@media (max-width: 640px) {
+  .consent-banner {
+    flex-wrap: wrap;
+  }
+  .consent-banner__actions {
+    width: 100%;
+    justify-content: flex-end;
+    margin-left: 0;
+  }
 }

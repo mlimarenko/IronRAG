@@ -139,6 +139,7 @@ fn test_gateway(
             ProviderBudgetRegistry::uniform(config, options).expect("test provider budget"),
         ),
         retry_policy: RetryPolicy::no_retry(),
+        admission: Arc::new(crate::integrations::provider_admission::UnqualifiedTestAdmission),
     }
 }
 
@@ -161,13 +162,23 @@ async fn openai_stream_uses_exactly_one_concurrency_permit() {
         model_name: "sample-model".to_string(),
         prompt: "prompt".to_string(),
         api_key_override: None,
-        base_url_override: Some(base_url),
+        base_url_override: Some(base_url.clone()),
         system_prompt: None,
         temperature: None,
         top_p: None,
         max_output_tokens_override: None,
         response_format: None,
         extra_parameters_json: local_openai_profile(),
+        // Ordinary-mode authority for a loopback fixture; never valid under a
+        // configured incident scope.
+        dispatch: Some(crate::shared::provider_http::DispatchAuthority::runtime_binding(
+            "local-openai",
+            uuid::Uuid::nil(),
+            None,
+            "sample-model",
+            base_url,
+            None,
+        )),
     };
     let mut deltas = Vec::new();
 
@@ -248,13 +259,23 @@ fn completion_test_request(base_url: String) -> ChatRequest {
         model_name: "sample-model".to_string(),
         prompt: "prompt".to_string(),
         api_key_override: None,
-        base_url_override: Some(base_url),
+        base_url_override: Some(base_url.clone()),
         system_prompt: None,
         temperature: None,
         top_p: None,
         max_output_tokens_override: None,
         response_format: None,
         extra_parameters_json: local_openai_profile(),
+        // Ordinary-mode authority for a loopback fixture; never valid under a
+        // configured incident scope.
+        dispatch: Some(crate::shared::provider_http::DispatchAuthority::runtime_binding(
+            "local-openai",
+            uuid::Uuid::nil(),
+            None,
+            "sample-model",
+            base_url.clone(),
+            None,
+        )),
     }
 }
 
@@ -319,7 +340,23 @@ async fn native_anthropic_chat_executes_the_bounded_http_path() {
             .expect("test provider budget"),
         ),
         retry_policy: RetryPolicy::no_retry(),
+        admission: Arc::new(crate::integrations::provider_admission::UnqualifiedTestAdmission),
     };
+    let dispatch = crate::shared::provider_http::DispatchAuthority::runtime_binding(
+        "anthropic",
+        uuid::Uuid::nil(),
+        None,
+        "model-alpha",
+        base_url.clone(),
+        Some("synthetic-api-key"),
+    )
+    .attest(
+        crate::shared::provider_http::ProviderSurface::Chat,
+        Some(super::provider::provider_auth_header(
+            ProviderAuthScheme::AnthropicApiKey,
+            "synthetic-api-key",
+        )),
+    );
     let runtime = ProviderRuntimeProfile {
         kind: ANTHROPIC_MESSAGES_RUNTIME_KIND.to_string(),
         auth_scheme: ProviderAuthScheme::AnthropicApiKey,
@@ -345,6 +382,7 @@ async fn native_anthropic_chat_executes_the_bounded_http_path() {
             top_p: Some(0.9),
             max_output_tokens: Some(64),
             image: None,
+            dispatch: Some(&dispatch),
         })
         .await
         .expect("native Anthropic chat call");

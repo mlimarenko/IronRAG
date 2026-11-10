@@ -254,6 +254,9 @@ pub struct ResolveSettleBlockersServices {
 #[derive(Clone)]
 pub struct AppState {
     pub settings: Settings,
+    /// The durable admission owner every provider surface shares. Resolver
+    /// bindings carry a clone of it, so no send site can hold a missing one.
+    pub dispatch_admission: Arc<dyn crate::shared::provider_http::ProviderDispatchAdmission>,
     pub credential_cipher: CredentialCipher,
     pub persistence: Persistence,
     pub agent_runtime: AgentRuntime,
@@ -333,12 +336,19 @@ impl AppState {
         let credential_cipher = take_credential_cipher(&mut settings)?;
         let bootstrap_secrets = take_bootstrap_secrets(&mut settings);
         let oidc_settings = take_oidc_settings(&mut settings)?;
+        let ordinary_financial_sends_allowed =
+            matches!(settings.required_financial_scope(), Ok(None));
         Self::from_prepared_dependencies(
             settings,
             persistence,
             credential_cipher,
             bootstrap_secrets,
             oidc_settings,
+            // Derived from configuration only: this constructor is not a
+            // production path and performs no persistence proof. The production
+            // constructors (`new`, `new_from_retained_settings`) evaluate the
+            // stored state once and pass the stronger result.
+            ordinary_financial_sends_allowed,
         )
     }
 
@@ -357,6 +367,7 @@ impl AppState {
         credential_cipher: CredentialCipher,
         bootstrap_secrets: BootstrapSecrets,
         oidc_settings: Option<Arc<OidcSettings>>,
+        ordinary_financial_sends_allowed: bool,
     ) -> anyhow::Result<Self> {
         let oidc_login_admission =
             crate::services::iam::oidc::OidcLoginAdmission::new(persistence.redis.clone());
@@ -551,7 +562,16 @@ impl AppState {
             )),
             agent_runtime.hooks(),
         );
-        let provider_gateway = UnifiedGateway::from_settings(&settings)?;
+        let provider_admission =
+            crate::integrations::provider_admission::FinancialDispatchAdmission::new(
+                persistence.postgres.clone(),
+                settings.required_financial_scope().map_err(anyhow::Error::msg)?,
+                ordinary_financial_sends_allowed,
+            );
+        let dispatch_admission: Arc<dyn crate::shared::provider_http::ProviderDispatchAdmission> =
+            Arc::new(provider_admission);
+        let provider_gateway =
+            UnifiedGateway::from_settings(&settings, Arc::clone(&dispatch_admission))?;
         let provider_budget = provider_gateway.provider_budget();
         let llm_gateway: Arc<dyn LlmGateway> = Arc::new(provider_gateway);
         let query_turn_admission = crate::services::query::turn_admission::QueryTurnAdmission::new(
@@ -573,6 +593,7 @@ impl AppState {
             agent_runtime,
             llm_gateway,
             provider_budget,
+            dispatch_admission,
             content_storage,
             deployment_diagnostics,
             worker_runtime,
@@ -620,12 +641,21 @@ impl AppState {
         let bootstrap_secrets = take_bootstrap_secrets(&mut settings);
         let oidc_settings = take_oidc_settings(&mut settings)?;
         let persistence = Persistence::connect(&settings).await?;
+        let required_financial_scope =
+            settings.required_financial_scope().map_err(anyhow::Error::msg)?;
+        crate::infra::repositories::ai_repository::validate_financial_configuration(
+            &persistence.postgres,
+            required_financial_scope.as_ref(),
+        )
+        .await?;
+        let ordinary_financial_sends_allowed = required_financial_scope.is_none();
         Self::from_prepared_dependencies(
             settings,
             persistence,
             credential_cipher,
             bootstrap_secrets,
             oidc_settings,
+            ordinary_financial_sends_allowed,
         )
     }
 
@@ -643,12 +673,21 @@ impl AppState {
         let bootstrap_secrets = take_bootstrap_secrets(settings);
         let oidc_settings = take_oidc_settings(settings)?;
         let persistence = Persistence::connect(settings).await?;
+        let required_financial_scope =
+            settings.required_financial_scope().map_err(anyhow::Error::msg)?;
+        crate::infra::repositories::ai_repository::validate_financial_configuration(
+            &persistence.postgres,
+            required_financial_scope.as_ref(),
+        )
+        .await?;
+        let ordinary_financial_sends_allowed = required_financial_scope.is_none();
         Self::from_prepared_dependencies(
             settings.clone(),
             persistence,
             credential_cipher,
             bootstrap_secrets,
             oidc_settings,
+            ordinary_financial_sends_allowed,
         )
     }
 }

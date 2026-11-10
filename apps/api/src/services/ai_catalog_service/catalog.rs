@@ -119,7 +119,20 @@ impl AiCatalogService {
         if let Some(profile_json) = &command.capability_flags_json {
             parse_provider_profile(&provider_kind, profile_json)?;
         }
-        let row = ai_repository::update_provider_catalog(
+        let financial_requested = command
+            .capability_flags_json
+            .as_ref()
+            .and_then(|profile| profile.get("financialAdmission"))
+            .is_some();
+        let required = state.settings.required_financial_scope().map_err(ApiError::BadRequest)?;
+        if financial_requested
+            && required.as_ref().is_none_or(|scope| scope.provider_id != command.provider_id)
+        {
+            return Err(ApiError::BadRequest(
+                "financial admission requires matching deployment configuration".to_owned(),
+            ));
+        }
+        let row = ai_repository::update_provider_catalog_with_scope(
             &state.persistence.postgres,
             ai_repository::UpdateProviderCatalog {
                 provider_id: command.provider_id,
@@ -130,6 +143,7 @@ impl AiCatalogService {
                 default_base_url: default_base_url.as_deref(),
                 capability_flags_json: command.capability_flags_json,
             },
+            if financial_requested { required.as_ref() } else { None },
         )
         .await
         .map_err(map_ai_write_error)?

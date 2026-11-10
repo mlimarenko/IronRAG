@@ -5,9 +5,11 @@ import { Toaster } from 'sonner'
 import { AppProvider } from '@/shared/contexts/AppContext'
 import { useApp } from '@/shared/contexts/app-context'
 import { ScreenState } from '@/shared/ui'
+import { AnalyticsConsent } from './AnalyticsConsent'
 import { AppShell } from './AppShell'
 import { returnToFromLocation } from './returnTo'
 import { PreferencesProvider } from './PreferencesContext'
+import { TelemetryRouteTracker } from './TelemetryRouteTracker'
 import LoginPage from '@/features/auth/LoginPage'
 import DashboardPage from '@/features/dashboard/DashboardPage'
 
@@ -16,6 +18,11 @@ const GraphPage = lazy(() => import('@/features/graph/GraphPage'))
 const AssistantPage = lazy(() => import('@/features/assistant/AssistantPage'))
 const AdminLayout = lazy(() => import('@/features/admin/AdminLayout'))
 const NotFoundPage = lazy(() => import('./NotFoundPage'))
+const TelemetryConsentBridge = lazy(() =>
+  import('./TelemetryConsentBridge').then((module) => ({
+    default: module.TelemetryConsentBridge,
+  })),
+)
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -96,7 +103,16 @@ export default function App() {
       <AppProvider>
         <PreferencesProvider>
           <BrowserRouter>
-            <AppRoutes />
+            <Suspense fallback={null}>
+              <TelemetryConsentBridge />
+            </Suspense>
+            <TelemetryRouteTracker />
+            <div className="app-frame">
+              <div className="app-viewport">
+                <AppRoutes />
+              </div>
+              <AnalyticsConsent />
+            </div>
             <Toaster richColors position="bottom-right" />
           </BrowserRouter>
         </PreferencesProvider>

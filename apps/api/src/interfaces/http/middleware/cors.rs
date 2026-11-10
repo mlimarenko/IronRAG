@@ -37,7 +37,12 @@ where
                 header::HeaderName::from_static(MCP_PROTOCOL_HEADER),
                 header::HeaderName::from_static(MCP_SESSION_HEADER),
             ])
-            .expose_headers([header::HeaderName::from_static(MCP_SESSION_HEADER)]),
+            .expose_headers([
+                header::HeaderName::from_static(MCP_SESSION_HEADER),
+                header::HeaderName::from_static(
+                    crate::interfaces::http::middleware::tracing_layer::TRACE_ID_HEADER,
+                ),
+            ]),
     )
 }
 

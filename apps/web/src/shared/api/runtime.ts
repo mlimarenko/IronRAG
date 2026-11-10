@@ -1,3 +1,4 @@
+import type { QueryFunction, QueryKey, SkipToken } from '@tanstack/react-query'
 import type { CreateClientConfig } from './generated/client.gen'
 
 export const createClientConfig: CreateClientConfig = (config) => ({
@@ -5,6 +6,51 @@ export const createClientConfig: CreateClientConfig = (config) => ({
   baseUrl: '',
   credentials: 'include',
 })
+
+/**
+ * A response that violates the wire contract its endpoint owns. Retrying cannot
+ * repair a deterministic malformed body, so it settles the query at once and
+ * keeps the raw response out of the cache.
+ */
+export class ResponseContractError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'ResponseContractError'
+  }
+}
+
+/**
+ * Reject malformed responses in the request lifecycle, before they enter the
+ * cache. A failure inside an endpoint-owned validator becomes a
+ * {@link ResponseContractError} unless the validator already raised one, so a
+ * caller can still distinguish its own typed contract error.
+ */
+export function validateQueryResponse<TData, TKey extends QueryKey>(
+  queryFn: QueryFunction<TData, TKey> | SkipToken | undefined,
+  validate: (data: TData) => unknown,
+): QueryFunction<TData, TKey> {
+  return async (context) => {
+    if (typeof queryFn !== 'function') throw new TypeError('Query request function is missing')
+    const data = await queryFn(context)
+    try {
+      validate(data)
+    } catch (error) {
+      if (error instanceof ResponseContractError) throw error
+      throw new ResponseContractError(error instanceof Error ? error.message : String(error))
+    }
+    return data
+  }
+}
+
+/**
+ * One retry is for a transient transport failure. A contract violation is
+ * deterministic: retrying only delays the operator-visible error and leaves the
+ * query in a cancellable retry window where a later refetch can restart it.
+ */
+export function retryContractViolation(failureCount: number, error: unknown): boolean {
+  if (error instanceof ResponseContractError) return false
+  return failureCount < 1
+}
 
 export interface ApiErrorBody {
   [extension: string]: unknown

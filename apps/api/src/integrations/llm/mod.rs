@@ -11,7 +11,7 @@ mod types;
 
 pub(crate) use embeddings::embedding_request_parameters;
 pub use gateway::UnifiedGateway;
-pub(crate) use provider::disable_bounded_answer_reasoning;
+pub(crate) use provider::{disable_bounded_answer_reasoning, provider_auth_header_for_binding};
 pub(crate) use request::provider_system_prompt;
 pub use types::{
     ChatCompletionStatus, ChatMessage, ChatRequest, ChatRequestSeed, ChatResponse, ChatToolCall,

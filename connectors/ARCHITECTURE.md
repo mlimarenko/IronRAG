@@ -108,7 +108,7 @@ establishes physical absence even under `ignore`. Its typed exclusion is counted
 independently in the sync report. This separate deletion contract is unchanged.
 `SourceFetchDeferred` performs no visibility write and advances no applied token.
 
-Synchronization requires `contentVisibilityContract: "visibility-intent/1"`
+Synchronization requires `contentVisibilityContract: "visibility-intent/2"`
 before source enumeration. Missing or mismatched capability fails without
 negotiating an older protocol. REQUIRED refs are completely refetched even when
 the opaque source token equals the applied token. Before recording success, the

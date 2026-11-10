@@ -3,6 +3,7 @@ use reqwest::{
     Method,
     header::{ACCEPT, CONTENT_TYPE},
 };
+use tracing::Instrument as _;
 
 use crate::{
     domains::provider_profiles::{ANTHROPIC_MESSAGES_RUNTIME_KIND, ProviderRuntimeProfile},
@@ -34,10 +35,61 @@ pub(super) struct NativeChatCall<'a> {
     pub(super) top_p: Option<f64>,
     pub(super) max_output_tokens: Option<i32>,
     pub(super) image: Option<(&'a [u8], &'a str)>,
+    pub(super) dispatch: Option<&'a crate::shared::provider_http::ProviderDispatchContext>,
+}
+
+/// The span for one logical chat call: request preparation, every retry
+/// attempt and the response parse.
+///
+/// The per-attempt `provider.http.request` span stays its child, so one
+/// `llm.chat` node shows how many transport attempts the call needed, and
+/// `provider.call.id` connects it to the billing row of the same call.
+pub(super) fn chat_span(provider_kind: &str, model_name: &str) -> tracing::Span {
+    let span = tracing::info_span!(
+        "llm.chat",
+        otel.kind = "client",
+        "provider.kind" = provider_kind,
+        "provider.model" = model_name,
+        "provider.call.id" = tracing::field::Empty,
+        "llm.completion.status" = tracing::field::Empty,
+    );
+    if let Some(provider_call_id) = crate::observability::current_provider_call_id() {
+        span.record("provider.call.id", provider_call_id);
+    }
+    span
+}
+
+/// Records the protocol-reported outcome on the chat span. A provider that
+/// truncated or refused the answer is otherwise indistinguishable in a trace
+/// from a normal completion.
+fn record_chat_status(
+    span: &tracing::Span,
+    result: &Result<(String, serde_json::Value, ChatCompletionStatus)>,
+) {
+    let Ok((_, _, status)) = result else {
+        return;
+    };
+    let label = match status {
+        ChatCompletionStatus::Complete => "complete",
+        ChatCompletionStatus::Truncated => "truncated",
+        ChatCompletionStatus::Refused => "refused",
+        ChatCompletionStatus::Unknown => "unknown",
+    };
+    span.record("llm.completion.status", label);
 }
 
 impl UnifiedGateway {
     pub(super) async fn call_native_chat(
+        &self,
+        call: NativeChatCall<'_>,
+    ) -> Result<(String, serde_json::Value, ChatCompletionStatus)> {
+        let span = chat_span(call.provider_kind, call.model_name);
+        let result = self.call_native_chat_inner(call).instrument(span.clone()).await;
+        record_chat_status(&span, &result);
+        result
+    }
+
+    async fn call_native_chat_inner(
         &self,
         call: NativeChatCall<'_>,
     ) -> Result<(String, serde_json::Value, ChatCompletionStatus)> {
@@ -85,19 +137,12 @@ impl UnifiedGateway {
                 } else {
                     request_builder
                 };
-                let response = Self::send_provider_request(
-                    request_builder.json(&body),
-                    &endpoint_url,
-                    call.provider_kind,
-                    "native-chat",
-                )
-                .await
-                .map_err(|source| {
-                    ProviderCallError::transport(
-                        format!("native chat transport failed: provider={}", call.provider_kind),
-                        source,
-                    )
+                let dispatch = call.dispatch.ok_or_else(|| {
+                    ProviderCallError::protocol("provider dispatch authority is missing")
                 })?;
+                let response = self
+                    .send_provider_request(request_builder.json(&body), dispatch, "native-chat")
+                    .await?;
                 let (status, headers, body_bytes) =
                     read_provider_response_body(response, call.provider_kind, "native chat")
                         .await?;
@@ -121,6 +166,20 @@ impl UnifiedGateway {
     }
 
     pub(super) async fn call_openai_compatible(
+        &self,
+        request: OpenAiCompatibleRequest<'_>,
+        allow_private_network: bool,
+    ) -> Result<(String, serde_json::Value, ChatCompletionStatus)> {
+        let span = chat_span(request.provider_kind, request.model_name);
+        let result = self
+            .call_openai_compatible_inner(request, allow_private_network)
+            .instrument(span.clone())
+            .await;
+        record_chat_status(&span, &result);
+        result
+    }
+
+    async fn call_openai_compatible_inner(
         &self,
         request: OpenAiCompatibleRequest<'_>,
         allow_private_network: bool,
@@ -149,19 +208,16 @@ impl UnifiedGateway {
                     request.auth_scheme,
                     request.api_key,
                 )?;
-                let response = Self::send_provider_request(
-                    request_builder.body(request_body.clone()),
-                    &endpoint_url,
-                    request.provider_kind,
-                    "chat",
-                )
-                .await
-                .map_err(|source| {
-                    ProviderCallError::transport(
-                        format!("provider transport failed: provider={}", request.provider_kind),
-                        source,
-                    )
+                let dispatch = request.dispatch.ok_or_else(|| {
+                    ProviderCallError::protocol("provider dispatch authority is missing")
                 })?;
+                let response = self
+                    .send_provider_request(
+                        request_builder.body(request_body.clone()),
+                        dispatch,
+                        "chat",
+                    )
+                    .await?;
 
                 let (status, headers, body_bytes) =
                     read_provider_response_body(response, request.provider_kind, "chat").await?;
@@ -192,6 +248,21 @@ impl UnifiedGateway {
         allow_private_network: bool,
         on_delta: &mut (dyn FnMut(String) + Send),
     ) -> Result<(String, serde_json::Value, ChatCompletionStatus)> {
+        let span = chat_span(request.provider_kind, request.model_name);
+        let result = self
+            .call_openai_compatible_stream_inner(request, allow_private_network, on_delta)
+            .instrument(span.clone())
+            .await;
+        record_chat_status(&span, &result);
+        result
+    }
+
+    async fn call_openai_compatible_stream_inner(
+        &self,
+        request: OpenAiCompatibleRequest<'_>,
+        allow_private_network: bool,
+        on_delta: &mut (dyn FnMut(String) + Send),
+    ) -> Result<(String, serde_json::Value, ChatCompletionStatus)> {
         let request_body = request.body()?;
         let endpoint_url =
             provider_endpoint_url(request.provider_kind, request.base_url, &request.chat_path)?;
@@ -216,19 +287,16 @@ impl UnifiedGateway {
                     request.auth_scheme,
                     request.api_key,
                 )?;
-                let response = Self::send_provider_request(
-                    request_builder.body(request_body.clone()),
-                    &endpoint_url,
-                    request.provider_kind,
-                    "chat-stream",
-                )
-                .await
-                .map_err(|source| {
-                    ProviderCallError::transport(
-                        format!("provider transport failed: provider={}", request.provider_kind),
-                        source,
-                    )
+                let dispatch = request.dispatch.ok_or_else(|| {
+                    ProviderCallError::protocol("provider dispatch authority is missing")
                 })?;
+                let response = self
+                    .send_provider_request(
+                        request_builder.body(request_body.clone()),
+                        dispatch,
+                        "chat-stream",
+                    )
+                    .await?;
 
                 let status = response.status();
                 if status.is_success() {

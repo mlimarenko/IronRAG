@@ -27,7 +27,7 @@ import { GraphLegend } from './components/GraphLegend'
 import { useGraphAdjacency } from './hooks/useGraphAdjacency'
 import { DEFAULT_GRAPH_LAYOUT, GRAPH_EDGE_RENDER_CAP, type GraphLayoutType } from './model/config'
 import { mapGraphTopology } from './model/graphAdapter'
-import { resolveGraphStatus, type StreamPhase } from './model/graphStatus'
+import { hasPublishedGraphCounts, resolveGraphStatus, type StreamPhase } from './model/graphStatus'
 import {
   EMPTY_LEGEND_FILTER,
   buildTypeLegend,
@@ -36,13 +36,6 @@ import {
 } from './model/typeLegend'
 
 type LoadProgress = { nodes: number; total: number }
-
-function summaryStatus(summary: ReturnType<typeof useGraphSummary>['data']): GraphStatus | null {
-  if (!summary) return null
-  if (summary.nodeCount === 0) return 'empty'
-  if (summary.graphSparseDocumentCount > 0) return 'partial'
-  return 'ready'
-}
 
 function statusTone(status: GraphStatus): string {
   if (status === 'ready') return 'ready'
@@ -186,7 +179,7 @@ function GraphWorkbench({ libraryId }: Readonly<{ libraryId: string }>) {
     setFocusedNeighborhoodId(null)
   }, [])
   const selectedBasic = selectedId ? (adjacency.nodeById.get(selectedId) ?? null) : null
-  const serverSummaryStatus = summaryStatus(summaryQuery.data)
+  const serverSummaryStatus = summaryQuery.data?.graphStatus ?? null
   const graphStatus: GraphStatus = resolveGraphStatus({
     streamPhase,
     knownNodeCount: summaryQuery.data?.nodeCount ?? 0,
@@ -215,12 +208,16 @@ function GraphWorkbench({ libraryId }: Readonly<{ libraryId: string }>) {
 
       <div className="graph-counts" aria-live="polite">
         <Badge tone={statusTone(graphStatus)}>{graphStatusLabel(graphStatus, t)}</Badge>
-        <span>
-          {formatNumber(nodeCount, locale)} {t('graph.nodes')}
-        </span>
-        <span>
-          {formatNumber(edgeCount, locale)} {t('graph.edges')}
-        </span>
+        {hasPublishedGraphCounts(graphStatus) && (
+          <>
+            <span>
+              {formatNumber(nodeCount, locale)} {t('graph.nodes')}
+            </span>
+            <span>
+              {formatNumber(edgeCount, locale)} {t('graph.edges')}
+            </span>
+          </>
+        )}
         {hiddenIds.size > 0 && (
           <span>
             {formatNumber(hiddenIds.size, locale)} {t('graph.hidden')}

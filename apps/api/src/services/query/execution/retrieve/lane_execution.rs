@@ -1,4 +1,5 @@
 use anyhow::Context;
+use tracing::Instrument as _;
 
 use super::{
     AppState, BTreeSet, ChunkRetrievalLaneOutcome, CompanionRetrievalPlan, DateTime,
@@ -12,6 +13,10 @@ use super::{
 /// (elapsed + returned chunk count) into the active inspector sink. The spans
 /// surface which retrieval companion lane was heavy on a given turn without
 /// changing the loader's own return contract.
+///
+/// The same boundary opens the OpenTelemetry span, so the trace carries the
+/// lane under its own name (`otel.name`) instead of a single opaque retrieval
+/// block.
 pub(super) async fn timed_lane<Fut>(
     name: &'static str,
     fut: Fut,
@@ -20,7 +25,7 @@ where
     Fut: std::future::Future<Output = anyhow::Result<Vec<RuntimeMatchedChunk>>>,
 {
     let started = std::time::Instant::now();
-    let result = fut.await;
+    let result = fut.instrument(retrieval_span(name)).await;
     crate::services::query::turn_spans::record_span(
         name,
         "lane",
@@ -31,6 +36,13 @@ where
     result
 }
 
+/// The OpenTelemetry span for one named retrieval phase. `otel.name` carries
+/// the phase name so the trace tree reads `retrieve.primary`,
+/// `retrieve.vector`, … rather than repeating the generic span name.
+fn retrieval_span(name: &'static str) -> tracing::Span {
+    tracing::info_span!("retrieval.phase", "otel.name" = name, "ironrag.retrieval.phase" = name)
+}
+
 /// Wrap any future so it emits a `stage`-kind turn span (elapsed_ms) into the
 /// active inspector sink. Complements `timed_lane` for retrieve phases that do
 /// not return `Vec<RuntimeMatchedChunk>` (merges, graph evidence, index loads).
@@ -39,7 +51,7 @@ where
     Fut: std::future::Future,
 {
     let started = std::time::Instant::now();
-    let output = fut.await;
+    let output = fut.instrument(retrieval_span(name)).await;
     crate::services::query::turn_spans::record_span(
         name,
         "stage",

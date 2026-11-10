@@ -504,8 +504,8 @@ services:
         # Same contract as the backend image: empty here, rejected by the
         # frontend Dockerfile, so the bundle can never carry a made-up version.
         APP_VERSION: ${IRONRAG_VERSION:-}
-        # Browser traces are off unless the image is explicitly built with an
-        # operator-controlled OTLP/HTTP traces endpoint.
+        # Browser telemetry is off until the viewer consents and the image is
+        # built with an operator-controlled OTLP base URL.
         VITE_OTEL_EXPORTER_OTLP_ENDPOINT: ${VITE_OTEL_EXPORTER_OTLP_ENDPOINT:-}
         VITE_OTEL_SERVICE_NAME: ${VITE_OTEL_SERVICE_NAME:-ironrag-web}
         VITE_OTEL_SERVICE_VERSION: ${VITE_OTEL_SERVICE_VERSION:-${IRONRAG_VERSION:-}}
@@ -517,6 +517,10 @@ services:
         condition: service_healthy
     environment:
       IRONRAG_API_UPSTREAM: http://backend:8080
+      # Same-origin proxy target for browser telemetry. Point it at an OTLP
+      # collector reachable from the frontend container when telemetry is built
+      # into the image; the default fails fast rather than leaking elsewhere.
+      IRONRAG_OTLP_UPSTREAM: ${IRONRAG_OTLP_UPSTREAM:-http://127.0.0.1:4318}
     ports:
       - "${IRONRAG_PORT:-19000}:8080"
     healthcheck:

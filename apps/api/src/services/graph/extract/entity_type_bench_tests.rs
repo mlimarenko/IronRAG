@@ -537,8 +537,13 @@ async fn entity_type_classifier_benchmark() {
             .runtime_graph_extract_recovery_max_attempts
             .clamp(1, GRAPH_EXTRACTION_MAX_PROVIDER_ATTEMPTS),
     };
-    let gateway: Arc<dyn LlmGateway> =
-        Arc::new(UnifiedGateway::from_settings(&settings).expect("build chat gateway"));
+    let gateway: Arc<dyn LlmGateway> = Arc::new(
+        UnifiedGateway::from_settings(
+            &settings,
+            Arc::new(crate::integrations::provider_admission::UnqualifiedTestAdmission),
+        )
+        .expect("build chat gateway"),
+    );
     let budget = Arc::new(
         ProviderBudgetRegistry::uniform(
             ProviderBudgetConfig::unlimited(),

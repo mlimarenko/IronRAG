@@ -8,6 +8,15 @@ import { reportUnauthorizedResponse } from '@/shared/api/sessionLifecycle'
 import { AppProvider } from '@/shared/contexts/AppContext'
 import { useApp } from '@/shared/contexts/app-context'
 import i18n from '@/shared/i18n'
+import {
+  requestTelemetryConsent,
+  type TelemetryPreferencesApi,
+} from '@/shared/lib/telemetry/accountConsent'
+import {
+  applyAccountTelemetryConsent,
+  beginAccountTelemetryConsent,
+  isTelemetryAllowed,
+} from '@/shared/lib/telemetry/consent'
 
 const { authApiMock, catalogMock } = vi.hoisted(() => ({
   authApiMock: {
@@ -897,6 +906,110 @@ describe('AppContext workspace-library scoping', () => {
     expect(container.querySelector('[data-testid="active-workspace"]')?.textContent).toBe('none')
     expect(container.querySelector('[data-testid="active-library"]')?.textContent).toBe('none')
   })
+
+  it('signs out and stops telemetry immediately without waiting for a queued denial', async () => {
+    authApiMock.resolveSession.mockResolvedValue(makeSession())
+    let resolveGrant!: () => void
+    const pendingGrant = new Promise<void>((resolve) => {
+      resolveGrant = resolve
+    })
+    let resolveLogout!: () => void
+    const pendingLogout = new Promise<void>((resolve) => {
+      resolveLogout = resolve
+    })
+    authApiMock.logout.mockReturnValue(pendingLogout)
+    const api: TelemetryPreferencesApi = {
+      load: vi.fn(),
+      seed: vi.fn(),
+      update: vi.fn(async (_principal, choice) => {
+        if (choice === 'granted') await pendingGrant
+        return { telemetryConsent: choice }
+      }),
+    }
+    await renderProbe()
+    beginAccountTelemetryConsent(PRINCIPAL)
+    applyAccountTelemetryConsent(PRINCIPAL, 'granted')
+    const grant = requestTelemetryConsent('granted', api)
+    await Promise.resolve()
+    const denial = requestTelemetryConsent('denied', api)
+    const button = Array.from(container.querySelectorAll('button')).find(
+      (item) => item.textContent === 'Log out',
+    )
+    await act(async () => {
+      button?.click()
+    })
+    expect(authApiMock.logout).toHaveBeenCalledTimes(1)
+    expect(container.querySelector('[data-testid="authenticated"]')?.textContent).toBe('no')
+    expect(container.querySelector('[data-testid="session-error"]')?.textContent).toBe('none')
+    expect(isTelemetryAllowed()).toBe(false)
+    resolveGrant()
+    resolveLogout()
+    await Promise.all([grant, denial, pendingLogout])
+  })
+
+  it('stops granted telemetry before the logout request finishes', async () => {
+    authApiMock.resolveSession.mockResolvedValue(makeSession())
+    let resolveLogout!: () => void
+    const pendingLogout = new Promise<void>((resolve) => {
+      resolveLogout = resolve
+    })
+    authApiMock.logout.mockReturnValue(pendingLogout)
+    await renderProbe()
+    beginAccountTelemetryConsent(PRINCIPAL)
+    applyAccountTelemetryConsent(PRINCIPAL, 'granted')
+    expect(isTelemetryAllowed()).toBe(true)
+    const button = Array.from(container.querySelectorAll('button')).find(
+      (item) => item.textContent === 'Log out',
+    )
+    await act(async () => {
+      button?.click()
+    })
+    expect(isTelemetryAllowed()).toBe(false)
+    expect(container.querySelector('[data-testid="authenticated"]')?.textContent).toBe('no')
+    resolveLogout()
+    await pendingLogout
+  })
+
+  it.each(['success', 'failure'] as const)(
+    'finishes a pending logout before the next login when logout reports %s',
+    async (result) => {
+      let finishLogout!: () => void
+      let failLogout!: (error: Error) => void
+      const pendingLogout = new Promise<void>((resolve, reject) => {
+        finishLogout = resolve
+        failLogout = reject
+      })
+      let cookie = 'principal-1'
+      authApiMock.resolveSession
+        .mockResolvedValueOnce(makeSession({ principalId: 'principal-1' }))
+        .mockResolvedValue(makeSession({ principalId: 'principal-2' }))
+      authApiMock.logout.mockImplementation(async () => {
+        await pendingLogout
+        cookie = ''
+      })
+      authApiMock.login.mockImplementation(async () => {
+        cookie = 'principal-2'
+        return { id: 'session-2' }
+      })
+      await renderProbe()
+      const buttons = Array.from(container.querySelectorAll('button'))
+      await act(async () => {
+        buttons.find((item) => item.textContent === 'Log out')?.click()
+        buttons.find((item) => item.textContent === 'Log in')?.click()
+      })
+      expect(container.querySelector('[data-testid="authenticated"]')?.textContent).toBe('no')
+      expect(authApiMock.login).not.toHaveBeenCalled()
+      await act(async () => {
+        if (result === 'success') finishLogout()
+        else failLogout(new Error('network unavailable'))
+        await pendingLogout.catch(() => undefined)
+      })
+      await flushUi()
+      expect(authApiMock.login).toHaveBeenCalledTimes(1)
+      expect(cookie).toBe('principal-2')
+      expect(container.querySelector('[data-testid="authenticated"]')?.textContent).toBe('yes')
+    },
+  )
 
   it('drops the signed-in identity once, however many requests report a dead session', async () => {
     authApiMock.resolveSession.mockImplementation((selection = {}) =>

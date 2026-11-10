@@ -428,6 +428,14 @@ async fn delete_evidence_closure_batch(
         .map_err(GcError::Graph)?;
     let candidate_roots = i64::try_from(candidate_ids.len()).unwrap_or(i64::MAX);
     let work_remaining = candidate_roots >= budget || selected.len() < candidate_ids.len();
+    repositories::invalidate_runtime_graph_snapshot_for_targets(
+        tx,
+        library_id,
+        &[],
+        &[],
+        &selected,
+    )
+    .await?;
     let dependent =
         sqlx::query("delete from knowledge_bundle_evidence where evidence_id = any($1)")
             .bind(&selected)
@@ -1289,49 +1297,27 @@ async fn run_stale_evidence_transaction(
     library_id: Uuid,
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
 ) -> Result<StaleEvidenceReport, GcError> {
-    let stale_revision_rows = sqlx::query_scalar::<_, i64>(
-        "with deleted as ( \
-             delete from runtime_graph_evidence ev \
-             using content_document_head h \
-             where ev.library_id = $1 \
-               and ev.document_id = h.document_id \
-               and ev.revision_id is not null \
-               and ev.revision_id not in ( \
-                   coalesce(h.readable_revision_id, '00000000-0000-0000-0000-000000000000'::uuid), \
-                   coalesce(h.active_revision_id,   '00000000-0000-0000-0000-000000000000'::uuid) \
-               ) \
-               and not exists ( \
-                   select 1 from ingest_job j \
-                   where j.library_id = ev.library_id \
-                     and j.knowledge_document_id = ev.document_id \
-                     and j.queue_state in ('queued','leased','paused') \
-                     and j.completed_at is null \
-               ) \
-             returning 1 \
-         ) \
-         select count(*)::bigint from deleted",
-    )
-    .bind(library_id)
-    .fetch_one(&mut **tx)
-    .await?;
-
-    let phantom_chunk_rows = sqlx::query_scalar::<_, i64>(
-        "with deleted as ( \
-             delete from runtime_graph_evidence ev \
-             where ev.library_id = $1 \
-               and ev.chunk_id is not null \
-               and not exists ( \
-                   select 1 from content_chunk c where c.id = ev.chunk_id \
-               ) \
-             returning 1 \
-         ) \
-         select count(*)::bigint from deleted",
-    )
-    .bind(library_id)
-    .fetch_one(&mut **tx)
-    .await?;
-
-    Ok(StaleEvidenceReport { stale_revision_rows, phantom_chunk_rows })
+    let mut counts = [0_i64; 2];
+    for (index, phase) in
+        [RuntimeGraphGcPhase::StaleRevisionEvidence, RuntimeGraphGcPhase::PhantomChunkEvidence]
+            .into_iter()
+            .enumerate()
+    {
+        loop {
+            let batch = delete_evidence_closure_batch(
+                library_id,
+                phase,
+                tx,
+                RUNTIME_GRAPH_DELETE_MUTATION_BUDGET,
+            )
+            .await?;
+            counts[index] += batch.evidence_deleted;
+            if !batch.work_remaining {
+                break;
+            }
+        }
+    }
+    Ok(StaleEvidenceReport { stale_revision_rows: counts[0], phantom_chunk_rows: counts[1] })
 }
 
 #[cfg(test)]

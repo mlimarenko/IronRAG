@@ -1,6 +1,7 @@
 use anyhow::{Context, Result, anyhow};
 use async_trait::async_trait;
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
+use tracing::Instrument as _;
 
 use crate::{
     domains::provider_profiles::{
@@ -14,8 +15,8 @@ use super::{
     ChatRequest, ChatResponse, EmbeddingBatchRequest, EmbeddingBatchResponse, EmbeddingRequest,
     EmbeddingResponse, LlmGateway, ToolUseRequest, ToolUseResponse, UnifiedGateway, VisionRequest,
     VisionResponse,
-    chat::NativeChatCall,
-    embeddings::EmbeddingsCall,
+    chat::{NativeChatCall, chat_span},
+    embeddings::{EmbeddingsCall, validate_embedding_inputs},
     openai_compatible::{
         OpenAiCompatibleContentPart, OpenAiCompatibleImageUrl, OpenAiCompatibleMessage,
         OpenAiCompatibleMessageContent,
@@ -34,12 +35,13 @@ use super::{
 #[async_trait]
 impl LlmGateway for UnifiedGateway {
     async fn generate(&self, mut request: ChatRequest) -> Result<ChatResponse> {
-        let resolved = Self::resolve_provider(
+        let resolved = Self::resolve_provider_attested(
             &request.provider_kind,
             request.api_key_override.as_deref(),
             request.base_url_override.as_deref(),
             &request.model_name,
             &request.extra_parameters_json,
+            request.dispatch.as_ref(),
         )?;
         let upstream_extra = Self::upstream_extra_parameters(
             &request.extra_parameters_json,
@@ -91,6 +93,7 @@ impl LlmGateway for UnifiedGateway {
                     top_p: controls.top_p,
                     max_output_tokens: request.max_output_tokens_override,
                     image: None,
+                    dispatch: resolved.dispatch.as_ref(),
                 })
                 .await?
             }
@@ -110,12 +113,13 @@ impl LlmGateway for UnifiedGateway {
         mut request: ChatRequest,
         on_delta: &mut (dyn FnMut(String) + Send),
     ) -> Result<ChatResponse> {
-        let resolved = Self::resolve_provider(
+        let resolved = Self::resolve_provider_attested(
             &request.provider_kind,
             request.api_key_override.as_deref(),
             request.base_url_override.as_deref(),
             &request.model_name,
             &request.extra_parameters_json,
+            request.dispatch.as_ref(),
         )?;
         if matches!(
             resolved.runtime.kind.as_str(),
@@ -169,12 +173,13 @@ impl LlmGateway for UnifiedGateway {
     }
 
     async fn generate_with_tools(&self, mut request: ToolUseRequest) -> Result<ToolUseResponse> {
-        let resolved = Self::resolve_provider(
+        let resolved = Self::resolve_provider_attested(
             &request.provider_kind,
             request.api_key_override.as_deref(),
             request.base_url_override.as_deref(),
             &request.model_name,
             &request.extra_parameters_json,
+            request.dispatch.as_ref(),
         )?;
         if matches!(
             resolved.runtime.kind.as_str(),
@@ -205,19 +210,16 @@ impl LlmGateway for UnifiedGateway {
                     resolved.runtime.auth_scheme,
                     resolved.api_key.as_deref(),
                 )?;
-                let response = Self::send_provider_request(
-                    request_builder.body(request_body.clone()),
-                    &endpoint_url,
-                    &request.provider_kind,
-                    "tool-use",
-                )
-                .await
-                .map_err(|source| {
-                    ProviderCallError::transport(
-                        format!("tool-use transport failed: provider={}", request.provider_kind),
-                        source,
-                    )
+                let dispatch = resolved.dispatch.as_ref().ok_or_else(|| {
+                    ProviderCallError::protocol("provider dispatch authority is missing")
                 })?;
+                let response = self
+                    .send_provider_request(
+                        request_builder.body(request_body.clone()),
+                        dispatch,
+                        "tool-use",
+                    )
+                    .await?;
 
                 let (status, headers, body_bytes) =
                     read_provider_response_body(response, &request.provider_kind, "tool-use")
@@ -239,6 +241,7 @@ impl LlmGateway for UnifiedGateway {
             },
             self.retry_policy,
         )
+        .instrument(chat_span(&request.provider_kind, &request.model_name))
         .await?;
 
         Ok(ToolUseResponse {
@@ -257,12 +260,13 @@ impl LlmGateway for UnifiedGateway {
         mut request: ToolUseRequest,
         on_text_delta: &mut (dyn FnMut(String) + Send),
     ) -> Result<ToolUseResponse> {
-        let resolved = Self::resolve_provider(
+        let resolved = Self::resolve_provider_attested(
             &request.provider_kind,
             request.api_key_override.as_deref(),
             request.base_url_override.as_deref(),
             &request.model_name,
             &request.extra_parameters_json,
+            request.dispatch.as_ref(),
         )?;
 
         let payload = tool_use_request_payload(&request, &resolved, true);
@@ -272,6 +276,10 @@ impl LlmGateway for UnifiedGateway {
         let (endpoint_url, target) =
             self.open_chat_endpoint(&request.provider_kind, &resolved).await?;
 
+        // The streaming tool-use path assembles its request here rather than in
+        // `chat`, so the chat span opens around the retry loop and the delta
+        // drain.
+        let span = chat_span(&request.provider_kind, &request.model_name);
         let (response, _provider_guard) = with_retry(
             || async {
                 let provider_guard =
@@ -284,22 +292,16 @@ impl LlmGateway for UnifiedGateway {
                     resolved.runtime.auth_scheme,
                     resolved.api_key.as_deref(),
                 )?;
-                let response = Self::send_provider_request(
-                    request_builder.body(request_body.clone()),
-                    &endpoint_url,
-                    &request.provider_kind,
-                    "tool-use-stream",
-                )
-                .await
-                .map_err(|source| {
-                    ProviderCallError::transport(
-                        format!(
-                            "tool-use stream transport failed: provider={}",
-                            request.provider_kind
-                        ),
-                        source,
-                    )
+                let dispatch = resolved.dispatch.as_ref().ok_or_else(|| {
+                    ProviderCallError::protocol("provider dispatch authority is missing")
                 })?;
+                let response = self
+                    .send_provider_request(
+                        request_builder.body(request_body.clone()),
+                        dispatch,
+                        "tool-use-stream",
+                    )
+                    .await?;
 
                 let status = response.status();
                 if status.is_success() {
@@ -310,9 +312,10 @@ impl LlmGateway for UnifiedGateway {
             },
             self.retry_policy,
         )
+        .instrument(span.clone())
         .await?;
 
-        let stream_state = drain_tool_use_stream(response, on_text_delta).await?;
+        let stream_state = drain_tool_use_stream(response, on_text_delta).instrument(span).await?;
         let (output_text, finish_reason, usage_json, tool_calls) = stream_state.finalize();
         Ok(ToolUseResponse {
             provider_kind: std::mem::take(&mut request.provider_kind),
@@ -330,12 +333,18 @@ impl LlmGateway for UnifiedGateway {
     }
 
     async fn embed(&self, mut request: EmbeddingRequest) -> Result<EmbeddingResponse> {
-        let resolved = Self::resolve_provider(
+        validate_embedding_inputs(
+            &request.provider_kind,
+            &request.model_name,
+            &serde_json::Value::String(request.input.clone()),
+        )?;
+        let resolved = Self::resolve_provider_attested(
             &request.provider_kind,
             request.api_key_override.as_deref(),
             request.base_url_override.as_deref(),
             &request.model_name,
             &request.extra_parameters_json,
+            request.dispatch.as_ref(),
         )?;
         let (endpoint_url, target) =
             self.open_embeddings_endpoint(&request.provider_kind, &resolved).await?;
@@ -350,7 +359,6 @@ impl LlmGateway for UnifiedGateway {
                 endpoint_url: &endpoint_url,
                 target: &target,
                 operation: "embedding",
-                transport_error: "embedding transport failed",
             })
             .await?;
 
@@ -388,6 +396,12 @@ impl LlmGateway for UnifiedGateway {
             });
         }
 
+        validate_embedding_inputs(
+            &request.provider_kind,
+            &request.model_name,
+            &serde_json::json!(&request.inputs),
+        )?;
+
         if request.inputs.len() == 1 {
             let response = self
                 .embed(EmbeddingRequest {
@@ -397,6 +411,7 @@ impl LlmGateway for UnifiedGateway {
                     api_key_override: request.api_key_override.clone(),
                     base_url_override: request.base_url_override.clone(),
                     extra_parameters_json: request.extra_parameters_json.clone(),
+                    dispatch: request.dispatch.clone(),
                 })
                 .await?;
             return Ok(EmbeddingBatchResponse {
@@ -408,12 +423,13 @@ impl LlmGateway for UnifiedGateway {
             });
         }
 
-        let resolved = Self::resolve_provider(
+        let resolved = Self::resolve_provider_attested(
             &request.provider_kind,
             request.api_key_override.as_deref(),
             request.base_url_override.as_deref(),
             &request.model_name,
             &request.extra_parameters_json,
+            request.dispatch.as_ref(),
         )?;
         let (endpoint_url, target) =
             self.open_embeddings_endpoint(&request.provider_kind, &resolved).await?;
@@ -428,7 +444,6 @@ impl LlmGateway for UnifiedGateway {
                 endpoint_url: &endpoint_url,
                 target: &target,
                 operation: "embedding batch",
-                transport_error: "embedding batch transport failed",
             })
             .await?;
 
@@ -460,12 +475,13 @@ impl LlmGateway for UnifiedGateway {
     }
 
     async fn vision_extract(&self, mut request: VisionRequest) -> Result<VisionResponse> {
-        let resolved = Self::resolve_provider(
+        let resolved = Self::resolve_provider_attested(
             &request.provider_kind,
             request.api_key_override.as_deref(),
             request.base_url_override.as_deref(),
             &request.model_name,
             &request.extra_parameters_json,
+            request.dispatch.as_ref(),
         )?;
         let upstream_extra = Self::upstream_extra_parameters(
             &request.extra_parameters_json,
@@ -524,6 +540,7 @@ impl LlmGateway for UnifiedGateway {
                     top_p,
                     max_output_tokens: request.max_output_tokens_override,
                     image: Some((&request.image_bytes, &request.mime_type)),
+                    dispatch: resolved.dispatch.as_ref(),
                 })
                 .await?
             }

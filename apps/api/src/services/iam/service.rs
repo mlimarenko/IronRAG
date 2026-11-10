@@ -21,19 +21,19 @@ mod session_support;
 #[cfg(test)]
 mod tests;
 
-pub(crate) use self::session_support::hash_password;
 use self::{
     bootstrap_support::{
         normalize_bootstrap_login, rollback_failed_bootstrap_principal, validate_email,
     },
-    mapping::{
-        grant_resource_kind_as_str, map_api_token, map_grant, map_principal,
-        map_workspace_membership,
-    },
+    mapping::{map_api_token, map_grant, map_principal, map_workspace_membership},
     session_support::{
         DUMMY_PASSWORD_HASH, OIDC_ONLY_PASSWORD_SENTINEL_HASH, issue_session_for_user,
         verify_password,
     },
+};
+pub(crate) use self::{
+    mapping::{grant_resource_kind_as_str, principal_kind_as_str},
+    session_support::hash_password,
 };
 
 #[derive(Clone, Default)]
@@ -628,6 +628,29 @@ impl IamService {
             token: plaintext.to_string(),
             api_token: map_api_token(token_row),
         })
+    }
+
+    /// Partial update of one API token: `label` is left untouched when `None`
+    /// and `expires_at` distinguishes omitted (`None`, untouched) from
+    /// `Some(None)` (clear) from `Some(Some(_))` (set). Permission scope is
+    /// immutable after mint, so it has no parameter here.
+    pub async fn update_api_token(
+        &self,
+        state: &AppState,
+        token_principal_id: Uuid,
+        label: Option<&str>,
+        expires_at: Option<Option<chrono::DateTime<chrono::Utc>>>,
+    ) -> Result<ApiToken, ApiError> {
+        let token_row = iam_repository::update_api_token(
+            &state.persistence.postgres,
+            token_principal_id,
+            label,
+            expires_at,
+        )
+        .await
+        .map_err(|e| ApiError::internal_with_log(e, "internal"))?
+        .ok_or_else(|| ApiError::resource_not_found("api_token", token_principal_id))?;
+        Ok(map_api_token(token_row))
     }
 
     pub async fn revoke_api_token(

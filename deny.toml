@@ -67,9 +67,9 @@ unused-license-exception = "deny"
 include-dev = true
 include-build = true
 exceptions = [
-    { crate = "webpki-root-certs@1.0.10", allow = ["CDLA-Permissive-2.0"] },
-    { crate = "webpki-roots@1.0.10", allow = ["CDLA-Permissive-2.0"] },
-    { crate = "xxhash-rust@0.8.16", allow = ["BSL-1.0"] },
+    { crate = "webpki-root-certs@1.0.11", allow = ["CDLA-Permissive-2.0"] },
+    { crate = "webpki-roots@1.0.11", allow = ["CDLA-Permissive-2.0"] },
+    { crate = "xxhash-rust@0.8.19", allow = ["BSL-1.0"] },
 ]
 
 [licenses.private]
@@ -80,7 +80,7 @@ registries = []
 unknown-registry = "deny"
 unknown-git = "deny"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
-allow-git = ["https://github.com/xberg-io/xberg.git", "https://github.com/ramosbugs/openidconnect-rs.git"]
+allow-git = ["https://github.com/xberg-io/xberg.git", "https://github.com/ramosbugs/openidconnect-rs.git", "https://github.com/launchbadge/sqlx.git"]
 
 [sources.allow-org]
 github = []

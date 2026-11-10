@@ -3,6 +3,7 @@ pub mod ai;
 pub mod audit;
 pub mod billing;
 pub mod catalog;
+pub mod connector;
 pub mod content;
 pub mod deployment;
 pub mod extract;

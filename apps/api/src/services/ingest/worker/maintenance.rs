@@ -151,6 +151,9 @@ pub(super) async fn run_graph_backfill_loop(
     state: Arc<AppState>,
     mut shutdown: broadcast::Receiver<()>,
 ) {
+    if !state.settings.maintenance_enabled {
+        return;
+    }
     info!("starting graph backfill loop");
     loop {
         if !wait_for_graph_backfill_tick(&mut shutdown).await {
@@ -323,6 +326,9 @@ pub(super) async fn run_graph_maintenance_loop(
     state: Arc<AppState>,
     mut shutdown: broadcast::Receiver<()>,
 ) {
+    if !state.settings.maintenance_enabled {
+        return;
+    }
     info!("starting graph maintenance loop");
     // Tokio intervals deliver their first tick immediately. A restarted worker
     // therefore begins draining durable file-name drift without waiting five
@@ -645,6 +651,56 @@ pub(super) fn spawn_external_stale_lease_reaper(heartbeat_pool: sqlx::PgPool) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn disabled_maintenance_stops_automatic_graph_loops() {
+        use crate::{app::config::Settings, infra::persistence::Persistence};
+        use base64::{Engine, engine::general_purpose::STANDARD};
+
+        let mut settings = Settings::from_env().expect("test settings");
+        settings.maintenance_enabled = false;
+        settings.discard_credential_master_key();
+        settings.credential_master_key = Some(STANDARD.encode([41_u8; 32]));
+        let postgres =
+            sqlx::PgPool::connect_lazy("postgres://127.0.0.1:1/unreachable").expect("lazy pool");
+        let redis = redis::Client::open("redis://127.0.0.1:1/").expect("redis client");
+        let enabled_settings = {
+            let mut enabled = settings.clone();
+            enabled.maintenance_enabled = true;
+            enabled
+        };
+        let persistence = Persistence::for_tests(postgres, redis);
+        let enabled_state = Arc::new(
+            AppState::from_dependencies(enabled_settings, persistence.clone())
+                .expect("enabled test state"),
+        );
+        let state =
+            Arc::new(AppState::from_dependencies(settings, persistence).expect("test state"));
+        let (_shutdown, receiver) = broadcast::channel(1);
+        tokio::time::timeout(
+            Duration::from_millis(100),
+            run_graph_backfill_loop(state.clone(), receiver),
+        )
+        .await
+        .expect("disabled backfill must return without admission");
+        let (_shutdown, receiver) = broadcast::channel(1);
+        tokio::time::timeout(
+            Duration::from_millis(100),
+            run_graph_maintenance_loop(state, receiver),
+        )
+        .await
+        .expect("disabled graph maintenance must return");
+        let (_shutdown, receiver) = broadcast::channel(1);
+        assert!(
+            tokio::time::timeout(
+                Duration::from_millis(100),
+                run_graph_backfill_loop(enabled_state, receiver)
+            )
+            .await
+            .is_err(),
+            "enabled backfill must stay active"
+        );
+    }
 
     fn consume_full_requested_batch(
         admission: &mut GraphReextractTickAdmission,

@@ -1,5 +1,18 @@
 use super::*;
 
+pub(super) fn resolved_chat_max_output_tokens(
+    purpose: AiBindingPurpose,
+    binding_override: Option<i32>,
+    model_max_output_tokens: Option<i32>,
+) -> Option<i32> {
+    binding_override.or_else(|| {
+        (purpose != AiBindingPurpose::EmbedChunk && !purpose.is_decision())
+            .then_some(model_max_output_tokens)
+            .flatten()
+            .filter(|limit| *limit > 0)
+    })
+}
+
 pub(super) fn deduplicate_binding_purposes(
     binding_purposes: &[AiBindingPurpose],
 ) -> Vec<AiBindingPurpose> {
@@ -110,27 +123,14 @@ pub(crate) fn embedding_profile_key_from_effective_row(
     )?;
     let extra_parameters_json =
         merge_binding_request_context(row.binding_extra_parameters_json, &model, &provider.profile);
-    let binding = ResolvedRuntimeBinding {
-        binding_id: Uuid::nil(),
-        workspace_id: Uuid::nil(),
-        library_id: Uuid::nil(),
-        binding_purpose,
-        provider_catalog_id: provider.id,
-        provider_kind: provider.provider_kind,
-        provider_base_url,
-        provider_api_style: provider.api_style,
-        account_id: Uuid::nil(),
-        api_key: None,
-        model_catalog_id: model.id,
-        model_name: model.model_name,
+    Ok(crate::services::ai_catalog_service::embedding_execution_profile_key_for(
+        &provider.provider_kind,
+        provider_base_url.as_deref(),
+        &provider.api_style,
+        &extra_parameters_json,
+        &model.model_name,
         effective_embedding_dimensions,
-        system_prompt: None,
-        temperature: None,
-        top_p: None,
-        max_output_tokens_override: None,
-        extra_parameters_json,
-    };
-    Ok(binding.embedding_execution_profile_key())
+    ))
 }
 
 fn map_effective_runtime_binding_row(
@@ -205,8 +205,13 @@ fn map_effective_runtime_binding_row(
         system_prompt: row.system_prompt.take(),
         temperature: row.temperature,
         top_p: row.top_p,
-        max_output_tokens_override: row.max_output_tokens_override,
+        max_output_tokens_override: resolved_chat_max_output_tokens(
+            requested_purpose,
+            row.max_output_tokens_override,
+            model.max_output_tokens,
+        ),
         extra_parameters_json,
+        admission: state.dispatch_admission.clone(),
     })
 }
 impl AiCatalogService {
@@ -323,6 +328,7 @@ impl AiCatalogService {
         let extra_parameters_json =
             merge_binding_request_context(binding.extra_parameters_json, &model, &provider.profile);
         Ok(ResolvedRuntimeBinding {
+            admission: std::sync::Arc::clone(&state.dispatch_admission),
             binding_id: binding.id,
             workspace_id,
             library_id,
@@ -339,7 +345,11 @@ impl AiCatalogService {
             system_prompt: binding.system_prompt,
             temperature: binding.temperature,
             top_p: binding.top_p,
-            max_output_tokens_override: binding.max_output_tokens_override,
+            max_output_tokens_override: resolved_chat_max_output_tokens(
+                binding_purpose,
+                binding.max_output_tokens_override,
+                model.max_output_tokens,
+            ),
             extra_parameters_json,
         })
     }

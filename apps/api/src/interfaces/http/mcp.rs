@@ -26,6 +26,7 @@ use crate::{
 mod audit;
 mod jsonrpc;
 mod lease;
+mod resources;
 mod session;
 mod session_transport;
 #[cfg(test)]
@@ -116,7 +117,14 @@ fn build_mcp_response_or_internal_error(
     }
 }
 
-pub const MCP_SUPPORTED_METHOD_NAMES: &[&str] = &["initialize", "tools/list", "tools/call"];
+pub const MCP_SUPPORTED_METHOD_NAMES: &[&str] = &[
+    "initialize",
+    "tools/list",
+    "tools/call",
+    "resources/list",
+    "resources/read",
+    "resources/templates/list",
+];
 
 pub const MCP_SUPPORTED_NOTIFICATION_METHOD_NAMES: &[&str] =
     &["notifications/initialized", "notifications/cancelled"];
@@ -679,7 +687,8 @@ fn mcp_initialize_result(capabilities: McpCapabilitySnapshot) -> Value {
     json!({
         "protocolVersion": MCP_PROTOCOL_VERSION,
         "capabilities": {
-            "tools": { "listChanged": false }
+            "tools": { "listChanged": false },
+            "resources": { "listChanged": false, "subscribe": false }
         },
         "serverInfo": McpServerInfo { name: MCP_SERVER_NAME, version: MCP_SERVER_VERSION },
         "instructions": crate::services::mcp::agent_policy::instructions(),

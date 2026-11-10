@@ -82,7 +82,7 @@ async def test_visibility_contract_receipt_replay_retains_original_floor() -> No
     def handle(request: httpx.Request) -> httpx.Response:
         paths.append(request.url.path)
         if request.url.path == "/v1/version":
-            return httpx.Response(200, json={"contentVisibilityContract": "visibility-intent/1"})
+            return httpx.Response(200, json={"contentVisibilityContract": "visibility-intent/2"})
         bodies.append(json.loads(request.content))
         return httpx.Response(201 if len(bodies) == 1 else 200, json=_visibility_receipt())
 
@@ -98,7 +98,10 @@ async def test_visibility_contract_receipt_replay_retains_original_floor() -> No
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("capability", [None, "visibility-policy/1", 1, "absent"])
+@pytest.mark.parametrize(
+    "capability",
+    [None, "visibility-policy/1", "visibility-intent/1", 1, "absent"],
+)
 async def test_visibility_contract_capability_refuses_before_write(capability: object) -> None:
     paths: list[str] = []
 
@@ -109,7 +112,11 @@ async def test_visibility_contract_capability_refuses_before_write(capability: o
 
     client = _client(httpx.MockTransport(handle), advertise_contract=False)
     request = _visibility_request()
-    with pytest.raises(IronRagError, match="contentVisibilityContract"):
+    # A backend that only advertises the pre-metadata contract must fail here,
+    # before any write and before the exact-key lookup can report a malformed
+    # payload. The message names the required version so the mismatch is
+    # actionable.
+    with pytest.raises(IronRagError, match="visibility-intent/2"):
         await client.create_visibility_intent(DOC, request=request)
     assert paths == ["/v1/version"]
     await client.aclose()
@@ -131,7 +138,7 @@ async def test_visibility_contract_capability_refuses_before_write(capability: o
 async def test_visibility_contract_rejects_invalid_receipt(field: str, value: object) -> None:
     def handle(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/v1/version":
-            return httpx.Response(200, json={"contentVisibilityContract": "visibility-intent/1"})
+            return httpx.Response(200, json={"contentVisibilityContract": "visibility-intent/2"})
         return httpx.Response(201, json={**_visibility_receipt(), field: value})
 
     client = _client(httpx.MockTransport(handle), advertise_contract=False)
@@ -149,7 +156,7 @@ async def test_visibility_contract_rejects_invalid_receipt(field: str, value: ob
 async def test_visibility_contract_typed_conflict(code: str) -> None:
     def handle(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/v1/version":
-            return httpx.Response(200, json={"contentVisibilityContract": "visibility-intent/1"})
+            return httpx.Response(200, json={"contentVisibilityContract": "visibility-intent/2"})
         return httpx.Response(409, json=_problem(code, status=409))
 
     client = _client(httpx.MockTransport(handle), advertise_contract=False)
@@ -166,7 +173,7 @@ async def test_visibility_contract_lost_receipt_replays_exact_request() -> None:
 
     def handle(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/v1/version":
-            return httpx.Response(200, json={"contentVisibilityContract": "visibility-intent/1"})
+            return httpx.Response(200, json={"contentVisibilityContract": "visibility-intent/2"})
         requests.append(request.content)
         if len(requests) == 1:
             raise httpx.ReadTimeout("lost receipt", request=request)
@@ -219,7 +226,7 @@ async def test_visibility_contract_retains_server_normalized_descriptor() -> Non
 
     def handle(http_request: httpx.Request) -> httpx.Response:
         if http_request.url.path == "/v1/version":
-            return httpx.Response(200, json={"contentVisibilityContract": "visibility-intent/1"})
+            return httpx.Response(200, json={"contentVisibilityContract": "visibility-intent/2"})
         assert json.loads(http_request.content)["replacement"]["title"] == " "
         return httpx.Response(201, json=_visibility_receipt())
 
@@ -245,7 +252,7 @@ def _settings() -> BaseConnectorSettings:
 def _client(handler: httpx.MockTransport, *, advertise_contract: bool = True) -> IronRagClient:
     def transport(request: httpx.Request) -> httpx.Response:
         if advertise_contract and request.url.path == "/v1/version":
-            return httpx.Response(200, json={"contentVisibilityContract": "visibility-intent/1"})
+            return httpx.Response(200, json={"contentVisibilityContract": "visibility-intent/2"})
         return handler.handle_request(request)
 
     return IronRagClient(
@@ -597,9 +604,48 @@ def _lookup_item(**overrides: object) -> dict[str, object]:
         "fileName": "page.txt",
         "documentState": "active",
         "status": "ready",
+        "visibilityIntentId": None,
+        "readableRevisionId": None,
     }
     item.update(overrides)
     return item
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("field", ["visibilityIntentId", "readableRevisionId"])
+@pytest.mark.parametrize("invalid", ["missing", "not-a-uuid"])
+async def test_find_document_rejects_missing_or_invalid_visibility(
+    field: str, invalid: str
+) -> None:
+    body = _lookup_item()
+    if invalid == "missing":
+        del body[field]
+    else:
+        body[field] = invalid
+    client = _client(httpx.MockTransport(lambda request: httpx.Response(200, json=body)))
+    try:
+        with pytest.raises(IronRagError):
+            await client.find_document(LIB, "confluence:page:42")
+    finally:
+        await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_find_document_parses_visibility_uuids() -> None:
+    client = _client(
+        httpx.MockTransport(
+            lambda request: httpx.Response(
+                200, json=_lookup_item(visibilityIntentId=str(DOC), readableRevisionId=str(LIB))
+            )
+        )
+    )
+    try:
+        document = await client.find_document(LIB, "confluence:page:42")
+    finally:
+        await client.aclose()
+    assert document is not None
+    assert document.visibility_intent_id == DOC
+    assert document.readable_revision_id == LIB
 
 
 @pytest.mark.asyncio
@@ -621,6 +667,8 @@ async def test_find_document_performs_one_exact_point_lookup() -> None:
     assert found is not None
     assert found.id == DOC
     assert found.external_key == "confluence:page:42"
+    assert found.visibility_intent_id is None
+    assert found.readable_revision_id is None
     assert len(requests) == 1, "an exact lookup must not fall back to the collection"
     assert "confluence:page:42" not in requests[0].url.path
 

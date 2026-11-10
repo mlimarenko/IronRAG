@@ -1,5 +1,74 @@
 # Changelog
 
+## 0.6.2
+
+### Added
+
+- Browser telemetry consent is stored per account and can be changed in the user
+  menu. Account preferences override browser choices; loading or unavailable
+  preferences keep optional telemetry off.
+- MCP diagnostics tools for connector ingest history (`list_ingest_jobs`,
+  `get_ingest_job`, `retry_ingest_job`, `cancel_ingest_job`) and for IAM
+  (`list_iam_tokens`, `revoke_iam_token`, `get_principal_access`). Ingest reads
+  follow the connector read policy, mutations the write-only connector policy;
+  the IAM tools require a system administrator.
+- The bundled connector catalog (`bookstack`, `confluence`, `gitrepos`,
+  `youtrack`) has one code-side owner instead of duplicated image and run-mode
+  lists.
+- MCP connector catalog and IAM administration tools (`list_connector_sources`,
+  `mint_iam_token`, `update_iam_token`), plus MCP resources `ironrag://manifest`
+  and `ironrag://typescript` served by `resources/list`, `resources/read` and
+  `resources/templates/list`.
+- Ingest job and attempt cursors plus the accepted queue-state vocabulary are
+  shared by the REST lists and the MCP ingest tools.
+- One trace per request. The REST API returns the OpenTelemetry trace id in an
+  `x-trace-id` response header, stdout log lines carry `trace_id` and `span_id`,
+  and REST audit rows store the same trace id. Retrieval phases, PostgreSQL
+  searches, LLM chat and embeddings calls, Xberg parsing, ingest enqueue and
+  each ingest stage now emit spans, so a slow or failed answer can be followed
+  from the request through the worker in the trace backend, the logs and the
+  audit log.
+
+### Fixed
+
+- Consent writes reject a changed account session before modifying preferences.
+  Revocation disables local telemetry immediately, including while a save is
+  pending; sign-out remains immediate and silent.
+- The consent banner occupies its own layout row instead of covering navigation
+  or page actions on desktop and narrow screens.
+- Malformed AI and queue responses are rejected before entering the query cache.
+  Contract errors stay visible instead of being reset by automatic retries or
+  queue polling; manual retry remains available.
+- Updated HTML parsing and development-tool dependencies, and pinned official
+  SQLx support for patched SQLite bindings. The backend runtime uses the official
+  SQLite package containing the three reported HIGH-severity fixes.
+- Log redaction compiles without unsupported regex look-around: Bearer and
+  Basic credentials are still removed while ordinary prose after the scheme
+  word stays readable.
+- Split code blocks keep per-segment source spans, so citations and table
+  anchors remain unambiguous when the same text repeats.
+- GitHub Release descriptions show the selected changelog section and preserve
+  editorial corrections when publication is retried.
+
+### Upgrade
+
+- Existing deployments must complete the documented additive schema rollout
+  before starting the new API and worker. Account preferences add a guarded
+  schema transition; keep the existing database and credential master key.
+  See [the schema rollout instructions](./docs/en/CLI.md#schema-rollout).
+
+### Known limitations
+
+- Sign-out does not wait for a pending consent save. If the server could not
+  persist a refusal, the account's previous preference can remain on other
+  devices; optional telemetry in the signing-out tab stops immediately.
+- Debian image scans still report the three patched SQLite HIGH findings because
+  the trixie advisory mapping does not recognize the pinned sid package's fixes.
+  Other Debian MEDIUM/LOW findings have no supported trixie fix at release time;
+  their reachability has not been established. Findings remain visible without
+  new suppressions.
+- Historical ingestion failures are not automatically repaired or replayed.
+
 ## 0.6.1
 
 ### Fixed

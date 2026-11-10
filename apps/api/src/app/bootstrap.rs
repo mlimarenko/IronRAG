@@ -1,6 +1,6 @@
 use argon2::{
     Argon2,
-    password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString, rand_core::OsRng},
+    password_hash::{PasswordHasher, PasswordVerifier, phc::PasswordHash},
 };
 use tracing::info;
 use uuid::Uuid;
@@ -14,7 +14,7 @@ use crate::{
 
 fn hash_password(password: &str) -> Result<String, ApiError> {
     Argon2::default()
-        .hash_password(password.as_bytes(), &SaltString::generate(&mut OsRng))
+        .hash_password(password.as_bytes())
         .map(|hash| hash.to_string())
         .map_err(|e| ApiError::internal_with_log(e, "internal"))
 }
@@ -257,4 +257,34 @@ async fn reconcile_bootstrap_password(
         ));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{hash_password, password_hash_matches};
+    use crate::interfaces::http::router_support::ApiError;
+
+    #[test]
+    fn persisted_compatibility_reads_accepted_password_hashes() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/credentials/accepted_writer.json"
+        )))
+        .expect("synthetic accepted-writer fixture");
+        let password = fixture["password"].as_str().expect("fixture password");
+        for field in ["bootstrap_hash", "iam_hash"] {
+            let hash = fixture[field].as_str().expect("accepted password hash");
+            assert!(password_hash_matches(password, hash).expect("valid persisted hash"));
+            assert!(!password_hash_matches("wrong-password", hash).expect("valid persisted hash"));
+        }
+        assert!(matches!(password_hash_matches(password, "malformed"), Err(ApiError::Internal)));
+
+        let hash = hash_password(password).expect("new bootstrap writer");
+        assert!(hash.starts_with("$argon2id$v=19$m=19456,t=2,p=1$"));
+        assert!(password_hash_matches(password, &hash).expect("new bootstrap reader"));
+        let fields: Vec<_> = hash.split('$').collect();
+        assert_eq!(fields.len(), 6);
+        assert_eq!(fields[4].len(), 22, "16-byte unpadded PHC salt");
+        assert_eq!(fields[5].len(), 43, "32-byte unpadded PHC output");
+    }
 }

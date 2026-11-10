@@ -52,12 +52,12 @@ Wizard details, non-interactive CI installs, provider keys, and telemetry:
 
 - **Self-hosted runtime** — Docker Compose (PostgreSQL + pgvector, Redis, backend, worker, frontend) or Helm on Kubernetes; data stays on your servers
 - **Typed knowledge graph** — entities, typed relations, and chunk-level citations; hybrid retrieval across vector, lexical, graph, and technical-fact lanes
-- **Native MCP server** — 23 tools for documents, graph, web ingest, and grounded `grounded_answer`; works with Claude Desktop / Code, Cursor, Codex, VS Code (Continue / Cline / Roo), Zed, OpenClaw, Hermes, and custom HTTP MCP clients
+- **Native MCP server** — 32 tools for documents, graph, web and connector ingest, IAM, and grounded `grounded_answer`; works with Claude Desktop / Code, Cursor, Codex, VS Code (Continue / Cline / Roo), Zed, OpenClaw, Hermes, and custom HTTP MCP clients
 - **Provider-agnostic AI** — OpenAI, DeepSeek, Qwen / DashScope, GPTunnel, OpenRouter, RouterAI, MiniMax, Ollama, LiteLLM / OpenAI-compatible gateways; eight binding purposes (`extract_text`, `extract_graph`, `graph_entity_type`, `embed_chunk`, `query_compile`, `query_rerank`, `query_answer`, `agent`) with per-currency cost rollups in the UI
 - **Code-aware document ingest** — 15-language tree-sitter AST; typed JSON / YAML / TOML records and named XLSX tables; native Xberg parsing for document text and structure, with LLM Vision for scanned pages and images
 - **Multi-tenant IAM** — principals, scoped tokens (system / workspace / library), permission groups, audit log
 - **Durable ops** — restart-safe document jobs with page-range checkpoints; durable assistant turns that recover after stream drops; streaming `tar.zst` backup / restore
-- **Pluggable connectors** — BookStack, Confluence, YouTrack, Git repos, or build your own; see [connectors/](./connectors/README.md). They live in this repository and ship on this version (poll + webhook intake)
+- **Pluggable connectors** — BookStack, Confluence, YouTrack, git repositories, or your own; poll and webhook intake. See [connectors/](./connectors/README.md)
 
 <p align="center">
   <img src="./docs/assets/readme-flow.gif" alt="IronRAG demo in light and dark themes: document upload, graph layouts, and assistant" width="1280">
@@ -97,9 +97,10 @@ Deep dive: [docs/en/PIPELINE.md](./docs/en/PIPELINE.md) · [docs/en/README.md](.
 | Credential encryption | [CREDENTIAL-ENCRYPTION.md](./docs/en/CREDENTIAL-ENCRYPTION.md) | [CREDENTIAL-ENCRYPTION.md](./docs/ru/CREDENTIAL-ENCRYPTION.md) |
 | Capacity & Compose / Helm | [CAPACITY-PLANNING.md](./docs/en/CAPACITY-PLANNING.md) | [CAPACITY-PLANNING.md](./docs/ru/CAPACITY-PLANNING.md) |
 | IAM | [IAM.md](./docs/en/IAM.md) | [IAM.md](./docs/ru/IAM.md) |
+| CLI | [CLI.md](./docs/en/CLI.md) | [CLI.md](./docs/ru/CLI.md) |
 | Changelog | [CHANGELOG.md](./CHANGELOG.md) | — |
 
-More topics (CLI, frontend, webhooks, benchmarks, Ollama) live under [`docs/en/`](./docs/en/README.md) and [`docs/ru/`](./docs/ru/README.md).
+More topics (frontend, webhooks, benchmarks, Ollama) live under [`docs/en/`](./docs/en/README.md) and [`docs/ru/`](./docs/ru/README.md).
 
 ## Working on IronRAG
 
@@ -128,13 +129,6 @@ grounded-answer tool — the contract is `apps/api/tests/MCP_PARITY.md`. After a
 change in retrieve, answer or the MCP tools, run the regression through the UI
 *and* through an external MCP client. One channel healthy and the other
 degraded is not a release; a tool reachable only from the UI is a defect.
-
-### Documentation
-
-- [`CLI`](./docs/en/CLI.md) — maintenance commands and schema rollout.
-- [`INSTALL`](./docs/en/INSTALL.md), [`PIPELINE`](./docs/en/PIPELINE.md), and
-  [`AI-BINDINGS`](./docs/en/AI-BINDINGS.md) — setup and runtime behavior.
-- [`CHANGELOG`](./CHANGELOG.md) — release changes.
 
 ### Development checks
 
@@ -167,32 +161,8 @@ degraded is not a release; a tool reachable only from the UI is a defect.
   ```
 
   The poisoned ones are those whose `o.status` is terminal.
-- **CI checks merge requests and protected default-branch pushes.** Migration
-  checks and ops self-tests run in both. Protected default pushes build backend,
-  frontend, Confluence, YouTrack and BookStack images; backend and BookStack
-  have separate image security gates. Other local checks use the Make targets.
-- **Develop builds and deploys an RC automatically.** A protected `develop` push
-  resolves the next patch from the latest published GitHub Release, for example
-  `0.6.1` after `0.6.0`, and builds `0.6.1-rc.<CI_PIPELINE_ID>` into every image
-  through `APP_VERSION`. Images stay stored under their immutable `sha-*` build
-  tag. `release:bundle` records the four deployed digests; `release:promote`
-  then publishes the exact `0.6.1-rc.<CI_PIPELINE_ID>` aliases for backend,
-  frontend, Confluence, YouTrack and BookStack from those same digests.
-  `deploy:gitops` waits for both the bundle and promotion. BookStack is tagged but
-  not deployed. No GitLab tag, reservation, manual job or public bump is
-  consumed. `/v1/version` and the visible frontend version report the same
-  string; the native version contract marks it `is_release: false` and
-  `is_prerelease: true`.
-- **A public GitHub release is an explicit flow.** In a protected `develop` push
-  pipeline run the manual `public:publish` job. It selects the next stable
-  version at publication time (`release_bump` job input: patch by default, minor or major)
-  and appends the clean SemVer snapshot and GitHub Release.
-  It never publishes the RC version and creates no GitLab tag or GitLab release.
-  Prepare release notes in `CHANGELOG.md`, under `## Unreleased` or the exact
-  stable version. The publisher stamps `Unreleased` and uses that version's
-  section as the GitHub description. Published tags remain immutable; editorial
-  corrections to the release description are preserved on retry. Schema-rollout fences guard
-  GitOps deployment and public publication.
+- **Local checks use the [Makefile](./Makefile) targets.**
+- **User-visible changes get a `CHANGELOG.md` entry under `## Unreleased`.**
 - **A snapshot import answers `202`.** The terminal status lives in
   `GET /v1/ops/operations/{id}`; `curl --fail` is green on an operation that
   failed afterwards.

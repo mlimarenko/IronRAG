@@ -166,8 +166,8 @@ class DocumentResource(BaseModel):
     file_name: str | None = Field(default=None, alias="fileName")
     document_hint: str | None = Field(default=None, alias="documentHint")
     uploaded_at: datetime | None = Field(default=None, alias="uploadedAt")
-    visibility_intent_id: UUID | None = None
-    readable_revision_id: UUID | None = None
+    visibility_intent_id: UUID | None = Field(default=None, alias="visibilityIntentId")
+    readable_revision_id: UUID | None = Field(default=None, alias="readableRevisionId")
     admission: OperationHandle | None = Field(default=None, exclude=True)
 
 
@@ -810,9 +810,13 @@ class IronRagClient:
             raise IronRagError("IronRAG version response is not valid JSON") from exc
         if (
             not isinstance(body, dict)
-            or body.get("contentVisibilityContract") != "visibility-intent/1"
+            or body.get("contentVisibilityContract") != "visibility-intent/2"
         ):
-            raise IronRagError("IronRAG requires contentVisibilityContract visibility-intent/1")
+            raise IronRagError(
+                "IronRAG requires contentVisibilityContract visibility-intent/2 "
+                "(exact-key visibility metadata); upgrade the backend or the connector "
+                "so both ends agree"
+            )
         self._visibility_contract_verified = True
 
     async def create_visibility_intent(
@@ -1063,7 +1067,13 @@ class IronRagClient:
         if response.status_code >= 400:
             _raise_for_problem(response)
         try:
-            document = DocumentResource.model_validate(response.json())
+            body = response.json()
+            if (
+                not isinstance(body, dict)
+                or not {"visibilityIntentId", "readableRevisionId"} <= body.keys()
+            ):
+                raise ValueError("document lookup lacks visibility metadata")
+            document = DocumentResource.model_validate(body)
         except ValueError as exc:
             raise IronRagError("IronRAG returned a malformed document lookup") from exc
         _validate_exact_document_identity(document, library_id, external_key)

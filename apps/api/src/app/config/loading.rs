@@ -28,6 +28,7 @@ impl Settings {
             settings_config_builder()?.add_source(ironrag_environment_source(None)).build()?;
 
         let mut settings: Self = cfg.try_deserialize()?;
+        settings.required_financial_scope().map_err(config::ConfigError::Message)?;
         settings.service_role = settings.service_role.trim().to_ascii_lowercase();
         settings.startup_authority_mode =
             settings.startup_authority_mode.trim().to_ascii_lowercase();
@@ -84,6 +85,46 @@ impl Settings {
         }
 
         Ok(settings)
+    }
+
+    /// The required incident scope is either completely configured or absent.
+    pub fn required_financial_scope(
+        &self,
+    ) -> Result<Option<crate::infra::repositories::ai_repository::RequiredFinancialScope>, String>
+    {
+        use crate::infra::repositories::ai_repository::RequiredFinancialScope;
+        match (
+            &self.financial_required_provider_id,
+            &self.financial_required_scope_id,
+            &self.financial_required_policy_fingerprint,
+        ) {
+            (None, None, None) => Ok(None),
+            (Some(provider), Some(scope), Some(fingerprint)) => {
+                let provider_id = uuid::Uuid::parse_str(provider)
+                    .map_err(|_| "invalid required financial provider id")?;
+                let scope_id = uuid::Uuid::parse_str(scope)
+                    .map_err(|_| "invalid required financial scope id")?;
+                let digest = fingerprint
+                    .strip_prefix("sha256:")
+                    .ok_or("invalid required financial fingerprint")?;
+                if provider_id.is_nil()
+                    || scope_id.is_nil()
+                    || digest.len() != 64
+                    || !digest.bytes().all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c))
+                {
+                    return Err("invalid required financial scope".to_owned());
+                }
+                Ok(Some(RequiredFinancialScope {
+                    provider_id,
+                    scope_id,
+                    policy_fingerprint: fingerprint.clone(),
+                }))
+            }
+            _ => {
+                Err("required financial scope must include provider, scope, and policy fingerprint"
+                    .to_owned())
+            }
+        }
     }
 
     /// Removes and zeroizes raw credential key configuration when a process

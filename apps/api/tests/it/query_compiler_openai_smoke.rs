@@ -130,6 +130,9 @@ fn binding_from_env() -> Option<ResolvedRuntimeBinding> {
                 }
             }
         }),
+        admission: std::sync::Arc::new(
+            ironrag_backend::integrations::provider_admission::UnqualifiedTestAdmission,
+        ),
     })
 }
 
@@ -150,7 +153,12 @@ async fn openai_strict_schema_round_trip() -> anyhow::Result<()> {
         )
     })?;
     let settings = settings_stub()?;
-    let gateway = UnifiedGateway::from_settings(&settings)?;
+    let gateway = UnifiedGateway::from_settings(
+        &settings,
+        std::sync::Arc::new(
+            ironrag_backend::integrations::provider_admission::UnqualifiedTestAdmission,
+        ),
+    )?;
     let service = QueryCompilerService;
 
     let mut failures = Vec::<(String, String)>::new();

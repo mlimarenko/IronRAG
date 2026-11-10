@@ -72,6 +72,9 @@ fn resolved_runtime_binding_redacts_runtime_credentials_from_diagnostics() {
         top_p: Some(0.8),
         max_output_tokens_override: Some(1_024),
         extra_parameters_json: serde_json::json!({}),
+        admission: std::sync::Arc::new(
+            crate::integrations::provider_admission::UnqualifiedTestAdmission,
+        ),
     };
 
     let diagnostic = format!("{binding:?}");

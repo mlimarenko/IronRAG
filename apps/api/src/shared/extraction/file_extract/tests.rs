@@ -94,6 +94,8 @@ async fn runtime_html_dispatch_preserves_declared_cp1251_without_a_meta_tag() {
     assert!(!had_errors);
     let policy = LibraryRecognitionPolicy::default();
     let plan = build_runtime_file_extraction_plan(FileExtractionRequest {
+        max_output_tokens_override: None,
+        vision_dispatch: None,
         cancellation_token: None,
         gateway: &FakeGateway,
         vision_provider: None,
@@ -1216,6 +1218,8 @@ fn builds_tabular_extraction_plan_for_tsv_upload() {
 async fn runtime_plan_uses_native_tabular_parser_for_xlsx_upload() {
     let policy = LibraryRecognitionPolicy::default();
     let result = build_runtime_file_extraction_plan(FileExtractionRequest {
+        max_output_tokens_override: None,
+        vision_dispatch: None,
         cancellation_token: None,
         gateway: &FakeGateway,
         vision_provider: None,
@@ -1290,6 +1294,8 @@ async fn runtime_plan_uses_vision_provider_for_non_xberg_images() {
     });
 
     let result = build_runtime_file_extraction_plan(FileExtractionRequest {
+        max_output_tokens_override: None,
+        vision_dispatch: None,
         cancellation_token: None,
         gateway: &FakeGateway,
         vision_provider: Some(&provider),
@@ -1337,6 +1343,8 @@ async fn runtime_plan_uses_vision_policy_for_static_raster_images() {
     });
 
     let result = build_runtime_file_extraction_plan(FileExtractionRequest {
+        max_output_tokens_override: None,
+        vision_dispatch: None,
         cancellation_token: None,
         gateway: &FakeGateway,
         vision_provider: Some(&provider),
@@ -1379,6 +1387,8 @@ async fn runtime_plan_rejects_empty_vision_image_text() {
     };
 
     let error = build_runtime_file_extraction_plan(FileExtractionRequest {
+        max_output_tokens_override: None,
+        vision_dispatch: None,
         cancellation_token: None,
         gateway: &EmptyVisionGateway,
         vision_provider: Some(&provider),
@@ -1407,6 +1417,8 @@ async fn runtime_plan_retries_once_when_vision_returns_empty_then_text() {
     let gateway = FlakyVisionGateway { calls: AtomicUsize::new(0) };
 
     let result = build_runtime_file_extraction_plan(FileExtractionRequest {
+        max_output_tokens_override: None,
+        vision_dispatch: None,
         cancellation_token: None,
         gateway: &gateway,
         vision_provider: Some(&provider),
@@ -1443,6 +1455,8 @@ async fn runtime_plan_rejects_empty_vision_image_text_after_one_retry() {
     let gateway = CountingEmptyVisionGateway { calls: AtomicUsize::new(0) };
 
     let error = build_runtime_file_extraction_plan(FileExtractionRequest {
+        max_output_tokens_override: None,
+        vision_dispatch: None,
         cancellation_token: None,
         gateway: &gateway,
         vision_provider: Some(&provider),
@@ -1482,6 +1496,8 @@ async fn runtime_plan_does_not_retry_when_vision_returns_text() {
     let gateway = CountingTextVisionGateway { calls: AtomicUsize::new(0) };
 
     let result = build_runtime_file_extraction_plan(FileExtractionRequest {
+        max_output_tokens_override: None,
+        vision_dispatch: None,
         cancellation_token: None,
         gateway: &gateway,
         vision_provider: Some(&provider),
@@ -1510,6 +1526,8 @@ async fn runtime_plan_does_not_retry_vision_provider_errors() {
     let gateway = ErroringVisionGateway { calls: AtomicUsize::new(0) };
 
     let error = build_runtime_file_extraction_plan(FileExtractionRequest {
+        max_output_tokens_override: None,
+        vision_dispatch: None,
         cancellation_token: None,
         gateway: &gateway,
         vision_provider: Some(&provider),
@@ -1535,6 +1553,8 @@ fn visual_input<'a>(
     provider: Option<&'a ProviderModelSelection>,
 ) -> VisualRecognitionInput<'a> {
     VisualRecognitionInput {
+        max_output_tokens_override: None,
+        dispatch: None,
         gateway,
         vision_provider: provider,
         api_key: "test-key",
@@ -1542,6 +1562,163 @@ fn visual_input<'a>(
         extra_parameters_json: None,
         cancellation_token: None,
     }
+}
+
+struct AuthorityVisionGateway {
+    calls: AtomicUsize,
+    provider_id: uuid::Uuid,
+    account_id: uuid::Uuid,
+}
+
+struct FailedVisionGateway(u16);
+
+vision_only_gateway!(
+    FailedVisionGateway,
+    |gateway: &FailedVisionGateway, _request: VisionRequest| {
+        use crate::integrations::{provider_budget::ProviderBudgetError, retry::ProviderCallError};
+        use crate::shared::provider_http::ProviderDispatchRefusal;
+        let error = match gateway.0 {
+            0 => ProviderCallError::admission(ProviderBudgetError::Dispatch(
+                ProviderDispatchRefusal::Admission,
+            )),
+            1 => ProviderCallError::local_request_rejected(),
+            2 => ProviderCallError::transport(
+                "private transport context",
+                reqwest::Client::new().get(":invalid").build().expect_err("invalid URL"),
+            ),
+            status => ProviderCallError::http_status(
+                "synthetic",
+                reqwest::StatusCode::from_u16(status).unwrap(),
+                &reqwest::header::HeaderMap::new(),
+                "private provider detail",
+            ),
+        };
+        Err(anyhow::Error::new(error).context("private context"))
+    }
+);
+
+#[tokio::test]
+async fn vision_failure_class_survives_both_extraction_paths_without_leaking_details() {
+    let provider =
+        ProviderModelSelection { provider_kind: "openai".into(), model_name: "vision".into() };
+    for (status, expected) in [
+        (0, ExtractionFailureClass::OperationalTerminal),
+        (1, ExtractionFailureClass::OperationalTerminal),
+        (2, ExtractionFailureClass::OperationalRetryable),
+        (400, ExtractionFailureClass::OperationalTerminal),
+        (429, ExtractionFailureClass::OperationalRetryable),
+        (503, ExtractionFailureClass::OperationalRetryable),
+    ] {
+        let gateway = FailedVisionGateway(status);
+        let error = recognize_native_visuals(
+            &mut native_visual_fixture(true),
+            UploadFileKind::Pdf,
+            visual_input(&gateway, Some(&provider)),
+        )
+        .await
+        .err()
+        .expect("provider failure");
+        assert_eq!(error.failure_class(), expected);
+        assert!(!error.to_string().contains("private"));
+        let policy = LibraryRecognitionPolicy::default();
+        let error = build_runtime_file_extraction_plan(FileExtractionRequest {
+            max_output_tokens_override: None,
+            vision_dispatch: None,
+            cancellation_token: None,
+            gateway: &gateway,
+            vision_provider: Some(&provider),
+            vision_api_key: Some("fixture-key"),
+            vision_base_url: None,
+            vision_extra_parameters_json: None,
+            file_name: Some("scan.png"),
+            mime_type: Some("image/png"),
+            file_bytes: valid_png_bytes(),
+            recognition_policy: &policy,
+        })
+        .await
+        .expect_err("provider failure");
+        assert_eq!(error.failure_class(), expected);
+        assert!(!error.to_string().contains("private"));
+    }
+}
+
+vision_only_gateway!(
+    AuthorityVisionGateway,
+    |gateway: &AuthorityVisionGateway, request: VisionRequest| {
+        use crate::shared::provider_http::ProviderDispatchAuthority;
+        let authority =
+            request.dispatch.as_ref().ok_or_else(|| anyhow::anyhow!("missing authority"))?;
+        anyhow::ensure!(
+            authority.kind() == ProviderDispatchAuthority::RuntimeBinding
+                && authority.provider_catalog_id() == gateway.provider_id
+                && authority.account_id() == Some(gateway.account_id)
+                && authority.provider_kind() == request.provider_kind
+                && authority.model_name() == request.model_name
+                && authority.base_url() == request.base_url_override.as_deref().unwrap_or_default()
+                && authority.credential_digest()
+                    == request
+                        .api_key_override
+                        .as_deref()
+                        .map(crate::shared::provider_http::credential_fingerprint),
+            "unattested route"
+        );
+        anyhow::ensure!(
+            request.max_output_tokens_override == Some(128_000),
+            "missing output bound"
+        );
+        let call = gateway.calls.fetch_add(1, Ordering::SeqCst);
+        Ok(VisionResponse {
+            provider_kind: request.provider_kind.clone(),
+            model_name: request.model_name.clone(),
+            output_text: if call == 0 { String::new() } else { r#"{"outcome":"no_text"}"#.into() },
+            usage_json: serde_json::json!({}),
+        })
+    }
+);
+
+#[tokio::test]
+async fn native_visual_preserves_trusted_binding_authority() {
+    let provider_id = uuid::Uuid::from_u128(41);
+    let account_id = uuid::Uuid::from_u128(42);
+    let gateway = AuthorityVisionGateway { calls: AtomicUsize::new(0), provider_id, account_id };
+    let provider =
+        ProviderModelSelection { provider_kind: "openai".into(), model_name: "vision".into() };
+    let authority = crate::shared::provider_http::DispatchAuthority::runtime_binding(
+        "openai",
+        provider_id,
+        Some(account_id),
+        "vision",
+        "https://example.invalid/v1",
+        Some("fixture-key"),
+    );
+    let mut input = visual_input(&gateway, Some(&provider));
+    input.dispatch = Some(&authority);
+    input.max_output_tokens_override = Some(128_000);
+    input.api_key = "fixture-key";
+    input.base_url = Some("https://example.invalid/v1");
+    let mut native = native_visual_fixture(true);
+    recognize_native_visuals(&mut native, UploadFileKind::Pdf, input)
+        .await
+        .expect("trusted binding reaches every physical vision attempt");
+    assert_eq!(gateway.calls.load(Ordering::SeqCst), 2);
+    let mut absent = visual_input(&gateway, Some(&provider));
+    absent.api_key = "fixture-key";
+    absent.base_url = Some("https://example.invalid/v1");
+    assert!(
+        recognize_native_visuals(&mut native_visual_fixture(true), UploadFileKind::Pdf, absent)
+            .await
+            .is_err()
+    );
+    let mut mismatch = visual_input(&gateway, Some(&provider));
+    mismatch.dispatch = Some(&authority);
+    mismatch.api_key = "wrong-fixture-key";
+    mismatch.base_url = Some("https://example.invalid/v1");
+    assert!(
+        recognize_native_visuals(&mut native_visual_fixture(true), UploadFileKind::Pdf, mismatch)
+            .await
+            .is_err()
+    );
+    assert_eq!(gateway.calls.load(Ordering::SeqCst), 2);
 }
 
 fn native_visual_fixture(
@@ -1938,6 +2115,8 @@ async fn no_text_for_an_image_only_document_fails_with_its_usage_receipt() {
         ProviderModelSelection { provider_kind: "openai".into(), model_name: "vision".into() };
     let policy = LibraryRecognitionPolicy::default();
     let error = build_runtime_file_extraction_plan(FileExtractionRequest {
+        max_output_tokens_override: None,
+        vision_dispatch: None,
         cancellation_token: None,
         gateway: &gateway,
         vision_provider: Some(&provider),

@@ -261,21 +261,17 @@ async fn cold_graph_currentness_scaled_and_adversarial() -> Result<()> {
             .execute(pg).await?;
         let snapshot = repositories::get_runtime_graph_snapshot(pg, fixture.library_id).await?.context("snapshot")?;
         let selected = snapshot.projection_identity();
-        let started = std::time::Instant::now();
         ensure!(content_fingerprint_repository::graph_projection_is_current(pg, selected).await?, "scaled valid graph refused");
-        let currentness_ms = started.elapsed().as_millis();
-        println!("scaled_currentness_ms={currentness_ms}");
         let auth = graph_auth(&fixture).await?;
         let started = std::time::Instant::now();
-        let response = get_graph(auth, State(fixture.state.clone()), Path(fixture.library_id)).await?;
+        let response = Box::pin(get_graph(auth, State(fixture.state.clone()), Path(fixture.library_id))).await?;
         let body = axum::body::to_bytes(response.into_body(), 128 * 1024 * 1024).await?;
-        let cold_ms = started.elapsed().as_millis();
+        let _cold_ms = started.elapsed().as_millis();
         ensure!(body.len() > 64 * 1024 * 1024, "fixture must exceed the topology cache value limit");
         let key = format!("graph:{}:v{}:g{}", fixture.library_id, snapshot.projection_version, snapshot.topology_generation);
         let mut redis = fixture.state.persistence.redis.get_multiplexed_async_connection().await?;
         let cached: bool = redis.exists(key).await?;
         ensure!(!cached, "oversized graph must not be retained in Redis");
-        println!("scaled_graph documents={} nodes={} edges={} extra_evidence={} currentness_ms={} cold_http_ms={} body_bytes={}", DOCUMENTS + 1, TARGETS + DOCUMENTS + 2, TARGETS + 1, TARGETS * 4 + DOCUMENTS, currentness_ms, cold_ms, body.len());
         let stale = Uuid::now_v7();
         sqlx::query("insert into runtime_graph_evidence (id,library_id,evidence_identity_key,target_kind,target_id,document_id,revision_id,evidence_text) values ($1,$2,'stale-check','node',$3,$4,null,'stale')")
             .bind(stale).bind(fixture.library_id).bind(nodes[0]).bind(document_id).execute(pg).await?;

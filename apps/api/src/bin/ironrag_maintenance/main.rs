@@ -53,9 +53,10 @@ use ironrag_backend::{
         lease::{
             self as maintenance_lease, MaintenanceClass, MaintenanceJobRun, Scope, StateCounts,
         },
-        ops_failure_disposition_schema, orphan_knowledge_documents, rebuild as maintenance_rebuild,
+        ops_failure_disposition_schema, orphan_knowledge_documents,
+        provider_source_generation_fence_schema, rebuild as maintenance_rebuild,
         repair as maintenance_repair, retention as maintenance_retention, service_identity_schema,
-        vector_orphan_reconcile, vision_recognition_schema,
+        user_preference_schema, vector_orphan_reconcile, vision_recognition_schema,
         webhook_outbox_ops::{
             self, MAX_WEBHOOK_LIFECYCLE_OUTBOX_AUDIT_LIMIT,
             MAX_WEBHOOK_LIFECYCLE_OUTBOX_RESOLUTION_REASON_CODE_BYTES,
@@ -401,8 +402,23 @@ enum RepairCommand {
 
 #[derive(Subcommand)]
 enum MigrateCommand {
+    /// Add the durable account-scoped telemetry preference table. Dry-run unless --apply is given.
+    UserPreferenceSchema {
+        #[arg(long)]
+        apply: bool,
+        #[arg(long)]
+        json: bool,
+    },
     /// Add standalone knowledge-search billing attribution. Dry-run unless --apply is given.
     BillingKnowledgeSearchSchema {
+        #[arg(long)]
+        apply: bool,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Keep financial admission counters out of the provider source-generation
+    /// fence. Dry-run unless --apply is given.
+    ProviderSourceGenerationFence {
         #[arg(long)]
         apply: bool,
         #[arg(long)]

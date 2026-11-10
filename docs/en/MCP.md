@@ -57,7 +57,7 @@ If your IronRAG instance is behind another domain or TLS terminator, replace the
 4. In `Admin -> MCP`, copy the ready-made snippet for your client.
 
 `tools/list` is grant-filtered. If a token cannot do something, the tool is not advertised.
-The JSON-RPC surface is intentionally small: `initialize`, `tools/list`, `tools/call`, and `notifications/initialized`. IronRAG does not expose an empty `resources/*` surface.
+The JSON-RPC surface covers `initialize`, `tools/list`, `tools/call`, `resources/list`, `resources/read`, `resources/templates/list`, and `notifications/initialized`. `initialize` advertises the `tools` and `resources` capabilities; resource subscriptions and change notifications are not supported.
 Tool arguments use camelCase fields only.
 Catalog targets use stable refs instead of opaque UUIDs: `workspace` is `<workspace>`, and `library` is `<workspace>/<library>`. Discovery responses expose these values as `ref`.
 
@@ -110,6 +110,12 @@ On unambiguous answers `clarification.required` is `false`, `clarification.quest
 |------|-------------|---------------------|
 | `list_workspaces` | List workspaces visible to the current token. | (none) |
 | `list_libraries` | List visible libraries, optionally filtered to one workspace ref. | `workspace` (optional) |
+
+### Connectors
+
+| Tool | Description | Required parameters |
+|------|-------------|---------------------|
+| `list_connector_sources` | List the built-in connector sources: kind, display name, run modes, image, and deployment directory. Requires connector read on at least one library. | (none) |
 
 ### Admin
 
@@ -170,7 +176,41 @@ These tools are advertised only by the diagnostics MCP mount at `/v1/mcp/diagnos
 | `get_runtime_execution` | Load the runtime lifecycle summary for one runtime execution. | `runtimeExecutionId` |
 | `get_runtime_execution_trace` | Load the full stage, action, and policy trace for one runtime execution. | `runtimeExecutionId` |
 
+### Ingest diagnostics
+
+Diagnostics-only mount. Reading a library's ingest history needs one of `library_read`, `document_read`, `document_write`, `connector_admin`, `ops_read`, `workspace_admin` (role) on that library. Retry and cancel need one of `connector_admin`, `library_write`, `workspace_admin`, so a read-only token sees the two read tools and not the mutations.
+
+| Tool | Description | Required parameters |
+|------|-------------|---------------------|
+| `list_ingest_jobs` | List ingest jobs for one library, newest first, with an optional queue-state filter and cursor paging. | `library` |
+| `get_ingest_job` | Load one ingest job with its recent attempts and the stage timeline of the latest returned attempt. | `jobId` |
+| `retry_ingest_job` | Requeue one job that is queued, paused, or holding a stale lease; completed, canceled, and failed jobs are rejected. | `jobId` |
+| `cancel_ingest_job` | Cancel one queued or running job; already terminal jobs are rejected. | `jobId` |
+
+### IAM diagnostics
+
+These tools require a caller that resolves as a system administrator; broad library grants alone do not qualify.
+
+| Tool | Description | Required parameters |
+|------|-------------|---------------------|
+| `list_iam_tokens` | List API tokens, optionally filtered to one workspace. | (none) |
+| `mint_iam_token` | Mint an API token with the given grants; the plaintext value is returned once. | `label` |
+| `update_iam_token` | Change an API token's label or expiry; `expiresAt: null` clears the expiry, and the grant scope is immutable after minting. | `tokenId` |
+| `revoke_iam_token` | Revoke one API token by its principal id. | `tokenId` |
+| `get_principal_access` | Resolve one principal's effective grants and workspace memberships. | `principalId` |
+
 Under the hood, MCP calls the same services as the web app: PostgreSQL for control state and knowledge-plane data, plus Redis-backed workers for ingestion.
+
+## Resources
+
+The server advertises the `resources` capability and serves two resources:
+
+| URI | MIME type | Contents |
+|-----|-----------|----------|
+| `ironrag://manifest` | `application/json` | The server manifest: name and version, JSON-RPC and protocol versions, session headers, the active surface (`answer` or `diagnostics`), the tool contract version and hash, the visible tools, and the resource list. |
+| `ironrag://typescript` | `text/typescript` | TypeScript declarations generated from the same contract: `IronRagToolName`, `IronRagManifest`, and one input interface per visible tool. |
+
+Both resources are derived from the same contract as `tools/list`, so a token only sees tools it can call, and the output is deterministic for unchanged grants and schemas. The manifest carries no generation timestamp and no random identifiers. Methods: `resources/list` returns the resource list, `resources/read` with `{ "uri": "..." }` returns the contents, and `resources/templates/list` returns an empty list because there are no templates.
 
 ## Graph Tool Quality Contract
 

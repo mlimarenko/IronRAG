@@ -654,16 +654,15 @@ class Orchestrator:
         attempt: MaterializationAttempt,
     ) -> str | None:
         """Prove this copy's current intent and historical-route public denial."""
-        head = await self._ironrag.get_document(attempt.document_id)
+        head = await self._ironrag.find_document(library_id, ref.external_key)
         if head is None:
-            self._state.remove_location(
-                kind=ref.kind,
-                item_id=ref.item_id,
-                ironrag_library_id=str(library_id),
-                ironrag_document_id=attempt.document_id,
-            )
             return "target disappeared during intent reconciliation; refetch required"
-        _validated_document_id(head, library_id=library_id, external_key=ref.external_key)
+        if (
+            _validated_document_id(head, library_id=library_id, external_key=ref.external_key)
+            != attempt.document_id
+        ):
+            self._state.transition_materialization_attempt(attempt, phase="intent_superseded")
+            return "target identity changed during intent reconciliation; refetch required"
         assert attempt.receipt is not None
         if head.visibility_intent_id != attempt.receipt.visibility_intent_id:
             self._state.transition_materialization_attempt(attempt, phase="intent_superseded")
@@ -765,12 +764,20 @@ class Orchestrator:
         historical_attempts: tuple[MaterializationAttempt, ...],
     ) -> bool:
         for historical in historical_attempts:
-            retired = await self._ironrag.get_document(historical.document_id)
-            if retired is None:
-                continue
-            _validated_document_id(
-                retired, library_id=UUID(historical.library_id), external_key=item.ref.external_key
+            retired = await self._ironrag.find_document(
+                UUID(historical.library_id), item.ref.external_key
             )
+            if retired is None:
+                return False
+            if (
+                _validated_document_id(
+                    retired,
+                    library_id=UUID(historical.library_id),
+                    external_key=item.ref.external_key,
+                )
+                != historical.document_id
+            ):
+                return False
             assert historical.receipt is not None
             if (
                 retired.visibility_intent_id != historical.receipt.visibility_intent_id

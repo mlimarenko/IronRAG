@@ -5,6 +5,12 @@ metadata:
   labels:
     {{- include "ironrag.labels" . | nindent 4 }}
 data:
+  {{- if hasKey .Values.maintenance "enabled" }}
+  {{- if not (kindIs "bool" .Values.maintenance.enabled) }}
+  {{- fail "maintenance.enabled must be a boolean" }}
+  {{- end }}
+  IRONRAG_MAINTENANCE_ENABLED: {{ .Values.maintenance.enabled | quote }}
+  {{- end }}
   IRONRAG_ENVIRONMENT: {{ .Values.app.environment | quote }}
   IRONRAG_DEPLOYMENT_ID: {{ .Values.observability.deploymentId | quote }}
   IRONRAG_DATABASE_MAX_CONNECTIONS: {{ .Values.app.databaseMaxConnections | quote }}
@@ -94,3 +100,12 @@ data:
   OTEL_EXPORTER_OTLP_PROTOCOL: {{ .Values.observability.otlpProtocol | quote }}
   OTEL_EXPORTER_OTLP_ENDPOINT: {{ .Values.observability.otlpEndpoint | quote }}
   OTEL_EXPORTER_OTLP_METRICS_TEMPORALITY_PREFERENCE: {{ .Values.observability.metricsTemporality | quote }}
+  {{- with .Values.financial.requiredProviderId }}
+  IRONRAG_FINANCIAL_REQUIRED_PROVIDER_ID: {{ . | trim | quote }}
+  {{- end }}
+  {{- with .Values.financial.requiredScopeId }}
+  IRONRAG_FINANCIAL_REQUIRED_SCOPE_ID: {{ . | trim | quote }}
+  {{- end }}
+  {{- with .Values.financial.requiredPolicyFingerprint }}
+  IRONRAG_FINANCIAL_REQUIRED_POLICY_FINGERPRINT: {{ . | trim | quote }}
+  {{- end }}

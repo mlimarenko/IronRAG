@@ -15,10 +15,7 @@ use crate::temp_postgres_database;
 use temp_postgres_database::TempPostgresDatabase;
 
 use anyhow::{Context, Result};
-use argon2::{
-    Argon2,
-    password_hash::{PasswordHasher, SaltString, rand_core::OsRng},
-};
+use argon2::{Argon2, password_hash::PasswordHasher};
 use axum::{
     Router,
     body::Body,
@@ -49,7 +46,7 @@ fn test_credential_master_key() -> String {
 
 fn argon2_hash(password: &str) -> Result<String> {
     Argon2::default()
-        .hash_password(password.as_bytes(), &SaltString::generate(&mut OsRng))
+        .hash_password(password.as_bytes())
         .map(|hash| hash.to_string())
         .map_err(|error| anyhow::anyhow!("failed to hash test password: {error}"))
 }

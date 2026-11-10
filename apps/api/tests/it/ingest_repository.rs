@@ -750,6 +750,143 @@ async fn retry_race_returns_none_when_fresh_attempt_appears_under_lock() -> Resu
 
 #[tokio::test]
 #[ignore = "requires local postgres with required extensions"]
+async fn stale_paused_and_queued_orphan_attempts_recover_without_changing_jobs() -> Result<()> {
+    let fixture = IngestRepositoryFixture::create().await?;
+    let result = async {
+        let paused = create_queue_job(&fixture, "paused", "paused-orphan").await?;
+        let queued = create_queue_job(&fixture, "queued", "queued-orphan").await?;
+        let fresh = create_queue_job(&fixture, "paused", "paused-fresh").await?;
+        let finished = create_queue_job(&fixture, "paused", "paused-finished").await?;
+        let stale_time = Utc::now() - Duration::minutes(10);
+        let mut ids = Vec::new();
+        for (job_id, heartbeat) in
+            [(paused.id, stale_time), (queued.id, stale_time), (fresh.id, Utc::now())]
+        {
+            let attempt = ingest_repository::create_ingest_attempt(
+                &fixture.pool,
+                &ingest_repository::NewIngestAttempt {
+                    job_id,
+                    attempt_number: 2,
+                    worker_principal_id: None,
+                    lease_token: Some("fixture-lease".into()),
+                    knowledge_generation_id: None,
+                    attempt_state: "leased".into(),
+                    current_stage: Some("extract_content".into()),
+                    started_at: Some(stale_time),
+                    heartbeat_at: Some(heartbeat),
+                    finished_at: None,
+                    failure_class: None,
+                    failure_code: None,
+                    failure_message: None,
+                    progress_percent: 1,
+                    retryable: false,
+                },
+            )
+            .await?;
+            ids.push(attempt.id);
+        }
+        let historical = ingest_repository::create_ingest_attempt(
+            &fixture.pool,
+            &ingest_repository::NewIngestAttempt {
+                job_id: paused.id,
+                attempt_number: 1,
+                worker_principal_id: None,
+                lease_token: Some("fixture-history".into()),
+                knowledge_generation_id: None,
+                attempt_state: "failed".into(),
+                current_stage: Some("extract_content".into()),
+                started_at: Some(stale_time),
+                heartbeat_at: Some(stale_time),
+                finished_at: Some(stale_time),
+                failure_class: Some("fixture".into()),
+                failure_code: Some("historical".into()),
+                failure_message: Some("unchanged".into()),
+                progress_percent: 1,
+                retryable: false,
+            },
+        )
+        .await?;
+        let finished_attempt = ingest_repository::create_ingest_attempt(
+            &fixture.pool,
+            &ingest_repository::NewIngestAttempt {
+                job_id: finished.id,
+                attempt_number: 1,
+                worker_principal_id: None,
+                lease_token: Some("finished-lease".into()),
+                knowledge_generation_id: None,
+                attempt_state: "leased".into(),
+                current_stage: Some("extract_content".into()),
+                started_at: Some(stale_time),
+                heartbeat_at: Some(stale_time),
+                finished_at: Some(stale_time),
+                failure_class: Some("fixture".into()),
+                failure_code: Some("finished-history".into()),
+                failure_message: Some("unchanged".into()),
+                progress_percent: 1,
+                retryable: false,
+            },
+        )
+        .await?;
+        let before: (String, chrono::DateTime<Utc>, i32) = sqlx::query_as(
+            "select queue_state::text, available_at, priority from ingest_job where id=$1",
+        )
+        .bind(queued.id)
+        .fetch_one(&fixture.pool)
+        .await?;
+        assert!(ingest_repository::resume_ingest_job(&fixture.pool, paused.id).await?.is_none());
+        let recovery =
+            ingest_repository::recover_stale_ingest_leases(&fixture.pool, Duration::minutes(5))
+                .await?;
+        assert_eq!(recovery.requeued, 0);
+        assert_eq!(recovery.orphaned, 2);
+        for id in &ids[..2] {
+            let attempt =
+                ingest_repository::get_ingest_attempt_by_id(&fixture.pool, *id).await?.unwrap();
+            assert_eq!(attempt.attempt_state, "failed");
+            assert_eq!(attempt.failure_class.as_deref(), Some("lease_expired"));
+            assert_eq!(attempt.failure_code.as_deref(), Some("stale_heartbeat"));
+            assert!(attempt.finished_at.is_some());
+        }
+        let fresh_attempt =
+            ingest_repository::get_ingest_attempt_by_id(&fixture.pool, ids[2]).await?.unwrap();
+        assert_eq!(fresh_attempt.attempt_state, "leased");
+        assert!(fresh_attempt.finished_at.is_none());
+        assert!(ingest_repository::resume_ingest_job(&fixture.pool, fresh.id).await?.is_none());
+        let history = ingest_repository::get_ingest_attempt_by_id(&fixture.pool, historical.id)
+            .await?
+            .unwrap();
+        assert_eq!(history.attempt_state, "failed");
+        assert_eq!(history.failure_class.as_deref(), Some("fixture"));
+        assert_eq!(history.failure_code.as_deref(), Some("historical"));
+        assert_eq!(history.failure_message.as_deref(), Some("unchanged"));
+        assert_eq!(history.finished_at, historical.finished_at);
+        let finished_after =
+            ingest_repository::get_ingest_attempt_by_id(&fixture.pool, finished_attempt.id)
+                .await?
+                .unwrap();
+        assert_eq!(finished_after.attempt_state, "leased");
+        assert_eq!(finished_after.failure_code.as_deref(), Some("finished-history"));
+        assert_eq!(finished_after.finished_at, finished_attempt.finished_at);
+        let after: (String, chrono::DateTime<Utc>, i32) = sqlx::query_as(
+            "select queue_state::text, available_at, priority from ingest_job where id=$1",
+        )
+        .bind(queued.id)
+        .fetch_one(&fixture.pool)
+        .await?;
+        assert_eq!(after, before);
+        let paused_after =
+            ingest_repository::get_ingest_job_by_id(&fixture.pool, paused.id).await?.unwrap();
+        assert_eq!(paused_after.queue_state, "paused");
+        assert!(ingest_repository::resume_ingest_job(&fixture.pool, paused.id).await?.is_some());
+        Ok(())
+    }
+    .await;
+    fixture.cleanup().await?;
+    result
+}
+
+#[tokio::test]
+#[ignore = "requires local postgres with required extensions"]
 async fn stale_orphaned_queue_lease_recovers_but_fresh_active_and_terminal_do_not() -> Result<()> {
     let fixture = IngestRepositoryFixture::create().await?;
 

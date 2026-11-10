@@ -46,7 +46,7 @@ const UPSERT_RUNTIME_GRAPH_SNAPSHOT_SQL: &str = "insert into runtime_graph_snaps
         build_epoch
      ) values (
         $1, $2, $3, $4, $5, $6, now(), $7,
-        case when $2 in ('ready', 'empty', 'failed') then 1 else 0 end,
+         case when $2 in ('ready', 'empty', 'failed', 'stale') then 1 else 0 end,
         $8
      )
      on conflict (library_id) do update
@@ -58,7 +58,7 @@ const UPSERT_RUNTIME_GRAPH_SNAPSHOT_SQL: &str = "insert into runtime_graph_snaps
          last_built_at = now(),
          last_error_message = excluded.last_error_message,
          topology_generation = case
-             when excluded.graph_status in ('ready', 'empty', 'failed')
+             when excluded.graph_status in ('ready', 'empty', 'failed', 'stale')
              then runtime_graph_snapshot.topology_generation + 1
              else runtime_graph_snapshot.topology_generation
          end,
@@ -73,7 +73,7 @@ const UPSERT_RUNTIME_GRAPH_SNAPSHOT_SQL: &str = "insert into runtime_graph_snaps
             and (
                 excluded.graph_status = 'building'
                 or (
-                    excluded.graph_status in ('ready', 'empty', 'failed')
+                    excluded.graph_status in ('ready', 'empty', 'failed', 'stale')
                     and runtime_graph_snapshot.graph_status = 'building'
                     and excluded.build_epoch = runtime_graph_snapshot.build_epoch
                 )
@@ -160,7 +160,7 @@ impl RuntimeGraphSnapshotInput<'_> {
     fn is_terminal(&self) -> Result<bool, sqlx::Error> {
         match self.graph_status {
             "building" => Ok(false),
-            "ready" | "empty" | "failed" => Ok(true),
+            "ready" | "empty" | "failed" | "stale" => Ok(true),
             status => Err(sqlx::Error::Protocol(format!(
                 "unsupported runtime graph snapshot status: {status}"
             ))),
@@ -274,6 +274,112 @@ where
         .await
 }
 
+macro_rules! invalidate_snapshot_sql {
+    ($predicate:literal) => {
+        concat!(
+            "update runtime_graph_snapshot snapshot
+             set graph_status = 'stale', topology_generation = topology_generation + 1,
+                 build_epoch = uuidv7(), updated_at = now()
+             where library_id = $1 and (",
+            $predicate,
+            ")"
+        )
+    };
+}
+
+/// Retires the selected identity while preserving its last published counts.
+/// The caller owns the graph/library locks and the surrounding transaction.
+pub async fn invalidate_runtime_graph_snapshot(
+    connection: &mut sqlx::PgConnection,
+    library_id: Uuid,
+    advance_source_truth_version: bool,
+) -> Result<(), sqlx::Error> {
+    let changed = sqlx::query(invalidate_snapshot_sql!("true"))
+        .bind(library_id)
+        .execute(&mut *connection)
+        .await?
+        .rows_affected();
+    if changed > 0 && advance_source_truth_version {
+        super::super::catalog_repository::touch_library_source_truth_version_with_executor(
+            connection, library_id,
+        )
+        .await?;
+    }
+    Ok(())
+}
+
+/// Invalidates before deleting a selected target or its evidence. Historical
+/// orphan cleanup leaves the published identity alone. A later error rolls back
+/// both this invalidation and the bounded deletion batch.
+pub async fn invalidate_runtime_graph_snapshot_for_targets(
+    connection: &mut sqlx::PgConnection,
+    library_id: Uuid,
+    node_ids: &[Uuid],
+    edge_ids: &[Uuid],
+    evidence_ids: &[Uuid],
+) -> Result<(), sqlx::Error> {
+    let changed = sqlx::query(invalidate_snapshot_sql!(
+        "exists (
+             select 1 from runtime_graph_node node
+             where node.library_id = snapshot.library_id
+               and node.projection_version = snapshot.projection_version
+               and (node.id = any($2) or exists (
+                   select 1 from runtime_graph_evidence evidence
+                   where evidence.id = any($4) and evidence.target_kind = 'node'
+                     and evidence.library_id = node.library_id and evidence.target_id = node.id
+               ))
+         ) or exists (
+             select 1 from runtime_graph_edge edge
+             where edge.library_id = snapshot.library_id
+               and edge.projection_version = snapshot.projection_version
+               and (edge.id = any($3) or exists (
+                   select 1 from runtime_graph_evidence evidence
+                   where evidence.id = any($4) and evidence.target_kind = 'edge'
+                     and evidence.library_id = edge.library_id and evidence.target_id = edge.id
+               ))
+         )"
+    ))
+    .bind(library_id)
+    .bind(node_ids)
+    .bind(edge_ids)
+    .bind(evidence_ids)
+    .execute(&mut *connection)
+    .await?
+    .rows_affected();
+    if changed > 0 {
+        super::super::catalog_repository::touch_library_source_truth_version_with_executor(
+            connection, library_id,
+        )
+        .await?;
+    }
+    Ok(())
+}
+
+/// Lifecycle publication may commit its own successful revision, but must not
+/// certify a library projection containing another source's denied membership.
+pub async fn invalidate_unpublished_runtime_graph_snapshot(
+    connection: &mut sqlx::PgConnection,
+    library_id: Uuid,
+    advance_source_truth_version: bool,
+) -> Result<(), sqlx::Error> {
+    let Some(snapshot) =
+        get_runtime_graph_snapshot_with_executor(&mut *connection, library_id).await?
+    else {
+        return Ok(());
+    };
+    if matches!(snapshot.graph_status.as_str(), "ready" | "empty")
+        && !super::super::content_fingerprint_repository::graph_projection_is_current_with_executor(
+            &mut *connection,
+            snapshot.projection_identity(),
+        )
+        .await?
+    {
+        invalidate_runtime_graph_snapshot(connection, library_id, advance_source_truth_version)
+            .await?;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -294,7 +400,7 @@ mod tests {
     #[test]
     fn snapshot_status_preserves_claim_and_terminal_classification() {
         assert!(!snapshot_input("building").is_terminal().unwrap());
-        for status in ["ready", "empty", "failed"] {
+        for status in ["ready", "empty", "failed", "stale"] {
             assert!(snapshot_input(status).is_terminal().unwrap());
         }
     }

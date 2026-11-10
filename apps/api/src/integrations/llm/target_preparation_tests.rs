@@ -59,6 +59,7 @@ fn gateway_whose_resolution_fails_with(error: ProviderHttpError) -> UnifiedGatew
             .expect("test provider budget"),
         ),
         retry_policy: RetryPolicy::no_retry(),
+        admission: Arc::new(crate::integrations::provider_admission::UnqualifiedTestAdmission),
     }
 }
 
@@ -95,6 +96,8 @@ fn openai_request(extra_parameters_json: &serde_json::Value) -> OpenAiCompatible
         response_format: None,
         extra_parameters_json,
         stream: false,
+        // Body preparation only: this fixture never reaches the send boundary.
+        dispatch: None,
     }
 }
 
@@ -111,6 +114,7 @@ async fn every_prepare_call_site_error(
         runtime: runtime_profile(OPENAI_COMPATIBLE_RUNTIME_KIND),
         request_policy: ProviderRequestPolicy::default(),
         reasoning_wire: None,
+        dispatch: None,
     };
     let native_runtime = runtime_profile(ANTHROPIC_MESSAGES_RUNTIME_KIND);
     let extra_parameters_json = serde_json::json!({});
@@ -140,6 +144,8 @@ async fn every_prepare_call_site_error(
                 top_p: None,
                 max_output_tokens: Some(16),
                 image: None,
+                // Target preparation fails first; this fixture never sends.
+                dispatch: None,
             })
             .await
             .expect_err("native chat"),

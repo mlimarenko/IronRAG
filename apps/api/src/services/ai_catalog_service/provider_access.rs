@@ -124,6 +124,14 @@ pub(super) async fn validate_provider_access(
                     max_output_tokens_override: Some(16),
                     response_format: None,
                     extra_parameters_json: provider_validation_extra_parameters(provider, model),
+                    dispatch: Some(crate::shared::provider_http::DispatchAuthority::account_validation(
+                        provider.provider_kind.clone(),
+                        provider.id,
+                        None,
+                        model.model_name.clone(),
+                        normalized_base_url.clone().unwrap_or_default(),
+                        normalized_api_key.as_deref(),
+                    )),
                 })
                 .await
                 .map(|_| ())

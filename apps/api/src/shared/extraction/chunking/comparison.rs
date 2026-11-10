@@ -364,7 +364,7 @@ mod tests {
     }
 
     fn profile(max_chars: usize, overlap_chars: usize) -> StructuredChunkingProfile {
-        StructuredChunkingProfile { max_chars, overlap_chars }
+        StructuredChunkingProfile { max_chars, overlap_chars, max_input_bytes: None }
     }
 
     fn assert_support_resolves(result: &ComparisonChunks) {

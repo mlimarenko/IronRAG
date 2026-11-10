@@ -102,6 +102,8 @@ pub struct FileExtractionPlan {
 }
 
 pub struct FileExtractionRequest<'a> {
+    pub vision_dispatch: Option<&'a crate::shared::provider_http::DispatchAuthority>,
+    pub max_output_tokens_override: Option<i32>,
     pub cancellation_token: Option<&'a tokio_util::sync::CancellationToken>,
     pub gateway: &'a dyn LlmGateway,
     pub vision_provider: Option<&'a ProviderModelSelection>,
@@ -420,6 +422,8 @@ pub async fn build_runtime_file_extraction_plan(
     request: FileExtractionRequest<'_>,
 ) -> Result<FileExtractionPlan, FileExtractError> {
     let FileExtractionRequest {
+        vision_dispatch,
+        max_output_tokens_override,
         cancellation_token,
         gateway,
         vision_provider,
@@ -434,6 +438,8 @@ pub async fn build_runtime_file_extraction_plan(
     let file_kind = detect_upload_file_kind(file_name, mime_type, &file_bytes);
 
     let input = VisualRecognitionInput {
+        dispatch: vision_dispatch,
+        max_output_tokens_override,
         gateway,
         vision_provider,
         api_key: vision_api_key.unwrap_or_default(),
@@ -481,6 +487,8 @@ pub async fn build_runtime_file_extraction_plan(
         let output = extraction::image::extract_image_with_provider(
             gateway,
             extraction::image::VisionProviderInput {
+                dispatch: vision_dispatch,
+                max_output_tokens_override,
                 provider_kind: &provider.provider_kind,
                 model_name: &provider.model_name,
                 api_key: input.api_key,
@@ -494,7 +502,11 @@ pub async fn build_runtime_file_extraction_plan(
         .await
         .map_err(|error| FileExtractError::VisionFailed {
             file_kind,
-            class: ExtractionFailureClass::OperationalRetryable,
+            class: if error.terminal {
+                ExtractionFailureClass::OperationalTerminal
+            } else {
+                ExtractionFailureClass::OperationalRetryable
+            },
             message: error.message.into(),
             calls: error.calls,
         })?;

@@ -19,6 +19,9 @@ use config::Map;
 
 fn sample_settings() -> Settings {
     Settings {
+        financial_required_policy_fingerprint: None,
+        financial_required_scope_id: None,
+        financial_required_provider_id: None,
         bind_addr: "0.0.0.0:8080".into(),
         service_role: "api".into(),
         database_url: "postgres://postgres:postgres@127.0.0.1:5432/ironrag".into(),

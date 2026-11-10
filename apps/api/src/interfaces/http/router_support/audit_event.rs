@@ -7,7 +7,7 @@ use crate::{
 
 /// One REST-surface audit event, grouped so the append helper takes a single
 /// cohesive value instead of a long positional list. The surface is always
-/// `rest` and there is never a trace id on this path, so neither is a field.
+/// `rest`; the trace id is read from the current span when the row is written.
 pub(crate) struct RestAuditEvent {
     pub(crate) request_id: Option<String>,
     pub(crate) action_kind: String,
@@ -25,6 +25,7 @@ pub(crate) async fn record_rest_audit_event(
     actor_principal_id: Uuid,
     event: RestAuditEvent,
 ) {
+    let trace_id = crate::observability::current_trace_id();
     if let Err(error) = state
         .application_services
         .audit
@@ -35,7 +36,7 @@ pub(crate) async fn record_rest_audit_event(
                 surface_kind: "rest".to_string(),
                 action_kind: event.action_kind,
                 request_id: event.request_id,
-                trace_id: None,
+                trace_id,
                 result_kind: event.result_kind,
                 redacted_message: event.redacted_message,
                 internal_message: event.internal_message,

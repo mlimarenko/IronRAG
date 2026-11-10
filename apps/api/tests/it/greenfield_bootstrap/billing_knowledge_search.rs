@@ -73,7 +73,7 @@ async fn exact_predecessor_preserves_billing_and_certifies_search_scope() -> Res
         assert!(applied.schema_applied && !applied.already_current);
         assert_eq!(retained_rows(&pool).await?, before);
         assert_eq!(hex::encode(baseline_checksum(&pool).await?), baseline_delta::BASELINE_REVISION_BILLING_KNOWLEDGE_SEARCH_SHA384);
-        persistence::validate_baseline_objects_present(&pool).await?;
+        assert!(persistence::validate_baseline_objects_present(&pool).await.is_err(), "knowledge-search revision is a frozen user-preference predecessor, not current readiness");
         for apply in [false, true] {
             let current = migrate(&pool, apply).await?;
             assert!(current.already_current && !current.schema_applied);

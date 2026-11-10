@@ -318,6 +318,30 @@ partial/pre-applied DDL и current drift вызывают отказ без stam
 enum. Не обходите отказ сбросом данных или правкой SQLx ledger. Наличие команды
 не является разрешением применить её к существующей установке.
 
+### `migrate user-preference-schema`
+
+Добавляет таблицу `public.iam_user_preference` для durable account-scoped
+telemetry consent. Точный predecessor - provider source-generation fence baseline
+`b54ff5e7a9087bcff86eabc640b38c87b743d9f2b5479fac8c1ec098e8eb3d9f30140b6dc57e051314b384848c493450`.
+Сначала пройдите все применимые более ранние guarded hops.
+
+```bash
+ironrag-maintenance migrate user-preference-schema --json
+# Только после проверки dry-run и разрешения окна смены runtime:
+ironrag-maintenance migrate user-preference-schema --apply --json
+```
+
+Перед сменой runtime остановите и дренируйте API, workers и maintenance writers.
+Переход создаёт только таблицу preference: `principal_id` (PK, FK на
+`iam_principal` с `ON DELETE CASCADE`), `telemetry_consent` (`granted` или
+`denied`) и `updated_at`. Отсутствие строки означает «не задано». Certificate
+проверяет точные колонки, PK, check constraint и FK до checksum CAS. Dry-run
+откатывается без persistent writes; неизвестный checksum, partial/pre-applied
+DDL и повреждённый current certificate вызывают отказ без stamp. Повтор на
+текущей ревизии проверяет объекты и возвращает `alreadyCurrent`. Не обходите
+отказ сбросом данных или правкой SQLx ledger. Наличие команды не является
+разрешением применить её к существующей установке.
+
 ## `audit` — проверка без изменений
 
 Подкоманды `audit` отвечают на вопрос «что происходит» и не изменяют данные.

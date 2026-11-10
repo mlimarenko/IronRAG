@@ -196,6 +196,10 @@ pub async fn acquire_ingest_revision_graph_reconcile_guard(
         finalize_reconcile_guard_abort(transaction, abort).await?;
         return Ok(abort.into_outcome());
     }
+    // Extraction/model results have already committed through their separate
+    // authority writer. Only derived topology is staged beyond this boundary;
+    // an ineligible content completion can discard it without losing results.
+    sqlx::query("savepoint ingest_graph_projection").execute(&mut *transaction).await?;
     Ok(IngestRevisionGraphGuardAcquireOutcome::Acquired(IngestRevisionGraphPublicationGuard {
         transaction,
         authority,
@@ -615,6 +619,10 @@ pub enum RuntimeGraphRebuildGuardAcquireOutcome {
 /// Returns any `SQLx` error raised while acquiring or closing the dedicated
 /// session, starting its transaction, locking the library row, or acquiring an
 /// advisory lock.
+#[expect(
+    clippy::cognitive_complexity,
+    reason = "guard acquisition coordinates advisory locks, timeouts, and transaction setup"
+)]
 pub async fn acquire_runtime_library_graph_rebuild_guard(
     pool: &PgPool,
     library_id: Uuid,

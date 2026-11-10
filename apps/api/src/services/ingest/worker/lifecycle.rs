@@ -377,6 +377,10 @@ async fn publish_content_ingest_failure(
         }) => {
             invalidate_library_embedding_profile_inventory(job.library_id);
             if !retry_scheduled {
+                crate::observability::error_tracking::report_error(
+                    "ingest.attempt_failed",
+                    error.as_ref(),
+                );
                 settle_terminal_content_failure(lifecycle, mutation_item_id).await;
             }
             log_content_failure_applied(lifecycle, deleted, retry_scheduled, mutation_failed);
@@ -511,7 +515,13 @@ pub(super) async fn finalize_failed_ingest_job(
             log_retryable_ingest_failure(lifecycle, finalized.attempt_number);
             Ok(())
         }
-        Ok(_) => Err(error).context(message),
+        Ok(_) => {
+            crate::observability::error_tracking::report_error(
+                "ingest.attempt_failed",
+                error.as_ref(),
+            );
+            Err(error).context(message)
+        }
         Err(e) => {
             tracing::warn!(%attempt_id, ?e, "failed to finalize attempt as failed");
             Err(error).context(message)

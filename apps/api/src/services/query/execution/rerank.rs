@@ -1,5 +1,7 @@
 use std::collections::HashMap;
 
+use tracing::Instrument as _;
+
 use crate::{
     app::state::AppState,
     domains::query::{
@@ -40,7 +42,16 @@ pub(crate) struct ApplyRerankRequest<'a> {
     pub(crate) semantic_chunk_ranks: &'a mut HashMap<uuid::Uuid, usize>,
 }
 
+/// Opens the rerank span and delegates to the configured-rerank body, so every
+/// early return keeps its parent span instead of leaving the rerank phase
+/// unidentified in the trace.
 pub(crate) async fn apply_configured_rerank(request: ApplyRerankRequest<'_>) -> RerankMetadata {
+    let mode = request.state.retrieval_intelligence.semantic_rerank.mode;
+    let span = tracing::info_span!("retrieval.rerank", "ironrag.rerank.mode" = ?mode);
+    apply_configured_rerank_inner(request).instrument(span).await
+}
+
+async fn apply_configured_rerank_inner(request: ApplyRerankRequest<'_>) -> RerankMetadata {
     let ApplyRerankRequest {
         state,
         library_id,

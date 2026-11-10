@@ -905,8 +905,13 @@ async fn document_head_rejects_foreign_parentage_and_only_bumps_for_readable_tra
         )
         .await?;
 
-        let revision_for =
-            |document_id, workspace_id, library_id, checksum: &'static str| NewContentRevision {
+        fn revision_for<'a>(
+            document_id: Uuid,
+            workspace_id: Uuid,
+            library_id: Uuid,
+            checksum: &'a str,
+        ) -> NewContentRevision<'a> {
+            NewContentRevision {
                 admission_identity: None,
                 document_id,
                 workspace_id,
@@ -923,7 +928,8 @@ async fn document_head_rejects_foreign_parentage_and_only_bumps_for_readable_tra
                 document_hint: None,
                 storage_key: None,
                 created_by_principal_id: None,
-            };
+            }
+        }
         let readable_revision = create_imported_fixture_revision(
             &pool,
             &revision_for(
@@ -941,7 +947,7 @@ async fn document_head_rejects_foreign_parentage_and_only_bumps_for_readable_tra
                 sibling.id,
                 fixture.workspace_id,
                 fixture.library_id,
-                "sha256:head-sibling",
+                &crate::content_lifecycle_support::fixture_checksum("head-sibling"),
             ),
         )
         .await?;
@@ -951,7 +957,7 @@ async fn document_head_rejects_foreign_parentage_and_only_bumps_for_readable_tra
                 foreign_document.id,
                 foreign_fixture.workspace_id,
                 foreign_fixture.library_id,
-                "sha256:head-foreign",
+                &crate::content_lifecycle_support::fixture_checksum("head-foreign"),
             ),
         )
         .await?;
@@ -1566,7 +1572,7 @@ async fn content_repository_tracks_mutation_idempotency_and_items() -> anyhow::R
                 revision_number: 1,
                 parent_revision_id: None,
                 content_source_kind: "upload",
-                checksum: "sha256:mutation-base",
+                checksum: &crate::content_lifecycle_support::fixture_checksum("mutation-base"),
                 mime_type: "text/plain",
                 byte_size: 100,
                 title: Some("Base"),
@@ -1589,7 +1595,7 @@ async fn content_repository_tracks_mutation_idempotency_and_items() -> anyhow::R
                 revision_number: 2,
                 parent_revision_id: Some(base_revision.id),
                 content_source_kind: "replace",
-                checksum: "sha256:mutation-result",
+                checksum: &crate::content_lifecycle_support::fixture_checksum("mutation-result"),
                 mime_type: "text/plain",
                 byte_size: 130,
                 title: Some("Result"),

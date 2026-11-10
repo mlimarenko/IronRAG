@@ -15,6 +15,7 @@ pub(super) async fn run_web_discovery_job(
     attempt_id: Uuid,
 ) -> anyhow::Result<()> {
     let run_id = resolve_ingest_job_subject_id(state, job, "content_web_ingest_run").await?;
+    tracing::Span::current().record("run_id", tracing::field::display(run_id));
     state
         .application_services
         .ingest

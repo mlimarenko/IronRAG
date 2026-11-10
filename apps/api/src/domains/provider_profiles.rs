@@ -4,6 +4,84 @@ use std::collections::BTreeMap;
 use rust_decimal::Decimal;
 
 pub(crate) const OPENAI_COMPATIBLE_RUNTIME_KIND: &str = "openai_compatible";
+
+/// Conservative UTF-8 byte bounds for a resolved embedding model. For
+/// `cl100k_base`, each ordinary token represents at least one input byte.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EmbeddingInputBounds {
+    pub max_input_bytes: usize,
+    pub max_request_bytes: usize,
+    pub max_inputs: usize,
+}
+
+impl EmbeddingInputBounds {
+    /// The model-specific contract; unknown providers and models are not
+    /// assigned an invented limit.
+    #[must_use]
+    pub fn for_resolved_model(provider_kind: &str, model_name: &str) -> Option<Self> {
+        match (provider_kind, model_name) {
+            ("openai", "text-embedding-3-large") => {
+                Some(Self { max_input_bytes: 8192, max_request_bytes: 300_000, max_inputs: 2048 })
+            }
+            _ => None,
+        }
+    }
+
+    #[must_use]
+    pub fn accepts<'a>(self, inputs: impl IntoIterator<Item = &'a str>) -> bool {
+        let mut total = 0usize;
+        let mut count = 0usize;
+        for input in inputs {
+            if input.is_empty() || input.len() > self.max_input_bytes {
+                return false;
+            }
+            let Some(next) = total.checked_add(input.len()) else { return false };
+            total = next;
+            count += 1;
+            if total > self.max_request_bytes || count > self.max_inputs {
+                return false;
+            }
+        }
+        count > 0
+    }
+
+    #[must_use]
+    pub fn accepts_json(self, input: &serde_json::Value) -> bool {
+        match input {
+            serde_json::Value::String(text) => self.accepts([text.as_str()]),
+            serde_json::Value::Array(values) if values.len() <= self.max_inputs => values
+                .iter()
+                .map(serde_json::Value::as_str)
+                .collect::<Option<Vec<_>>>()
+                .is_some_and(|inputs| self.accepts(inputs)),
+            _ => false,
+        }
+    }
+}
+
+#[cfg(test)]
+mod embedding_input_bounds_tests {
+    use super::EmbeddingInputBounds;
+
+    #[test]
+    fn known_openai_model_enforces_utf8_and_total_bounds() {
+        let bounds = EmbeddingInputBounds::for_resolved_model("openai", "text-embedding-3-large")
+            .expect("known model");
+        let valid = "ж".repeat(4096);
+        let oversized = "ж".repeat(4097);
+        assert!(bounds.accepts([valid.as_str()]));
+        assert!(!bounds.accepts([oversized.as_str()]));
+        assert!(!bounds.accepts([""]));
+        assert!(!bounds.accepts(std::iter::empty()));
+        assert!(!bounds.accepts(std::iter::repeat_n(valid.as_str(), 37)));
+        assert!(!bounds.accepts(std::iter::repeat_n("x", 2049)));
+        assert!(!bounds.accepts_json(&serde_json::json!(["valid", 123])));
+        assert!(
+            EmbeddingInputBounds::for_resolved_model("other", "text-embedding-3-large").is_none()
+        );
+        assert!(EmbeddingInputBounds::for_resolved_model("openai", "other").is_none());
+    }
+}
 pub(crate) const ANTHROPIC_MESSAGES_RUNTIME_KIND: &str = "anthropic_messages";
 pub(crate) const GEMINI_GENERATE_CONTENT_RUNTIME_KIND: &str = "gemini_generate_content";
 /// Runtime kind of the TypeSafe System One typed-decision endpoint. Declared
@@ -568,6 +646,9 @@ pub struct ProviderProfile {
     /// including the standard `default` — prices at 1.
     #[serde(default)]
     pub service_tier_multipliers: BTreeMap<String, Decimal>,
+    /// Durable admission state belongs to the provider catalog, not its runtime projection.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub financial_admission: Option<FinancialAdmission>,
     /// Binding purposes no seeded model of this provider covers, each with the
     /// reason a person can act on. Setup shows these next to the provider so an
     /// operator resolves the gap instead of discovering it when their first
@@ -576,6 +657,611 @@ pub struct ProviderProfile {
     pub purpose_gaps: Vec<ProviderPurposeGap>,
     #[serde(default)]
     pub ui_hints: serde_json::Value,
+}
+
+/// A non-replenishing grant. Monetary amounts use integer millionths of USD.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct FinancialAdmission {
+    pub version: u32,
+    pub provider_id: uuid::Uuid,
+    pub scope_id: uuid::Uuid,
+    pub policy_fingerprint: String,
+    pub cutoff: chrono::DateTime<chrono::Utc>,
+    pub state: FinancialAdmissionState,
+    pub grant_microusd: u64,
+    pub global_limit: u64,
+    pub global_consumed: u64,
+    pub models: BTreeMap<String, FinancialModelAllowance>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub history: Vec<FinancialAdmissionArchive>,
+}
+
+/// A closed grant retained without nested history.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct FinancialAdmissionArchive {
+    pub version: u32,
+    pub provider_id: uuid::Uuid,
+    pub scope_id: uuid::Uuid,
+    pub policy_fingerprint: String,
+    pub cutoff: chrono::DateTime<chrono::Utc>,
+    pub state: FinancialAdmissionState,
+    pub grant_microusd: u64,
+    pub global_limit: u64,
+    pub global_consumed: u64,
+    pub models: BTreeMap<String, FinancialModelAllowance>,
+}
+
+impl From<FinancialAdmission> for FinancialAdmissionArchive {
+    fn from(value: FinancialAdmission) -> Self {
+        Self {
+            version: value.version,
+            provider_id: value.provider_id,
+            scope_id: value.scope_id,
+            policy_fingerprint: value.policy_fingerprint,
+            cutoff: value.cutoff,
+            state: value.state,
+            grant_microusd: value.grant_microusd,
+            global_limit: value.global_limit,
+            global_consumed: value.global_consumed,
+            models: value.models,
+        }
+    }
+}
+
+impl From<FinancialAdmissionArchive> for FinancialAdmission {
+    fn from(value: FinancialAdmissionArchive) -> Self {
+        Self {
+            version: value.version,
+            provider_id: value.provider_id,
+            scope_id: value.scope_id,
+            policy_fingerprint: value.policy_fingerprint,
+            cutoff: value.cutoff,
+            state: value.state,
+            grant_microusd: value.grant_microusd,
+            global_limit: value.global_limit,
+            global_consumed: value.global_consumed,
+            models: value.models,
+            history: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum FinancialAdmissionState {
+    Prepared,
+    Active,
+    Closed,
+}
+
+/// The send boundary must enforce the entire selected envelope without rewriting the body.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct FinancialModelAllowance {
+    pub endpoint: String,
+    pub envelope: FinancialRequestEnvelope,
+    pub attempt_microusd: u64,
+    pub limit: u64,
+    pub consumed: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+/// One admitted request class.
+///
+/// The financial unit is the full published model maximum: one reservation per
+/// physical attempt, taken non-refundably before dispatch and never reduced by
+/// the measured body size. It rests on the documented model input maximum
+/// (`maxInputTokens`) and the documented per-token tariff, reserved at the
+/// highest documented input rate.
+///
+/// A provider that rejects an oversized request and bills it anyway is a named
+/// contract-deviation assumption: there is no numeric bound for it and no claim
+/// that unallocated money covers it.
+///
+/// The byte fields below are resource and validity guards. They bound memory and
+/// obviously unacceptable payloads, they are not a token-count proof and not a
+/// billing bound, and they never lower the reservation.
+///
+/// Embedding class: the byte bound additionally rests on first-party evidence
+/// that `text-embedding-3-large` maps to `cl100k_base` at the pinned tiktoken
+/// revision and that the encoder emits tokens only as non-empty UTF-8 byte
+/// spans. Inputs must therefore be strings; token-ID arrays are refused,
+/// because that reasoning does not cover them.
+///
+/// Generation class: that encoding premise is NOT established and is not
+/// claimed. `maxInputTokens` there is the documented model maximum the
+/// reservation is taken at, not a proof of the provider's tokenization.
+pub enum FinancialRequestEnvelope {
+    Chat {
+        allowed_service_tiers: Vec<String>,
+        /// Resource and validity guard only; never a billing bound.
+        max_input_bytes: u64,
+        max_output_tokens: u64,
+        /// Documented model input maximum the reservation is taken at.
+        max_input_tokens: u64,
+    },
+    Embeddings {
+        max_inputs: u64,
+        /// Resource and validity guard only.
+        max_input_bytes_each: u64,
+        /// Resource and validity guard only.
+        max_input_bytes_total: u64,
+        /// Documented aggregate model input maximum. No default.
+        max_input_tokens: u64,
+    },
+}
+
+impl FinancialAdmission {
+    /// Apply a lifecycle change; the server constructs successor history.
+    pub(crate) fn transition(
+        current: Option<Self>,
+        mut desired: Self,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<Self, &'static str> {
+        desired.validate()?;
+        if desired.immutable_fingerprint().ok().as_deref() != Some(&desired.policy_fingerprint) {
+            return Err("invalid financial admission fingerprint");
+        }
+        let fresh = || {
+            desired.state == FinancialAdmissionState::Prepared
+                && desired.global_consumed == 0
+                && desired.models.values().all(|model| model.consumed == 0)
+                && desired.cutoff > now
+        };
+        match current {
+            None if fresh() && desired.history.is_empty() => Ok(desired),
+            None => Err("invalid initial financial admission"),
+            Some(current) => {
+                current.validate()?;
+                if current.provider_id != desired.provider_id
+                    || current.immutable_fingerprint().ok().as_deref()
+                        != Some(&current.policy_fingerprint)
+                {
+                    return Err("invalid current financial admission");
+                }
+                if current.state == FinancialAdmissionState::Closed
+                    && desired.state == FinancialAdmissionState::Prepared
+                {
+                    if !fresh()
+                        || current.scope_id == desired.scope_id
+                        || (!desired.history.is_empty() && desired.history != current.history)
+                    {
+                        return Err("invalid successor financial admission");
+                    }
+                    desired.history = current.history.clone();
+                    desired.history.push(current.into());
+                    Ok(desired)
+                } else {
+                    if desired.history.is_empty() {
+                        desired.history = current.history.clone();
+                    } else if desired.history != current.history {
+                        return Err("invalid financial admission history");
+                    }
+                    let mut expected = current.clone();
+                    expected.state = desired.state;
+                    if expected != desired
+                        || !matches!(
+                            (current.state, desired.state),
+                            (FinancialAdmissionState::Prepared, FinancialAdmissionState::Active)
+                                | (
+                                    FinancialAdmissionState::Active,
+                                    FinancialAdmissionState::Closed
+                                )
+                        )
+                        || (desired.state == FinancialAdmissionState::Active
+                            && desired.cutoff <= now)
+                    {
+                        return Err("invalid financial admission transition");
+                    }
+                    Ok(desired)
+                }
+            }
+        }
+    }
+
+    /// SHA-256 of the versioned immutable policy, excluding lifecycle and counters.
+    pub fn immutable_fingerprint(&self) -> Result<String, serde_json::Error> {
+        use sha2::{Digest, Sha256};
+        #[derive(Serialize)]
+        struct ImmutableModel<'a> {
+            endpoint: &'a str,
+            envelope: &'a FinancialRequestEnvelope,
+            attempt_microusd: u64,
+            limit: u64,
+        }
+        let models: BTreeMap<&str, ImmutableModel<'_>> = self
+            .models
+            .iter()
+            .map(|(name, model)| {
+                (
+                    name.as_str(),
+                    ImmutableModel {
+                        endpoint: &model.endpoint,
+                        envelope: &model.envelope,
+                        attempt_microusd: model.attempt_microusd,
+                        limit: model.limit,
+                    },
+                )
+            })
+            .collect();
+        let bytes = serde_json::to_vec(&(
+            "financial-admission/1",
+            self.version,
+            self.provider_id,
+            self.scope_id,
+            self.cutoff,
+            self.grant_microusd,
+            self.global_limit,
+            models,
+        ))?;
+        Ok(format!("sha256:{}", hex::encode(Sha256::digest(bytes))))
+    }
+
+    /// Validate internal arithmetic without interpreting an upstream response.
+    pub fn validate(&self) -> Result<(), &'static str> {
+        for entry in &self.history {
+            let archived = FinancialAdmission::from(entry.clone());
+            if archived.state != FinancialAdmissionState::Closed
+                || archived.provider_id != self.provider_id
+                || archived.validate().is_err()
+                || archived.immutable_fingerprint().ok().as_deref()
+                    != Some(&archived.policy_fingerprint)
+            {
+                return Err("invalid financial admission history");
+            }
+        }
+        if self.version != 1
+            || self.provider_id.is_nil()
+            || self.scope_id.is_nil()
+            || self.policy_fingerprint.is_empty()
+            || self.models.is_empty()
+            || self.global_limit == 0
+            || self.global_consumed > self.global_limit
+        {
+            return Err("invalid financial admission identity or limit");
+        }
+        let mut liability = 0_u64;
+        let mut consumed = 0_u64;
+        for (model, allowance) in &self.models {
+            if model.is_empty()
+                || allowance.endpoint.is_empty()
+                || allowance.attempt_microusd == 0
+                || allowance.limit == 0
+                || allowance.consumed > allowance.limit
+            {
+                return Err("invalid model allowance");
+            }
+            match &allowance.envelope {
+                FinancialRequestEnvelope::Chat {
+                    allowed_service_tiers,
+                    max_input_bytes,
+                    max_output_tokens,
+                    max_input_tokens,
+                } => {
+                    if allowed_service_tiers.is_empty()
+                        || allowed_service_tiers
+                            .iter()
+                            .any(|tier| tier != "default" && tier != "flex")
+                        || *max_input_bytes == 0
+                        || *max_output_tokens == 0
+                    {
+                        return Err("invalid chat envelope");
+                    }
+                    if *max_input_tokens == 0 {
+                        return Err("invalid chat input ceiling");
+                    }
+                }
+                FinancialRequestEnvelope::Embeddings {
+                    max_inputs,
+                    max_input_bytes_each,
+                    max_input_bytes_total,
+                    max_input_tokens,
+                } => {
+                    if *max_inputs == 0 || *max_input_bytes_each == 0 || *max_input_bytes_total == 0
+                    {
+                        return Err("invalid embedding envelope");
+                    }
+                    if *max_input_tokens == 0 {
+                        return Err("invalid embedding input ceiling");
+                    }
+                }
+            }
+            liability = liability
+                .checked_add(
+                    allowance
+                        .attempt_microusd
+                        .checked_mul(allowance.limit)
+                        .ok_or("financial liability overflow")?,
+                )
+                .ok_or("financial liability overflow")?;
+            consumed =
+                consumed.checked_add(allowance.consumed).ok_or("financial count overflow")?;
+        }
+        if liability > self.grant_microusd || consumed != self.global_consumed {
+            return Err("financial liability or counters inconsistent");
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod financial_admission_tests {
+    use super::*;
+
+    fn policy() -> FinancialAdmission {
+        FinancialAdmission {
+            version: 1,
+            provider_id: uuid::Uuid::new_v4(),
+            scope_id: uuid::Uuid::new_v4(),
+            policy_fingerprint: "fixture".to_owned(),
+            cutoff: chrono::Utc::now(),
+            state: FinancialAdmissionState::Prepared,
+            grant_microusd: 100,
+            global_limit: 2,
+            global_consumed: 0,
+            history: Vec::new(),
+            models: BTreeMap::from([(
+                "fixture-model".to_owned(),
+                FinancialModelAllowance {
+                    endpoint: "https://example.test/chat/completions".to_owned(),
+                    envelope: FinancialRequestEnvelope::Chat {
+                        allowed_service_tiers: vec!["default".to_owned(), "flex".to_owned()],
+                        max_input_bytes: 100,
+                        max_output_tokens: 10,
+                        max_input_tokens: 90,
+                    },
+                    attempt_microusd: 50,
+                    limit: 2,
+                    consumed: 0,
+                },
+            )]),
+        }
+    }
+
+    #[test]
+    fn financial_successor_preserves_flat_history_and_fingerprint() {
+        let now = chrono::Utc::now();
+        let mut old = policy();
+        old.cutoff = now + chrono::Duration::hours(1);
+        old.state = FinancialAdmissionState::Closed;
+        old.global_consumed = 1;
+        old.models.get_mut("fixture-model").unwrap().consumed = 1;
+        old.policy_fingerprint = old.immutable_fingerprint().unwrap();
+        let mut desired = policy();
+        desired.provider_id = old.provider_id;
+        desired.cutoff = now + chrono::Duration::hours(2);
+        desired.policy_fingerprint = desired.immutable_fingerprint().unwrap();
+        let fingerprint = desired.policy_fingerprint.clone();
+        let stored =
+            FinancialAdmission::transition(Some(old.clone()), desired.clone(), now).unwrap();
+        assert_eq!(stored.history, vec![FinancialAdmissionArchive::from(old.clone())]);
+        assert_eq!(stored.immutable_fingerprint().unwrap(), fingerprint);
+        let roundtrip: FinancialAdmission =
+            serde_json::from_value(serde_json::to_value(&stored).unwrap()).unwrap();
+        assert_eq!(stored, roundtrip);
+        assert!(stored.validate().is_ok());
+        let mut second_closed = stored.clone();
+        second_closed.state = FinancialAdmissionState::Closed;
+        let mut third = policy();
+        third.provider_id = old.provider_id;
+        third.cutoff = now + chrono::Duration::hours(3);
+        third.policy_fingerprint = third.immutable_fingerprint().unwrap();
+        let second_successor =
+            FinancialAdmission::transition(Some(second_closed.clone()), third, now).unwrap();
+        assert_eq!(second_successor.history.len(), 2);
+        assert_eq!(second_successor.history[0], FinancialAdmissionArchive::from(old.clone()));
+        assert_eq!(second_successor.history[1], FinancialAdmissionArchive::from(second_closed));
+        let mut nested = serde_json::to_value(&second_successor).unwrap();
+        nested["history"][0]["history"] = serde_json::json!([]);
+        assert!(serde_json::from_value::<FinancialAdmission>(nested).is_err());
+
+        let mut active = stored.clone();
+        active.state = FinancialAdmissionState::Active;
+        active.history.clear();
+        let activated = FinancialAdmission::transition(Some(stored.clone()), active, now).unwrap();
+        assert_eq!(activated.state, FinancialAdmissionState::Active);
+        assert_eq!(activated.history, stored.history);
+
+        let mut corrupt = stored;
+        corrupt.history[0].global_consumed = 0;
+        assert!(corrupt.validate().is_err());
+    }
+
+    #[test]
+    fn financial_successor_rejects_invalid_candidates() {
+        let now = chrono::Utc::now();
+        let mut old = policy();
+        old.cutoff = now + chrono::Duration::hours(1);
+        old.state = FinancialAdmissionState::Closed;
+        old.global_consumed = 1;
+        old.models.get_mut("fixture-model").unwrap().consumed = 1;
+        old.policy_fingerprint = old.immutable_fingerprint().unwrap();
+        let mut desired = policy();
+        desired.provider_id = old.provider_id;
+        desired.cutoff = now + chrono::Duration::hours(2);
+        desired.policy_fingerprint = desired.immutable_fingerprint().unwrap();
+
+        let mut same = desired.clone();
+        same.scope_id = old.scope_id;
+        same.policy_fingerprint = same.immutable_fingerprint().unwrap();
+        assert!(FinancialAdmission::transition(Some(old.clone()), same, now).is_err());
+        let mut consumed = desired.clone();
+        consumed.global_consumed = 1;
+        consumed.models.get_mut("fixture-model").unwrap().consumed = 1;
+        assert!(FinancialAdmission::transition(Some(old.clone()), consumed, now).is_err());
+        let mut expired = desired.clone();
+        expired.cutoff = now;
+        expired.policy_fingerprint = expired.immutable_fingerprint().unwrap();
+        assert!(FinancialAdmission::transition(Some(old.clone()), expired, now).is_err());
+        let mut forged = desired;
+        forged.policy_fingerprint = "wrong".into();
+        assert!(FinancialAdmission::transition(Some(old), forged, now).is_err());
+    }
+
+    #[test]
+    fn financial_existing_lifecycle_remains_strict() {
+        let now = chrono::Utc::now();
+        let mut prepared = policy();
+        prepared.cutoff = now + chrono::Duration::hours(1);
+        prepared.policy_fingerprint = prepared.immutable_fingerprint().unwrap();
+        let mut active = prepared.clone();
+        active.state = FinancialAdmissionState::Active;
+        assert!(
+            FinancialAdmission::transition(Some(prepared.clone()), active.clone(), now).is_ok()
+        );
+        let mut closed = active.clone();
+        closed.state = FinancialAdmissionState::Closed;
+        assert!(FinancialAdmission::transition(Some(active), closed.clone(), now).is_ok());
+        assert!(FinancialAdmission::transition(Some(closed), prepared, now).is_err());
+    }
+
+    #[test]
+    fn financial_policy_fingerprint_is_stable_for_the_same_policy() {
+        let value = policy();
+        assert_eq!(value.immutable_fingerprint().unwrap(), value.immutable_fingerprint().unwrap());
+    }
+
+    #[test]
+    fn financial_policy_fingerprint_ignores_mutable_state_and_counters() {
+        let original = policy();
+        let mut mutated = original.clone();
+        mutated.state = FinancialAdmissionState::Active;
+        mutated.global_consumed = 1;
+        mutated.models.get_mut("fixture-model").unwrap().consumed = 1;
+        assert_eq!(
+            mutated.immutable_fingerprint().unwrap(),
+            original.immutable_fingerprint().unwrap(),
+            "lifecycle and consumption are not part of the immutable policy"
+        );
+    }
+
+    #[test]
+    fn financial_policy_fingerprint_changes_on_every_immutable_field() {
+        let base = policy().immutable_fingerprint().unwrap();
+        let mut variants: Vec<FinancialAdmission> = Vec::new();
+
+        let mut value = policy();
+        value.models.get_mut("fixture-model").unwrap().endpoint.push_str("/other");
+        variants.push(value);
+
+        let mut value = policy();
+        if let FinancialRequestEnvelope::Chat { max_input_tokens, .. } =
+            &mut value.models.get_mut("fixture-model").unwrap().envelope
+        {
+            *max_input_tokens += 1;
+        }
+        variants.push(value);
+
+        let mut value = policy();
+        value.models.get_mut("fixture-model").unwrap().attempt_microusd += 1;
+        variants.push(value);
+
+        let mut value = policy();
+        value.models.get_mut("fixture-model").unwrap().limit += 1;
+        variants.push(value);
+
+        let mut value = policy();
+        value.cutoff += chrono::Duration::seconds(1);
+        variants.push(value);
+
+        let mut value = policy();
+        value.grant_microusd += 1_000;
+        variants.push(value);
+
+        let mut value = policy();
+        value.global_limit += 1;
+        variants.push(value);
+
+        for variant in variants {
+            assert_ne!(
+                variant.immutable_fingerprint().unwrap(),
+                base,
+                "an immutable policy change must move the fingerprint"
+            );
+        }
+    }
+
+    #[test]
+    fn financial_policy_deserialization_refusal_never_echoes_the_payload() {
+        let secret = "sk-live-should-never-appear";
+        let malformed = format!(r#"{{"providerId":"{secret}","models":"#);
+        let error = serde_json::from_str::<FinancialAdmission>(&malformed)
+            .expect_err("malformed policy must be refused");
+        let rendered = error.to_string();
+        assert!(!rendered.contains(secret));
+        assert!(!rendered.contains("http://"));
+        assert!(!rendered.contains("https://"));
+    }
+
+    #[test]
+    fn financial_policy_rejects_overflow_overgrant_and_counter_disagreement() {
+        let mut value = policy();
+        assert!(value.validate().is_ok());
+        value.grant_microusd = 99;
+        assert!(value.validate().is_err());
+        value.grant_microusd = u64::MAX;
+        value.models.get_mut("fixture-model").unwrap().attempt_microusd = u64::MAX;
+        assert!(value.validate().is_err());
+        value = policy();
+        value.global_consumed = 1;
+        assert!(value.validate().is_err());
+    }
+
+    #[test]
+    fn financial_policy_rejects_zero_input_ceiling() {
+        let mut value = policy();
+        assert!(value.validate().is_ok());
+        let model = value.models.get_mut("fixture-model").unwrap();
+        if let FinancialRequestEnvelope::Chat { max_input_tokens, .. } = &mut model.envelope {
+            *max_input_tokens = 0;
+        }
+        assert!(value.validate().is_err());
+    }
+
+    #[test]
+    fn financial_envelope_deserialization_requires_the_input_ceiling() {
+        let missing = serde_json::json!({
+            "kind": "chat",
+            "allowed_service_tiers": ["default"],
+            "max_input_bytes": 100,
+            "max_output_tokens": 10
+        });
+        assert!(serde_json::from_value::<FinancialRequestEnvelope>(missing).is_err());
+
+        let present = serde_json::json!({
+            "kind": "chat",
+            "allowed_service_tiers": ["default"],
+            "max_input_bytes": 100,
+            "max_output_tokens": 10,
+            "max_input_tokens": 90
+        });
+        assert!(serde_json::from_value::<FinancialRequestEnvelope>(present).is_ok());
+    }
+
+    #[test]
+    fn financial_policy_rejects_auto_tier() {
+        let mut value = policy();
+        let model = value.models.get_mut("fixture-model").unwrap();
+        if let FinancialRequestEnvelope::Chat { allowed_service_tiers, .. } = &mut model.envelope {
+            allowed_service_tiers.push("auto".to_owned());
+        }
+        assert!(value.validate().is_err());
+    }
+
+    #[test]
+    fn financial_fingerprint_ignores_mutable_state_but_not_policy() {
+        let mut value = policy();
+        let original = value.immutable_fingerprint().unwrap();
+        value.state = FinancialAdmissionState::Active;
+        value.global_consumed = 1;
+        value.models.get_mut("fixture-model").unwrap().consumed = 1;
+        assert_eq!(value.immutable_fingerprint().unwrap(), original);
+        value.models.get_mut("fixture-model").unwrap().limit = 1;
+        assert_ne!(value.immutable_fingerprint().unwrap(), original);
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]

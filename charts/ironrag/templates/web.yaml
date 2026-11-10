@@ -51,6 +51,10 @@ spec:
           env:
             - name: IRONRAG_API_UPSTREAM
               value: {{ include "ironrag.apiUpstream" . | quote }}
+            {{- with .Values.web.otlpUpstream }}
+            - name: IRONRAG_OTLP_UPSTREAM
+              value: {{ . | quote }}
+            {{- end }}
           readinessProbe:
             httpGet:
               path: /

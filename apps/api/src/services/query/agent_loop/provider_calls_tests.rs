@@ -14,6 +14,9 @@ fn provider_call_record_captures_exact_resolved_binding_and_unmodified_usage() {
     let binding_id = Uuid::now_v7();
     let usage_json = serde_json::json!({});
     let binding = ResolvedRuntimeBinding {
+        admission: std::sync::Arc::new(
+            crate::integrations::provider_admission::UnqualifiedTestAdmission,
+        ),
         binding_id,
         workspace_id: Uuid::now_v7(),
         library_id: Uuid::now_v7(),
@@ -50,6 +53,9 @@ fn provider_call_record_captures_exact_resolved_binding_and_unmodified_usage() {
 #[test]
 fn provider_call_attribution_mismatch_fails_before_response_recording() {
     let binding = ResolvedRuntimeBinding {
+        admission: std::sync::Arc::new(
+            crate::integrations::provider_admission::UnqualifiedTestAdmission,
+        ),
         binding_id: Uuid::now_v7(),
         workspace_id: Uuid::now_v7(),
         library_id: Uuid::now_v7(),

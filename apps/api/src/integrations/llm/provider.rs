@@ -1,5 +1,5 @@
 use anyhow::{Context, Result, anyhow};
-use reqwest::{Url, header::AUTHORIZATION};
+use reqwest::Url;
 use serde::Deserialize;
 use zeroize::Zeroize as _;
 
@@ -33,6 +33,9 @@ pub(super) struct ResolvedProviderRuntime {
     pub(super) allow_private_network: bool,
     pub(super) runtime: ProviderRuntimeProfile,
     pub(super) request_policy: ProviderRequestPolicy,
+    /// Sealed route/credential attestation issued by the authoritative binding
+    /// resolver. `None` only for a caller that must then be refused before send.
+    pub(super) dispatch: Option<crate::shared::provider_http::ProviderDispatchContext>,
     /// The confirmed wire control for the binding's typed reasoning selection,
     /// or `None` when no mode was selected. `None` means the binding's own raw
     /// parameters and the existing automatic provider policy apply untouched;
@@ -97,12 +100,34 @@ impl ProviderRequestPolicy {
 }
 
 impl UnifiedGateway {
+    /// Resolve a provider runtime without a binding attestation. The result
+    /// cannot send: the shared boundary requires a [`ProviderDispatchContext`].
+    /// Test-only: no production caller resolves an unattested runtime.
+    #[cfg(test)]
     pub(super) fn resolve_provider(
         provider_kind: &str,
         api_key_override: Option<&str>,
         base_url_override: Option<&str>,
         model_name: &str,
         extra_parameters_json: &serde_json::Value,
+    ) -> Result<ResolvedProviderRuntime> {
+        Self::resolve_provider_attested(
+            provider_kind,
+            api_key_override,
+            base_url_override,
+            model_name,
+            extra_parameters_json,
+            None,
+        )
+    }
+
+    pub(super) fn resolve_provider_attested(
+        provider_kind: &str,
+        api_key_override: Option<&str>,
+        base_url_override: Option<&str>,
+        model_name: &str,
+        extra_parameters_json: &serde_json::Value,
+        authority: Option<&crate::shared::provider_http::DispatchAuthority>,
     ) -> Result<ResolvedProviderRuntime> {
         let runtime_profile = resolve_runtime_profile(provider_kind, extra_parameters_json)?;
         let api_key = api_key_override
@@ -132,18 +157,58 @@ impl UnifiedGateway {
                 runtime_profile.runtime.kind
             ));
         }
+        let resolved_base_url = resolve_runtime_provider_base_url(
+            runtime_profile.base_url.allow_private_network,
+            base_url,
+        );
+        let resolved_dispatch = match authority {
+            Some(authority) => Some(bind_dispatch_authority(
+                authority,
+                provider_kind,
+                &resolved_base_url,
+                model_name,
+                api_key.as_deref(),
+                runtime_profile.runtime.auth_scheme,
+            )?),
+            None => None,
+        };
         Ok(ResolvedProviderRuntime {
-            api_key,
-            base_url: resolve_runtime_provider_base_url(
-                runtime_profile.base_url.allow_private_network,
-                base_url,
-            ),
+            base_url: resolved_base_url,
             allow_private_network: runtime_profile.base_url.allow_private_network,
-            runtime: runtime_profile.runtime,
+            runtime: runtime_profile.runtime.clone(),
             request_policy: runtime_profile.request_policy,
+            dispatch: resolved_dispatch,
             reasoning_wire,
+            api_key,
         })
     }
+}
+
+/// Bind the resolver-issued authority to the route and credential this call
+/// actually resolved, refusing any label, base URL or credential override.
+fn bind_dispatch_authority(
+    authority: &crate::shared::provider_http::DispatchAuthority,
+    provider_kind: &str,
+    base_url: &str,
+    model_name: &str,
+    api_key: Option<&str>,
+    auth_scheme: ProviderAuthScheme,
+) -> Result<crate::shared::provider_http::ProviderDispatchContext> {
+    use crate::shared::provider_http::{ProviderSurface, credential_fingerprint};
+    let credential = api_key.map(str::trim).filter(|value| !value.is_empty());
+    if authority.provider_kind() != provider_kind
+        || authority.base_url() != base_url
+        || authority.model_name() != model_name
+        || authority.credential_digest() != credential.map(credential_fingerprint)
+    {
+        return Err(anyhow!(
+            "dispatch authority does not match the resolved provider route for provider={provider_kind}"
+        ));
+    }
+    Ok(authority.attest(
+        ProviderSurface::Chat,
+        credential.map(|token| provider_auth_header(auth_scheme, token)),
+    ))
 }
 
 pub(super) fn resolve_provider_request_policy(
@@ -364,6 +429,34 @@ fn validate_runtime_base_url(
     Ok(())
 }
 
+pub(super) fn provider_auth_header(
+    auth_scheme: ProviderAuthScheme,
+    token: &str,
+) -> (reqwest::header::HeaderName, String) {
+    use reqwest::header::HeaderName;
+    match auth_scheme {
+        ProviderAuthScheme::Bearer => {
+            (HeaderName::from_static("authorization"), format!("Bearer {}", token))
+        }
+        ProviderAuthScheme::RawAuthorization => {
+            (HeaderName::from_static("authorization"), token.to_string())
+        }
+        ProviderAuthScheme::AnthropicApiKey => {
+            (HeaderName::from_static("x-api-key"), token.to_string())
+        }
+        ProviderAuthScheme::GoogleApiKey => {
+            (HeaderName::from_static("x-goog-api-key"), token.to_string())
+        }
+    }
+}
+
+/// The bearer header the TypeSafe decision client attaches to every call.
+pub(crate) fn provider_auth_header_for_binding(
+    token: &str,
+) -> (reqwest::header::HeaderName, String) {
+    provider_auth_header(ProviderAuthScheme::Bearer, token)
+}
+
 pub(super) fn apply_provider_auth(
     request: reqwest::RequestBuilder,
     auth_scheme: ProviderAuthScheme,
@@ -372,10 +465,6 @@ pub(super) fn apply_provider_auth(
     let Some(token) = api_key.map(str::trim).filter(|value| !value.is_empty()) else {
         return request;
     };
-    match auth_scheme {
-        ProviderAuthScheme::Bearer => request.bearer_auth(token),
-        ProviderAuthScheme::RawAuthorization => request.header(AUTHORIZATION, token),
-        ProviderAuthScheme::AnthropicApiKey => request.header("x-api-key", token),
-        ProviderAuthScheme::GoogleApiKey => request.header("x-goog-api-key", token),
-    }
+    let (header, value) = provider_auth_header(auth_scheme, token);
+    request.header(header, value)
 }

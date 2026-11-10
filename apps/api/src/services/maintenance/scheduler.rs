@@ -51,6 +51,7 @@
 //! advisory lock.
 
 mod billing;
+mod db_pool;
 mod nonterminal_records;
 mod query_executions;
 mod query_result_cache;
@@ -190,16 +191,37 @@ fn walk_quotas(
 /// cluster-wide admission/rotation lock, and is driven by
 /// `run_graph_backfill_loop` in the ingest worker instead of this scheduler.
 /// Adding it here would route it to the `Unsupported` dispatch arm.
-const SCHEDULED_CLASSES: [MaintenanceClass; 3] = [
+const SCHEDULED_CLASSES: [MaintenanceClass; 4] = [
     MaintenanceClass::GcSupersededVectors,
     MaintenanceClass::GcRuntimeGraph,
     MaintenanceClass::GcHistoricalProjection,
+    MaintenanceClass::GraphProjection,
 ];
 
 /// Build a scheduler-task handle for the lifetime of the process.
 /// Returns `None` when the role / kill-switch combination means the
 /// scheduler must not run.
 #[must_use]
+/// Publishes the PostgreSQL pool gauges even when the maintenance sweeper is
+/// disabled. The gauges are observability-only and do not mutate state, so
+/// every serving role may report them; when the full scheduler runs it already
+/// calls the same publisher on its cadence.
+pub(crate) fn spawn_db_pool_metrics_reporter(
+    state: AppState,
+    mut shutdown: broadcast::Receiver<()>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(std::time::Duration::from_secs(60));
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            tokio::select! {
+                _ = ticker.tick() => db_pool::publish(&state.persistence),
+                _ = shutdown.recv() => break,
+            }
+        }
+    })
+}
+
 pub fn spawn_maintenance_scheduler(
     state: AppState,
     mut shutdown: broadcast::Receiver<()>,
@@ -260,6 +282,7 @@ pub fn spawn_maintenance_scheduler(
             }
             if std::time::Instant::now() >= next_nonterminal_sample {
                 nonterminal_records::sample_and_publish(&state, config.class_interval).await;
+                db_pool::publish(&state.persistence);
                 next_nonterminal_sample = std::time::Instant::now()
                     + nonterminal_records::NONTERMINAL_RECORD_SAMPLE_INTERVAL;
             }
@@ -590,6 +613,14 @@ pub async fn process_runtime_graph_class_once_for_test(state: &AppState, owner_n
     process_class(state, &config, owner_node, MaintenanceClass::GcRuntimeGraph, quotas).await;
 }
 
+/// Exercises the production lease and completion path without unrelated sweepers.
+#[cfg(feature = "test-support")]
+pub async fn process_graph_projection_class_once_for_test(state: &AppState, owner_node: &str) {
+    let config = SchedulerConfig::from_settings(&state.settings);
+    let quotas = WalkQuotas { in_flight: 1, fresh: 0 };
+    process_class(state, &config, owner_node, MaintenanceClass::GraphProjection, quotas).await;
+}
+
 /// Run one full scheduler tick with the production batch sizing. Integration
 /// tests use this seam to prove a single tick drains more than one due row.
 #[cfg(feature = "test-support")]
@@ -669,6 +700,7 @@ enum DispatchKind {
     SupersededVectors,
     RuntimeGraph,
     HistoricalProjection,
+    GraphProjection,
     Unsupported,
 }
 
@@ -681,6 +713,7 @@ fn dispatch_kind(class: MaintenanceClass, scope: Scope) -> DispatchKind {
             DispatchKind::SupersededVectors
         }
         (MaintenanceClass::GcRuntimeGraph, Scope::Library(_)) => DispatchKind::RuntimeGraph,
+        (MaintenanceClass::GraphProjection, Scope::Library(_)) => DispatchKind::GraphProjection,
         (MaintenanceClass::GcHistoricalProjection, Scope::Library(_)) => {
             DispatchKind::HistoricalProjection
         }
@@ -708,6 +741,7 @@ async fn dispatch(
         DispatchKind::HistoricalProjection => {
             dispatch_gc_historical_projection(state, run, owner_node, library_id).await
         }
+        DispatchKind::GraphProjection => dispatch_graph_projection(state, library_id).await,
         DispatchKind::Unsupported => unsupported_class_scope(class, scope),
     }
 }
@@ -754,6 +788,23 @@ fn skipped_or_failed(
         wire_error_code: error.code(),
         error_code,
         error_text: error.to_string(),
+    }
+}
+
+async fn dispatch_graph_projection(state: &AppState, library_id: Uuid) -> DispatchOutcome {
+    use crate::services::graph::error::GraphServiceError;
+    match super::graph_projection::reconcile(state, library_id).await {
+        Ok(()) | Err(GraphServiceError::LibraryNotFound { .. }) => {
+            DispatchOutcome::Ok(GcSweepDetail::no_work())
+        }
+        Err(GraphServiceError::WriteContention { .. }) => {
+            DispatchOutcome::Skipped { reason: GcSkipReason::LibraryBusy }
+        }
+        Err(error) => DispatchOutcome::Failed {
+            wire_error_code: GcErrorCode::RuntimeGraph.label(),
+            error_code: GcErrorCode::RuntimeGraph,
+            error_text: error.to_string(),
+        },
     }
 }
 

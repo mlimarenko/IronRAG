@@ -31,6 +31,7 @@ fn openai_test_request(extra_parameters_json: &serde_json::Value) -> OpenAiCompa
         response_format: None,
         extra_parameters_json,
         stream: false,
+        dispatch: None,
     }
 }
 
@@ -51,6 +52,43 @@ fn serializes_openai_compatible_chat_request_as_valid_json() {
             .and_then(serde_json::Value::as_str),
         Some("hello"),
     );
+}
+
+#[test]
+fn financial_chat_service_tier_defaults_without_overriding_explicit_tier() {
+    for (extra, expected) in
+        [(serde_json::json!({}), "default"), (serde_json::json!({"service_tier": "flex"}), "flex")]
+    {
+        let body = openai_test_request(&extra).body().unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value["service_tier"], expected);
+    }
+}
+
+#[test]
+fn financial_chat_count_defaults_without_overriding_explicit_count() {
+    for (extra, expected) in [(serde_json::json!({}), 1), (serde_json::json!({"n": 2}), 2)] {
+        let body = openai_test_request(&extra).body().unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value["n"], expected);
+    }
+    assert!(openai_test_request(&serde_json::json!(null)).body().is_err());
+}
+
+#[test]
+fn default_chat_parameters_is_idempotent_and_preserves_explicit_values() {
+    let mut empty = serde_json::Map::new();
+    super::openai_compatible::default_chat_parameters(&mut empty);
+    assert_eq!(empty["service_tier"], "default");
+    assert_eq!(empty["n"], 1);
+
+    let mut explicit = serde_json::Map::from_iter([
+        ("service_tier".to_string(), serde_json::json!("flex")),
+        ("n".to_string(), serde_json::json!(2)),
+    ]);
+    super::openai_compatible::default_chat_parameters(&mut explicit);
+    assert_eq!(explicit["service_tier"], "flex");
+    assert_eq!(explicit["n"], 2);
 }
 
 #[test]
@@ -185,6 +223,34 @@ fn serializes_openai_token_limit_as_max_completion_tokens() {
     let value: serde_json::Value =
         serde_json::from_slice(&body).expect("serialized body should stay valid json");
     assert_eq!(value.get("max_completion_tokens").and_then(serde_json::Value::as_i64), Some(16),);
+    assert!(value.get("max_tokens").is_none());
+}
+
+#[test]
+fn serializes_bounded_vision_controls_for_openai() {
+    let vision = super::VisionRequest {
+        provider_kind: "openai".into(),
+        model_name: "gpt-5.4-mini".into(),
+        prompt: "fixture".into(),
+        image_bytes: vec![],
+        mime_type: "image/png".into(),
+        api_key_override: None,
+        base_url_override: None,
+        system_prompt: None,
+        temperature: None,
+        top_p: None,
+        max_output_tokens_override: Some(128_000),
+        extra_parameters_json: serde_json::json!({"n": 1, "service_tier": "flex"}),
+        dispatch: None,
+    };
+    let extra = UnifiedGateway::upstream_extra_parameters(&vision.extra_parameters_json, None);
+    let mut request = openai_test_request(&extra);
+    request.max_output_tokens = vision.max_output_tokens_override;
+    let body = request.body().expect("serialize vision controls");
+    let value: serde_json::Value = serde_json::from_slice(&body).expect("valid request JSON");
+    assert_eq!(value["n"], 1);
+    assert_eq!(value["service_tier"], "flex");
+    assert_eq!(value["max_completion_tokens"], 128_000);
     assert!(value.get("max_tokens").is_none());
 }
 

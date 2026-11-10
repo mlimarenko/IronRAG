@@ -17,6 +17,8 @@ use super::{ExtractionFailureClass, FileExtractError, UploadFileKind};
 
 pub struct VisualRecognitionInput<'a> {
     pub gateway: &'a dyn LlmGateway,
+    pub dispatch: Option<&'a crate::shared::provider_http::DispatchAuthority>,
+    pub max_output_tokens_override: Option<i32>,
     pub vision_provider: Option<&'a ProviderModelSelection>,
     pub api_key: &'a str,
     pub base_url: Option<&'a str>,
@@ -141,6 +143,8 @@ pub async fn recognize_native_visuals(
         let result = image::recognize_visual(
             input.gateway,
             image::VisionProviderInput {
+                dispatch: input.dispatch,
+                max_output_tokens_override: input.max_output_tokens_override,
                 provider_kind: &provider.provider_kind,
                 model_name: &provider.model_name,
                 api_key: input.api_key,
@@ -158,7 +162,11 @@ pub async fn recognize_native_visuals(
                 receipt.calls.extend(error.calls);
                 return Err(FileExtractError::VisionFailed {
                     file_kind,
-                    class: ExtractionFailureClass::OperationalRetryable,
+                    class: if error.terminal {
+                        ExtractionFailureClass::OperationalTerminal
+                    } else {
+                        ExtractionFailureClass::OperationalRetryable
+                    },
                     message: error.message.into(),
                     calls: receipt.calls,
                 });

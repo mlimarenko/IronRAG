@@ -565,7 +565,7 @@ async fn initialized_notifications_are_accepted_without_jsonrpc_error_bodies() -
 
 #[tokio::test]
 #[ignore = "requires local postgres and redis services"]
-async fn resource_discovery_methods_are_not_supported() -> anyhow::Result<()> {
+async fn resource_discovery_methods_return_manifest_and_typescript() -> anyhow::Result<()> {
     let settings =
         Settings::from_env().context("failed to load settings for mcp resource contracts test")?;
     let fixture = McpDiscoveryContractFixture::create(settings).await?;
@@ -576,18 +576,47 @@ async fn resource_discovery_methods_are_not_supported() -> anyhow::Result<()> {
         let initialize = fixture.rpc_call(&token, "initialize", json!({})).await?;
         assert_eq!(initialize["result"]["protocolVersion"], json!("2025-11-25"));
         assert_eq!(initialize["result"]["capabilities"]["tools"], json!({ "listChanged": false }));
-        assert!(
-            initialize["result"]["capabilities"].get("resources").is_none(),
-            "initialize must not advertise an empty resources surface"
+        assert_eq!(
+            initialize["result"]["capabilities"]["resources"],
+            json!({ "listChanged": false, "subscribe": false })
         );
 
         let resources = fixture.rpc_call(&token, "resources/list", json!({})).await?;
-        assert_eq!(resources["error"]["code"], json!(-32601));
-        assert_eq!(resources["error"]["data"]["errorKind"], json!("unsupported_method"));
+        let listed = resources["result"]["resources"]
+            .as_array()
+            .context("resources/list must return a resources array")?;
+        let uris =
+            listed.iter().filter_map(|resource| resource["uri"].as_str()).collect::<Vec<_>>();
+        assert!(uris.contains(&"ironrag://manifest"));
+        assert!(uris.contains(&"ironrag://typescript"));
+
+        let manifest = fixture
+            .rpc_call(&token, "resources/read", json!({ "uri": "ironrag://manifest" }))
+            .await?;
+        let manifest_content = &manifest["result"]["contents"][0];
+        assert_eq!(manifest_content["mimeType"], json!("application/json"));
+        let manifest_text =
+            manifest_content["text"].as_str().context("manifest content must carry text")?;
+        let manifest_payload: serde_json::Value =
+            serde_json::from_str(manifest_text).context("manifest text must parse as JSON")?;
+        assert!(
+            manifest_payload["toolContract"]["hash"]
+                .as_str()
+                .is_some_and(|hash| hash.starts_with("sha256:")),
+            "manifest toolContract.hash must be a sha256 digest"
+        );
+
+        let typescript = fixture
+            .rpc_call(&token, "resources/read", json!({ "uri": "ironrag://typescript" }))
+            .await?;
+        let typescript_text = typescript["result"]["contents"][0]["text"]
+            .as_str()
+            .context("typescript content must carry text")?;
+        assert!(typescript_text.contains("export interface IronRagManifest"));
+        assert!(typescript_text.contains("export type IronRagToolName"));
 
         let templates = fixture.rpc_call(&token, "resources/templates/list", json!({})).await?;
-        assert_eq!(templates["error"]["code"], json!(-32601));
-        assert_eq!(templates["error"]["data"]["errorKind"], json!("unsupported_method"));
+        assert_eq!(templates["result"]["resourceTemplates"], json!([]));
 
         Ok(())
     }

@@ -81,6 +81,25 @@ server {
         proxy_pass ${IRONRAG_API_UPSTREAM};
     }
 
+    # Browser telemetry. The OTLP collectors are internal-only; the web pod is
+    # the single same-origin entry point so the CSP needs no third-party host.
+    # /otlp/v1/traces -> <upstream>/v1/traces.
+    location /otlp/ {
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_buffering off;
+        proxy_read_timeout 30s;
+        proxy_pass ${IRONRAG_OTLP_UPSTREAM}/;
+    }
+
+    # Source maps are release artifacts, not public assets.
+    location ~* \.map$ {
+        return 404;
+    }
+
     location /assets/ {
         expires 1y;
         add_header Cache-Control "public, immutable";

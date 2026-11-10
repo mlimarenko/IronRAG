@@ -186,6 +186,11 @@ async fn request_revision_chunk_embedding_batch(
     cancellation_token: &CancellationToken,
 ) -> AnyhowResult<(Vec<usize>, EmbeddingBatchResponse)> {
     ensure_not_cancelled(cancellation_token)?;
+    if let Some(bounds) = binding.embedding_input_bounds()
+        && !bounds.accepts(batch.iter().map(|index| chunks[*index].normalized_text.as_str()))
+    {
+        return Err(crate::integrations::retry::ProviderCallError::local_request_rejected().into());
+    }
     let inputs = batch.iter().map(|index| chunks[*index].normalized_text.clone()).collect();
     let first_offset = batch.first().copied().unwrap_or_default();
     let request = EmbeddingBatchRequest {
@@ -195,6 +200,7 @@ async fn request_revision_chunk_embedding_batch(
         api_key_override: binding.api_key.clone(),
         base_url_override: binding.provider_base_url.clone(),
         extra_parameters_json: binding.extra_parameters_json.clone(),
+        dispatch: Some(binding.dispatch_authority()),
     };
     let response = tokio::select! {
         _ = cancellation_token.cancelled() => {

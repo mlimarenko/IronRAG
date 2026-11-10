@@ -1402,9 +1402,24 @@ begin
         join public.ai_account account on account.id = binding.account_id
         join public.ai_model_catalog model on model.id = binding.model_catalog_id
         join (
-            select id from old_providers
-            union
-            select id from new_providers
+            select new_providers.id
+            from new_providers
+            join old_providers on old_providers.id = new_providers.id
+            where (
+                new_providers.provider_kind,
+                new_providers.display_name,
+                new_providers.api_style,
+                new_providers.lifecycle_state,
+                new_providers.default_base_url,
+                new_providers.capability_flags_json - 'financialAdmission'
+            ) is distinct from (
+                old_providers.provider_kind,
+                old_providers.display_name,
+                old_providers.api_style,
+                old_providers.lifecycle_state,
+                old_providers.default_base_url,
+                old_providers.capability_flags_json - 'financialAdmission'
+            )
         ) changed_provider
           on changed_provider.id = account.provider_catalog_id
           or changed_provider.id = model.provider_catalog_id
@@ -3064,6 +3079,18 @@ CREATE TABLE public.iam_user (
     auth_provider_kind text DEFAULT 'password'::text NOT NULL,
     external_subject text,
     role public.iam_system_role DEFAULT 'viewer'::public.iam_system_role NOT NULL
+);
+
+
+--
+-- Name: iam_user_preference; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.iam_user_preference (
+    principal_id uuid NOT NULL,
+    telemetry_consent text NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT iam_user_preference_telemetry_consent_check CHECK ((telemetry_consent = ANY (ARRAY['granted'::text, 'denied'::text])))
 );
 
 
@@ -5077,6 +5104,14 @@ ALTER TABLE ONLY public.iam_user
 
 ALTER TABLE ONLY public.iam_user
     ADD CONSTRAINT iam_user_pkey PRIMARY KEY (principal_id);
+
+
+--
+-- Name: iam_user_preference iam_user_preference_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.iam_user_preference
+    ADD CONSTRAINT iam_user_preference_pkey PRIMARY KEY (principal_id);
 
 
 --
@@ -8316,6 +8351,14 @@ ALTER TABLE ONLY public.iam_session
 
 ALTER TABLE ONLY public.iam_user
     ADD CONSTRAINT iam_user_principal_id_fkey FOREIGN KEY (principal_id) REFERENCES public.iam_principal(id) ON DELETE CASCADE;
+
+
+--
+-- Name: iam_user_preference iam_user_preference_principal_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.iam_user_preference
+    ADD CONSTRAINT iam_user_preference_principal_id_fkey FOREIGN KEY (principal_id) REFERENCES public.iam_principal(id) ON DELETE CASCADE;
 
 
 --

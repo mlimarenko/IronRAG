@@ -7,6 +7,8 @@ vi.mock('./generated', () => ({
     createIamSession: vi.fn(),
     deleteIamSession: vi.fn(),
     createIamBootstrap: vi.fn(),
+    updateIamPreferences: vi.fn(),
+    seedIamPreferences: vi.fn(),
   },
 }))
 
@@ -55,5 +57,22 @@ describe('authApi', () => {
       authApi.bootstrapSetup({ login: 'admin@example.test', password: 'correct horse' } as never),
     ).resolves.toEqual({ id: 'session-2' })
     await expect(authApi.logout()).resolves.toBeUndefined()
+  })
+
+  it('binds both preference mutations to the expected principal', async () => {
+    vi.mocked(Iam.updateIamPreferences).mockResolvedValue({
+      data: { telemetryConsent: 'denied' },
+    } as never)
+    vi.mocked(Iam.seedIamPreferences).mockResolvedValue({
+      data: { telemetryConsent: 'granted' },
+    } as never)
+    await authApi.updateIamPreferences('principal-a', 'denied')
+    await authApi.seedIamPreferences('principal-a', 'granted')
+    expect(Iam.updateIamPreferences).toHaveBeenCalledWith({
+      body: { expectedPrincipalId: 'principal-a', telemetryConsent: 'denied' },
+    })
+    expect(Iam.seedIamPreferences).toHaveBeenCalledWith({
+      body: { expectedPrincipalId: 'principal-a', telemetryConsent: 'granted' },
+    })
   })
 })

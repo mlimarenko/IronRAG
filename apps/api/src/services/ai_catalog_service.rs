@@ -59,6 +59,7 @@ use binding_operations::{binding_affects_vector_index_dimension, validate_bindin
 use binding_operations::{parse_request_policy, validate_request_policy};
 #[cfg(test)]
 use bootstrap_operations::bootstrap_env_credential_needs_sync;
+pub(crate) use runtime::embedding_execution_profile_key_for;
 use runtime::{merge_binding_request_context, resolve_effective_embedding_dimensions};
 use runtime_resolution::deduplicate_binding_purposes;
 pub(crate) use runtime_resolution::embedding_profile_key_from_effective_row;

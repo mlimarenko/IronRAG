@@ -40,7 +40,10 @@ pub fn split_large_record_units(
                 heading_trail: block.heading_trail.clone(),
                 section_path: block.section_path.clone(),
                 page_number: block.page_number,
-                source_span: None,
+                // Segments repeat the record header rather than remaining a
+                // contiguous substring. Provenance verifies the field-aware
+                // excerpt against this original record anchor.
+                source_span: block.source_span.clone(),
                 parent_block_id: block.parent_block_id,
                 table_coordinates: None,
                 code_language: None,
@@ -179,6 +182,25 @@ fn render_record_unit_segment_text(
         rendered.push_str(field);
     }
     rendered
+}
+
+/// Verifies a generated record segment against its covering source unit.
+/// Only a repeated header and contiguous, verbatim fields are accepted.
+pub(crate) fn is_record_unit_excerpt(source: &str, excerpt: &str) -> bool {
+    let Some((header, fields)) = source.trim().split_once("fields: ") else {
+        return false;
+    };
+    let Some((excerpt_header, excerpt_fields)) = excerpt.trim().split_once("fields: ") else {
+        return false;
+    };
+    if header != excerpt_header {
+        return false;
+    }
+    let fields = split_record_fields(fields);
+    let excerpt_fields = split_record_fields(excerpt_fields);
+    !excerpt_fields.is_empty()
+        && excerpt_fields.len() <= fields.len()
+        && fields.windows(excerpt_fields.len()).any(|window| window == excerpt_fields)
 }
 
 /// Returns a bounded, field-aware excerpt for the shared `render_record_unit`

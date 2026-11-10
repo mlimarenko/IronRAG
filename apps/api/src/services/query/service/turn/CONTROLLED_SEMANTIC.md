@@ -114,8 +114,11 @@ the lifecycle UUID. Its immutable identity records the canonical `ledgerRoot`;
 a native advisory transaction lock serializes first creation. Another root for
 that lifecycle is rejected before any case dispatch, even if an admission file
 is moved or replaced. Keep this context and its ledger for the complete lifecycle;
-do not delete, relabel or manually repair either to permit replay. Database-level
-anchor behavior still requires observation in the separately admitted fixture.
+do not delete, relabel or manually repair either to permit replay. The ignored
+offline native tests exercise PostgreSQL anchor creation, idempotency, scope and
+root refusal, concurrent ownership, and resolved binding drift in disposable
+databases with provider dispatch denied. They do not replace observation in an
+admitted target or prove provider wire behavior or cost.
 Exclusive synced `started` records precede case-native operations;
 their identity binds the question, answer, protocol and source evidence, excluding
 mutable annotation paths, subset order and newly allocated execution IDs.

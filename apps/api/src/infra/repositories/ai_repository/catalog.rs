@@ -260,6 +260,11 @@ pub async fn create_provider_catalog(
     postgres: &PgPool,
     provider: NewProviderCatalog<'_>,
 ) -> Result<AiProviderCatalogRow, sqlx::Error> {
+    if provider.capability_flags_json.get("financialAdmission").is_some() {
+        return Err(sqlx::Error::Protocol(
+            "financial admission requires configured initialization".into(),
+        ));
+    }
     sqlx::query_as::<_, AiProviderCatalogRow>(
         "insert into ai_provider_catalog (
             id,
@@ -314,7 +319,93 @@ pub async fn update_provider_catalog(
     postgres: &PgPool,
     provider: UpdateProviderCatalog<'_>,
 ) -> Result<Option<AiProviderCatalogRow>, sqlx::Error> {
-    sqlx::query_as::<_, AiProviderCatalogRow>(
+    update_provider_catalog_with_scope(postgres, provider, None).await
+}
+
+/// Row identity read under the provider lock, aliased because the tuple nested
+/// in `Option` exceeds clippy's type-complexity budget.
+type ExistingProviderIdentity = (Value, String, String, String, Option<String>, String);
+
+/// Apply an explicitly configured financial lifecycle action under the same row lock.
+pub async fn update_provider_catalog_with_scope(
+    postgres: &PgPool,
+    mut provider: UpdateProviderCatalog<'_>,
+    scope: Option<&super::pricing::RequiredFinancialScope>,
+) -> Result<Option<AiProviderCatalogRow>, sqlx::Error> {
+    let mut transaction = postgres.begin().await?;
+    let existing: Option<ExistingProviderIdentity> = sqlx::query_as(
+        "select capability_flags_json, provider_kind, api_style::text, lifecycle_state::text, default_base_url, display_name from ai_provider_catalog where id = $1 for update",
+    ).bind(provider.provider_id).fetch_optional(&mut *transaction).await?;
+    let Some((existing, old_kind, old_style, old_lifecycle, old_base, old_display)) = existing
+    else {
+        return Ok(None);
+    };
+    if existing.get("financialAdmission").is_some()
+        && (old_kind != provider.provider_kind
+            || old_style != provider.api_style
+            || old_lifecycle != provider.lifecycle_state
+            || old_base.as_deref() != provider.default_base_url)
+    {
+        return Err(sqlx::Error::Protocol("protected provider identity cannot be changed".into()));
+    }
+    if let Some(ref mut incoming) = provider.capability_flags_json {
+        let old_financial = existing.get("financialAdmission");
+        let desired_financial = incoming.get("financialAdmission");
+        if let Some(scope) = scope {
+            use crate::domains::provider_profiles::FinancialAdmission;
+            let invalid = || sqlx::Error::Protocol("financial admission lifecycle refused".into());
+            if scope.provider_id != provider.provider_id
+                || old_kind != provider.provider_kind
+                || old_style != provider.api_style
+                || old_lifecycle != provider.lifecycle_state
+                || old_base.as_deref() != provider.default_base_url
+                || old_display != provider.display_name
+            {
+                return Err(invalid());
+            }
+            let desired: FinancialAdmission =
+                serde_json::from_value(desired_financial.cloned().ok_or_else(invalid)?)
+                    .map_err(|_| invalid())?;
+            if desired.provider_id != scope.provider_id
+                || desired.scope_id != scope.scope_id
+                || desired.policy_fingerprint != scope.policy_fingerprint
+                || desired.validate().is_err()
+                || desired.immutable_fingerprint().map_err(|_| invalid())?
+                    != scope.policy_fingerprint
+            {
+                return Err(invalid());
+            }
+            let mut old_profile = existing.clone();
+            let mut desired_profile = incoming.clone();
+            old_profile.as_object_mut().ok_or_else(invalid)?.remove("financialAdmission");
+            desired_profile.as_object_mut().ok_or_else(invalid)?.remove("financialAdmission");
+            if old_profile != desired_profile {
+                return Err(invalid());
+            }
+            let current = old_financial
+                .cloned()
+                .map(serde_json::from_value)
+                .transpose()
+                .map_err(|_| invalid())?;
+            let stored = FinancialAdmission::transition(current, desired, chrono::Utc::now())
+                .map_err(|_| invalid())?;
+            incoming.as_object_mut().ok_or_else(invalid)?.insert(
+                "financialAdmission".to_owned(),
+                serde_json::to_value(stored).map_err(|_| invalid())?,
+            );
+        } else if old_financial != desired_financial
+            || (old_financial.is_some() && *incoming != existing)
+        {
+            return Err(sqlx::Error::Protocol(
+                "financial admission cannot be changed by generic update".into(),
+            ));
+        }
+    } else if scope.is_some() {
+        return Err(sqlx::Error::Protocol(
+            "financial admission lifecycle requires a profile".into(),
+        ));
+    }
+    let result = sqlx::query_as::<_, AiProviderCatalogRow>(
         "update ai_provider_catalog
          set provider_kind = $2,
              display_name = $3,
@@ -339,8 +430,10 @@ pub async fn update_provider_catalog(
     .bind(provider.lifecycle_state)
     .bind(provider.default_base_url)
     .bind(provider.capability_flags_json)
-    .fetch_optional(postgres)
-    .await
+    .fetch_optional(&mut *transaction)
+    .await?;
+    transaction.commit().await?;
+    Ok(result)
 }
 
 /// Real hard delete. The provider row's `on delete restrict` foreign keys
@@ -353,7 +446,7 @@ pub async fn delete_provider_catalog(
     postgres: &PgPool,
     provider_id: Uuid,
 ) -> Result<bool, sqlx::Error> {
-    let result = sqlx::query("delete from ai_provider_catalog where id = $1")
+    let result = sqlx::query("delete from ai_provider_catalog where id = $1 and not (capability_flags_json ? 'financialAdmission')")
         .bind(provider_id)
         .execute(postgres)
         .await?;

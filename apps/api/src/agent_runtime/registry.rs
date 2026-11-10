@@ -58,7 +58,6 @@ impl RuntimeTaskRegistry {
         self.entries.get(&task_kind).map(|entry| entry.contract_version)
     }
 
-    #[must_use]
     pub fn entries(
         &self,
     ) -> impl ExactSizeIterator<Item = (&RuntimeTaskKind, &RuntimeTaskCatalogEntry)> {

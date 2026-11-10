@@ -109,6 +109,35 @@ fn preparation_units_exhaust_exact_utf8_answer_and_stable_ids() -> TestResult {
 }
 
 #[test]
+fn sentence_level_units_isolate_each_assertion() -> TestResult {
+    let answer = "Deadline is 90 seconds. Restart is forbidden. The orchestrator keeps confirmations in distributed memory.";
+    let input = prepared(answer)?;
+    assert_eq!(input.units().len(), 3);
+    assert_eq!(input.units().iter().map(|unit| unit.text.as_str()).collect::<String>(), answer);
+    assert!(input.units()[2].text.contains("distributed memory"));
+    Ok(())
+}
+
+#[test]
+fn empty_authorized_source_is_ignored_not_a_provenance_failure() -> TestResult {
+    let valid = source("The marker is amber.");
+    let empty = AuthorizedSemanticSource { text: "   ".into(), ..source("x") };
+    let prepared = prepare("Q", "The marker is amber.", vec![empty, valid])?;
+    assert_eq!(prepared.sources().len(), 1);
+    Ok(())
+}
+
+#[test]
+fn all_empty_authorized_sources_are_no_evidence() -> TestResult {
+    let empty = AuthorizedSemanticSource { text: "   ".into(), ..source("x") };
+    assert!(matches!(
+        prepare("Q", "A", vec![empty]).err(),
+        Some(SemanticPreparationError::NoEvidence)
+    ));
+    Ok(())
+}
+
+#[test]
 fn preparation_hashes_bind_exact_source_identity_scope_text_and_locator() -> TestResult {
     let text = "A neutral document.";
     let base = source(text);
@@ -229,16 +258,35 @@ fn preparation_refuses_independent_size_limits_without_truncation() -> TestResul
 fn preparation_rejects_empty_and_invalid_sources() {
     assert_eq!(prepared(" \n").err(), Some(SemanticPreparationError::EmptyAnswer));
     assert_eq!(prepare("Q", "A", vec![]).err(), Some(SemanticPreparationError::NoEvidence));
+    // A set with only whitespace-only sources carries no evidence.
     assert_eq!(
         prepare("Q", "A", vec![source(" ")]).err(),
-        Some(SemanticPreparationError::InvalidSource)
+        Some(SemanticPreparationError::NoEvidence)
     );
+    // Empty sources are ignored when a valid non-empty source remains.
+    let mixed = prepare("Q", "A", vec![source(" "), source("abc")])
+        .expect("a valid source must survive empty-source filtering");
+    assert_eq!(mixed.sources().len(), 1);
+    // Invalid non-empty sources still fail closed.
     let mut item = source("abc");
     item.locator = SemanticSourceLocator::DocumentSlice { start: 4, end: 2 };
     assert_eq!(prepare("Q", "A", vec![item]).err(), Some(SemanticPreparationError::InvalidSource));
     let mut item = source("abc");
     item.document_revision_id = Uuid::nil();
     assert_eq!(prepare("Q", "A", vec![item]).err(), Some(SemanticPreparationError::InvalidSource));
+}
+
+#[test]
+fn over_limit_sentence_answer_falls_back_to_line_units() -> TestResult {
+    let paragraph = "Alpha. Beta. Gamma. Delta. Epsilon. Zeta. Eta. Theta. Iota. Kappa.";
+    let answer = format!("{paragraph}\n{paragraph}\n{paragraph}\n{paragraph}\n");
+    let input = prepared(&answer)?;
+    assert!(
+        input.units().len() <= MAX_ANSWER_UNITS,
+        "sentence splitting over the cap must fall back to paragraph/line units"
+    );
+    assert_eq!(input.units().iter().map(|unit| unit.text.as_str()).collect::<String>(), answer);
+    Ok(())
 }
 
 #[test]
@@ -372,7 +420,29 @@ fn claimless_false_refusal_is_not_vacuous_factual_success() -> TestResult {
     assert_eq!(parse(&input, &value).err(), Some(SemanticValidationError::IncoherentAssessment));
     value["responseClassification"] = json!("false_refusal");
     value["completeness"] = json!("complete");
-    assert_eq!(parse(&input, &value).err(), Some(SemanticValidationError::IncoherentAssessment));
+    let SemanticVerificationOutcome::Completed { assessment } = parse(&input, &value)?.outcome
+    else {
+        return Err("expected completed".into());
+    };
+    assert_eq!(assessment.completeness, SemanticCompleteness::Undetermined);
+    assert_eq!(assessment.response_classification, SemanticResponseClassification::FalseRefusal);
+    Ok(())
+}
+
+#[test]
+fn refusal_completeness_is_derived_undetermined_by_the_server() -> TestResult {
+    let input = prepared("I cannot provide a supported answer.")?;
+    let mut value = response(&input);
+    value["units"][0]["support"] = json!("no_factual_claims");
+    value["units"][0]["evidence"] = json!([]);
+    value["responseClassification"] = json!("false_refusal");
+    value["completeness"] = json!("complete");
+    let SemanticVerificationOutcome::Completed { assessment } = parse(&input, &value)?.outcome
+    else {
+        return Err("expected completed".into());
+    };
+    assert_eq!(assessment.completeness, SemanticCompleteness::Undetermined);
+    assert_eq!(assessment.response_classification, SemanticResponseClassification::FalseRefusal);
     Ok(())
 }
 

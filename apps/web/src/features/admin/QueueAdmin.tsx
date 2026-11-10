@@ -439,7 +439,7 @@ export default function QueueAdmin() {
   const items = useMemo(() => queue.data?.items ?? [], [queue.data?.items])
   const selectedItem = items.find((item) => item.jobId === selectedJobId) ?? null
   // The inspector renders only from a validated queue response. TanStack keeps
-  // the last successful `data` while a poll's `select` throws, so a stale row's
+  // the last successful `data` when a polled response fails validation, so a stale row's
   // movement controls would otherwise stay reachable over the error grid.
   const inspectorItem = queuePhase === 'ready' ? selectedItem : null
 

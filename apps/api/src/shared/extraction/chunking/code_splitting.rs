@@ -1,5 +1,6 @@
 use super::code_boundaries::detect_code_boundaries;
 use super::{StructuredBlockData, StructuredBlockKind, char_count, chunk_block_len};
+use crate::shared::extraction::structured_document::StructuredSourceSpan;
 
 /// Splits large code blocks at language-aware boundaries before chunk windows are built.
 ///
@@ -10,6 +11,7 @@ use super::{StructuredBlockData, StructuredBlockKind, char_count, chunk_block_le
 pub fn split_large_code_blocks(
     blocks: &[StructuredBlockData],
     max_chars: usize,
+    source: Option<&str>,
 ) -> Vec<StructuredBlockData> {
     let max_chars = max_chars.max(1);
     let mut result = Vec::new();
@@ -29,10 +31,48 @@ pub fn split_large_code_blocks(
             result.push(block.clone());
             continue;
         }
+        // Only map offsets when the complete block has one exact location in
+        // its source anchor. Reconstruction can otherwise remove whitespace.
+        let block_start = block.source_span.as_ref().and_then(|anchor| {
+            let source = source?;
+            let start = usize::try_from(anchor.start_offset).ok()?;
+            let end = usize::try_from(anchor.end_offset).ok()?;
+            if end < start {
+                return None;
+            }
+            let anchored: String = source.chars().skip(start).take(end - start).collect();
+            if anchored.chars().count() != end - start {
+                return None;
+            }
+            let offset = anchored.find(&block.text)?;
+            let next = offset + anchored[offset..].chars().next()?.len_utf8();
+            if anchored[next..].contains(&block.text) {
+                return None;
+            }
+            Some(start + anchored[..offset].chars().count())
+        });
+        let mut cursor = 0usize;
+        let mut mapping_valid = true;
         for segment in segments {
             if segment.text.trim().is_empty() && segment.normalized_text.trim().is_empty() {
                 continue;
             }
+            let source_span = block_start.and_then(|block_start| {
+                if !mapping_valid {
+                    return None;
+                }
+                let Some(relative) = block.text[cursor..].find(&segment.text) else {
+                    mapping_valid = false;
+                    return None;
+                };
+                let start = cursor + relative;
+                let end = start + segment.text.len();
+                cursor = end;
+                let start_offset =
+                    i32::try_from(block_start + block.text[..start].chars().count()).ok()?;
+                let end_offset = start_offset + i32::try_from(segment.text.chars().count()).ok()?;
+                Some(StructuredSourceSpan { start_offset, end_offset })
+            });
             result.push(StructuredBlockData {
                 block_id: uuid::Uuid::now_v7(),
                 ordinal: 0,
@@ -42,7 +82,7 @@ pub fn split_large_code_blocks(
                 heading_trail: block.heading_trail.clone(),
                 section_path: block.section_path.clone(),
                 page_number: block.page_number,
-                source_span: None,
+                source_span,
                 parent_block_id: block.parent_block_id,
                 table_coordinates: None,
                 code_language: block.code_language.clone(),

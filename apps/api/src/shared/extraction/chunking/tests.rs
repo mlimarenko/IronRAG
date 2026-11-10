@@ -53,7 +53,27 @@ fn make_chunk(chunk_index: i32, content_text: &str) -> StructuredChunkWindow {
         simhash_fingerprint: None,
         is_near_duplicate: false,
         window_text: None,
+        runtime_provenance: None,
     }
+}
+
+#[test]
+fn oversized_endpoint_block_respects_requested_chunk_size_without_losing_text() {
+    let text = "x".repeat(18_480);
+    let block = make_block(0, StructuredBlockKind::EndpointBlock, &text, false);
+    let chunks = build_structured_chunk_windows(
+        std::slice::from_ref(&block),
+        StructuredChunkingProfile {
+            max_chars: 8192,
+            overlap_chars: 0,
+            max_input_bytes: Some(8192),
+        },
+        None,
+    )
+    .expect("valid chunking profile");
+    assert!(chunks.iter().all(|chunk| chunk.normalized_text.len() <= 8192));
+    assert_eq!(chunks.iter().map(|chunk| chunk.normalized_text.as_str()).collect::<String>(), text);
+    assert!(chunks.iter().all(|chunk| chunk.support_block_ids.contains(&block.block_id)));
 }
 
 #[test]
@@ -64,8 +84,10 @@ fn overlap_produces_shared_blocks_between_chunks() {
 
     let chunks = build_structured_chunk_windows(
         &blocks,
-        StructuredChunkingProfile { max_chars: 1200, overlap_chars: 300 },
-    );
+        StructuredChunkingProfile { max_chars: 1200, overlap_chars: 300, max_input_bytes: None },
+        None,
+    )
+    .expect("valid chunking profile");
 
     assert!(chunks.len() >= 2, "expected at least 2 chunks, got {}", chunks.len());
 
@@ -88,8 +110,10 @@ fn heading_starts_new_chunk_when_window_has_content() {
 
     let chunks = build_structured_chunk_windows(
         &blocks,
-        StructuredChunkingProfile { max_chars: 2800, overlap_chars: 0 },
-    );
+        StructuredChunkingProfile { max_chars: 2800, overlap_chars: 0, max_input_bytes: None },
+        None,
+    )
+    .expect("valid chunking profile");
 
     assert_eq!(chunks.len(), 2, "heading should force a split: got {} chunks", chunks.len());
     assert_eq!(
@@ -109,8 +133,10 @@ fn boilerplate_blocks_are_filtered_from_chunks() {
     let boilerplate_id = blocks[1].block_id;
     let chunks = build_structured_chunk_windows(
         &blocks,
-        StructuredChunkingProfile { max_chars: 2800, overlap_chars: 0 },
-    );
+        StructuredChunkingProfile { max_chars: 2800, overlap_chars: 0, max_input_bytes: None },
+        None,
+    )
+    .expect("valid chunking profile");
 
     for chunk in &chunks {
         assert!(
@@ -134,8 +160,10 @@ fn quality_score_rewards_code_and_headings() {
 
     let chunks = build_structured_chunk_windows(
         &blocks,
-        StructuredChunkingProfile { max_chars: 2800, overlap_chars: 0 },
-    );
+        StructuredChunkingProfile { max_chars: 2800, overlap_chars: 0, max_input_bytes: None },
+        None,
+    )
+    .expect("valid chunking profile");
 
     assert_eq!(chunks.len(), 1);
     // The quality function adds +0.1 for code and +0.1 for heading, but clamps to 1.0 max.
@@ -153,8 +181,10 @@ fn quality_score_penalizes_short_content() {
 
     let chunks = build_structured_chunk_windows(
         &blocks,
-        StructuredChunkingProfile { max_chars: 2800, overlap_chars: 0 },
-    );
+        StructuredChunkingProfile { max_chars: 2800, overlap_chars: 0, max_input_bytes: None },
+        None,
+    )
+    .expect("valid chunking profile");
 
     assert_eq!(chunks.len(), 1);
     assert!(
@@ -170,8 +200,10 @@ fn simhash_fingerprint_is_computed() {
 
     let chunks = build_structured_chunk_windows(
         &blocks,
-        StructuredChunkingProfile { max_chars: 2800, overlap_chars: 0 },
-    );
+        StructuredChunkingProfile { max_chars: 2800, overlap_chars: 0, max_input_bytes: None },
+        None,
+    )
+    .expect("valid chunking profile");
 
     assert_eq!(chunks.len(), 1);
     assert!(chunks[0].simhash_fingerprint.is_some(), "simhash_fingerprint should be Some");
@@ -200,6 +232,7 @@ fn near_duplicate_marking_works() {
             simhash_fingerprint: Some(fingerprint),
             is_near_duplicate: false,
             window_text: None,
+            runtime_provenance: None,
         },
         StructuredChunkWindow {
             chunk_index: 1,
@@ -215,6 +248,7 @@ fn near_duplicate_marking_works() {
             simhash_fingerprint: Some(fingerprint),
             is_near_duplicate: false,
             window_text: None,
+            runtime_provenance: None,
         },
     ];
 
@@ -233,8 +267,10 @@ fn zero_overlap_produces_no_shared_blocks() {
 
     let chunks = build_structured_chunk_windows(
         &blocks,
-        StructuredChunkingProfile { max_chars: 2800, overlap_chars: 0 },
-    );
+        StructuredChunkingProfile { max_chars: 2800, overlap_chars: 0, max_input_bytes: None },
+        None,
+    )
+    .expect("valid chunking profile");
 
     assert!(chunks.len() >= 2, "expected at least 2 chunks");
 
@@ -439,7 +475,7 @@ fn splits_large_code_block_before_chunking() {
         code_language: Some("rust".to_string()),
         is_boilerplate: false,
     };
-    let result = split_large_code_blocks(&[block], 500);
+    let result = split_large_code_blocks(&[block], 500, None);
     assert!(
         result.len() > 1,
         "should split large code block into multiple sub-blocks, got {}",
@@ -449,6 +485,47 @@ fn splits_large_code_block_before_chunking() {
         result.iter().all(|split| split.parent_block_id.is_none()),
         "split code blocks must not reference a discarded parent block"
     );
+}
+
+#[test]
+fn code_split_offsets_require_exact_unique_anchored_source() {
+    use crate::shared::extraction::structured_document::StructuredSourceSpan;
+
+    for text in ["aaaaaaaX\n\nBCDE", "яяяяяяяX\n\nBCDE"] {
+        let source = format!("```\n{text}\n```");
+        let mut block = make_block(0, StructuredBlockKind::CodeBlock, text, false);
+        block.source_span = Some(StructuredSourceSpan {
+            start_offset: 4,
+            end_offset: 4 + i32::try_from(text.chars().count()).unwrap(),
+        });
+        let segments = split_large_code_blocks(&[block.clone()], 4, Some(&source));
+        assert!(segments.len() > 1);
+        let first = segments[0].source_span.as_ref().unwrap();
+        assert_eq!((first.start_offset, first.end_offset), (4, 8));
+        for segment in &segments {
+            if let Some(span) = &segment.source_span {
+                let actual: String = source
+                    .chars()
+                    .skip(span.start_offset as usize)
+                    .take((span.end_offset - span.start_offset) as usize)
+                    .collect();
+                assert_eq!(actual, segment.text);
+            }
+        }
+        assert!(
+            split_large_code_blocks(&[block.clone()], 4, None)
+                .iter()
+                .all(|s| s.source_span.is_none())
+        );
+        let ambiguous = format!("{source}{text}");
+        block.source_span.as_mut().unwrap().end_offset =
+            i32::try_from(ambiguous.chars().count()).unwrap();
+        assert!(
+            split_large_code_blocks(&[block], 4, Some(&ambiguous))
+                .iter()
+                .all(|s| s.source_span.is_none())
+        );
+    }
 }
 
 #[test]
@@ -488,8 +565,10 @@ fn builds_structured_chunk_windows_from_semantic_blocks() {
 
     let chunks = build_structured_chunk_windows(
         &blocks,
-        StructuredChunkingProfile { max_chars: 80, overlap_chars: 0 },
-    );
+        StructuredChunkingProfile { max_chars: 80, overlap_chars: 0, max_input_bytes: None },
+        None,
+    )
+    .expect("valid chunking profile");
 
     assert_eq!(chunks.len(), 1);
     assert_eq!(chunks[0].chunk_kind, StructuredBlockKind::EndpointBlock);
@@ -551,8 +630,10 @@ fn table_rows_become_independent_chunks() {
 
     let chunks = build_structured_chunk_windows(
         &blocks,
-        StructuredChunkingProfile { max_chars: 2800, overlap_chars: 0 },
-    );
+        StructuredChunkingProfile { max_chars: 2800, overlap_chars: 0, max_input_bytes: None },
+        None,
+    )
+    .expect("valid chunking profile");
 
     assert_eq!(chunks.len(), 2);
     assert!(chunks.iter().all(|chunk| chunk.chunk_kind == StructuredBlockKind::TableRow));
@@ -612,8 +693,10 @@ fn table_summaries_become_independent_chunks() {
 
     let chunks = build_structured_chunk_windows(
         &blocks,
-        StructuredChunkingProfile { max_chars: 2800, overlap_chars: 0 },
-    );
+        StructuredChunkingProfile { max_chars: 2800, overlap_chars: 0, max_input_bytes: None },
+        None,
+    )
+    .expect("valid chunking profile");
 
     assert_eq!(chunks.len(), 3);
     assert_eq!(chunks[0].chunk_kind, StructuredBlockKind::Heading);
@@ -633,8 +716,10 @@ fn source_units_become_independent_chunks() {
 
     let chunks = build_structured_chunk_windows(
         &blocks,
-        StructuredChunkingProfile { max_chars: 2800, overlap_chars: 280 },
-    );
+        StructuredChunkingProfile { max_chars: 2800, overlap_chars: 280, max_input_bytes: None },
+        None,
+    )
+    .expect("valid chunking profile");
 
     assert_eq!(chunks.len(), 3);
     assert_eq!(chunks[0].chunk_kind, StructuredBlockKind::SourceProfile);

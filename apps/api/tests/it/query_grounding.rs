@@ -322,7 +322,7 @@ fn admitted_query_turns_fit_the_default_worker_stack() -> Result<()> {
         .enable_all()
         .build()?;
     runtime.block_on(async {
-        let fixture = QueryGroundingAppFixture::create().await?;
+        let fixture = Box::pin(QueryGroundingAppFixture::create()).await?;
         let actor = iam_repository::create_principal(
             &fixture.state.persistence.postgres,
             "user",
@@ -2381,7 +2381,7 @@ async fn context_bundle_roundtrip_by_query_execution_persists_trace_and_chunk_re
 #[tokio::test]
 #[ignore = "requires local postgres service with database create/drop access"]
 async fn persistent_query_result_cache_expires_and_replaces_stale_winner() -> Result<()> {
-    let fixture = QueryGroundingAppFixture::create().await?;
+    let fixture = Box::pin(QueryGroundingAppFixture::create()).await?;
     let result = async {
         let first =
             fixture.create_execution_detail("First cache source", "verified", json!([])).await?;
@@ -2523,7 +2523,7 @@ async fn persistent_query_result_cache_expires_and_replaces_stale_winner() -> Re
 #[tokio::test]
 #[ignore = "requires local postgres service with database create/drop access"]
 async fn query_result_cache_gc_uses_db_ttl_and_keeps_each_batch_bounded() -> Result<()> {
-    let fixture = QueryGroundingAppFixture::create().await?;
+    let fixture = Box::pin(QueryGroundingAppFixture::create()).await?;
     let result = async {
         let detail = fixture
             .create_replayable_execution_detail(
@@ -2754,7 +2754,7 @@ async fn query_result_cache_gc_uses_db_ttl_and_keeps_each_batch_bounded() -> Res
 #[tokio::test]
 #[ignore = "requires local postgres service with database create/drop access"]
 async fn cached_replay_turn_and_audit_row_commit_atomically() -> Result<()> {
-    let fixture = QueryGroundingAppFixture::create().await?;
+    let fixture = Box::pin(QueryGroundingAppFixture::create()).await?;
     let result = async {
         let detail = fixture
             .create_replayable_execution_detail(
@@ -2940,7 +2940,7 @@ async fn replay_materialization_counts(fixture: &QueryGroundingAppFixture) -> Re
 #[tokio::test]
 #[ignore = "requires local postgres and redis services"]
 async fn cached_replay_service_returns_exact_selected_answer_and_audit() -> Result<()> {
-    let fixture = QueryGroundingAppFixture::create().await?;
+    let fixture = Box::pin(QueryGroundingAppFixture::create()).await?;
     let result = async {
         let detail = fixture
             .create_replayable_execution_detail(
@@ -2988,7 +2988,7 @@ async fn cached_replay_service_denies_retained_a_after_intent_and_bound_c() -> R
     use sha2::{Digest, Sha256};
     use std::time::Duration;
 
-    let fixture = QueryGroundingAppFixture::create().await?;
+    let fixture = Box::pin(QueryGroundingAppFixture::create()).await?;
     let result = async {
         let pg = &fixture.state.persistence.postgres;
         let detail = fixture
@@ -3127,7 +3127,7 @@ async fn cached_replay_service_denies_retained_a_after_intent_and_bound_c() -> R
 #[tokio::test]
 #[ignore = "requires local postgres service with database create/drop access"]
 async fn execution_sources_require_exact_execution_scope_and_canonical_bundle() -> Result<()> {
-    let fixture = QueryGroundingAppFixture::create().await?;
+    let fixture = Box::pin(QueryGroundingAppFixture::create()).await?;
     let result = async {
         let pg = &fixture.state.persistence.postgres;
         let detail = fixture
@@ -3248,7 +3248,7 @@ async fn execution_detail_http_denies_deleted_execution_after_hydration_and_with
         response::IntoResponse,
     };
     use std::time::Duration;
-    let fixture = QueryGroundingAppFixture::create().await?;
+    let fixture = Box::pin(QueryGroundingAppFixture::create()).await?;
     let result = async {
         let pg = &fixture.state.persistence.postgres;
         let detail = fixture
@@ -3321,7 +3321,7 @@ async fn execution_detail_http_denies_deleted_execution_after_hydration_and_with
 #[tokio::test]
 #[ignore = "requires isolated postgres and redis services"]
 async fn execution_detail_denies_withdrawn_expanded_fact_support_blocks() -> Result<()> {
-    let fixture = QueryGroundingAppFixture::create().await?;
+    let fixture = Box::pin(QueryGroundingAppFixture::create()).await?;
     let result = async {
         let pg = &fixture.state.persistence.postgres;
         let source = fixture.create_replayable_execution_detail(
@@ -3368,7 +3368,7 @@ async fn execution_detail_denies_withdrawn_expanded_fact_support_blocks() -> Res
 #[tokio::test]
 #[ignore = "requires local postgres service with database create/drop access"]
 async fn cached_replay_rechecks_exact_db_winner_and_ttl_before_materializing() -> Result<()> {
-    let fixture = QueryGroundingAppFixture::create().await?;
+    let fixture = Box::pin(QueryGroundingAppFixture::create()).await?;
     let result = async {
         let first = fixture
             .create_replayable_execution_detail("First cache source?", "First grounded answer.")
@@ -3514,7 +3514,7 @@ async fn cached_replay_rechecks_exact_db_winner_and_ttl_before_materializing() -
 #[tokio::test]
 #[ignore = "requires local postgres service with database create/drop access"]
 async fn parallel_cached_replays_in_one_conversation_serialize_without_deadlock() -> Result<()> {
-    let fixture = QueryGroundingAppFixture::create().await?;
+    let fixture = Box::pin(QueryGroundingAppFixture::create()).await?;
     let result = Box::pin(async {
         let source = fixture
             .create_replayable_execution_detail(
@@ -3616,7 +3616,7 @@ async fn parallel_cached_replays_in_one_conversation_serialize_without_deadlock(
 #[tokio::test]
 #[ignore = "requires local postgres service with database create/drop access"]
 async fn cached_replay_rechecks_terminal_verification_and_grounding_in_transaction() -> Result<()> {
-    let fixture = QueryGroundingAppFixture::create().await?;
+    let fixture = Box::pin(QueryGroundingAppFixture::create()).await?;
     let result = async {
         let source = fixture
             .create_replayable_execution_detail(
@@ -4337,7 +4337,7 @@ async fn concurrent_mcp_retention_enforcement_is_serialized_and_bounded() -> Res
 #[tokio::test]
 #[ignore = "requires local postgres service with database create/drop access"]
 async fn replay_provenance_keeps_external_source_conversation_from_eviction() -> Result<()> {
-    let fixture = QueryGroundingAppFixture::create().await?;
+    let fixture = Box::pin(QueryGroundingAppFixture::create()).await?;
     let result = async {
         let source = fixture
             .create_replayable_execution_detail(
@@ -4748,7 +4748,7 @@ async fn entity_neighborhood_filters_out_context_bundle_vertices() -> Result<()>
 #[ignore = "requires local postgres and redis services"]
 async fn execution_detail_maps_authoritative_verification_states_for_grounding_regressions()
 -> Result<()> {
-    let fixture = QueryGroundingAppFixture::create().await?;
+    let fixture = Box::pin(QueryGroundingAppFixture::create()).await?;
     let result = async {
         let cases = [
             (
@@ -4830,7 +4830,7 @@ async fn execution_detail_maps_authoritative_verification_states_for_grounding_r
 #[tokio::test]
 #[ignore = "requires local postgres and redis services"]
 async fn execution_detail_surfaces_noisy_layout_segments_and_technical_facts() -> Result<()> {
-    let fixture = QueryGroundingAppFixture::create().await?;
+    let fixture = Box::pin(QueryGroundingAppFixture::create()).await?;
     let result = async {
         let document_id = Uuid::now_v7();
         let revision_id = Uuid::now_v7();
@@ -4925,7 +4925,7 @@ async fn execution_detail_surfaces_noisy_layout_segments_and_technical_facts() -
 #[tokio::test]
 #[ignore = "requires local postgres and redis services"]
 async fn execution_detail_surfaces_multihop_graph_and_multi_document_fact_support() -> Result<()> {
-    let fixture = QueryGroundingAppFixture::create().await?;
+    let fixture = Box::pin(QueryGroundingAppFixture::create()).await?;
     let result = async {
         let inventory_document_id = Uuid::now_v7();
         let inventory_revision_id = Uuid::now_v7();

@@ -421,6 +421,11 @@ pub(super) fn validate_response(
             Some(provider_call_id),
         )
         .unwrap_or_else(|error| {
+            tracing::warn!(
+                provider_call_id = %provider_call_id,
+                error = ?error,
+                "semantic verification response validation failed"
+            );
             prepared.failed(error.failure_code(), elapsed, Some(provider_call_id))
         })
 }

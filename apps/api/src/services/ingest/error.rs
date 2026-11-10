@@ -60,6 +60,9 @@ impl IngestServiceError {
                 crate::shared::provider_failure::ProviderFailureKind::QuotaExhausted => {
                     "IngestServiceError::ProviderQuotaExhausted"
                 }
+                crate::shared::provider_failure::ProviderFailureKind::RequestRejected => {
+                    "IngestServiceError::ProviderRequestRejected"
+                }
             },
             Self::Cancelled => "IngestServiceError::Cancelled",
             Self::Repository(_) => "IngestServiceError::Repository",

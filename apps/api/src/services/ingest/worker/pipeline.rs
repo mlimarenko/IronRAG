@@ -2,7 +2,7 @@ use std::time::Instant;
 
 use anyhow::Context;
 use chrono::Utc;
-use tracing::{info, warn};
+use tracing::{Instrument as _, info, warn};
 
 use crate::{
     infra::repositories::ingest_repository,
@@ -28,17 +28,27 @@ pub(super) enum ContentPipelineOutcome {
     LifecyclePublished,
 }
 
+#[expect(
+    clippy::cognitive_complexity,
+    reason = "the content pipeline is a flat sequence of named stages; the tracing spans add the remaining branches"
+)]
 pub(super) async fn run_ingest_pipeline(
     context: IngestStageContext<'_>,
 ) -> anyhow::Result<ContentPipelineOutcome> {
-    let PreparedContent { revision } = Box::pin(prepare_ingest_content(&context)).await?;
-    let embedding = embed_ingest_content(&context, &revision).await?;
+    let PreparedContent { revision } = Box::pin(prepare_ingest_content(&context))
+        .instrument(tracing::info_span!("ingest.prepare", "ingest.stage" = "prepare"))
+        .await?;
+    let embedding = embed_ingest_content(&context, &revision)
+        .instrument(tracing::info_span!("ingest.embed", "ingest.stage" = "embed"))
+        .await?;
 
     // Summary generation and execution-profile validation may need the main
     // pool/provider stack, so both must finish before graph reconcile acquires
     // its long heartbeat-pool publication guard. The summary itself remains
     // uncommitted until the exact attempt publication below.
-    let document_summary = prepare_document_summary(&context).await;
+    let document_summary = prepare_document_summary(&context)
+        .instrument(tracing::info_span!("ingest.summary", "ingest.stage" = "summary"))
+        .await;
     validate_embedding_execution_profile(
         &context,
         revision.library_id,
@@ -46,13 +56,16 @@ pub(super) async fn run_ingest_pipeline(
     )
     .await?;
 
-    let graph = extract_revision_graph(&context, &revision).await?;
-    finalize_content_readiness(&context, &revision, embedding, document_summary, graph).await
+    let graph = extract_revision_graph(&context, &revision)
+        .instrument(tracing::info_span!("ingest.graph", "ingest.stage" = "graph"))
+        .await?;
+    finalize_content_readiness(&context, embedding, document_summary, graph)
+        .instrument(tracing::info_span!("ingest.finalize", "ingest.stage" = "finalize"))
+        .await
 }
 
 async fn finalize_content_readiness(
     context: &IngestStageContext<'_>,
-    revision: &crate::infra::knowledge_rows::KnowledgeRevisionRow,
     embedding: EmbeddingStageOutcome,
     document_summary: Option<String>,
     graph: GraphExtractionOutcome,
@@ -173,11 +186,11 @@ async fn finalize_content_readiness(
         .await
     }
     .context("failed to atomically publish content ingest success")?;
-    let (mutation_completed, source_truth_version) = match publication {
+    let mutation_completed = match publication {
         ingest_repository::PublishContentIngestSuccessOutcome::Applied {
             mutation_completed,
-            source_truth_version,
-        } => (mutation_completed, source_truth_version),
+            ..
+        } => mutation_completed,
         ingest_repository::PublishContentIngestSuccessOutcome::AuthorityLost { .. } => {
             return Err(anyhow::Error::new(JobLeaseLost { job_id: job.id }));
         }
@@ -185,18 +198,64 @@ async fn finalize_content_readiness(
 
     refresh_published_content_summary(
         context,
-        revision.library_id,
-        source_truth_version,
+        job.library_id,
+        publication,
         pending_summary_refresh,
     )
     .await;
 
-    invalidate_library_embedding_profile_inventory(revision.library_id);
+    invalidate_library_embedding_profile_inventory(job.library_id);
     settle_published_content_page(context, mutation_item_id).await;
     converge_published_technical_facts(context).await;
 
     log_content_publication(context, mutation_completed);
     Ok(ContentPipelineOutcome::LifecyclePublished)
+}
+
+/// Runs worker publication and its deferred effects using already retained
+/// extraction/vector results. No preparation or provider stage is invoked.
+#[cfg(feature = "test-support")]
+pub async fn finalize_content_readiness_for_test(
+    state: &crate::app::state::AppState,
+    job: &ingest_repository::IngestJobRow,
+    input: &ingest_repository::PublishContentIngestSuccess,
+    effects: ingest_repository::ContentIngestPublicationEffects,
+    authorized: crate::services::graph::service::AuthorizedRevisionGraphReconcile,
+) -> anyhow::Result<()> {
+    let cancellation_token = tokio_util::sync::CancellationToken::new();
+    let requested = std::sync::atomic::AtomicBool::new(false);
+    let context = IngestStageContext {
+        state,
+        worker_id: "prepared-content-completion-test",
+        job,
+        attempt_id: input.attempt_id,
+        document_id: input.document_id,
+        revision_id: input.revision_id,
+        cancellation: super::errors::PipelineCancellation {
+            token: &cancellation_token,
+            user_requested: &requested,
+            operator_pause_requested: &requested,
+            lease_lost_requested: &requested,
+        },
+    };
+    let outcome = authorized.outcome?;
+    finalize_content_readiness(
+        &context,
+        EmbeddingStageOutcome {
+            source_truth_version: input.expected_source_truth_version,
+            embedding_profile_key: input.embedding_profile_key.clone(),
+        },
+        effects.document_summary,
+        GraphExtractionOutcome {
+            graph_ready: outcome.graph_ready,
+            graph_degraded: false,
+            pending_summary_refresh: outcome.pending_summary_refresh,
+            publication_guard: Some(authorized.publication_guard),
+            terminal_stage_event: effects.terminal_stage_events.into_iter().next(),
+        },
+    )
+    .await?;
+    Ok(())
 }
 
 fn log_content_publication(context: &IngestStageContext<'_>, mutation_completed: bool) {
@@ -243,9 +302,12 @@ async fn validate_embedding_execution_profile(
 async fn refresh_published_content_summary(
     context: &IngestStageContext<'_>,
     library_id: uuid::Uuid,
-    source_truth_version: i64,
+    publication: ingest_repository::PublishContentIngestSuccessOutcome,
     pending_summary_refresh: Option<crate::services::graph::summary::PendingGraphSummaryRefresh>,
 ) {
+    let Some(source_truth_version) = publication.published_source_truth_version() else {
+        return;
+    };
     if let Some(pending_summary_refresh) = pending_summary_refresh
         && let Err(error) = context
             .state

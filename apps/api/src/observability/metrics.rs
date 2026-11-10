@@ -10,7 +10,7 @@
 //! free-form codes pass through `sanitize_label` so no unbounded token can
 //! explode the time series.
 
-use std::sync::OnceLock;
+use std::sync::{Arc, Mutex};
 
 use opentelemetry::{
     KeyValue, global,
@@ -218,17 +218,63 @@ struct Metrics {
     graph_extraction_cache: Counter<u64>,
     provider_calls: Counter<u64>,
     provider_cost_usd: Counter<f64>,
+    provider_http_duration: Histogram<f64>,
     semantic_rerank_degradations: Counter<u64>,
+    db_pool_connections: Gauge<u64>,
+    query_turns: Counter<u64>,
+    query_turn_duration: Histogram<f64>,
+}
+
+/// The meters one process needs, grouped so [`Metrics::new`] keeps a stable
+/// argument list as scopes are added.
+struct Meters {
+    ingest: Meter,
+    maintenance: Meter,
+    graph: Meter,
+    provider: Meter,
+    retrieval: Meter,
+    db: Meter,
+    query: Meter,
+}
+
+impl Meters {
+    fn global() -> Self {
+        Self {
+            ingest: global::meter("ironrag.ingest"),
+            maintenance: global::meter("ironrag.maintenance"),
+            graph: global::meter("ironrag.graph"),
+            provider: global::meter("ironrag.provider"),
+            retrieval: global::meter("ironrag.retrieval"),
+            db: global::meter("ironrag.db"),
+            query: global::meter("ironrag.query"),
+        }
+    }
+
+    #[cfg(test)]
+    fn from_meter(meter: &Meter) -> Self {
+        Self {
+            ingest: meter.clone(),
+            maintenance: meter.clone(),
+            graph: meter.clone(),
+            provider: meter.clone(),
+            retrieval: meter.clone(),
+            db: meter.clone(),
+            query: meter.clone(),
+        }
+    }
 }
 
 impl Metrics {
-    fn new(
-        ingest_meter: &Meter,
-        maintenance_meter: &Meter,
-        graph_meter: &Meter,
-        provider_meter: &Meter,
-        retrieval_meter: &Meter,
-    ) -> Self {
+    fn new(meters: &Meters) -> Self {
+        let Meters {
+            ingest: ingest_meter,
+            maintenance: maintenance_meter,
+            graph: graph_meter,
+            provider: provider_meter,
+            retrieval: retrieval_meter,
+            db: db_meter,
+            query: query_meter,
+        } = meters;
         Self {
             ingest_attempts: ingest_meter
                 .u64_counter("ironrag.ingest.attempts")
@@ -275,12 +321,32 @@ impl Metrics {
                 .with_description("Provider cost recorded by tracked calls, in USD")
                 .with_unit("USD")
                 .build(),
+            provider_http_duration: provider_meter
+                .f64_histogram("ironrag.provider.http_duration")
+                .with_description("Wall-clock duration of one provider HTTP attempt")
+                .with_unit("s")
+                .build(),
             semantic_rerank_degradations: retrieval_meter
                 .u64_counter("ironrag.semantic_rerank.degradations")
                 .with_description(
                     "Optional active semantic rerank fell back to lexical order, by reason",
                 )
                 .with_unit("{degradation}")
+                .build(),
+            db_pool_connections: db_meter
+                .u64_gauge("ironrag.db.pool.connections")
+                .with_description("PostgreSQL pool connections by pool and state")
+                .with_unit("{connection}")
+                .build(),
+            query_turns: query_meter
+                .u64_counter("ironrag.query.turns")
+                .with_description("Completed query turns by surface")
+                .with_unit("{turn}")
+                .build(),
+            query_turn_duration: query_meter
+                .f64_histogram("ironrag.query.turn_duration")
+                .with_description("Wall-clock duration of a completed query turn")
+                .with_unit("s")
                 .build(),
         }
     }
@@ -397,19 +463,65 @@ impl Metrics {
         self.semantic_rerank_degradations
             .add(1, &[KeyValue::new("reason", sanitize_label(reason))]);
     }
+
+    fn record_provider_http_duration(
+        &self,
+        provider: &str,
+        operation: &str,
+        outcome: &str,
+        seconds: f64,
+    ) {
+        if !seconds.is_finite() || seconds < 0.0 {
+            return;
+        }
+        self.provider_http_duration.record(
+            seconds,
+            &[
+                KeyValue::new("provider", sanitize_label(provider)),
+                KeyValue::new("operation", sanitize_label(operation)),
+                KeyValue::new("outcome", outcome.to_string()),
+            ],
+        );
+    }
+
+    fn record_db_pool_connections(&self, pool: &str, state: &str, count: u64) {
+        self.db_pool_connections.record(
+            count,
+            &[KeyValue::new("pool", pool.to_string()), KeyValue::new("state", state.to_string())],
+        );
+    }
+
+    fn record_query_turn(&self, surface: &str, duration_seconds: f64) {
+        let surface = sanitize_label(surface);
+        self.query_turns.add(1, &[KeyValue::new("surface", surface.clone())]);
+        if duration_seconds.is_finite() && duration_seconds >= 0.0 {
+            self.query_turn_duration.record(duration_seconds, &[KeyValue::new("surface", surface)]);
+        }
+    }
 }
 
-fn metrics() -> &'static Metrics {
-    static METRICS: OnceLock<Metrics> = OnceLock::new();
-    METRICS.get_or_init(|| {
-        Metrics::new(
-            &global::meter("ironrag.ingest"),
-            &global::meter("ironrag.maintenance"),
-            &global::meter("ironrag.graph"),
-            &global::meter("ironrag.provider"),
-            &global::meter("ironrag.retrieval"),
-        )
-    })
+static METRICS: Mutex<Option<Arc<Metrics>>> = Mutex::new(None);
+
+fn metrics() -> Arc<Metrics> {
+    let mut guard = METRICS.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some(metrics) = guard.as_ref() {
+        return Arc::clone(metrics);
+    }
+    let metrics = Arc::new(Metrics::new(&Meters::global()));
+    *guard = Some(Arc::clone(&metrics));
+    metrics
+}
+
+/// Drops instruments cached before the OTLP meter provider was installed.
+///
+/// `AppState` construction records startup metrics before
+/// `install_otlp_providers` publishes the global provider. Those instruments
+/// are bound to the no-op global meter and never export. Resetting the cache
+/// after the provider is installed makes the next record call build the
+/// instruments from the real provider.
+pub(crate) fn reset_after_meter_provider_install() {
+    let mut guard = METRICS.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    *guard = None;
 }
 
 /// Records one terminal ingest attempt and its duration in seconds.
@@ -475,6 +587,24 @@ pub fn record_provider_cost_usd(call_kind: &str, model: &str, usd: f64) {
 /// when no single log line is inspected.
 pub fn record_semantic_rerank_degradation(reason: &str) {
     metrics().record_semantic_rerank_degradation(reason);
+}
+
+/// Records one provider HTTP attempt. `provider` and `operation` are the
+/// bounded integration identity; `outcome` is `ok` or `error`.
+pub fn record_provider_http_duration(provider: &str, operation: &str, outcome: &str, seconds: f64) {
+    metrics().record_provider_http_duration(provider, operation, outcome, seconds);
+}
+
+/// Records the current PostgreSQL pool connection count for one bounded
+/// `(pool, state)` pair. `state` is `active`, `idle` or `max`.
+pub fn record_db_pool_connections(pool: &str, state: &str, count: u64) {
+    metrics().record_db_pool_connections(pool, state, count);
+}
+
+/// Records one completed query turn and its end-to-end duration. `surface` is
+/// the bounded turn surface (`agent` or `grounded`).
+pub fn record_query_turn(surface: &str, duration_seconds: f64) {
+    metrics().record_query_turn(surface, duration_seconds);
 }
 
 #[cfg(test)]
@@ -558,7 +688,7 @@ mod tests {
             .with_reader(PeriodicReader::builder(exporter.clone()).build())
             .build();
         let meter = provider.meter("ironrag.metrics.test");
-        let metrics = Metrics::new(&meter, &meter, &meter, &meter, &meter);
+        let metrics = Metrics::new(&Meters::from_meter(&meter));
         (provider, exporter, metrics)
     }
 
@@ -708,6 +838,66 @@ mod tests {
     fn unknown_job_kind_is_bounded_to_other() {
         assert_eq!(normalize_job_kind("brand_new_kind"), "other");
         assert_eq!(normalize_job_kind("content_mutation"), "content_mutation");
+    }
+
+    #[test]
+    fn provider_http_duration_carries_bounded_identity() {
+        let (provider, exporter, metrics) = test_fixture();
+        metrics.record_provider_http_duration("anthropic", "chat", "ok", 1.75);
+        let points = collect(&provider, &exporter);
+        let point = find(&points, "ironrag.provider.http_duration", "provider", "anthropic");
+        assert_eq!(point.value, 1.0, "one histogram observation");
+        assert_eq!(
+            point.attributes.iter().find(|(k, _)| k == "operation").map(|(_, v)| v.as_str()),
+            Some("chat")
+        );
+        assert_eq!(
+            point.attributes.iter().find(|(k, _)| k == "outcome").map(|(_, v)| v.as_str()),
+            Some("ok")
+        );
+    }
+
+    #[test]
+    fn provider_http_duration_ignores_invalid_seconds() {
+        let (provider, exporter, metrics) = test_fixture();
+        metrics.record_provider_http_duration("openai", "embeddings", "error", f64::NAN);
+        metrics.record_provider_http_duration("openai", "embeddings", "error", -1.0);
+        let points = collect(&provider, &exporter);
+        assert!(
+            points.iter().all(|point| point.name != "ironrag.provider.http_duration"),
+            "invalid durations must not create an observation"
+        );
+    }
+
+    #[test]
+    fn db_pool_connections_carry_pool_and_state() {
+        let (provider, exporter, metrics) = test_fixture();
+        metrics.record_db_pool_connections("main", "active", 9);
+        metrics.record_db_pool_connections("main", "max", 20);
+        let points = collect(&provider, &exporter);
+        assert_eq!(find(&points, "ironrag.db.pool.connections", "state", "active").value, 9.0);
+        assert_eq!(find(&points, "ironrag.db.pool.connections", "state", "max").value, 20.0);
+        assert_eq!(
+            find(&points, "ironrag.db.pool.connections", "state", "active")
+                .attributes
+                .iter()
+                .find(|(k, _)| k == "pool")
+                .map(|(_, v)| v.as_str()),
+            Some("main")
+        );
+    }
+
+    #[test]
+    fn query_turn_records_surface_and_duration() {
+        let (provider, exporter, metrics) = test_fixture();
+        metrics.record_query_turn("grounded", 2.5);
+        let points = collect(&provider, &exporter);
+        assert_eq!(find(&points, "ironrag.query.turns", "surface", "grounded").value, 1.0);
+        assert_eq!(
+            find(&points, "ironrag.query.turn_duration", "surface", "grounded").value,
+            1.0,
+            "one histogram observation"
+        );
     }
 
     #[test]

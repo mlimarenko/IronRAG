@@ -164,6 +164,7 @@ pub(super) async fn embed_question(
             api_key_override: embedding_binding.api_key.clone(),
             base_url_override: embedding_binding.provider_base_url.clone(),
             extra_parameters_json: embedding_binding.extra_parameters_json.clone(),
+            dispatch: Some(embedding_binding.dispatch_authority()),
         }),
     )
     .await
@@ -220,6 +221,9 @@ mod tests {
 
     fn binding() -> ResolvedRuntimeBinding {
         ResolvedRuntimeBinding {
+            admission: std::sync::Arc::new(
+                crate::integrations::provider_admission::UnqualifiedTestAdmission,
+            ),
             binding_id: Uuid::from_u128(1),
             workspace_id: Uuid::from_u128(2),
             library_id: Uuid::from_u128(3),

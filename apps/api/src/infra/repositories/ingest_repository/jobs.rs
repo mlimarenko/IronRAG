@@ -7,6 +7,7 @@ use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use sqlx::{Acquire, Executor, FromRow, PgPool, Postgres};
+use tracing::Instrument as _;
 use uuid::Uuid;
 
 /// Settles a bounded batch of historical failed content jobs that predate
@@ -404,6 +405,11 @@ async fn count_live_graph_refresh_jobs(
 ///
 /// Transaction-aware callers use this to commit a job and its owning domain
 /// record atomically.
+///
+/// The `ingest.enqueue` span is the producer side of the worker's `ingest.job`
+/// span: it carries the workspace, library, kind and job id, which is the only
+/// identity the API and the worker share across the queue, so an operator can
+/// join a request to the trace that later processed its job.
 pub async fn create_ingest_job_with_executor<'e, E>(
     executor: E,
     input: &NewIngestJob,
@@ -411,8 +417,18 @@ pub async fn create_ingest_job_with_executor<'e, E>(
 where
     E: Executor<'e, Database = Postgres>,
 {
-    sqlx::query_as::<_, IngestJobRow>(sqlx::AssertSqlSafe(format!(
-        "insert into ingest_job (
+    let job_id = Uuid::now_v7();
+    let span = tracing::info_span!(
+        "ingest.enqueue",
+        otel.kind = "producer",
+        "workspace.id" = %input.workspace_id,
+        "library.id" = %input.library_id,
+        "ingest.job.id" = %job_id,
+        "ingest.job.kind" = %input.job_kind,
+    );
+    async {
+        sqlx::query_as::<_, IngestJobRow>(sqlx::AssertSqlSafe(format!(
+            "insert into ingest_job (
             id,
             workspace_id,
             library_id,
@@ -450,24 +466,27 @@ where
         )
         returning
             {INGEST_JOB_COLUMNS}",
-    )))
-    .bind(Uuid::now_v7())
-    .bind(input.workspace_id)
-    .bind(input.library_id)
-    .bind(input.mutation_id)
-    .bind(input.mutation_item_id)
-    .bind(input.connector_id)
-    .bind(input.async_operation_id)
-    .bind(input.knowledge_document_id)
-    .bind(input.knowledge_revision_id)
-    .bind(&input.job_kind)
-    .bind(&input.queue_state)
-    .bind(input.priority)
-    .bind(&input.dedupe_key)
-    .bind(input.queued_at)
-    .bind(input.available_at)
-    .bind(input.completed_at)
-    .fetch_one(executor)
+        )))
+        .bind(job_id)
+        .bind(input.workspace_id)
+        .bind(input.library_id)
+        .bind(input.mutation_id)
+        .bind(input.mutation_item_id)
+        .bind(input.connector_id)
+        .bind(input.async_operation_id)
+        .bind(input.knowledge_document_id)
+        .bind(input.knowledge_revision_id)
+        .bind(&input.job_kind)
+        .bind(&input.queue_state)
+        .bind(input.priority)
+        .bind(&input.dedupe_key)
+        .bind(input.queued_at)
+        .bind(input.available_at)
+        .bind(input.completed_at)
+        .fetch_one(executor)
+        .await
+    }
+    .instrument(span)
     .await
 }
 

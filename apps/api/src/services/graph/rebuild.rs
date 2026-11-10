@@ -102,6 +102,24 @@ pub(crate) async fn rebuild_library_graph(
         rebuild_library_graph_in_transaction(state, library_id, guard.connection()).await;
     match transaction_result {
         Ok(RebuildTransactionOutcome::Published(outcome)) => {
+            let published = repositories::get_runtime_graph_snapshot_with_executor(
+                &mut *guard.connection(),
+                library_id,
+            )
+            .await?
+            .ok_or_else(|| GraphServiceError::PersistenceIntegrity {
+                message: "rebuilt graph snapshot is missing".to_owned(),
+            })?;
+            if !repositories::content_fingerprint_repository::graph_projection_is_current_with_executor(
+                &mut *guard.connection(), published.projection_identity(),
+            )
+            .await?
+            {
+                guard.rollback().await.context("roll back unpublished rebuilt graph")?;
+                return Err(GraphServiceError::PersistenceIntegrity {
+                    message: "rebuilt graph does not match its published sources and topology".to_owned(),
+                });
+            }
             guard.commit().await.context("failed to commit atomic runtime graph rebuild")?;
             schedule_topology_prewarm(state, library_id);
             Ok(outcome)
@@ -129,6 +147,10 @@ pub(crate) async fn rebuild_library_graph(
     }
 }
 
+#[expect(
+    clippy::cognitive_complexity,
+    reason = "atomic library rebuild coordinates snapshot, cursor, merge and projection phases"
+)]
 async fn rebuild_library_graph_in_transaction(
     state: &AppState,
     library_id: Uuid,
@@ -194,14 +216,17 @@ async fn rebuild_library_graph_in_transaction(
     }
 
     tracing::info!(%library_id, phase = "merge", elapsed_seconds = started.elapsed().as_secs(), "runtime graph rebuild phase");
+    let cursor_context = RebuildExtractionCursorContext {
+        scope: &GraphMergeScope::new(library_id, projection_version),
+        ready_documents: &ready_documents,
+        started,
+    };
     merge_rebuild_extraction_cursor_with_connection(
         state,
         connection,
-        &GraphMergeScope::new(library_id, projection_version),
-        &ready_documents,
+        &cursor_context,
         &mut extractions,
         first_batch,
-        started,
     )
     .await?;
     extractions.close(connection).await.context("failed to close rebuild extraction cursor")?;
@@ -260,15 +285,24 @@ async fn rebuild_library_graph_in_transaction(
     Ok(RebuildTransactionOutcome::Published(projection))
 }
 
+struct RebuildExtractionCursorContext<'a> {
+    scope: &'a GraphMergeScope,
+    ready_documents: &'a BTreeMap<Uuid, ReadyGraphDocument>,
+    started: std::time::Instant,
+}
+
+#[expect(
+    clippy::cognitive_complexity,
+    reason = "rebuild extraction cursor merges batches, logs progress and advances cursor"
+)]
 async fn merge_rebuild_extraction_cursor_with_connection(
     state: &AppState,
     connection: &mut sqlx::PgConnection,
-    scope: &GraphMergeScope,
-    ready_documents: &BTreeMap<Uuid, ReadyGraphDocument>,
+    context: &RebuildExtractionCursorContext<'_>,
     extractions: &mut repositories::RuntimeGraphRebuildExtractionCursor,
     mut batch: Vec<repositories::RuntimeGraphRebuildExtractionRow>,
-    started: std::time::Instant,
 ) -> Result<(), GraphServiceError> {
+    let RebuildExtractionCursorContext { scope, ready_documents, started } = *context;
     let mut batches = 0usize;
     let mut records = 0usize;
     while !batch.is_empty() {
@@ -294,8 +328,7 @@ async fn merge_rebuild_extraction_cursor_with_connection(
             rebuild_graph_extraction_record_with_connection(
                 state,
                 connection,
-                scope.library_id,
-                scope.projection_version,
+                scope,
                 expected_completion,
                 &identities,
                 record,
@@ -304,7 +337,7 @@ async fn merge_rebuild_extraction_cursor_with_connection(
         }
         batches += 1;
         records += batch_len;
-        if batches == 1 || batches % 16 == 0 {
+        if batches == 1 || batches.is_multiple_of(16) {
             tracing::info!(library_id = %scope.library_id, batches, records, elapsed_seconds = started.elapsed().as_secs(), "runtime graph rebuild merge progress");
         }
         batch = extractions
@@ -319,8 +352,7 @@ async fn merge_rebuild_extraction_cursor_with_connection(
 async fn rebuild_graph_extraction_record_with_connection(
     state: &AppState,
     connection: &mut sqlx::PgConnection,
-    library_id: Uuid,
-    projection_version: i64,
+    scope: &GraphMergeScope,
     expected_completion: Option<&ReadyGraphDocument>,
     identities: &repositories::runtime_graph_repository::RuntimeGraphRebuildIdentities,
     record: repositories::runtime_graph_repository::RuntimeGraphRebuildExtractionRow,
@@ -331,8 +363,8 @@ async fn rebuild_graph_extraction_record_with_connection(
     let Some(document_row) = identities.documents.get(&record.document_id) else {
         return Ok(None);
     };
-    if record.library_id != library_id
-        || document_row.library_id != library_id
+    if record.library_id != scope.library_id
+        || document_row.library_id != scope.library_id
         || document_row.deleted_at.is_some()
     {
         return Ok(None);
@@ -351,7 +383,7 @@ async fn rebuild_graph_extraction_record_with_connection(
         || expected_completion.revision_id != revision_id
         || expected_completion.activated_by_attempt_id
             != extraction_lifecycle.activated_by_attempt_id
-        || active_readable_revision_id(&document_head) != Some(revision_id)
+        || active_readable_revision_id(document_head) != Some(revision_id)
     {
         return Ok(None);
     }
@@ -360,7 +392,7 @@ async fn rebuild_graph_extraction_record_with_connection(
     };
     if revision.document_id != record.document_id
         || revision.workspace_id != document_row.workspace_id
-        || revision.library_id != library_id
+        || revision.library_id != scope.library_id
     {
         return Ok(None);
     }
@@ -374,7 +406,8 @@ async fn rebuild_graph_extraction_record_with_connection(
     }
 
     let document = synthesize_document_row(document_row, document_head, Some(revision));
-    let chunk = synthesize_chunk_row(chunk_row, document_row.id, library_id, revision.created_at);
+    let chunk =
+        synthesize_chunk_row(chunk_row, document_row.id, scope.library_id, revision.created_at);
     let extraction_recovery =
         extraction_recovery_summary_from_json(record.recovery_summary.as_ref());
     let candidates = repaired_graph_extraction_candidates(record.normalized_output_json)
@@ -388,7 +421,8 @@ async fn rebuild_graph_extraction_record_with_connection(
         return Ok(None);
     }
 
-    let merge_scope = GraphMergeScope::new(library_id, projection_version)
+    let merge_scope = scope
+        .clone()
         .with_lifecycle(Some(revision_id), extraction_lifecycle.activated_by_attempt_id);
     merge_chunk_graph_candidates_with_connection(
         connection,
@@ -528,22 +562,8 @@ pub(crate) async fn reconcile_revision_graph_authorized(
     // new chunk ids in place; only the appended chunks are extracted and merged
     // again. Any other change (edit, delete, reorder) keeps the full teardown
     // path below unchanged.
-    let pure_append = match previous_active_revision_id {
-        Some(previous_revision_id) => {
-            let previous_chunks = content_chunk_repository::list_chunks_by_revision_with_executor(
-                &mut *connection,
-                previous_revision_id,
-            )
-            .await
-            .with_context(|| {
-                format!(
-                    "failed to list previous revision chunks {previous_revision_id} while classifying append"
-                )
-            })?;
-            classify_pure_append_chunks(&previous_chunks, &revision_chunks)
-        }
-        None => None,
-    };
+    let pure_append =
+        load_pure_append_delta(connection, previous_active_revision_id, &revision_chunks).await?;
     let carried_evidence_target_count = carry_previous_revision_graph_evidence(
         connection,
         PreviousRevisionCarry {
@@ -622,12 +642,58 @@ pub(crate) async fn reconcile_revision_graph_authorized(
         cancellation_token,
     )
     .await?;
-    Ok(RevisionGraphReconcileOutcome {
-        graph_ready: graph_contribution_count > 0 && projection.graph_status == GRAPH_STATUS_READY,
+    finish_revision_graph_reconcile(
+        connection,
+        authority.library_id,
+        snapshot.as_ref(),
+        projection,
         graph_contribution_count,
-        pending_summary_refresh: Some(pending_summary_refresh),
+        pending_summary_refresh,
+    )
+    .await
+}
+
+/// Per-revision results remain ready while library-wide topology is stale, but
+/// a targeted refresh cannot certify aggregates removed by another source's GC.
+async fn finish_revision_graph_reconcile(
+    connection: &mut sqlx::PgConnection,
+    library_id: Uuid,
+    snapshot: Option<&RuntimeGraphSnapshotRow>,
+    mut projection: GraphProjectionOutcome,
+    graph_contribution_count: usize,
+    pending_summary_refresh: PendingGraphSummaryRefresh,
+) -> Result<RevisionGraphReconcileOutcome, GraphServiceError> {
+    if snapshot.is_some_and(|snapshot| snapshot.graph_status == "stale") {
+        // A targeted refresh cannot reconstruct aggregates shared with sources
+        // removed by GC. Only a complete retained-input rebuild clears stale.
+        repositories::invalidate_runtime_graph_snapshot(connection, library_id, false).await?;
+        projection.graph_status = "stale".to_owned();
+    }
+    Ok(RevisionGraphReconcileOutcome {
+        graph_ready: graph_contribution_count > 0
+            && matches!(projection.graph_status.as_str(), GRAPH_STATUS_READY | "stale"),
+        graph_contribution_count,
+        pending_summary_refresh: (projection.graph_status == GRAPH_STATUS_READY)
+            .then_some(pending_summary_refresh),
         projection,
     })
+}
+
+/// Classifies append reuse against the predecessor's immutable chunk identities.
+async fn load_pure_append_delta(
+    connection: &mut sqlx::PgConnection,
+    previous_revision_id: Option<Uuid>,
+    revision_chunks: &[content_chunk_repository::ContentChunkRow],
+) -> Result<Option<PureAppendDelta>, GraphServiceError> {
+    let Some(previous_revision_id) = previous_revision_id else {
+        return Ok(None);
+    };
+    let previous_chunks = content_chunk_repository::list_chunks_by_revision_with_executor(
+        connection, previous_revision_id,
+    ).await.with_context(|| format!(
+        "failed to list previous revision chunks {previous_revision_id} while classifying append"
+    ))?;
+    Ok(classify_pure_append_chunks(&previous_chunks, revision_chunks))
 }
 
 /// Inputs for carrying or replacing a previous revision's graph evidence.

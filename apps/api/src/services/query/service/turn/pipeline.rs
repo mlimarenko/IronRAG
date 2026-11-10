@@ -8,10 +8,12 @@ use super::*;
 /// joining the stage table, then drill down if needed.
 fn log_query_turn_completed(
     message: &'static str,
+    surface: &'static str,
     total_ms: u64,
     terminal_execution: &query_repository::QueryExecutionRow,
     stage_summary_count: usize,
 ) {
+    crate::observability::metrics::record_query_turn(surface, total_ms as f64 / 1_000.0);
     tracing::info!(
         total_ms,
         execution_id = %terminal_execution.id,
@@ -405,6 +407,7 @@ impl QueryService {
         let request_turn = detail.request_turn.ok_or(ApiError::Internal)?;
         log_query_turn_completed(
             "query.agent_turn.completed",
+            "agent",
             turn_started_at.elapsed().as_millis() as u64,
             &terminal_execution,
             detail.runtime_stage_summaries.len(),
@@ -577,6 +580,7 @@ impl QueryService {
 
         log_query_turn_completed(
             "query.turn.completed",
+            "grounded",
             turn_started_at.elapsed().as_millis() as u64,
             &terminal_execution,
             detail.runtime_stage_summaries.len(),

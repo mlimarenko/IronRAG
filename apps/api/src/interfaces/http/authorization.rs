@@ -93,6 +93,29 @@ pub const POLICY_MCP_DISCOVERY: &[&str] = &[
 pub const POLICY_MCP_MEMORY_READ: &[&str] = POLICY_DOCUMENTS_READ;
 pub const POLICY_MCP_AUDIT_REVIEW: &[&str] = &[PERMISSION_AUDIT_READ, PERMISSION_WORKSPACE_ADMIN];
 
+/// Read access to a library's connector and ingest-job diagnostics.
+///
+/// Mirrors [`POLICY_LIBRARY_READ`] plus the two connector/ops read kinds, so a
+/// connector operator or an ops reader can inspect ingest history without
+/// holding a document-writing grant.
+pub const POLICY_CONNECTOR_READ: &[&str] = &[
+    PERMISSION_CONNECTOR_ADMIN,
+    PERMISSION_LIBRARY_READ,
+    PERMISSION_LIBRARY_WRITE,
+    PERMISSION_DOCUMENT_READ,
+    PERMISSION_DOCUMENT_WRITE,
+    PERMISSION_OPS_READ,
+    PERMISSION_WORKSPACE_ADMIN,
+];
+
+/// Write access to a library's connector and ingest-job state.
+///
+/// Deliberately write-kind only (no read kinds), so
+/// `accepted_permissions_require_write` classifies it as a write request and
+/// the caller's system-role write capability is enforced.
+pub const POLICY_CONNECTOR_WRITE: &[&str] =
+    &[PERMISSION_CONNECTOR_ADMIN, PERMISSION_LIBRARY_WRITE, PERMISSION_WORKSPACE_ADMIN];
+
 /// Permission kinds that represent a write/mutation capability.
 ///
 /// Any authorization request whose accepted-permission set is a subset of write

@@ -1,6 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 
-import { adminApi, queries } from '@/shared/api'
+import { adminApi, queries, retryContractViolation, validateQueryResponse } from '@/shared/api'
 import type { BindingValidationResponse } from '@/shared/api/generated'
 import type {
   CreateAccountRequest,
@@ -54,35 +54,60 @@ export function useAiAdminData(selectedScope: AIScopeKind, scopeContext: AiScope
     libraryId: scopeContext.libraryId,
   })
 
+  const providerOptions = queries.listAiProvidersOptions()
   const providersQuery = useQuery({
-    ...queries.listAiProvidersOptions(),
+    ...providerOptions,
+    queryFn: validateQueryResponse(providerOptions.queryFn, mapProviderList),
+    retry: retryContractViolation,
     select: mapProviderList,
   })
+  const modelOptions = queries.listAiModelsOptions({ query: modelParams })
   const modelsQuery = useQuery({
-    ...queries.listAiModelsOptions({ query: modelParams }),
+    ...modelOptions,
+    queryFn: validateQueryResponse(modelOptions.queryFn, mapModelList),
+    retry: retryContractViolation,
     select: mapModelList,
   })
+  const localAccountOptions = queries.listAiAccountsOptions({ query: localParams })
   const localAccountsQuery = useQuery({
-    ...queries.listAiAccountsOptions({ query: localParams }),
+    ...localAccountOptions,
+    queryFn: validateQueryResponse(localAccountOptions.queryFn, (raw) =>
+      mapAccountList(raw, providersQuery.data ?? []),
+    ),
+    retry: retryContractViolation,
     select: (raw) => mapAccountList(raw, providersQuery.data ?? []),
   })
+  const visibleAccountOptions = queries.listAiAccountsOptions({ query: visibleParams })
   const visibleAccountsQuery = useQuery({
-    ...queries.listAiAccountsOptions({ query: visibleParams }),
+    ...visibleAccountOptions,
+    queryFn: validateQueryResponse(visibleAccountOptions.queryFn, (raw) =>
+      mapAccountList(raw, providersQuery.data ?? []),
+    ),
     enabled: selectedScope !== 'instance',
+    retry: retryContractViolation,
     select: (raw) => mapAccountList(raw, providersQuery.data ?? []),
   })
+  const instanceBindingOptions = queries.listAiLibraryBindingsOptions({ query: instanceParams })
   const instanceBindingsQuery = useQuery({
-    ...queries.listAiLibraryBindingsOptions({ query: instanceParams }),
+    ...instanceBindingOptions,
+    queryFn: validateQueryResponse(instanceBindingOptions.queryFn, mapBindingList),
+    retry: retryContractViolation,
     select: mapBindingList,
   })
+  const workspaceBindingOptions = queries.listAiLibraryBindingsOptions({ query: workspaceParams })
   const workspaceBindingsQuery = useQuery({
-    ...queries.listAiLibraryBindingsOptions({ query: workspaceParams }),
+    ...workspaceBindingOptions,
+    queryFn: validateQueryResponse(workspaceBindingOptions.queryFn, mapBindingList),
     enabled: Boolean(scopeContext.workspaceId),
+    retry: retryContractViolation,
     select: mapBindingList,
   })
+  const libraryBindingOptions = queries.listAiLibraryBindingsOptions({ query: libraryParams })
   const libraryBindingsQuery = useQuery({
-    ...queries.listAiLibraryBindingsOptions({ query: libraryParams }),
+    ...libraryBindingOptions,
+    queryFn: validateQueryResponse(libraryBindingOptions.queryFn, mapBindingList),
     enabled: Boolean(scopeContext.workspaceId && scopeContext.libraryId),
+    retry: retryContractViolation,
     select: mapBindingList,
   })
 
@@ -125,17 +150,23 @@ export function useAiAdminData(selectedScope: AIScopeKind, scopeContext: AiScope
 }
 
 export function useProviderDetail(providerId: string | null) {
+  const options = queries.getAiProviderOptions({ path: { providerId: providerId ?? '' } })
   return useQuery({
-    ...queries.getAiProviderOptions({ path: { providerId: providerId ?? '' } }),
+    ...options,
+    queryFn: validateQueryResponse(options.queryFn, (raw) => mapProviderList([raw])[0]),
     enabled: Boolean(providerId),
+    retry: retryContractViolation,
     select: (raw) => mapProviderList([raw])[0],
   })
 }
 
 export function useModelDetail(modelId: string | null) {
+  const options = queries.getAiModelOptions({ path: { modelId: modelId ?? '' } })
   return useQuery({
-    ...queries.getAiModelOptions({ path: { modelId: modelId ?? '' } }),
+    ...options,
+    queryFn: validateQueryResponse(options.queryFn, (raw) => mapModelList([raw])[0]),
     enabled: Boolean(modelId),
+    retry: retryContractViolation,
     select: (raw) => mapModelList([raw])[0],
   })
 }
@@ -144,9 +175,15 @@ export function useAccountDetail(
   accountId: string | null,
   providerList: ReturnType<typeof mapProviderList>,
 ) {
+  const options = queries.getAiAccountOptions({ path: { accountId: accountId ?? '' } })
   return useQuery({
-    ...queries.getAiAccountOptions({ path: { accountId: accountId ?? '' } }),
+    ...options,
+    queryFn: validateQueryResponse(
+      options.queryFn,
+      (raw) => mapAccountList([raw], providerList)[0],
+    ),
     enabled: Boolean(accountId),
+    retry: retryContractViolation,
     staleTime: 0,
     refetchOnMount: 'always',
     select: (raw) => mapAccountList([raw], providerList)[0],
@@ -154,9 +191,12 @@ export function useAccountDetail(
 }
 
 export function useBindingDetail(bindingId: string | null) {
+  const options = queries.getAiLibraryBindingOptions({ path: { bindingId: bindingId ?? '' } })
   return useQuery({
-    ...queries.getAiLibraryBindingOptions({ path: { bindingId: bindingId ?? '' } }),
+    ...options,
+    queryFn: validateQueryResponse(options.queryFn, (raw) => mapBindingList([raw])[0]),
     enabled: Boolean(bindingId),
+    retry: retryContractViolation,
     select: (raw) => mapBindingList([raw])[0],
   })
 }

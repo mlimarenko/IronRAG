@@ -950,3 +950,278 @@ pub struct McpOperationStatus {
     pub operation: crate::domains::ops::OpsAsyncOperation,
     pub progress: crate::domains::ops::OpsAsyncOperationProgress,
 }
+
+// ============================================================================
+// Ingest diagnostics (`list_ingest_jobs`, `get_ingest_job`,
+// `retry_ingest_job`, `cancel_ingest_job`)
+// ============================================================================
+
+/// Arguments for `list_ingest_jobs`.
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct McpListIngestJobsRequest {
+    /// Catalog library reference, `<workspace>/<library>`.
+    pub library: String,
+    /// Optional `queue_state` filter; absent or empty means no filtering.
+    pub queue_states: Option<Vec<String>>,
+    /// Page size; defaults to 50 and is clamped to 1..=200.
+    pub limit: Option<u32>,
+    /// Opaque `nextCursor` from a previous response.
+    pub cursor: Option<String>,
+}
+
+/// Arguments for `get_ingest_job`.
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct McpGetIngestJobRequest {
+    pub job_id: Uuid,
+    /// How many attempts to return; defaults to 10 and is clamped to 1..=20.
+    pub attempt_limit: Option<u32>,
+}
+
+/// Arguments for `retry_ingest_job`.
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct McpRetryIngestJobRequest {
+    pub job_id: Uuid,
+}
+
+/// Arguments for `cancel_ingest_job`.
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct McpCancelIngestJobRequest {
+    pub job_id: Uuid,
+}
+
+/// One ingest attempt as returned by the ingest diagnostics tools.
+#[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct McpIngestAttempt {
+    pub attempt_id: Uuid,
+    pub attempt_number: i32,
+    pub attempt_state: String,
+    pub current_stage: Option<String>,
+    pub failure_class: Option<String>,
+    pub failure_code: Option<String>,
+    pub failure_message: Option<String>,
+    pub progress_percent: i32,
+    pub retryable: bool,
+    pub started_at: DateTime<Utc>,
+    pub finished_at: Option<DateTime<Utc>>,
+}
+
+/// One recorded ingest stage transition.
+#[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct McpIngestStageEvent {
+    pub stage_name: String,
+    pub stage_state: String,
+    pub ordinal: i32,
+    pub message: Option<String>,
+    pub recorded_at: DateTime<Utc>,
+}
+
+/// Compact ingest job row shared by the list, retry, and cancel tools.
+#[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct McpIngestJobSummary {
+    pub job_id: Uuid,
+    pub workspace_id: Uuid,
+    pub library_id: Uuid,
+    pub job_kind: String,
+    pub queue_state: String,
+    pub priority: i32,
+    pub dedupe_key: Option<String>,
+    pub async_operation_id: Option<Uuid>,
+    pub queued_at: DateTime<Utc>,
+    pub available_at: DateTime<Utc>,
+    pub completed_at: Option<DateTime<Utc>>,
+    pub latest_attempt: Option<McpIngestAttempt>,
+}
+
+/// One page of ingest jobs.
+#[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct McpIngestJobList {
+    pub items: Vec<McpIngestJobSummary>,
+    pub next_cursor: Option<String>,
+}
+
+/// One ingest job with its recent attempts and the recorded stage timeline.
+#[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct McpIngestJobDetail {
+    pub job: McpIngestJobSummary,
+    pub attempts: Vec<McpIngestAttempt>,
+    pub has_more_attempts: bool,
+    pub stage_events: Vec<McpIngestStageEvent>,
+}
+
+// ============================================================================
+// IAM diagnostics (`list_iam_tokens`, `revoke_iam_token`,
+// `get_principal_access`)
+// ============================================================================
+
+/// Arguments for `list_iam_tokens`; absent `workspace_id` lists every token.
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct McpListIamTokensRequest {
+    pub workspace_id: Option<Uuid>,
+}
+
+/// Arguments for `revoke_iam_token`.
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct McpRevokeIamTokenRequest {
+    pub token_id: Uuid,
+}
+
+/// Arguments for `get_principal_access`.
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct McpGetPrincipalAccessRequest {
+    pub principal_id: Uuid,
+}
+
+/// One API token row. `workspace_id` is absent for tokens that are not
+/// scoped to a single workspace, matching `ApiToken::workspace_id`.
+#[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct McpIamToken {
+    pub principal_id: Uuid,
+    pub workspace_id: Option<Uuid>,
+    pub label: String,
+    pub token_prefix: String,
+    pub status: String,
+    pub expires_at: Option<DateTime<Utc>>,
+}
+
+/// One page of API tokens.
+#[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct McpIamTokenList {
+    pub items: Vec<McpIamToken>,
+}
+
+/// Principal identity as returned to an IAM diagnostics caller.
+#[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct McpIamPrincipal {
+    pub principal_id: Uuid,
+    pub principal_kind: String,
+    pub display_name: String,
+}
+
+/// One effective grant. The scope identifiers are lifted from
+/// `resource_kind`/`resource_id`; expired grants are already filtered out
+/// before resolution, so the stored `Grant` carries no expiry to expose.
+#[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct McpIamGrant {
+    pub grant_id: Uuid,
+    pub resource_kind: String,
+    pub resource_id: Uuid,
+    pub permission_kind: String,
+    pub workspace_id: Option<Uuid>,
+    pub library_id: Option<Uuid>,
+    pub document_id: Option<Uuid>,
+    pub granted_at: DateTime<Utc>,
+}
+
+/// One workspace membership state for a principal.
+#[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct McpIamMembership {
+    pub workspace_id: Uuid,
+    pub membership_state: String,
+}
+
+/// Effective access resolution for one principal.
+#[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct McpPrincipalAccess {
+    pub principal: McpIamPrincipal,
+    pub grants: Vec<McpIamGrant>,
+    pub workspace_memberships: Vec<McpIamMembership>,
+}
+
+/// Deserializes a field as `Option<Option<T>>`, distinguishing "field omitted"
+/// (outer `None`, leave the column untouched) from "field present but `null`"
+/// (`Some(None)`, clear the column) from "field present with a value"
+/// (`Some(Some(value))`). Pair with `#[serde(default)]` so an omitted field
+/// defaults to outer `None` instead of erroring. Same rule as the REST
+/// `PatchTokenRequest`.
+fn deserialize_double_option<'de, D, T>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Deserialize::deserialize(deserializer).map(Some)
+}
+
+/// Arguments for `mint_iam_token`, mirroring the REST `MintTokenRequest` body.
+///
+/// `permission_kinds` stays a string list because the accepted vocabulary has
+/// one owner, `interfaces::http::iam::parse_iam_permission_kinds`, which parses
+/// each value with `IamPermissionKind`'s own serde representation instead of a
+/// second copy of the enum names here.
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct McpMintIamTokenRequest {
+    pub workspace_id: Option<Uuid>,
+    pub label: String,
+    pub expires_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub library_ids: Vec<Uuid>,
+    #[serde(default)]
+    pub permission_kinds: Vec<String>,
+}
+
+/// Arguments for `update_iam_token`. `expires_at` distinguishes omitted (leave
+/// the expiry untouched), `null` (clear it), and a timestamp (set it); the
+/// permission scope has no field here because it is immutable after mint.
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct McpUpdateIamTokenRequest {
+    pub token_id: Uuid,
+    pub label: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_double_option")]
+    pub expires_at: Option<Option<DateTime<Utc>>>,
+}
+
+/// A freshly minted API token together with its plaintext secret.
+///
+/// `token` is the secret itself: it is returned by this one response and can
+/// never be read again, so the caller has to persist it immediately. There is
+/// deliberately no `Debug` implementation — a derived one would print the
+/// plaintext into any log line that formats the value.
+#[derive(Clone, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct McpMintedIamToken {
+    pub token: String,
+    pub api_token: McpIamToken,
+}
+
+// ============================================================================
+// Connector catalog (`list_connector_sources`)
+// ============================================================================
+
+/// One bundled connector source, copied verbatim from the static catalog in
+/// [`crate::domains::connector::CONNECTOR_SOURCES`]. The catalog is code, not
+/// database state, so this is the only place the list exists.
+#[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct McpConnectorSource {
+    pub kind: String,
+    pub display_name: String,
+    pub run_modes: Vec<String>,
+    pub image: String,
+    pub deploy_directory: String,
+}
+
+/// Every bundled connector source, in catalog order.
+#[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct McpConnectorSourceList {
+    pub items: Vec<McpConnectorSource>,
+}

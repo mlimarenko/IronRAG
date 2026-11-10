@@ -9,6 +9,7 @@ import type {
   IngestStageEvent,
   IngestStageTimelineResponse,
 } from '@/shared/api/generated'
+import { ResponseContractError } from '@/shared/api'
 import {
   gridFacetKey,
   gridFacetValue,
@@ -46,7 +47,7 @@ function isInteger(value: unknown): value is number {
  * names the offending field for diagnostics; the Queue view translates it to a
  * localized fallback so a raw field diagnostic is never the user's message.
  */
-export class QueueResponseError extends Error {
+export class QueueResponseError extends ResponseContractError {
   constructor(public readonly detail: string) {
     super(detail)
     this.name = 'QueueResponseError'

@@ -52,7 +52,7 @@ impl ProviderFailureClassificationService {
         error: &ProviderCallError,
     ) -> Option<RuntimeProviderFailureClass> {
         match error {
-            ProviderCallError::Admission { .. } => {
+            ProviderCallError::Admission { .. } | ProviderCallError::LocalRequestRejected => {
                 Some(RuntimeProviderFailureClass::InternalRequestInvalid)
             }
             ProviderCallError::Transport { source, .. } => Some(classify_reqwest_failure(source)),
@@ -188,7 +188,7 @@ fn classify_http_failure(status: StatusCode) -> RuntimeProviderFailureClass {
 
 fn provider_call_status(error: &ProviderCallError) -> Option<StatusCode> {
     match error {
-        ProviderCallError::Admission { .. } => None,
+        ProviderCallError::Admission { .. } | ProviderCallError::LocalRequestRejected => None,
         ProviderCallError::Transport { source, .. }
         | ProviderCallError::ResponseBody { source, .. }
         | ProviderCallError::ResponseJson { source, .. } => source.status(),
@@ -202,7 +202,7 @@ fn provider_call_status(error: &ProviderCallError) -> Option<StatusCode> {
 
 fn is_retryable_provider_call_error(error: &ProviderCallError) -> bool {
     match error {
-        ProviderCallError::Admission { .. } => false,
+        ProviderCallError::Admission { .. } | ProviderCallError::LocalRequestRejected => false,
         ProviderCallError::Transport { source, .. }
         | ProviderCallError::ResponseBody { source, .. } => {
             source.is_timeout()

@@ -260,7 +260,10 @@ pub(super) fn answer_omits_structural_context_coverage(
 pub(super) fn query_ir_needs_structural_coverage_guard(query_ir: &QueryIR) -> bool {
     if query_ir.requests_broad_procedure_variant_coverage()
         || query_ir_requires_remediation_synthesis(query_ir)
-        || matches!(query_ir.act, QueryAct::Compare | QueryAct::Enumerate | QueryAct::Meta)
+        || matches!(
+            query_ir.act,
+            QueryAct::Compare | QueryAct::Enumerate | QueryAct::Meta | QueryAct::RetrieveValue
+        )
     {
         return false;
     }
@@ -332,6 +335,7 @@ pub(super) fn structural_coverage_focus_tokens(query_ir: &QueryIR) -> BTreeSet<S
         .iter()
         .map(|entity| entity.label.as_str())
         .chain(query_ir.literal_constraints.iter().map(|literal| literal.text.as_str()))
+        .chain(query_ir.temporal_constraints.iter().map(|constraint| constraint.surface.as_str()))
         .chain(query_ir.document_focus.iter().map(|focus| focus.hint.as_str()))
     {
         for token in crate::services::query::text_match::normalized_alnum_tokens(

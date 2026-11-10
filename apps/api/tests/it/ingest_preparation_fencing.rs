@@ -278,6 +278,234 @@ async fn lease_content_mutation_attempt(
 }
 
 #[tokio::test]
+#[ignore = "requires isolated postgres with required extensions; no providers"]
+async fn bounded_preparation_rebuilds_only_authorized_derived_chunks_without_losing_source()
+-> Result<()> {
+    use ironrag_backend::{
+        app::seed_clean_v1_ai_catalog,
+        infra::repositories::ai_repository,
+        shared::{
+            extraction::file_extract::build_inline_text_extraction_plan,
+            secret_encryption::SecretPurpose,
+        },
+    };
+    use tokio_util::sync::CancellationToken;
+
+    let fixture = ContentLifecycleFixture::create().await?;
+    let result = async {
+        let state = &fixture.state;
+        let pool = &state.persistence.postgres;
+        seed_clean_v1_ai_catalog(pool).await?;
+        let provider = ai_repository::list_provider_catalog(pool)
+            .await?
+            .into_iter()
+            .find(|provider| provider.provider_kind == "openai")
+            .context("seeded OpenAI provider")?;
+        let model = ai_repository::list_model_catalog(pool, Some(provider.id))
+            .await?
+            .into_iter()
+            .find(|model| model.model_name == "text-embedding-3-large")
+            .context("seeded embedding contract")?;
+        let account_id = Uuid::now_v7();
+        let fixture_key = state.credential_cipher.encrypt(
+            SecretPurpose::AiAccountApiKey,
+            account_id,
+            "synthetic-preparation-only-not-sent",
+        )?;
+        let account = ai_repository::create_account(
+            pool,
+            ai_repository::NewAiAccount {
+                account_id,
+                scope_kind: "library",
+                workspace_id: Some(fixture.workspace_id),
+                library_id: Some(fixture.library_id),
+                provider_catalog_id: provider.id,
+                label: "bounded-preparation-fixture",
+                base_url: None,
+                created_by_principal_id: None,
+            },
+            Some(&fixture_key),
+        )
+        .await?;
+        ai_repository::create_binding(
+            pool,
+            ai_repository::CreateAiBindingInput {
+                scope_kind: "library",
+                workspace_id: Some(fixture.workspace_id),
+                library_id: Some(fixture.library_id),
+                binding_purpose: "embed_chunk",
+                account_id: account.id,
+                provider_catalog_id: provider.id,
+                model_catalog_id: model.id,
+                system_prompt: None,
+                temperature: None,
+                top_p: None,
+                max_output_tokens_override: None,
+                extra_parameters_json: serde_json::json!({}),
+                binding_state: "active",
+                updated_by_principal_id: None,
+            },
+        )
+        .await?;
+        let text = "🦀".repeat(4620);
+        let plan = build_inline_text_extraction_plan(&text);
+        let normalized = plan.normalized_text.as_deref().context("normalized fixture")?;
+        let checksum = format!("sha256:{}", hex::encode(Sha256::digest(text.as_bytes())));
+        let extracted_checksum = hex::encode(Sha256::digest(normalized.as_bytes()));
+        let document = state
+            .application_services
+            .content
+            .create_document(
+                state,
+                CreateDocumentCommand {
+                    workspace_id: fixture.workspace_id,
+                    library_id: fixture.library_id,
+                    external_key: Some(format!("bounded-preparation-{}", Uuid::now_v7())),
+                    file_name: Some("bounded-fixture.txt".into()),
+                    created_by_principal_id: None,
+                    parent_external_key: None,
+                },
+            )
+            .await
+            .context("create bounded fixture document")?;
+        let admission = crate::content_repository::unbound_mutation_admission(
+            ironrag_contracts::documents::ReplacementIdentity {
+                checksum: checksum.clone(),
+                mime_type: "text/plain".into(),
+                byte_size: i64::try_from(text.len())?,
+                file_name: "bounded-fixture.txt".into(),
+                title: None,
+                language_code: None,
+                source_uri: None,
+                document_hint: None,
+            },
+        )?;
+        let created = content_revision_repository::create_revision_with_projection(
+            pool,
+            &content_revision_repository::NewContentRevisionProjection {
+                admission_identity: Some(&admission),
+                document_id: document.id,
+                workspace_id: fixture.workspace_id,
+                library_id: fixture.library_id,
+                content_source_kind: "upload",
+                checksum: &checksum,
+                mime_type: "text/plain",
+                byte_size: i64::try_from(text.len())?,
+                title: None,
+                language_code: None,
+                source_uri: None,
+                document_hint: None,
+                storage_key: None,
+                created_by_principal_id: None,
+            },
+        )
+        .await
+        .context("create bounded fixture source revision")?;
+        let content_revision_repository::CreateContentRevisionOutcome::Created(revision) = created
+        else {
+            anyhow::bail!("fixture revision was not created");
+        };
+        let job = create_leased_content_mutation_job(
+            pool,
+            ContentMutationRevisionScope {
+                workspace_id: fixture.workspace_id,
+                library_id: fixture.library_id,
+                document_id: document.id,
+                revision_id: revision.id,
+            },
+            format!("bounded-preparation-{}", revision.id),
+            "bounded-fixture.txt",
+        )
+        .await?;
+        let attempt =
+            lease_content_mutation_attempt(pool, job.id, 1, "bounded-preparation", 30).await?;
+        let fence = authority(fixture.workspace_id, fixture.library_id, attempt.id, revision.id);
+        let extraction = state
+            .document_store
+            .update_revision_extract_artifact_fenced(
+                fence,
+                "text_readable",
+                IngestRevisionExtractArtifact::Replace {
+                    normalized_text: normalized,
+                    text_checksum: &extracted_checksum,
+                    text_readable_at: Some(Utc::now()),
+                    image_checksum: None,
+                },
+            )
+            .await
+            .context("persist bounded fixture extraction")?;
+        assert!(matches!(extraction, IngestAttemptMutationOutcome::Applied(_)));
+        let before: serde_json::Value =
+            sqlx::query_scalar("select to_jsonb(j) from ingest_job j where id=$1")
+                .bind(job.id)
+                .fetch_one(pool)
+                .await
+                .context("capture bounded fixture job before preparation")?;
+        let mut expected_chunks = None;
+        for _ in 0..2 {
+            let prepared = state
+                .application_services
+                .content
+                .prepare_and_persist_revision_structure(
+                    state,
+                    fence,
+                    &plan,
+                    &CancellationToken::new(),
+                )
+                .await
+                .context("prepare bounded fixture revision through native service")?;
+            assert!(matches!(prepared, IngestAttemptMutationOutcome::Applied(_)));
+            let chunks =
+                content_chunk_repository::list_chunks_by_revision(pool, revision.id).await?;
+            assert!(chunks.len() >= 3);
+            let mut covered = std::collections::BTreeSet::new();
+            let mut identity = Vec::new();
+            for chunk in &chunks {
+                assert!(chunk.normalized_text.len() <= 8192);
+                assert!(!chunk.normalized_text.trim().is_empty());
+                let source_slice: String = normalized
+                    .chars()
+                    .skip(usize::try_from(chunk.start_offset)?)
+                    .take(usize::try_from(chunk.end_offset - chunk.start_offset)?)
+                    .collect();
+                assert_eq!(source_slice, chunk.normalized_text);
+                covered.extend(chunk.start_offset..chunk.end_offset);
+                identity.push((
+                    chunk.id,
+                    chunk.text_checksum.clone(),
+                    chunk.start_offset,
+                    chunk.end_offset,
+                ));
+            }
+            assert_eq!(covered.len(), normalized.chars().count());
+            if let Some(expected) = &expected_chunks {
+                assert_eq!(&identity, expected);
+            } else {
+                expected_chunks = Some(identity);
+            }
+        }
+        let source = content_revision_repository::get_revision_by_id(pool, revision.id)
+            .await?
+            .context("revision retained")?;
+        assert_eq!(source.checksum, checksum);
+        assert_eq!(source.byte_size, i64::try_from(text.len())?);
+        assert_eq!(source.document_id, document.id);
+        let after: serde_json::Value =
+            sqlx::query_scalar("select to_jsonb(j) from ingest_job j where id=$1")
+                .bind(job.id)
+                .fetch_one(pool)
+                .await?;
+        assert_eq!(after, before, "preparation must not mutate job lifecycle");
+        Ok(())
+    }
+    .await;
+    let cleanup = fixture.cleanup().await;
+    result?;
+    cleanup?;
+    Ok(())
+}
+
+#[tokio::test]
 #[ignore = "requires local postgres service"]
 async fn stale_attempt_cannot_replace_any_persisted_preparation_artifact() -> Result<()> {
     let settings = Settings::from_env().context("load ingest preparation fencing settings")?;
@@ -1379,7 +1607,10 @@ async fn preparation_fence_rejects_a_checksum_that_differs_from_stored_revision_
                 CreateRevisionCommand {
                     document_id: document.id,
                     content_source_kind: "upload".to_string(),
-                    checksum: format!("sha256:fence-drift-{}", Uuid::now_v7()),
+                    checksum: crate::content_lifecycle_support::fixture_checksum(&format!(
+                        "fence-drift-{}",
+                        Uuid::now_v7()
+                    )),
                     mime_type: "application/x-ndjson".to_string(),
                     byte_size: 64,
                     title: Some("Fence Drift".to_string()),

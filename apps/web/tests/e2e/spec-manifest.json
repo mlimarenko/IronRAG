@@ -11,5 +11,6 @@
   "libraries-grid.spec.ts": 2,
   "library-queue.spec.ts": 15,
   "minimal-ui.spec.ts": 9,
-  "sidebar-labels.spec.ts": 4
+  "sidebar-labels.spec.ts": 4,
+  "telemetry-consent.spec.ts": 2
 }

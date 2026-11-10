@@ -274,7 +274,7 @@ async fn selected_reasoning_binding_roundtrips_to_real_gateway_payload() -> Resu
                 },
             )
             .await?;
-        let gateway = UnifiedGateway::from_settings(&state.settings)?;
+        let gateway = UnifiedGateway::from_settings(&state.settings, std::sync::Arc::clone(&state.dispatch_admission))?;
         for (purpose, wire) in [
             (AiBindingPurpose::QueryAnswer, "reasoning_effort_none"),
             (AiBindingPurpose::QueryCompile, "thinking_disabled"),

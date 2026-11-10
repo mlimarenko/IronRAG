@@ -2,14 +2,15 @@ mod api_tokens;
 mod bootstrap;
 mod grants;
 mod memberships;
+mod preferences;
 mod principals;
 mod service_identities;
 mod sessions;
 mod users;
 
 pub use self::{
-    api_tokens::*, bootstrap::*, grants::*, memberships::*, principals::*, service_identities::*,
-    sessions::*, users::*,
+    api_tokens::*, bootstrap::*, grants::*, memberships::*, preferences::*, principals::*,
+    service_identities::*, sessions::*, users::*,
 };
 
 use chrono::{DateTime, Utc};

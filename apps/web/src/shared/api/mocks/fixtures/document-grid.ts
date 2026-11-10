@@ -14,10 +14,12 @@ export default function documentGridItems(): ContentDocumentListItem[] {
     libraryId: 'library-demo-1',
     processingStartedAt: index === 30 ? '2037-04-02T11:58:29.875Z' : '2026-09-01T10:00:00.000Z',
     processingFinishedAt: index === 30 ? '2037-04-02T12:00:00.000Z' : '2026-09-01T10:00:02.000Z',
+    readableRevisionId: null,
     readiness: index % 2 ? 'graph_sparse' : 'graph_ready',
     retryable: false,
     status: index % 2 ? 'failed' : 'ready',
     uploadedAt: index === 30 ? '1999-04-02T12:00:00.000Z' : '2026-08-20T09:00:00.000Z',
+    visibilityIntentId: null,
     workspaceId: 'workspace-alpha',
   }))
 }

@@ -105,7 +105,8 @@ pub(super) fn chat_round_trip_validation_failure_kind(
         {
             ChatRoundTripValidationFailureKind::ProviderUnavailable
         }
-        ProviderCallError::Admission { .. }
+        ProviderCallError::LocalRequestRejected
+        | ProviderCallError::Admission { .. }
         | ProviderCallError::ResponsePolicy { .. }
         | ProviderCallError::ResponseJson { .. }
         | ProviderCallError::Json { .. }

@@ -196,6 +196,13 @@ async fn publish_graph_refresh_success_in_transaction(
 
     publish_graph_refresh_completion(&mut transaction, input, &job, effects).await?;
 
+    crate::infra::repositories::invalidate_unpublished_runtime_graph_snapshot(
+        &mut transaction,
+        input.library_id,
+        false,
+    )
+    .await?;
+
     let source_truth_version = advance_vector_source_truth_version(
         &mut transaction,
         input.library_id,

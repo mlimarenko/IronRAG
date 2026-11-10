@@ -264,6 +264,12 @@ impl Drop for OidcSettings {
 
 #[derive(Clone, Deserialize, utoipa::ToSchema)]
 pub struct Settings {
+    #[serde(default)]
+    pub financial_required_provider_id: Option<String>,
+    #[serde(default)]
+    pub financial_required_scope_id: Option<String>,
+    #[serde(default)]
+    pub financial_required_policy_fingerprint: Option<String>,
     pub bind_addr: String,
     pub service_role: String,
     pub database_url: String,

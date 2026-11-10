@@ -43,6 +43,11 @@ pub(crate) async fn verify_selected_candidate(
     {
         Ok(prepared) => prepared,
         Err(error) => {
+            tracing::warn!(
+                execution_id = %execution.query_execution_id,
+                error = ?error,
+                "semantic preparation failed"
+            );
             let report = preparation_failure_report(question, &stage.generation.answer, error, 0);
             apply_semantic_report(&mut stage.verification, report);
             return Ok(());

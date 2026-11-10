@@ -34,6 +34,7 @@ fn list_row(job_queue_state: Option<&str>, mutation_state: Option<&str>) -> Cont
         deleted_at: None,
         active_revision_id: Some(revision_id),
         readable_revision_id: Some(revision_id),
+        visibility_intent_id: None,
         revision_title: Some("Sample document".to_string()),
         revision_mime_type: Some("text/markdown".to_string()),
         revision_byte_size: Some(128),

@@ -15,11 +15,14 @@
 FROM python:3.12-alpine@sha256:1b668429b3511ab407d8e00648891631b0b1a4d7e15e3ca70f38ab5b91ad4ab4 AS runtime-base
 
 ARG APP_VERSION
+# `apk upgrade` is what ships patched musl and zlib: the pinned base digest
+# predates the published fixes, so the scan reports them until this runs.
 RUN if [ -z "$(printf '%s' "${APP_VERSION}" | tr -d '[:space:]')" ]; then \
         echo "APP_VERSION is blank: this image would report an unidentifiable build at /health." >&2; \
         echo "Pass the release tag, for example --build-arg APP_VERSION=v0.6.0." >&2; \
         exit 1; \
     fi \
+    && apk upgrade --no-cache \
     && apk add --no-cache ca-certificates curl
 
 COPY --from=ghcr.io/astral-sh/uv:0.9.22 /uv /usr/local/bin/uv

@@ -55,9 +55,10 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import httpx
+import structlog
 
 from .ironrag import (
     IronRagClient,
@@ -277,6 +278,10 @@ class SyncManager:
     async def _run_once_unlocked(self, *, reason: str) -> SyncReport:
         await self._ironrag.ensure_visibility_contract()
         started = datetime.now(tz=UTC)
+        # One correlation id per sweep, inherited by every item task. The
+        # reaper and the report line carry it too, so an operator can join
+        # one sweep's records without guessing the time window.
+        structlog.contextvars.bind_contextvars(run_id=uuid4().hex)
         log.info("sync.start", reason=reason, connector=self._adapter.name)
         report = SyncReport(started_at=started, finished_at=started)
         if self._routing_reloader is not None:
@@ -298,6 +303,14 @@ class SyncManager:
         tasks: list[asyncio.Task[None]] = []
 
         async def process(ref: Any) -> None:
+            # Correlation for everything this item attempt logs: a fresh
+            # request id plus the item identity. Bound in the item's own task,
+            # so concurrent items never overwrite each other.
+            structlog.contextvars.bind_contextvars(
+                request_id=uuid4().hex,
+                item_kind=ref.kind,
+                item_id=ref.item_id,
+            )
             if ref.materialization_enforcement is SourceMaterializationEnforcement.REQUIRED:
                 required_seen.add((ref.kind, ref.item_id))
             seen.setdefault(ref.kind, set()).add(ref.item_id)

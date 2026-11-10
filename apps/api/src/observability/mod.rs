@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use anyhow::{Context, anyhow};
 use opentelemetry::global;
-use opentelemetry::trace::TracerProvider as _;
+use opentelemetry::trace::{TraceContextExt, TracerProvider as _};
 use opentelemetry::{Context as OtelContext, KeyValue};
 use opentelemetry_appender_tracing::layer::OpenTelemetryTracingBridge;
 use opentelemetry_http::{HeaderExtractor, HeaderInjector};
@@ -29,7 +29,9 @@ use tracing_subscriber::util::SubscriberInitExt as _;
 use url::Url;
 use uuid::Uuid;
 
+pub mod error_tracking;
 pub mod metrics;
+pub mod redaction;
 
 const DEFAULT_LOG_FILTER: &str = "info";
 const DEFAULT_SERVICE_NAME: &str = "ironrag-backend";
@@ -143,6 +145,7 @@ where
 /// # Errors
 /// Returns an error when the subscriber or OTLP exporter cannot be installed.
 pub fn init_tracing(deployment_id: Option<String>) -> anyhow::Result<()> {
+    error_tracking::install_panic_hook();
     let filter = env_string(IRONRAG_LOG_FILTER).unwrap_or_else(|| DEFAULT_LOG_FILTER.to_string());
     let env_filter = crate::shared::telemetry::compose_env_filter(&filter);
     let endpoint = env_string(OTEL_EXPORTER_OTLP_ENDPOINT);
@@ -202,7 +205,7 @@ fn init_without_exporter(
 ) -> anyhow::Result<()> {
     tracing_subscriber::registry()
         .with(env_filter)
-        .with(tracing_subscriber::fmt::layer().with_target(false).with_writer(log_writer))
+        .with(stdout_log_layer(log_writer))
         .try_init()
         .context("failed to initialize tracing subscriber")?;
     store_log_appender(log_guard)?;
@@ -263,7 +266,7 @@ fn install_otlp_subscriber(
 
     tracing_subscriber::registry()
         .with(env_filter)
-        .with(tracing_subscriber::fmt::layer().with_target(false).with_writer(log_writer))
+        .with(stdout_log_layer(log_writer))
         .with(tracer_layer)
         .with(metrics_layer)
         .with(logs_layer)
@@ -280,6 +283,7 @@ fn install_otlp_providers(providers: OtlpProviders) -> anyhow::Result<()> {
     }
     if let Some(provider) = providers.meter {
         global::set_meter_provider(provider.clone());
+        crate::observability::metrics::reset_after_meter_provider_install();
         store_meter_provider(provider)?;
     }
     if let Some(provider) = providers.logger {
@@ -381,6 +385,77 @@ impl Tracer {
         });
         let _ = span.set_parent(parent_context);
     }
+}
+
+/// Trace and span ids of the span entered on the current task, in the
+/// lowercase hex form Tempo and VictoriaLogs print. `None` when no
+/// OpenTelemetry span is current — the plain-subscriber path and any code
+/// outside a span.
+///
+/// This is the one reader for log correlation, the response header and audit
+/// rows, so they cannot disagree about which trace an operation belonged to.
+#[must_use]
+pub fn current_span_context() -> Option<(String, String)> {
+    let span_context = Span::current().context().span().span_context().clone();
+    span_context
+        .is_valid()
+        .then(|| (span_context.trace_id().to_string(), span_context.span_id().to_string()))
+}
+
+#[must_use]
+pub fn current_trace_id() -> Option<String> {
+    current_span_context().map(|(trace_id, _)| trace_id)
+}
+
+/// Wraps the stdout event formatter with the current trace identity.
+///
+/// The OTLP log exporter attaches `trace_id`/`span_id` to the records it
+/// ships, but the stdout line that operators and the plain log pipeline read
+/// carried neither, so a log line could not be joined to its trace. The ids
+/// are appended after the formatted event, keeping the existing line prefix
+/// byte-identical for parsers and saved queries.
+struct TraceContextFormat<F>(F);
+
+impl Default for TraceContextFormat<tracing_subscriber::fmt::format::Format> {
+    fn default() -> Self {
+        Self(tracing_subscriber::fmt::format::Format::default())
+    }
+}
+
+impl<S, N, F> tracing_subscriber::fmt::FormatEvent<S, N> for TraceContextFormat<F>
+where
+    S: tracing::Subscriber + for<'span> tracing_subscriber::registry::LookupSpan<'span>,
+    N: for<'writer> tracing_subscriber::fmt::FormatFields<'writer> + 'static,
+    F: tracing_subscriber::fmt::FormatEvent<S, N>,
+{
+    fn format_event(
+        &self,
+        ctx: &tracing_subscriber::fmt::FmtContext<'_, S, N>,
+        mut writer: tracing_subscriber::fmt::format::Writer<'_>,
+        event: &tracing::Event<'_>,
+    ) -> std::fmt::Result {
+        let mut line = String::new();
+        self.0.format_event(ctx, tracing_subscriber::fmt::format::Writer::new(&mut line), event)?;
+        write!(writer, "{}", line.trim_end_matches('\n'))?;
+        match current_span_context() {
+            Some((trace_id, span_id)) => writeln!(writer, " trace_id={trace_id} span_id={span_id}"),
+            None => writer.write_str(" trace_id=- span_id=-\n"),
+        }
+    }
+}
+
+/// The stdout log layer used by both installation paths: bounded, lossy,
+/// non-blocking, target-less, and carrying the current trace identity.
+fn stdout_log_layer<S>(
+    log_writer: tracing_appender::non_blocking::NonBlocking,
+) -> impl tracing_subscriber::Layer<S>
+where
+    S: tracing::Subscriber + for<'span> tracing_subscriber::registry::LookupSpan<'span>,
+{
+    tracing_subscriber::fmt::layer()
+        .with_target(false)
+        .with_writer(log_writer)
+        .event_format(TraceContextFormat::default())
 }
 
 pub fn inject_trace_context(request: reqwest::RequestBuilder) -> reqwest::RequestBuilder {

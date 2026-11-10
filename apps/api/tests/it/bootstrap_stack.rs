@@ -187,6 +187,9 @@ async fn fresh_startup_bootstraps_postgres_catalog_and_knowledge_plane() -> Resu
         )
         .execute(postgres)
         .await?;
+        // Re-run the canonical seed exactly as a startup authority does, so the
+        // manifest reconciliation retires seed-owned rows it no longer carries.
+        // This is the ordinary bootstrap path; it carries no financial setup.
         seed_clean_v1_ai_catalog(postgres).await?;
         let retired = sqlx::query_scalar::<_, String>(
             "select model.lifecycle_state::text
@@ -290,6 +293,440 @@ async fn instance_account_updated_at(
 /// `ai_account`; a real credential change must. Before IRG-213 the account
 /// UPDATE fired on every startup, which bumped `catalog_library.source_truth_version`
 /// for every library and re-armed the GC queue the lease gate reads.
+#[tokio::test]
+#[ignore = "requires local postgres and redis services"]
+async fn financial_admission_charges_every_attempt_and_never_refunds() -> Result<()> {
+    use ironrag_backend::infra::repositories::ai_repository::{
+        FinancialAdmission, FinancialAdmissionState, FinancialModelAllowance,
+        FinancialRequestEnvelope, RequiredFinancialScope, UpdateProviderCatalog,
+        consume_financial_attempt, get_provider_catalog_by_id, update_provider_catalog,
+    };
+
+    let fixture = BootstrapStackFixture::create().await?;
+    let result = async {
+        let postgres = &fixture.state.persistence.postgres;
+        let provider_id: Uuid =
+            sqlx::query_scalar("select id from ai_provider_catalog where provider_kind = 'openai'")
+                .fetch_one(postgres)
+                .await?;
+        let scope_id = Uuid::new_v4();
+        let envelope = FinancialRequestEnvelope::Chat {
+            allowed_service_tiers: vec!["default".into(), "flex".into()],
+            max_input_bytes: 65_536,
+            max_output_tokens: 128_000,
+            max_input_tokens: 922_000,
+        };
+        let mut admission = FinancialAdmission {
+            version: 1,
+            provider_id,
+            scope_id,
+            policy_fingerprint: String::new(),
+            cutoff: chrono::Utc::now() + chrono::Duration::hours(1),
+            state: FinancialAdmissionState::Active,
+            grant_microusd: 10_000,
+            global_limit: 10,
+            global_consumed: 0,
+            history: Vec::new(),
+            models: std::collections::BTreeMap::from([(
+                "gpt-6-luna".to_string(),
+                FinancialModelAllowance {
+                    endpoint: "https://api.openai.com/v1/chat/completions".to_string(),
+                    envelope,
+                    attempt_microusd: 1_000,
+                    limit: 10,
+                    consumed: 0,
+                },
+            )]),
+        };
+        admission.policy_fingerprint = admission.immutable_fingerprint()?;
+        let mut predecessor = admission.clone();
+        predecessor.scope_id = Uuid::new_v4();
+        predecessor.state = FinancialAdmissionState::Closed;
+        predecessor.global_consumed = 1;
+        predecessor.models.get_mut("gpt-6-luna").unwrap().consumed = 1;
+        predecessor.policy_fingerprint = predecessor.immutable_fingerprint()?;
+        admission.history.push(predecessor.into());
+        let scope = RequiredFinancialScope {
+            provider_id,
+            scope_id,
+            policy_fingerprint: admission.policy_fingerprint.clone(),
+        };
+        write_financial_admission(postgres, provider_id, &admission).await?;
+        let before_seed = get_provider_catalog_by_id(postgres, provider_id).await?.unwrap();
+        update_provider_catalog(
+            postgres,
+            UpdateProviderCatalog {
+                provider_id,
+                provider_kind: &before_seed.provider_kind,
+                display_name: "Seed conflict fixture",
+                api_style: &before_seed.api_style,
+                lifecycle_state: &before_seed.lifecycle_state,
+                default_base_url: before_seed.default_base_url.as_deref(),
+                capability_flags_json: None,
+            },
+        )
+        .await?
+        .unwrap();
+        seed_clean_v1_ai_catalog(postgres).await?;
+        let after_seed = get_provider_catalog_by_id(postgres, provider_id).await?.unwrap();
+        let seeded: FinancialAdmission =
+            serde_json::from_value(after_seed.capability_flags_json["financialAdmission"].clone())?;
+        assert_eq!(seeded, admission);
+        let body = serde_json::json!({
+            "model": "gpt-6-luna",
+            "messages": [{"role": "user", "content": "hello"}],
+            "service_tier": "flex",
+            "n": 1,
+            "max_completion_tokens": 1024,
+        });
+        let endpoint = "https://api.openai.com/v1/chat/completions";
+
+        // One admitted attempt, then an application retry: two units.
+        consume_financial_attempt(postgres, &scope, "gpt-6-luna", endpoint, &body).await?;
+        consume_financial_attempt(postgres, &scope, "gpt-6-luna", endpoint, &body).await?;
+
+        let row = get_provider_catalog_by_id(postgres, provider_id).await?.expect("provider row");
+        let stored = serde_json::from_value::<FinancialAdmission>(
+            row.capability_flags_json["financialAdmission"].clone(),
+        )?;
+        assert_eq!(stored.global_consumed, 2, "each admitted attempt consumes one unit");
+        assert_eq!(stored.models["gpt-6-luna"].consumed, 2);
+        assert_eq!(stored.history, admission.history);
+
+        // Re-reading the durable row after an attempt completes changes nothing:
+        // there is no refund on success, failure, or an unknown outcome.
+        let after_success =
+            get_provider_catalog_by_id(postgres, provider_id).await?.expect("provider row");
+        let stored_after = serde_json::from_value::<FinancialAdmission>(
+            after_success.capability_flags_json["financialAdmission"].clone(),
+        )?;
+        assert_eq!(stored_after.global_consumed, 2);
+        assert_eq!(stored_after.models["gpt-6-luna"].consumed, 2);
+
+        Ok(())
+    }
+    .await;
+    fixture.cleanup().await?;
+    result
+}
+
+#[tokio::test]
+#[ignore = "requires local postgres and redis services"]
+async fn financial_admission_denials_consume_no_attempt() -> Result<()> {
+    use ironrag_backend::infra::repositories::ai_repository::{
+        FinancialAdmission, FinancialAdmissionError, FinancialAdmissionState,
+        FinancialModelAllowance, FinancialRequestEnvelope, RequiredFinancialScope,
+        consume_financial_attempt, get_provider_catalog_by_id,
+    };
+
+    let fixture = BootstrapStackFixture::create().await?;
+    let result = async {
+        let postgres = &fixture.state.persistence.postgres;
+        let provider_id: Uuid = sqlx::query_scalar(
+            "select id from ai_provider_catalog where provider_kind = 'openai'",
+        )
+        .fetch_one(postgres)
+        .await?;
+        let scope_id = Uuid::new_v4();
+        let envelope = FinancialRequestEnvelope::Chat {
+            allowed_service_tiers: vec!["default".into(), "flex".into()],
+            max_input_bytes: 65_536,
+            max_output_tokens: 128_000,
+            max_input_tokens: 922_000,
+        };
+        let base = FinancialAdmission {
+            version: 1,
+            provider_id,
+            scope_id,
+            policy_fingerprint: String::new(),
+            cutoff: chrono::Utc::now() + chrono::Duration::hours(1),
+            state: FinancialAdmissionState::Active,
+            grant_microusd: 5_000,
+            global_limit: 5,
+            global_consumed: 0,
+            history: Vec::new(),
+            models: std::collections::BTreeMap::from([(
+                "gpt-6-luna".to_string(),
+                FinancialModelAllowance {
+                    endpoint: "https://api.openai.com/v1/chat/completions".to_string(),
+                    envelope,
+                    attempt_microusd: 1_000,
+                    limit: 5,
+                    consumed: 0,
+                },
+            )]),
+        };
+        let mut base = base;
+        base.policy_fingerprint = base.immutable_fingerprint()?;
+        let scope = RequiredFinancialScope {
+            provider_id,
+            scope_id,
+            policy_fingerprint: base.policy_fingerprint.clone(),
+        };
+        let body = serde_json::json!({
+            "model": "gpt-6-luna",
+            "messages": [{"role": "user", "content": "hello"}],
+            "service_tier": "default",
+            "n": 1,
+            "max_completion_tokens": 1024,
+        });
+        let endpoint = "https://api.openai.com/v1/chat/completions";
+
+        // Each denial must leave the persisted counters untouched.
+        let deny = |admission: Option<&FinancialAdmission>, scope: &RequiredFinancialScope| {
+            let admission = admission.cloned();
+            let scope = scope.clone();
+            let body = body.clone();
+            async move {
+                let expected_global = admission.as_ref().map_or(0, |value| value.global_consumed);
+                let expected_model = admission
+                    .as_ref()
+                    .and_then(|value| value.models.get("gpt-6-luna"))
+                    .map_or(0, |model| model.consumed);
+                match admission {
+                    Some(admission) => {
+                        write_financial_admission(postgres, provider_id, &admission).await?;
+                    }
+                    None => {
+                        sqlx::query(
+                            "update ai_provider_catalog set capability_flags_json = capability_flags_json - 'financialAdmission' where id = $1",
+                        )
+                        .bind(provider_id)
+                        .execute(postgres)
+                        .await?;
+                    }
+                }
+                let outcome =
+                    consume_financial_attempt(postgres, &scope, "gpt-6-luna", endpoint, &body)
+                        .await;
+                assert!(outcome.is_err(), "the attempt must be refused");
+                let row = get_provider_catalog_by_id(postgres, provider_id)
+                    .await?
+                    .expect("provider row");
+                let persisted = row.capability_flags_json.get("financialAdmission");
+                if let Some(value) = persisted {
+                    let stored = serde_json::from_value::<FinancialAdmission>(value.clone())?;
+                    assert_eq!(
+                        stored.global_consumed, expected_global,
+                        "a refusal must not consume"
+                    );
+                    assert_eq!(stored.models["gpt-6-luna"].consumed, expected_model);
+                }
+                Ok::<(), anyhow::Error>(())
+            }
+        };
+
+        // Missing state.
+        deny(None, &scope).await?;
+
+        // Corrupt payload.
+        let corrupt = serde_json::json!({"version": 1, "providerId": provider_id});
+        sqlx::query(
+            "update ai_provider_catalog set capability_flags_json = jsonb_set(capability_flags_json, '{financialAdmission}', $2::jsonb, true) where id = $1",
+        )
+        .bind(provider_id)
+        .bind(corrupt)
+        .execute(postgres)
+        .await?;
+        let outcome =
+            consume_financial_attempt(postgres, &scope, "gpt-6-luna", endpoint, &body).await;
+        assert!(outcome.is_err());
+
+        // Mismatched fingerprint.
+        let mut mismatched = base.clone();
+        mismatched.policy_fingerprint = "sha256".to_string();
+        deny(Some(&mismatched), &scope).await?;
+
+        // Prepared and closed states.
+        let mut prepared = base.clone();
+        prepared.state = FinancialAdmissionState::Prepared;
+        deny(Some(&prepared), &scope).await?;
+        let mut closed = base.clone();
+        closed.state = FinancialAdmissionState::Closed;
+        deny(Some(&closed), &scope).await?;
+
+        // Expired.
+        let mut expired = base.clone();
+        expired.cutoff = chrono::Utc::now() - chrono::Duration::seconds(1);
+        expired.policy_fingerprint = expired.immutable_fingerprint()?;
+        let expired_scope = RequiredFinancialScope {
+            provider_id,
+            scope_id,
+            policy_fingerprint: expired.policy_fingerprint.clone(),
+        };
+        deny(Some(&expired), &expired_scope).await?;
+
+        // Model exhaustion and global exhaustion. The documents stay internally
+        // consistent (sum of model counters equals global_consumed), so the
+        // refusal is exhaustion, not invalid state.
+        let mut model_full = base.clone();
+        model_full.models.get_mut("gpt-6-luna").expect("model").consumed = 5;
+        model_full.global_consumed = 5;
+        model_full.global_limit = 10;
+        model_full.policy_fingerprint = model_full.immutable_fingerprint()?;
+        let model_scope = RequiredFinancialScope {
+            provider_id,
+            scope_id,
+            policy_fingerprint: model_full.policy_fingerprint.clone(),
+        };
+        deny(Some(&model_full), &model_scope).await?;
+        let outcome =
+            consume_financial_attempt(postgres, &model_scope, "gpt-6-luna", endpoint, &body).await;
+        assert!(matches!(outcome, Err(FinancialAdmissionError::Exhausted)));
+        let mut global_full = base.clone();
+        global_full.models.get_mut("gpt-6-luna").expect("model").consumed = 5;
+        global_full.global_consumed = 5;
+        deny(Some(&global_full), &scope).await?;
+        let outcome =
+            consume_financial_attempt(postgres, &scope, "gpt-6-luna", endpoint, &body).await;
+        assert!(matches!(outcome, Err(FinancialAdmissionError::Exhausted)));
+
+        Ok(())
+    }
+    .await;
+    fixture.cleanup().await?;
+    result
+}
+
+#[tokio::test]
+#[ignore = "requires local postgres and redis services"]
+async fn successor_admission_activates_through_catalog_write() -> Result<()> {
+    use ironrag_backend::infra::repositories::ai_repository::{
+        FinancialAdmission, FinancialAdmissionState, FinancialModelAllowance,
+        FinancialRequestEnvelope, RequiredFinancialScope, UpdateProviderCatalog,
+        get_provider_catalog_by_id, update_provider_catalog_with_scope,
+    };
+
+    let fixture = BootstrapStackFixture::create().await?;
+    let result = async {
+        let postgres = &fixture.state.persistence.postgres;
+        let provider_id: Uuid =
+            sqlx::query_scalar("select id from ai_provider_catalog where provider_kind = 'openai'")
+                .fetch_one(postgres)
+                .await?;
+        let before =
+            get_provider_catalog_by_id(postgres, provider_id).await?.expect("provider row");
+        let now = chrono::Utc::now();
+        let envelope = FinancialRequestEnvelope::Chat {
+            allowed_service_tiers: vec!["default".into(), "flex".into()],
+            max_input_bytes: 65_536,
+            max_output_tokens: 128_000,
+            max_input_tokens: 922_000,
+        };
+        let mut predecessor = FinancialAdmission {
+            version: 1,
+            provider_id,
+            scope_id: Uuid::new_v4(),
+            policy_fingerprint: String::new(),
+            cutoff: now + chrono::Duration::hours(1),
+            state: FinancialAdmissionState::Closed,
+            grant_microusd: 10_000,
+            global_limit: 10,
+            global_consumed: 1,
+            history: Vec::new(),
+            models: std::collections::BTreeMap::from([(
+                "gpt-6-luna".to_string(),
+                FinancialModelAllowance {
+                    endpoint: "https://api.openai.com/v1/chat/completions".to_string(),
+                    envelope,
+                    attempt_microusd: 1_000,
+                    limit: 10,
+                    consumed: 1,
+                },
+            )]),
+        };
+        predecessor.policy_fingerprint = predecessor.immutable_fingerprint()?;
+        write_financial_admission(postgres, provider_id, &predecessor).await?;
+
+        let mut successor = predecessor.clone();
+        successor.scope_id = Uuid::new_v4();
+        successor.state = FinancialAdmissionState::Prepared;
+        successor.global_consumed = 0;
+        successor.models.get_mut("gpt-6-luna").expect("model").consumed = 0;
+        successor.cutoff = now + chrono::Duration::hours(2);
+        successor.history.clear();
+        successor.policy_fingerprint = successor.immutable_fingerprint()?;
+        let scope = RequiredFinancialScope {
+            provider_id,
+            scope_id: successor.scope_id,
+            policy_fingerprint: successor.policy_fingerprint.clone(),
+        };
+
+        let mut profile = before.capability_flags_json.clone();
+        profile["financialAdmission"] = serde_json::to_value(&successor)?;
+        let stored = update_provider_catalog_with_scope(
+            postgres,
+            UpdateProviderCatalog {
+                provider_id,
+                provider_kind: &before.provider_kind,
+                display_name: &before.display_name,
+                api_style: &before.api_style,
+                lifecycle_state: &before.lifecycle_state,
+                default_base_url: before.default_base_url.as_deref(),
+                capability_flags_json: Some(profile),
+            },
+            Some(&scope),
+        )
+        .await?
+        .expect("provider row");
+        let prepared: FinancialAdmission =
+            serde_json::from_value(stored.capability_flags_json["financialAdmission"].clone())?;
+        assert_eq!(prepared.state, FinancialAdmissionState::Prepared);
+        assert_eq!(prepared.scope_id, successor.scope_id);
+        assert_eq!(prepared.history.len(), 1);
+        assert_eq!(prepared.history[0].scope_id, predecessor.scope_id);
+        assert_eq!(prepared.history[0].state, FinancialAdmissionState::Closed);
+        assert_eq!(prepared.history[0].global_consumed, 1);
+
+        // The API response does not expose financialAdmission, so activation
+        // must work without echoing the server-owned history.
+        let mut active = successor.clone();
+        active.state = FinancialAdmissionState::Active;
+        active.history.clear();
+        let mut profile = before.capability_flags_json.clone();
+        profile["financialAdmission"] = serde_json::to_value(&active)?;
+        let stored = update_provider_catalog_with_scope(
+            postgres,
+            UpdateProviderCatalog {
+                provider_id,
+                provider_kind: &before.provider_kind,
+                display_name: &before.display_name,
+                api_style: &before.api_style,
+                lifecycle_state: &before.lifecycle_state,
+                default_base_url: before.default_base_url.as_deref(),
+                capability_flags_json: Some(profile),
+            },
+            Some(&scope),
+        )
+        .await?
+        .expect("provider row");
+        let activated: FinancialAdmission =
+            serde_json::from_value(stored.capability_flags_json["financialAdmission"].clone())?;
+        assert_eq!(activated.state, FinancialAdmissionState::Active);
+        assert_eq!(activated.history, prepared.history);
+        Ok(())
+    }
+    .await;
+    fixture.cleanup().await?;
+    result
+}
+
+async fn write_financial_admission(
+    postgres: &PgPool,
+    provider_id: Uuid,
+    admission: &ironrag_backend::infra::repositories::ai_repository::FinancialAdmission,
+) -> Result<()> {
+    let value = serde_json::to_value(admission)?;
+    sqlx::query(
+        "update ai_provider_catalog set capability_flags_json = jsonb_set(capability_flags_json, '{financialAdmission}', $2::jsonb, true) where id = $1",
+    )
+    .bind(provider_id)
+    .bind(value)
+    .execute(postgres)
+    .await?;
+    Ok(())
+}
+
 #[tokio::test]
 #[ignore = "requires local postgres and redis services"]
 async fn bootstrap_ai_account_upsert_is_idempotent() -> Result<()> {

@@ -86,7 +86,7 @@ their pending request and progress rather than treating it as a confirmed
 duplicate or permanent content rejection. Exact idempotent replay returns the
 original admission, and complete documents keep normal duplicate semantics.
 
-The version response advertises `contentVisibilityContract: "visibility-intent/1"`.
+The version response advertises `contentVisibilityContract: "visibility-intent/2"`.
 Clients must require that capability before submitting visibility-dependent work;
 its absence does not authorize an older writable policy.
 

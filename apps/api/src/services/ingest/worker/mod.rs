@@ -20,6 +20,9 @@ pub use runtime::spawn_ingestion_worker;
 #[cfg(feature = "test-support")]
 pub use attempt::worker_attempt_abort_guard_for_test;
 
+#[cfg(feature = "test-support")]
+pub use pipeline::finalize_content_readiness_for_test;
+
 #[cfg(test)]
 mod claim_tests;
 #[cfg(test)]

@@ -2,6 +2,7 @@ use std::time::Duration;
 
 pub mod extraction_protocol;
 pub mod llm;
+pub mod provider_admission;
 pub mod provider_budget;
 pub mod retry;
 pub mod typesafe;

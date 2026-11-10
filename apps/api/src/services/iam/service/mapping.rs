@@ -44,7 +44,7 @@ pub(super) fn map_workspace_membership(
     }
 }
 
-pub(super) const fn grant_resource_kind_as_str(value: &GrantResourceKind) -> &'static str {
+pub(crate) const fn grant_resource_kind_as_str(value: &GrantResourceKind) -> &'static str {
     match value {
         GrantResourceKind::System => "system",
         GrantResourceKind::Workspace => "workspace",
@@ -55,6 +55,19 @@ pub(super) const fn grant_resource_kind_as_str(value: &GrantResourceKind) -> &'s
         GrantResourceKind::Connector => "connector",
         GrantResourceKind::ProviderCredential => "provider_credential",
         GrantResourceKind::LibraryBinding => "library_binding",
+    }
+}
+
+/// Wire name of a principal kind: the `iam_principal.principal_kind` value.
+///
+/// Kept next to [`parse_principal_kind`] so the two directions of the same
+/// vocabulary live together.
+pub(crate) const fn principal_kind_as_str(value: &PrincipalKind) -> &'static str {
+    match value {
+        PrincipalKind::User => "user",
+        PrincipalKind::ApiToken => "api_token",
+        PrincipalKind::Worker => "worker",
+        PrincipalKind::Bootstrap => "bootstrap",
     }
 }
 

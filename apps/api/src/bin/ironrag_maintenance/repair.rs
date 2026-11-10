@@ -7,7 +7,8 @@ use maintenance_repair as repair;
 
 #[allow(
     clippy::print_stdout,
-    reason = "operator maintenance commands intentionally stream reports to the terminal"
+    clippy::cognitive_complexity,
+    reason = "operator maintenance commands intentionally stream reports to the terminal and dispatch multiple subcommands"
 )]
 pub(super) async fn run_repair(state: &AppState, command: RepairCommand) -> Result<()> {
     match command {

@@ -11,7 +11,7 @@ use crate::{http_response_support, temp_postgres_database};
 use anyhow::{Context, Result, ensure};
 use argon2::{
     Argon2,
-    password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString, rand_core::OsRng},
+    password_hash::{PasswordHasher, PasswordVerifier, phc::PasswordHash},
 };
 use axum::{
     Router,
@@ -447,7 +447,7 @@ fn oidc_command(
 
 fn password_hash(password: &str) -> Result<String> {
     Argon2::default()
-        .hash_password(password.as_bytes(), &SaltString::generate(&mut OsRng))
+        .hash_password(password.as_bytes())
         .map(|hash| hash.to_string())
         .context("failed to generate integration password hash")
 }

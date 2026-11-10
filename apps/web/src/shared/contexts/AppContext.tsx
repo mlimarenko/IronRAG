@@ -17,6 +17,7 @@ import {
   type Locale,
 } from '@/shared/types'
 import { mapCatalogLibrary, mapShellLibrary } from '@/shared/lib/library'
+import { markTelemetryConsentPending } from '@/shared/lib/telemetry/consent'
 import {
   readScopePreference,
   writeScopePreference,
@@ -196,6 +197,7 @@ export function AppProvider({ children }: Readonly<{ children: ReactNode }>) {
 
   const queryClient = useQueryClient()
   const cachedIdentity = useRef<string | null>(null)
+  const pendingSignOut = useRef<Promise<void> | null>(null)
 
   /**
    * Cross the identity boundary: cached server state belongs to exactly one
@@ -401,6 +403,7 @@ export function AppProvider({ children }: Readonly<{ children: ReactNode }>) {
 
   const login = useCallback(
     async (loginVal: string, password: string) => {
+      if (pendingSignOut.current) await pendingSignOut.current
       await authApi.login(loginVal, password)
       const session = await resolveSessionForStoredScope()
       applySession(session)
@@ -422,14 +425,15 @@ export function AppProvider({ children }: Readonly<{ children: ReactNode }>) {
     // an ordinary failure, not a "your session expired" banner on top of a
     // sign-out the user asked for.
     markSessionSignedOut()
-    try {
-      await authApi.logout()
-    } catch {
-      // Ignore logout errors — clear local state regardless
-    }
+    markTelemetryConsentPending()
+    // The response clears the browser cookie; a later sign-in must not race it.
+    const logoutRequest = pendingSignOut.current ?? authApi.logout().catch(() => undefined)
+    pendingSignOut.current = logoutRequest
     clearSignedInState()
     setIsBootstrapRequired(false)
     setIsSessionExpired(false)
+    await logoutRequest
+    if (pendingSignOut.current === logoutRequest) pendingSignOut.current = null
   }, [clearSignedInState])
 
   // The single reaction to "the server stopped accepting this session".
@@ -447,6 +451,7 @@ export function AppProvider({ children }: Readonly<{ children: ReactNode }>) {
 
   const bootstrapSetup = useCallback(
     async (data: BootstrapSetup) => {
+      if (pendingSignOut.current) await pendingSignOut.current
       await authApi.bootstrapSetup(data)
       const session = await resolveSessionForStoredScope()
       applySession(session)

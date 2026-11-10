@@ -156,6 +156,7 @@ pub struct ContentDocumentListRow {
     // head pointers — may be absent while the document is still in flight
     pub active_revision_id: Option<Uuid>,
     pub readable_revision_id: Option<Uuid>,
+    pub visibility_intent_id: Option<Uuid>,
 
     // active revision metadata (Postgres copy)
     pub revision_title: Option<String>,
@@ -557,6 +558,7 @@ fn document_list_base_cte_sql() -> String {
                 d.deleted_at,
                 current_revision.revision_id as active_revision_id,
                 current_revision.revision_id as readable_revision_id,
+                h.visibility_intent_id,
                 h.latest_mutation_id,
                 m.mutation_state::text as mutation_state,
                 m.failure_code as mutation_failure_code,
@@ -1073,6 +1075,7 @@ where
             p.deleted_at,
             p.active_revision_id,
             p.readable_revision_id,
+            p.visibility_intent_id,
             p.revision_title,
             p.revision_mime_type,
             p.revision_byte_size,
@@ -2089,12 +2092,26 @@ where
     )
     .await?;
     after_status_read.await;
-    let snapshot_row = crate::infra::repositories::get_runtime_graph_snapshot_with_executor(
+    let mut snapshot_row = crate::infra::repositories::get_runtime_graph_snapshot_with_executor(
         &mut *transaction,
         library_id,
     )
     .await?;
+    if let Some(snapshot) = snapshot_row.as_mut()
+        && matches!(snapshot.graph_status.as_str(), "ready" | "empty")
+        && !super::content_fingerprint_repository::graph_projection_is_current_with_executor(
+            &mut *transaction,
+            snapshot.projection_identity(),
+        )
+        .await?
+    {
+        // Denial admission does not wait on graph cleanup. Report effective
+        // readiness from this same MVCC view, without mutating a read path.
+        snapshot.graph_status = "stale".to_owned();
+    }
     let graph_ready_raw = if let Some(snapshot) = snapshot_row.as_ref() {
+        // Document coverage is independent of whole-projection publication.
+        // Keep it aligned with graph-gap filters; graph_status gates usability.
         if snapshot.graph_status == "empty" || snapshot.node_count <= 0 {
             0
         } else {

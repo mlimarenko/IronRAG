@@ -267,6 +267,8 @@ pub enum ProviderBudgetError {
     RegistryCapacity { max_entries: usize },
     #[error("provider concurrency registry lock is poisoned")]
     RegistryPoisoned,
+    #[error("provider dispatch refused: {0}")]
+    Dispatch(#[from] crate::shared::provider_http::ProviderDispatchRefusal),
 }
 
 impl ProviderBudgetError {
@@ -282,6 +284,29 @@ impl ProviderBudgetError {
             Self::LimiterClosed => "admission_limiter_closed",
             Self::RegistryCapacity { .. } => "admission_registry_capacity",
             Self::RegistryPoisoned => "admission_registry_poisoned",
+            Self::Dispatch(refusal) => match refusal {
+                crate::shared::provider_http::ProviderDispatchRefusal::Authority => {
+                    "dispatch_authority"
+                }
+                crate::shared::provider_http::ProviderDispatchRefusal::RouteMismatch => {
+                    "dispatch_route_mismatch"
+                }
+                crate::shared::provider_http::ProviderDispatchRefusal::CredentialMismatch => {
+                    "dispatch_credential_mismatch"
+                }
+                crate::shared::provider_http::ProviderDispatchRefusal::UninspectableBody => {
+                    "dispatch_uninspectable_body"
+                }
+                crate::shared::provider_http::ProviderDispatchRefusal::Envelope => {
+                    "dispatch_envelope"
+                }
+                crate::shared::provider_http::ProviderDispatchRefusal::Admission => {
+                    "dispatch_admission"
+                }
+                crate::shared::provider_http::ProviderDispatchRefusal::Exhausted => {
+                    "dispatch_exhausted"
+                }
+            },
         }
     }
 }

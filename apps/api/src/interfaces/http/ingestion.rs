@@ -18,6 +18,10 @@ use crate::{
             POLICY_LIBRARY_READ, POLICY_USAGE_READ, authorize_library_permission,
             load_library_and_authorize,
         },
+        ingest_pagination::{
+            IngestAttemptListCursor, IngestJobListCursor, decode_page_cursor, encode_page_cursor,
+            parse_ingest_queue_state_filter,
+        },
         router_support::ApiError,
     },
     services::ingest::service::QUEUE_STALE_LEASE_SECONDS,
@@ -74,9 +78,6 @@ pub struct IngestReadinessResponse {
 // GET /v1/ingest/libraries/{libraryId}/jobs
 // ============================================================================
 
-const INGEST_QUEUE_STATE_VALUES: &[&str] =
-    &["queued", "leased", "completed", "failed", "canceled", "paused"];
-
 #[derive(Debug, Deserialize, utoipa::ToSchema, utoipa::IntoParams)]
 #[serde(rename_all = "camelCase")]
 #[into_params(parameter_in = Query)]
@@ -97,56 +98,6 @@ pub struct IngestJobListPageResponse {
     pub next_cursor: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct IngestJobListCursor {
-    queued_at: chrono::DateTime<chrono::Utc>,
-    job_id: Uuid,
-}
-
-fn parse_ingest_queue_state_filter(raw: &str) -> Result<Vec<String>, ApiError> {
-    let mut out = Vec::new();
-    for token in raw.split(',').map(str::trim).filter(|value| !value.is_empty()) {
-        if !INGEST_QUEUE_STATE_VALUES.contains(&token) {
-            return Err(ApiError::BadRequest(format!(
-                "unknown status filter value `{token}`; allowed: {}",
-                INGEST_QUEUE_STATE_VALUES.join(", ")
-            )));
-        }
-        out.push(token.to_string());
-    }
-    Ok(out)
-}
-
-// ============================================================================
-// Opaque cursors for the ingest jobs/attempts list surfaces.
-//
-// Same shape as the primary `/v1/content/libraries/{libraryId}/documents`
-// cursor: base64(json(...)), opaque from the client's perspective, only
-// valid against the server version that produced it. Any decode failure is
-// surfaced as a `BadRequest` — callers are expected to drop the cursor and
-// start from the top instead of pretending the page succeeded.
-// ============================================================================
-
-fn encode_page_cursor<T: Serialize>(cursor: &T) -> String {
-    use base64::Engine;
-    // Both cursor shapes below are plain structs of infallibly-serializable
-    // fields (`DateTime<Utc>` / `Uuid` / `i32`), so `to_vec` can only fail on
-    // I/O errors which `Vec<u8>` never produces. Fall back to an empty token
-    // on the (unreachable) error path so the caller keeps paginating rather
-    // than panicking on the hot path.
-    let json = serde_json::to_vec(cursor).unwrap_or_default();
-    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(json)
-}
-
-fn decode_page_cursor<T: serde::de::DeserializeOwned>(token: &str) -> Result<T, ApiError> {
-    use base64::Engine;
-    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
-        .decode(token)
-        .map_err(|_| ApiError::BadRequest("invalid cursor encoding".to_string()))?;
-    serde_json::from_slice(&bytes)
-        .map_err(|_| ApiError::BadRequest("invalid cursor payload".to_string()))
-}
-
 // ============================================================================
 // GET /v1/ingest/jobs/{jobId}/attempts
 // ============================================================================
@@ -165,12 +116,6 @@ pub struct IngestAttemptListPageResponse {
     pub items: Vec<IngestAttempt>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub next_cursor: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct IngestAttemptListCursor {
-    attempt_number: i32,
-    attempt_id: Uuid,
 }
 
 // ============================================================================

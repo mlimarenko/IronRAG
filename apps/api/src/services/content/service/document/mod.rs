@@ -217,6 +217,8 @@ pub struct ListDocumentsPageCommand {
 #[derive(Debug, Clone)]
 pub struct ContentDocumentListEntry {
     pub id: Uuid,
+    pub visibility_intent_id: Option<Uuid>,
+    pub readable_revision_id: Option<Uuid>,
     pub library_id: Uuid,
     pub workspace_id: Uuid,
     pub file_name: Option<String>,
@@ -331,6 +333,8 @@ fn build_document_list_entry(
 
     Ok(ContentDocumentListEntry {
         id: row.id,
+        visibility_intent_id: row.visibility_intent_id,
+        readable_revision_id: row.readable_revision_id,
         library_id: row.library_id,
         workspace_id: row.workspace_id,
         file_name,

@@ -998,10 +998,36 @@ pub(crate) const REQUIRED_BASELINE_OBJECT_GROUPS_BILLING_KNOWLEDGE_SEARCH: &[&[(
     REQUIRED_BASELINE_OBJECTS_BILLING_KNOWLEDGE_SEARCH,
 ];
 
+const REQUIRED_BASELINE_OBJECTS_USER_PREFERENCE: &[(&str, &str)] = &[
+    (
+        "account telemetry preference table, columns and primary key",
+        crate::services::maintenance::user_preference_schema::TABLE_CERTIFICATE,
+    ),
+    (
+        "account telemetry preference consent check and principal foreign key",
+        crate::services::maintenance::user_preference_schema::CONSENT_CERTIFICATE,
+    ),
+];
+
+pub(crate) const REQUIRED_BASELINE_OBJECT_GROUPS_USER_PREFERENCE: &[&[(&str, &str)]] = &[
+    REQUIRED_BASELINE_OBJECTS_IRG75,
+    REQUIRED_BASELINE_OBJECTS_PROVISIONING,
+    REQUIRED_BASELINE_OBJECTS_IRG112,
+    REQUIRED_BASELINE_OBJECTS_IRG173,
+    REQUIRED_BASELINE_OBJECTS_QUERY_RERANK,
+    REQUIRED_BASELINE_OBJECTS_DECISION_CATALOG,
+    REQUIRED_BASELINE_OBJECTS_CONTENT_VISIBILITY_INTENT,
+    REQUIRED_BASELINE_OBJECTS_VISION_RECOGNITION,
+    REQUIRED_BASELINE_OBJECTS_DOCUMENT_READ_ATTRIBUTION,
+    REQUIRED_BASELINE_OBJECTS_BILLING_KNOWLEDGE_SEARCH,
+    REQUIRED_BASELINE_OBJECTS_USER_PREFERENCE,
+];
+
 /// Readiness validates the current revision, including unchanged document-read
-/// attribution and the exact current enum. Frozen predecessors stay exact.
+/// attribution, the exact current enum, and the account telemetry preference
+/// table. Frozen predecessors stay exact.
 pub(crate) const REQUIRED_BASELINE_OBJECT_GROUPS: &[&[(&str, &str)]] =
-    REQUIRED_BASELINE_OBJECT_GROUPS_BILLING_KNOWLEDGE_SEARCH;
+    REQUIRED_BASELINE_OBJECT_GROUPS_USER_PREFERENCE;
 
 /// Fails when the recorded baseline checksum is current but an object that
 /// baseline declares is absent.

@@ -20,11 +20,11 @@ use crate::{
 
 use super::{
     MCP_DISTRIBUTED_CANCEL_SCRIPT, MCP_DISTRIBUTED_OWNER_ACQUIRE_SCRIPT,
-    MCP_DISTRIBUTED_RELEASE_SCRIPT, MCP_TOOL_CALL_CANCEL_PENDING_MARKER, McpAcceptPreference,
-    McpDistributedAdmissionOutcome, McpDistributedAdmissionResolution,
-    McpDistributedToolCallAdmission, McpInFlightRequestKey, McpInFlightToolCallRegistry,
-    McpJsonRpcResponse, McpSessionScope, McpToolCallDispatch, accept_preference,
-    cancel_mcp_in_flight_tool_call, finalize_mcp_response,
+    MCP_DISTRIBUTED_RELEASE_SCRIPT, MCP_SUPPORTED_METHOD_NAMES,
+    MCP_TOOL_CALL_CANCEL_PENDING_MARKER, McpAcceptPreference, McpDistributedAdmissionOutcome,
+    McpDistributedAdmissionResolution, McpDistributedToolCallAdmission, McpInFlightRequestKey,
+    McpInFlightToolCallRegistry, McpJsonRpcResponse, McpSessionScope, McpToolCallDispatch,
+    accept_preference, cancel_mcp_in_flight_tool_call, finalize_mcp_response,
     finalize_mcp_tool_call_sse_response_with_interval,
     grounded_answer_must_preserve_spans_for_evidence,
     grounded_answer_must_preserve_spans_for_source_titles, mcp_cancel_marker_matches_generation,
@@ -79,7 +79,13 @@ fn initialize_result_exposes_the_exact_shared_agent_policy() {
 
     assert_eq!(payload["instructions"], json!(crate::services::mcp::agent_policy::instructions()));
     assert_eq!(payload["protocolVersion"], json!("2025-11-25"));
-    assert_eq!(payload["capabilities"], json!({ "tools": { "listChanged": false } }));
+    assert_eq!(
+        payload["capabilities"],
+        json!({
+            "tools": { "listChanged": false },
+            "resources": { "listChanged": false, "subscribe": false },
+        })
+    );
     assert_eq!(
         payload["instructions"]
             .as_str()
@@ -88,6 +94,16 @@ fn initialize_result_exposes_the_exact_shared_agent_policy() {
             .count(),
         1
     );
+}
+
+#[test]
+fn supported_method_names_include_tools_and_resources() {
+    for method in ["initialize", "tools/list", "tools/call"] {
+        assert!(MCP_SUPPORTED_METHOD_NAMES.contains(&method), "missing {method}");
+    }
+    for method in ["resources/list", "resources/read", "resources/templates/list"] {
+        assert!(MCP_SUPPORTED_METHOD_NAMES.contains(&method), "missing {method}");
+    }
 }
 
 #[test]

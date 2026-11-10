@@ -179,3 +179,12 @@ OpenTelemetry export requires both `IRONRAG_OTEL_ENABLED=true` and an explicit
 `OTEL_EXPORTER_OTLP_ENDPOINT` for a collector you control. A stable
 `ironrag.deployment.id` is derived only after that opt-in. Log export remains
 separately disabled because logs may contain document or query content.
+
+Browser telemetry (Core Web Vitals, JavaScript errors, API failures, release
+health and product events) is also off by default. It is baked into the frontend
+image with `VITE_OTEL_EXPORTER_OTLP_ENDPOINT` (base URL; the app appends
+`/v1/traces`, `/v1/metrics` and `/v1/logs`) and remains disabled until the viewer
+grants consent in the UI. The same-origin `/otlp/` path is proxied by the web
+container to `IRONRAG_OTLP_UPSTREAM`. Payloads are redacted in the browser: no
+document content, questions, logins, emails, phone numbers or URL query strings
+are exported, and the session identifier is random per tab.

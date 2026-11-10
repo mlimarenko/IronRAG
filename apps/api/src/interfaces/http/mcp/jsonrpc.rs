@@ -28,8 +28,8 @@ use super::{
     handle_owned_mcp_tool_call, issue_registered_mcp_session,
     mark_distributed_mcp_tool_call_cancelled, mcp_distributed_coordination_keys,
     mcp_in_flight_request_key, mcp_protocol_header_error_response,
-    mcp_session_access_error_response, mcp_session_scope, parse_mcp_jsonrpc_request, session,
-    start_distributed_bounded_mcp_tool_call, tools, valid_initialize_params,
+    mcp_session_access_error_response, mcp_session_scope, parse_mcp_jsonrpc_request, resources,
+    session, start_distributed_bounded_mcp_tool_call, tools, valid_initialize_params,
     validate_and_accept_mcp_session, with_request_id,
 };
 
@@ -336,7 +336,9 @@ async fn handle_session_mcp_transport_request(
     {
         return response;
     }
-    dispatch_session_mcp_method(auth, state, request, session_scope, context).await
+    // The session dispatch carries the full tool-call future; box it here so
+    // the transport entry point stays below clippy's large-future threshold.
+    Box::pin(dispatch_session_mcp_method(auth, state, request, session_scope, context)).await
 }
 
 async fn resolve_mcp_transport_session(
@@ -405,6 +407,18 @@ async fn dispatch_session_mcp_method(
                 &state,
                 &context.request_id,
                 request.id,
+                context.surface,
+            )
+            .await
+        }
+        "resources/list" => resources::handle_resources_list(request.id).await,
+        "resources/templates/list" => resources::handle_resources_templates_list(request.id).await,
+        "resources/read" => {
+            resources::handle_resources_read(
+                &auth,
+                &state,
+                request.id,
+                request.params,
                 context.surface,
             )
             .await

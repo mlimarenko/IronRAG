@@ -5,6 +5,7 @@ mod types;
 mod access;
 mod mappers;
 pub(crate) mod oidc;
+pub(crate) mod preferences;
 mod service_identities;
 mod tokens;
 mod users;
@@ -14,6 +15,13 @@ use mappers::*;
 pub use service_identities::*;
 pub use tokens::*;
 pub use users::*;
+
+/// The MCP `mint_iam_token` tool builds the same command as
+/// `POST /v1/iam/tokens` through this one helper instead of restating the
+/// validation rules in the MCP access layer. The grant builders, deduplication
+/// helpers and [`MintGrantScope`] stay reachable for the same reason through
+/// the `pub use tokens::*` glob above.
+pub(crate) use tokens::build_mint_token_command;
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -29,6 +37,7 @@ use tracing::{error, info, warn};
 use uuid::Uuid;
 
 use self::{
+    preferences::{get_iam_preferences, seed_iam_preferences, update_iam_preferences},
     session::{
         get_bootstrap_status, get_session, login_session, logout_session, resolve_session,
         setup_bootstrap_admin,
@@ -66,6 +75,8 @@ pub fn router() -> Router<AppState> {
         .route("/iam/oidc/login", get(oidc::oidc_login))
         .route("/iam/oidc/callback", get(oidc::oidc_callback))
         .route("/iam/me", get(get_me))
+        .route("/iam/preferences", get(get_iam_preferences).put(update_iam_preferences))
+        .route("/iam/preferences/seed", post(seed_iam_preferences))
         .route("/iam/users", get(list_users).post(create_user))
         .route("/iam/users/{userId}", patch(set_user_role).delete(delete_user))
         .route("/iam/users/{userId}/access", get(get_user_access).put(set_user_access))
@@ -217,6 +228,30 @@ fn authorize_workspace_scope_for_row(
         None if auth.is_system_admin => Ok(()),
         None => Err(ApiError::Unauthorized),
     }
+}
+
+/// Parses the MCP `permissionKinds` string list with the enum's own serde
+/// vocabulary.
+///
+/// `IamPermissionKind` (snake_case) is the single owner of the accepted
+/// permission names, so this reuses its `Deserialize` implementation instead of
+/// keeping a second string table that could drift from the REST surface. An
+/// unknown value is a client error naming that value and the accepted
+/// vocabulary serde reports.
+pub(crate) fn parse_iam_permission_kinds(
+    values: Vec<String>,
+) -> Result<Vec<IamPermissionKind>, ApiError> {
+    values
+        .into_iter()
+        .map(|value| {
+            serde_json::from_value::<IamPermissionKind>(serde_json::Value::String(value.clone()))
+                .map_err(|error| {
+                    ApiError::BadRequest(format!(
+                        "unknown permissionKinds value '{value}': {error}"
+                    ))
+                })
+        })
+        .collect()
 }
 
 /// Decides whether a permission may be granted on a resource kind.

@@ -13,6 +13,7 @@
 use crate::{database_url, http_response_support};
 mod billing_document_read;
 mod billing_knowledge_search;
+mod user_preference;
 use ironrag_backend::infra::persistence;
 
 use database_url::database_url_with_name;
@@ -1863,7 +1864,7 @@ mod vision_recognition {
             persistence::validate_baseline_objects_present(&pool).await?;
             assert_eq!(
                 hex::encode(baseline_checksum(&pool).await?),
-                baseline_delta::BASELINE_REVISION_BILLING_KNOWLEDGE_SEARCH_SHA384
+                baseline_delta::BASELINE_REVISION_USER_PREFERENCE_SHA384
             );
             let workspace =
                 catalog_repository::create_workspace(&pool, "fresh-vision", "Fresh Vision", None)
@@ -2131,6 +2132,11 @@ mod xberg_recognition {
             assert!(billing.schema_applied && !billing.already_current);
             let search = ironrag_backend::services::maintenance::billing_knowledge_search_schema::migrate_billing_knowledge_search_schema(&pool,true).await?;
             assert!(search.schema_applied && !search.already_current);
+            let fence = ironrag_backend::services::maintenance::provider_source_generation_fence_schema::migrate_provider_source_generation_fence(&pool,true).await?;
+            assert!(fence.schema_applied && !fence.already_current);
+            let preference = ironrag_backend::services::maintenance::user_preference_schema::migrate_user_preference_schema(&pool,true).await?;
+            assert!(preference.schema_applied && !preference.already_current);
+            assert_eq!(hex::encode(baseline_checksum(&pool).await?), baseline_delta::BASELINE_REVISION_USER_PREFERENCE_SHA384);
             assert_eq!(preserved_publication(&pool).await?,before);
             assert_eq!(source_digest(&storage,&key).await?,original_bytes);
             persistence::validate_baseline_objects_present(&pool).await?;
@@ -3064,6 +3070,16 @@ async fn additive_baseline_chain_advances_irg75_to_shipped_revision() -> Result<
         assert!(billing.schema_applied && !billing.already_current);
         let search = ironrag_backend::services::maintenance::billing_knowledge_search_schema::migrate_billing_knowledge_search_schema(&pool,true).await?;
         assert!(search.schema_applied && !search.already_current);
+        assert_eq!(baseline_checksum(&pool).await?, hex::decode(ironrag_backend::services::maintenance::baseline_delta::BASELINE_REVISION_BILLING_KNOWLEDGE_SEARCH_SHA384)?);
+        let fence = ironrag_backend::services::maintenance::provider_source_generation_fence_schema::migrate_provider_source_generation_fence(&pool, true).await?;
+        assert!(fence.schema_applied && !fence.already_current);
+        let preference = ironrag_backend::services::maintenance::user_preference_schema::migrate_user_preference_schema(&pool, true).await?;
+        assert!(preference.schema_applied && !preference.already_current);
+        assert_eq!(baseline_checksum(&pool).await?, shipped_checksum);
+        let fence = ironrag_backend::services::maintenance::provider_source_generation_fence_schema::migrate_provider_source_generation_fence(&pool, true).await?;
+        assert!(fence.already_current && !fence.schema_applied);
+        let preference = ironrag_backend::services::maintenance::user_preference_schema::migrate_user_preference_schema(&pool, true).await?;
+        assert!(preference.already_current && !preference.schema_applied);
         assert_eq!(baseline_checksum(&pool).await?, shipped_checksum);
         persistence::validate_baseline_objects_present(&pool).await?;
         Ok(())

@@ -253,6 +253,8 @@ class FakeIronRag:
     async def get_document(self, document_id: UUID | str) -> DocumentResource | None:
         for doc in self.documents.values():
             if str(doc.id) == str(document_id):
+                if doc.visibility_intent_id is not None and doc.readable_revision_id is None:
+                    return None
                 return doc
         return None
 
@@ -3330,6 +3332,120 @@ async def test_required_equal_token_denies_history_when_current_copy_is_missing(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("race", ["missing", "reclaimed", "newer"])
+async def test_required_materialization_identity_race_defers(tmp_path: Path, race: str) -> None:
+    class RacingLookup(FakeIronRag):
+        async def find_document(
+            self, library_id: UUID, external_key: str
+        ) -> DocumentResource | None:
+            doc = await super().find_document(library_id, external_key)
+            if doc is not None and doc.visibility_intent_id is not None:
+                if race == "missing":
+                    return None
+                if race == "reclaimed":
+                    return doc.model_copy(update={"id": _doc_id(9999)})
+                return doc.model_copy(update={"visibility_intent_id": _doc_id(9998)})
+            return doc
+
+    ref = _required_page_ref("v2")
+    state, ironrag = _state(tmp_path), RacingLookup()
+    _seed_existing_page(state, ironrag, ref, change_token="v1")
+    adapter = FixedFetchResultAdapter(
+        _materialized_page(ref, b"safe", enforcement=SourceMaterializationEnforcement.REQUIRED)
+    )
+    outcome = await _orchestrator(adapter, ironrag, state).push_ref(ref)
+    assert outcome.deferred
+    assert not ironrag.revisions
+    assert state.get(ref.kind, ref.item_id).change_token == "v1"
+    assert state.get_location(ref.kind, ref.item_id, str(LIB)).ironrag_document_id == str(DOC_PRE)
+    # A displaced target must retire the attempt exactly like an intent
+    # mismatch, so repeated key churn cannot leave inert accepted attempts.
+    attempt = state.materialization_attempts_for_document(str(DOC_PRE))[0]
+    expected = "intent_superseded" if race in {"reclaimed", "newer"} else "intent_accepted"
+    assert attempt.phase == expected
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("race", ["missing", "reclaimed", "newer", "readable"])
+async def test_required_materialization_historical_closure_race_fails_closed(
+    tmp_path: Path,
+    race: str,
+) -> None:
+    class RacingHistory(FakeIronRag):
+        async def wait_for_operation(self, operation_id: UUID, **kwargs: Any) -> OperationStatus:
+            result = await super().wait_for_operation(operation_id, **kwargs)
+            key = (LIB2, ref.external_key)
+            doc = self.documents[key]
+            if race == "missing":
+                del self.documents[key]
+            else:
+                changes = {
+                    "reclaimed": {"id": _doc_id(9999)},
+                    "newer": {"visibility_intent_id": _doc_id(9998)},
+                    "readable": {"readable_revision_id": _doc_id(9997)},
+                }
+                self.documents[key] = doc.model_copy(update=changes[race])
+            return result
+
+    ref = _required_page_ref("v2")
+    state, ironrag = _state(tmp_path), RacingHistory()
+    for library_id, document_id in ((LIB2, DOC_OLD), (LIB, DOC_PRE)):
+        state.upsert(
+            kind=ref.kind,
+            item_id=ref.item_id,
+            change_token="v1",
+            external_key=ref.external_key,
+            ironrag_document_id=str(document_id),
+            ironrag_library_id=str(library_id),
+        )
+        ironrag.documents[(library_id, ref.external_key)] = _document(
+            document_id, library_id, ref.external_key
+        )
+    adapter = FixedFetchResultAdapter(
+        _materialized_page(ref, b"safe", enforcement=SourceMaterializationEnforcement.REQUIRED)
+    )
+    orchestrator = _orchestrator(adapter, ironrag, state)
+    if race in {"newer", "readable"}:
+        with pytest.raises(IronRagError):
+            await orchestrator.push_ref(ref)
+    else:
+        assert (await orchestrator.push_ref(ref)).deferred
+    assert state.get(ref.kind, ref.item_id).change_token == "v1"
+
+
+@pytest.mark.asyncio
+async def test_required_materialization_suppressed_copy_replaces_and_preserves_history(
+    tmp_path: Path,
+) -> None:
+    ref = _required_page_ref("v2")
+    state = _state(tmp_path)
+    ironrag = FakeIronRag()
+    for library_id, document_id in ((LIB2, DOC_OLD), (LIB, DOC_PRE)):
+        state.upsert(
+            kind=ref.kind,
+            item_id=ref.item_id,
+            change_token="v1",
+            external_key=ref.external_key,
+            ironrag_document_id=str(document_id),
+            ironrag_library_id=str(library_id),
+        )
+        ironrag.documents[(library_id, ref.external_key)] = _document(
+            document_id, library_id, ref.external_key
+        )
+    adapter = FixedFetchResultAdapter(
+        _materialized_page(ref, b"safe v2", enforcement=SourceMaterializationEnforcement.REQUIRED)
+    )
+    outcome = await _orchestrator(adapter, ironrag, state).push_ref(ref)
+    assert outcome.action == "replaced"
+    assert len(ironrag.revisions) == 1
+    assert ironrag.revisions[0]["visibility_intent_id"] is not None
+    historical = ironrag.documents[(LIB2, ref.external_key)]
+    assert historical.visibility_intent_id is not None
+    assert historical.readable_revision_id is None
+    assert state.get_location(ref.kind, ref.item_id, str(LIB2)).ironrag_document_id == str(DOC_OLD)
+
+
+@pytest.mark.asyncio
 async def test_required_materialization_retries_after_historical_intent_failure(
     tmp_path: Path,
 ) -> None:
@@ -4829,10 +4945,12 @@ async def test_visibility_contract_failed_copy_does_not_starve_later_denial(
                 raise IronRagError("unknown first-copy receipt")
             return await super().create_visibility_intent(document_id, **kwargs)
 
-        async def get_document(self, document_id: UUID | str) -> DocumentResource | None:
-            if failure == "head" and str(document_id) == str(DOC_PRE):
+        async def find_document(
+            self, library_id: UUID, external_key: str
+        ) -> DocumentResource | None:
+            if failure == "head" and library_id == LIB and self.visibility_requests:
                 raise IronRagError("unknown first-copy head")
-            return await super().get_document(document_id)
+            return await super().find_document(library_id, external_key)
 
     ref = _required_page_ref("v2")
     state = _state(tmp_path)

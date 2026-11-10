@@ -347,16 +347,17 @@ async fn connect_postgres(
     Ok((pool, temp_database))
 }
 
-fn database_error_code(error: &sqlx::Error) -> Option<String> {
-    error
-        .as_database_error()
-        .and_then(|database_error| database_error.code().map(std::borrow::Cow::into_owned))
-}
-
-fn anyhow_database_error_code(error: &anyhow::Error) -> Option<String> {
-    error
-        .chain()
-        .find_map(|cause| cause.downcast_ref::<sqlx::Error>().and_then(database_error_code))
+fn anyhow_admission_invariant(error: &anyhow::Error) -> Option<&'static str> {
+    error.chain().find_map(|cause| {
+        match cause.downcast_ref::<ironrag_backend::infra::repositories::admission_repository::AdmissionError>() {
+            Some(
+                ironrag_backend::infra::repositories::admission_repository::AdmissionError::InvariantViolation(
+                    message,
+                ),
+            ) => Some(*message),
+            _ => None,
+        }
+    })
 }
 
 #[tokio::test]
@@ -638,7 +639,12 @@ async fn web_ingest_run_repository_enforces_constraints_and_keeps_settings_immut
             )
             .await
             .expect_err("negative max_depth must violate migration check");
-        assert_eq!(anyhow_database_error_code(&negative_depth_error).as_deref(), Some("23514"));
+        // The canonical admission refuses invalid web settings in Rust before any
+        // statement reaches the database, so the typed invariant is the contract here.
+        assert_eq!(
+            anyhow_admission_invariant(&negative_depth_error),
+            Some("invalid web admission settings")
+        );
 
         let zero_pages_error = fixture
             .create_run(
@@ -653,7 +659,10 @@ async fn web_ingest_run_repository_enforces_constraints_and_keeps_settings_immut
             )
             .await
             .expect_err("zero max_pages must violate migration check");
-        assert_eq!(anyhow_database_error_code(&zero_pages_error).as_deref(), Some("23514"));
+        assert_eq!(
+            anyhow_admission_invariant(&zero_pages_error),
+            Some("invalid web admission settings")
+        );
 
         Ok(())
     }

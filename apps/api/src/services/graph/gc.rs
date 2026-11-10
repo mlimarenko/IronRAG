@@ -195,6 +195,9 @@ pub(crate) async fn run_gc_postgres_transaction(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
 ) -> Result<GcReport, GraphGcError> {
     ensure_library_has_no_active_ingest_jobs_locked(library_id, tx).await?;
+    repositories::invalidate_unpublished_runtime_graph_snapshot(tx, library_id, true)
+        .await
+        .map_err(|source| GraphGcError::Postgres { library_id, source })?;
     let orphan_evidence_before = delete_orphan_runtime_graph_evidence(library_id, tx).await?;
     let (edge_evidence_deleted, edges_deleted) =
         delete_zombie_runtime_graph_edges(library_id, tx).await?;
@@ -434,6 +437,16 @@ pub(crate) async fn delete_zombie_edge_closure_batch(
     let candidate_roots = i64::try_from(candidate_ids.len()).unwrap_or(i64::MAX);
     let work_remaining = candidate_roots >= budget || selected.len() < candidate_ids.len();
 
+    repositories::invalidate_runtime_graph_snapshot_for_targets(
+        tx,
+        library_id,
+        &[],
+        &selected,
+        &[],
+    )
+    .await
+    .map_err(|source| GraphGcError::Postgres { library_id, source })?;
+
     let bundle_evidence_deleted = sqlx::query(
         "delete from knowledge_bundle_evidence ref
          using runtime_graph_evidence evidence
@@ -543,6 +556,15 @@ pub(crate) async fn delete_zombie_node_closure_batch(
     let selected = budgeted_root_prefix("runtime graph node", &costs, budget)?;
     let candidate_roots = i64::try_from(candidate_ids.len()).unwrap_or(i64::MAX);
     let work_remaining = candidate_roots >= budget || selected.len() < candidate_ids.len();
+    repositories::invalidate_runtime_graph_snapshot_for_targets(
+        tx,
+        library_id,
+        &selected,
+        &[],
+        &[],
+    )
+    .await
+    .map_err(|source| GraphGcError::Postgres { library_id, source })?;
     let dependent = sqlx::query("delete from knowledge_bundle_entity where entity_id = any($1)")
         .bind(&selected)
         .execute(&mut **tx)

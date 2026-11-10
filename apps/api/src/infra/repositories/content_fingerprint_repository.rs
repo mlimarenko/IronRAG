@@ -150,11 +150,22 @@ pub async fn graph_projection_is_current(
     postgres: &PgPool,
     selected: super::RuntimeGraphProjectionIdentity,
 ) -> Result<bool, sqlx::Error> {
+    graph_projection_is_current_with_executor(postgres, selected).await
+}
+
+/// Checks the same public membership on a writer's transaction before commit.
+pub async fn graph_projection_is_current_with_executor<'e, E>(
+    executor: E,
+    selected: super::RuntimeGraphProjectionIdentity,
+) -> Result<bool, sqlx::Error>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+{
     // Keep stale-target existence checks as keyed probes: unrelated libraries
     // must not become a full-table hashed subplan for this library's request.
     sqlx::query_scalar(
         "with selected_snapshot as materialized (
-             select library_id, projection_version from runtime_graph_snapshot
+             select library_id, projection_version, node_count, edge_count from runtime_graph_snapshot
              where library_id = $1 and projection_version = $2
                and topology_generation = $3 and graph_status in ('ready', 'empty')
          ), current_revisions as materialized (
@@ -171,6 +182,17 @@ pub async fn graph_projection_is_current(
              group by evidence.target_id, evidence.target_kind
          )
          select exists (select 1 from selected_snapshot) and not exists (
+            select 1 from selected_snapshot snapshot
+            where (snapshot.node_count > 0) <> exists (
+                select 1 from runtime_graph_node node
+                where node.library_id = snapshot.library_id
+                  and node.projection_version = snapshot.projection_version
+            ) or (snapshot.edge_count > 0) <> exists (
+                select 1 from runtime_graph_edge edge
+                where edge.library_id = snapshot.library_id
+                  and edge.projection_version = snapshot.projection_version
+            )
+         ) and not exists (
             select 1 from selected_snapshot snapshot
             join runtime_graph_node node on node.library_id = snapshot.library_id
              and node.projection_version = snapshot.projection_version
@@ -211,7 +233,7 @@ pub async fn graph_projection_is_current(
     .bind(selected.library_id)
     .bind(selected.projection_version)
     .bind(selected.topology_generation)
-    .fetch_one(postgres)
+    .fetch_one(executor)
     .await
 }
 

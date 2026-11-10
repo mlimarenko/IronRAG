@@ -115,6 +115,9 @@ fn sample_chunk() -> ChunkRow {
 
 fn sample_runtime_binding() -> ResolvedRuntimeBinding {
     ResolvedRuntimeBinding {
+        admission: std::sync::Arc::new(
+            crate::integrations::provider_admission::UnqualifiedTestAdmission,
+        ),
         binding_id: uuid::Uuid::now_v7(),
         workspace_id: uuid::Uuid::nil(),
         library_id: uuid::Uuid::nil(),

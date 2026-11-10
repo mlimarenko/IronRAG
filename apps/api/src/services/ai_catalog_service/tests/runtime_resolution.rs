@@ -1,4 +1,48 @@
+use super::super::runtime_resolution::resolved_chat_max_output_tokens;
 use super::*;
+
+#[test]
+fn financial_chat_output_limit_uses_selected_model_only_when_override_absent() {
+    let purpose = AiBindingPurpose::QueryAnswer;
+    assert_eq!(resolved_chat_max_output_tokens(purpose, None, Some(32_768)), Some(32_768));
+    assert_eq!(resolved_chat_max_output_tokens(purpose, None, Some(8_192)), Some(8_192));
+    assert_eq!(resolved_chat_max_output_tokens(purpose, Some(500), Some(32_768)), Some(500));
+    assert_eq!(resolved_chat_max_output_tokens(purpose, Some(0), Some(32_768)), Some(0));
+    assert_eq!(resolved_chat_max_output_tokens(purpose, Some(-1), Some(32_768)), Some(-1));
+    assert_eq!(resolved_chat_max_output_tokens(purpose, None, None), None);
+    assert_eq!(resolved_chat_max_output_tokens(purpose, None, Some(0)), None);
+    assert_eq!(resolved_chat_max_output_tokens(purpose, None, Some(-1)), None);
+    assert_eq!(
+        resolved_chat_max_output_tokens(AiBindingPurpose::EmbedChunk, None, Some(100)),
+        None
+    );
+    assert_eq!(
+        resolved_chat_max_output_tokens(AiBindingPurpose::QueryRerank, None, Some(100)),
+        None
+    );
+    assert_eq!(
+        resolved_chat_max_output_tokens(AiBindingPurpose::GraphEntityType, None, Some(100)),
+        None
+    );
+    assert_eq!(
+        resolved_chat_max_output_tokens(AiBindingPurpose::QueryRerank, Some(7), Some(100)),
+        Some(7)
+    );
+}
+
+#[test]
+fn financial_resolved_output_limit_reaches_chat_request() {
+    let mut binding =
+        super::super::test_binding::systemone_decision_binding_base("https://example.com");
+    binding.binding_purpose = AiBindingPurpose::QueryAnswer;
+    binding.max_output_tokens_override =
+        resolved_chat_max_output_tokens(binding.binding_purpose, None, Some(32_768));
+    let request = crate::integrations::llm::build_text_chat_request(
+        binding.chat_request_seed(),
+        "question".to_string(),
+    );
+    assert_eq!(request.max_output_tokens_override, Some(32_768));
+}
 
 #[test]
 fn runtime_binding_batch_deduplicates_purposes_in_first_seen_order() {

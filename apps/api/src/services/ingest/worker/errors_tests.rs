@@ -5,7 +5,10 @@ use super::errors::{
 use super::limits::HeavyRevisionPipelinePermitTimeout;
 use crate::{
     domains::ops::OpsFailureDisposition,
-    integrations::{provider_budget::ProviderBudgetError, retry::ProviderRateLimit},
+    integrations::{
+        provider_budget::ProviderBudgetError,
+        retry::{ProviderCallError, ProviderRateLimit},
+    },
     services::content::error::ContentServiceError,
     shared::extraction::file_extract::{
         ExtractionFailureClass, FileExtractError, UploadAdmissionError, UploadFileKind,
@@ -108,6 +111,72 @@ fn ordinary_failures_carry_no_operational_deferral() {
 
     assert_eq!(classification.operational_defer, None);
     assert!(classification.is_retryable());
+}
+
+#[test]
+fn concurrency_saturation_carries_no_operational_deferral() {
+    let error = anyhow::Error::new(ProviderCallError::admission(ProviderBudgetError::Dispatch(
+        crate::shared::provider_http::ProviderDispatchRefusal::RouteMismatch,
+    )));
+    // A genuine saturation refusal must stay on its own path: no deferral, and
+    // never relabelled as the financial maintenance code.
+    let saturation =
+        anyhow::Error::new(ProviderCallError::admission(ProviderBudgetError::AcquireTimeout {
+            timeout_ms: 20,
+        }));
+    let classification = classify_content_ingest_failure(&saturation);
+    assert_eq!(classification.failure_code, "provider_concurrency_unavailable");
+    assert_eq!(classification.operational_defer, None);
+
+    // A dispatch refusal is a different code from concurrency saturation.
+    let financial = classify_content_ingest_failure(&error);
+    assert_ne!(
+        financial.failure_code, classification.failure_code,
+        "maintenance must not merge into saturation telemetry"
+    );
+}
+
+#[test]
+fn irreversible_dispatch_refusals_are_terminal_and_redacted() {
+    use crate::shared::provider_http::ProviderDispatchRefusal;
+
+    for (refusal, code) in [
+        (ProviderDispatchRefusal::Authority, "dispatch_authority"),
+        (ProviderDispatchRefusal::RouteMismatch, "dispatch_route_mismatch"),
+        (ProviderDispatchRefusal::CredentialMismatch, "dispatch_credential_mismatch"),
+        (ProviderDispatchRefusal::UninspectableBody, "dispatch_uninspectable_body"),
+        (ProviderDispatchRefusal::Envelope, "dispatch_envelope"),
+        (ProviderDispatchRefusal::Exhausted, "dispatch_exhausted"),
+    ] {
+        let error = anyhow::Error::new(ContentServiceError::Internal(anyhow::Error::new(
+            ProviderCallError::admission(ProviderBudgetError::Dispatch(refusal)),
+        )))
+        .context("graph materialization boundary");
+        let classification = classify_content_ingest_failure(&error);
+        assert_eq!(classification.failure_class, "provider");
+        assert_eq!(classification.failure_code, code);
+        assert_eq!(classification.failure_disposition, OpsFailureDisposition::OperationalTerminal);
+        assert!(!classification.is_retryable());
+        assert_eq!(classification.operational_defer, None);
+    }
+}
+
+#[test]
+fn financial_dispatch_refusal_defers_without_spending_the_attempt_budget() {
+    let error = anyhow::Error::new(ProviderCallError::admission(ProviderBudgetError::Dispatch(
+        crate::shared::provider_http::ProviderDispatchRefusal::Admission,
+    )));
+
+    let classification = classify_content_ingest_failure(&error);
+
+    assert_eq!(classification.failure_class, "provider");
+    assert_eq!(classification.failure_code, "provider_financial_dispatch_unavailable");
+    assert_ne!(classification.failure_code, "provider_concurrency_unavailable");
+    assert_eq!(classification.failure_disposition, OpsFailureDisposition::RetryExhausted);
+    assert!(
+        classification.operational_defer.is_some(),
+        "a maintenance refusal must be deferred, not spun into a terminal failure"
+    );
 }
 
 #[test]

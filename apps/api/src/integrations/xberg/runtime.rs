@@ -19,6 +19,7 @@ use tokio::{
     process::Command,
     sync::{Semaphore, oneshot},
 };
+use tracing::Instrument as _;
 
 static NATIVE_SLOT: LazyLock<Arc<Semaphore>> = LazyLock::new(|| Arc::new(Semaphore::new(1)));
 const STDERR_LIMIT: usize = 4096;
@@ -96,8 +97,28 @@ pub(super) async fn invoke(
         PermitWaitError::LimiterClosed { .. } => Error::LimiterClosed,
     })?;
     ensure_native_memory(bytes.len(), &operation)?;
-    invoke_admitted(source, bytes, operation, range, Admission { settings, permit: Some(permit) })
-        .await
+    let span = tracing::info_span!(
+        "extract.parse",
+        "extract.source_format" = source.source_format,
+        "extract.operation" = ?operation,
+        "extract.input_bytes" = bytes.len(),
+        "extract.range_start" = range.map(|range| range.0),
+        "extract.range_end" = range.map(|range| range.1),
+        "extract.elapsed_ms" = tracing::field::Empty,
+    );
+    let result = invoke_admitted(
+        source,
+        bytes,
+        operation,
+        range,
+        Admission { settings, permit: Some(permit) },
+    )
+    .instrument(span.clone())
+    .await;
+    if let Ok((_, elapsed_ms)) = &result {
+        span.record("extract.elapsed_ms", *elapsed_ms);
+    }
+    result
 }
 
 async fn invoke_admitted(
@@ -144,7 +165,11 @@ async fn invoke_admitted(
     let (mut sender, receiver) = oneshot::channel();
     // The supervisor, not the caller future, owns the scratch and permit. A
     // dropped/cancelled caller closes the receiver; cleanup still awaits reap.
-    tokio::spawn(async move {
+    // It carries the caller's `extract.parse` span so the child's work is not a
+    // separate root trace.
+    let supervisor_span = tracing::Span::current();
+    tokio::spawn(
+        async move {
         let mut command = Command::new(&settings.binary);
         command
             .stdin(Stdio::piped())
@@ -251,7 +276,9 @@ async fn invoke_admitted(
         };
         drop(permit);
         let _ = sender.send(result);
-    });
+        }
+        .instrument(supervisor_span),
+    );
     receiver.await.map_err(|error| Error::Supervisor(error.to_string()))?
 }
 

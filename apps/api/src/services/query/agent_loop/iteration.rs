@@ -47,6 +47,7 @@ pub(super) async fn request_agent_model_response(
         tools,
         extra_parameters_json: context.binding.extra_parameters_json.clone(),
         require_tool_call,
+        dispatch: Some(context.binding.dispatch_authority()),
     };
     let provider_call = crate::observability::with_provider_call_id(
         reservation.provider_call_id(),

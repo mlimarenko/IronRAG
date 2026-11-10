@@ -244,6 +244,7 @@ fn sample_provider(provider_kind: &str) -> ProviderCatalogEntry {
         request_policy: ProviderRequestPolicy::default(),
         usage_policy: ProviderUsagePolicy::default(),
         service_tier_multipliers: std::collections::BTreeMap::new(),
+        financial_admission: None,
         purpose_gaps: Vec::new(),
         ui_hints: ui_hints.clone(),
     };

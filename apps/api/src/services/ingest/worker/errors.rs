@@ -13,7 +13,11 @@ use crate::{
     },
     services::content::error::ContentServiceError,
     services::ingest::cancellation::anyhow_is_cancelled,
-    shared::extraction::file_extract::UploadAdmissionError,
+    shared::{
+        extraction::{chunking::StructuredChunkingError, file_extract::UploadAdmissionError},
+        provider_failure::{ProviderFailure, ProviderFailureKind},
+        provider_http::ProviderDispatchRefusal,
+    },
 };
 
 #[derive(Debug)]
@@ -192,7 +196,26 @@ pub(super) fn classify_content_ingest_failure(
             )),
         };
     }
-    if provider_admission_error(error).is_some() {
+    if let Some(admission) = provider_admission_error(error) {
+        if let ProviderBudgetError::Dispatch(refusal) = admission {
+            let temporary = matches!(refusal, ProviderDispatchRefusal::Admission);
+            return ContentIngestFailureClassification {
+                failure_class: "provider",
+                failure_code: if temporary {
+                    "provider_financial_dispatch_unavailable"
+                } else {
+                    admission.redacted_detail()
+                }
+                .to_string(),
+                failure_disposition: if temporary {
+                    OpsFailureDisposition::RetryExhausted
+                } else {
+                    OpsFailureDisposition::OperationalTerminal
+                },
+                operational_defer: temporary
+                    .then(|| operational_defer_to_chrono(PROVIDER_QUOTA_COOLDOWN)),
+            };
+        }
         return ContentIngestFailureClassification {
             failure_class: "provider",
             failure_code: "provider_concurrency_unavailable".to_string(),
@@ -224,6 +247,14 @@ pub(super) fn classify_content_ingest_failure(
             operational_defer: None,
         };
     }
+    if is_chunk_input_rejection(error) {
+        return ContentIngestFailureClassification {
+            failure_class: "content_prepare",
+            failure_code: "chunk_input_unsupported".to_string(),
+            failure_disposition: OpsFailureDisposition::ContentUnsupported,
+            operational_defer: None,
+        };
+    }
     if error.downcast_ref::<ContentProviderQuotaError>().is_some() {
         // Quota does not replenish on a retry timescale, but it also must not
         // permanently fail the revision: park the job for a long cooldown so it
@@ -233,6 +264,17 @@ pub(super) fn classify_content_ingest_failure(
             failure_code: ContentProviderQuotaError::FAILURE_CODE.to_string(),
             failure_disposition: OpsFailureDisposition::RetryExhausted,
             operational_defer: Some(operational_defer_to_chrono(PROVIDER_QUOTA_COOLDOWN)),
+        };
+    }
+    if error
+        .downcast_ref::<ProviderFailure>()
+        .is_some_and(|failure| failure.kind() == ProviderFailureKind::RequestRejected)
+    {
+        return ContentIngestFailureClassification {
+            failure_class: "provider",
+            failure_code: "provider_request_rejected".to_string(),
+            failure_disposition: OpsFailureDisposition::OperationalTerminal,
+            operational_defer: None,
         };
     }
     ContentIngestFailureClassification {
@@ -268,6 +310,35 @@ fn provider_admission_error(error: &anyhow::Error) -> Option<&ProviderBudgetErro
         return provider_admission_error(source);
     }
     None
+}
+
+fn is_chunk_input_rejection(error: &anyhow::Error) -> bool {
+    if error.downcast_ref::<StructuredChunkingError>().is_some() {
+        return true;
+    }
+    match error.downcast_ref::<ContentServiceError>() {
+        Some(ContentServiceError::Internal(source)) => is_chunk_input_rejection(source),
+        _ => false,
+    }
+}
+
+#[cfg(test)]
+mod chunk_input_tests {
+    use super::*;
+
+    #[test]
+    fn ambiguous_source_mapping_is_terminal_not_a_provider_retry() {
+        let error = anyhow::Error::new(ContentServiceError::Internal(
+            StructuredChunkingError::AmbiguousSplit { chunk_index: 3 }.into(),
+        ))
+        .context("prepare revision");
+        let failure = classify_content_ingest_failure(&error);
+        assert_eq!(failure.failure_class, "content_prepare");
+        assert_eq!(failure.failure_code, "chunk_input_unsupported");
+        assert_eq!(failure.failure_disposition, OpsFailureDisposition::ContentUnsupported);
+        assert!(!failure.is_retryable());
+        assert!(failure.operational_defer.is_none());
+    }
 }
 
 pub(super) fn is_provider_lane_acquisition_failure(error: &ContentServiceError) -> bool {

@@ -59,9 +59,10 @@ describe('AI model catalog response boundary', () => {
     })
 
     await waitFor(() =>
-      expect(result.current.error).toEqual(
-        new TypeError('Model catalog entry model-alpha.pricing must be an object'),
-      ),
+      expect(result.current.error).toMatchObject({
+        name: 'ResponseContractError',
+        message: 'Model catalog entry model-alpha.pricing must be an object',
+      }),
     )
     expect(result.current.models).toEqual([])
     expect(listModels).toHaveBeenCalledTimes(1)

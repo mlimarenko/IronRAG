@@ -4,6 +4,7 @@ import * as DropdownMenu from '@radix-ui/react-dropdown-menu'
 import * as Dialog from '@radix-ui/react-dialog'
 import {
   AlertTriangle,
+  BarChart3,
   ChevronsUpDown,
   ExternalLink,
   Command,
@@ -22,6 +23,12 @@ import { useTranslation } from 'react-i18next'
 import { versionApi } from '@/shared/api/version'
 import { useApp } from '@/shared/contexts/app-context'
 import { BUILD_VERSION_TAG, formatVersionTag } from '@/shared/lib/build-version'
+import {
+  readTelemetryConsentState,
+  subscribeTelemetryConsent,
+  type TelemetryConsentState,
+} from '@/shared/lib/telemetry/consent'
+import { requestTelemetryConsent } from '@/shared/lib/telemetry/accountConsent'
 import { Badge, Button, IconButton } from '@/shared/ui'
 import { Brand } from './Brand'
 import { CommandPalette } from './CommandPalette'
@@ -51,10 +58,25 @@ export function AppShell({ children }: Readonly<{ children: ReactNode }>) {
   const [mobileOpen, setMobileOpen] = useState(false)
   const [paletteOpen, setPaletteOpen] = useState(false)
   const [scopeOpen, setScopeOpen] = useState(false)
+  const [telemetryConsent, setTelemetryConsent] = useState<TelemetryConsentState>(() =>
+    readTelemetryConsentState(),
+  )
   const scopeSwitcherControl = useMemo(
     () => ({ openScopeSwitcher: () => setScopeOpen(true) }),
     [setScopeOpen],
   )
+
+  useEffect(
+    () => subscribeTelemetryConsent(() => setTelemetryConsent(readTelemetryConsentState())),
+    [],
+  )
+
+  const telemetryEnabled = telemetryConsent.consent === 'granted'
+  const telemetryAvailable =
+    telemetryConsent.status === 'anonymous' || telemetryConsent.status === 'ready'
+  const telemetryLabel = telemetryAvailable
+    ? t(telemetryEnabled ? 'analytics.menuDisable' : 'analytics.menuEnable')
+    : t('analytics.menuUnavailable')
 
   const isAdmin = user?.role === 'admin'
   const release = useQuery({
@@ -245,6 +267,16 @@ export function AppShell({ children }: Readonly<{ children: ReactNode }>) {
                     >
                       <Languages size={16} />
                       {t('common.language')}
+                    </DropdownMenu.Item>
+                    <DropdownMenu.Item
+                      className="user-menu__item"
+                      disabled={!telemetryAvailable}
+                      onSelect={() =>
+                        void requestTelemetryConsent(telemetryEnabled ? 'denied' : 'granted')
+                      }
+                    >
+                      <BarChart3 size={16} />
+                      {telemetryLabel}
                     </DropdownMenu.Item>
                     <DropdownMenu.Separator className="user-menu__separator" />
                     <DropdownMenu.Item

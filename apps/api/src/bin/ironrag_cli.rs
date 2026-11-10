@@ -15,6 +15,14 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
+    /// Print the immutable policy fingerprint of a financial admission policy.
+    ///
+    /// Reads one bounded JSON `FinancialAdmission` document from stdin, uses the
+    /// canonical `immutable_fingerprint`, and prints only the `sha256:` string.
+    /// No database, provider client or runtime settings are initialized first,
+    /// so it works while the estate is paused.
+    FinancialPolicyFingerprint,
+
     /// List all users
     ListUsers,
 
@@ -498,6 +506,31 @@ async fn cmd_backfill_document_parents(pool: &PgPool, library: &str) -> Result<(
 
 // ── Main ────────────────────────────────────────────────────────────
 
+/// Upper bound on a policy document read from stdin.
+const FINANCIAL_POLICY_MAX_BYTES: u64 = 1_048_576;
+
+/// Compute the canonical immutable-policy fingerprint without echoing the input.
+fn cmd_financial_policy_fingerprint() -> Result<String> {
+    use ironrag_backend::infra::repositories::ai_repository::FinancialAdmission;
+    use std::io::Read as _;
+
+    let mut raw = Vec::new();
+    std::io::stdin()
+        .lock()
+        .take(FINANCIAL_POLICY_MAX_BYTES + 1)
+        .read_to_end(&mut raw)
+        .map_err(|_| anyhow::anyhow!("financial policy input could not be read"))?;
+    if raw.len() as u64 > FINANCIAL_POLICY_MAX_BYTES {
+        bail!("financial policy input exceeds the {FINANCIAL_POLICY_MAX_BYTES} byte limit");
+    }
+    let policy: FinancialAdmission = serde_json::from_slice(&raw)
+        .map_err(|_| anyhow::anyhow!("financial policy input is not a valid admission document"))?;
+    let fingerprint = policy
+        .immutable_fingerprint()
+        .map_err(|_| anyhow::anyhow!("financial policy fingerprint could not be computed"))?;
+    Ok(fingerprint)
+}
+
 #[allow(
     clippy::print_stderr,
     clippy::print_stdout,
@@ -515,12 +548,22 @@ async fn main() -> Result<()> {
     if let Commands::Probe { endpoint, port } = cli.command {
         return cmd_probe(endpoint, port).await;
     }
+    if let Commands::FinancialPolicyFingerprint = cli.command {
+        println!("{}", cmd_financial_policy_fingerprint()?);
+        return Ok(());
+    }
 
     let mut settings = Settings::from_env().context("failed to load settings")?;
     settings.discard_credential_master_key();
     let pool = connect(&settings.database_url).await?;
 
     match cli.command {
+        Commands::FinancialPolicyFingerprint => {
+            // Handled before configuration load; reaching here means the
+            // dispatch order broke.
+            eprintln!("financial-policy-fingerprint must run before configuration load");
+            std::process::exit(2);
+        }
         Commands::ListUsers => cmd_list_users(&pool).await,
 
         Commands::ListTokens => cmd_list_tokens(&pool).await,

@@ -1,8 +1,30 @@
 import { describe, expect, it } from 'vitest'
 
-import { resolveGraphStatus } from './graphStatus'
+import { hasPublishedGraphCounts, resolveGraphStatus } from './graphStatus'
 
 describe('resolveGraphStatus', () => {
+  it.each(['loading', 'ready', 'error'] as const)(
+    'keeps denied publication stale during %s instead of inferring readiness from counts',
+    (streamPhase) => {
+      expect(
+        resolveGraphStatus({
+          streamPhase,
+          knownNodeCount: 400,
+          loadedNodeCount: 0,
+          serverStatus: 'stale',
+        }),
+      ).toBe('stale')
+    },
+  )
+
+  it('shows counts only for a published graph', () => {
+    for (const status of ['ready', 'partial', 'empty'] as const) {
+      expect(hasPublishedGraphCounts(status)).toBe(true)
+    }
+    for (const status of ['stale', 'failed', 'building', 'rebuilding'] as const) {
+      expect(hasPublishedGraphCounts(status)).toBe(false)
+    }
+  })
   it('calls a load over a graph the server already counted a rebuild', () => {
     // "building" over an existing graph reads as "your graph is gone".
     expect(

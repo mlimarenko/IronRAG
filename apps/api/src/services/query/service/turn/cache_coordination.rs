@@ -56,7 +56,7 @@ fn log_cache_wait_timed_out(cache_context: &QueryResultCacheContext, wait_starte
     warn!(
         cache_key = %cache_context.cache_key,
         wait_ms = wait_started.elapsed().as_millis() as u64,
-        "query result cache fill wait timed out before source execution completed"
+        "query result cache fill wait timed out; proceeding with source execution"
     );
 }
 
@@ -129,7 +129,7 @@ async fn ensure_cache_fill_wait_can_continue(
     wait_started: Instant,
     source_checked_at: &mut Instant,
 ) -> Result<bool, ApiError> {
-    let CacheCoordinationRequest { state, cache_context, conversation, request_turn } = request;
+    let CacheCoordinationRequest { state, cache_context, conversation, .. } = request;
     if source_checked_at.elapsed()
         >= result_cache::QUERY_RESULT_CACHE_NOTIFICATION_FALLBACK_INTERVAL
     {
@@ -142,9 +142,12 @@ async fn ensure_cache_fill_wait_can_continue(
     if wait_started.elapsed() < result_cache::QUERY_RESULT_CACHE_WAIT_TIMEOUT {
         return Ok(true);
     }
+    // A contended cache fill that outlives the bounded wait must not fail the
+    // turn: fall open and execute the source, exactly like a changed source
+    // generation. Returning a Conflict here surfaced as an HTTP500 because the
+    // agent loop wraps grounded-answer failures as internal errors.
     log_cache_wait_timed_out(cache_context, wait_started);
-    discard_unexecuted_query_request_turn(state, conversation, request_turn).await;
-    Err(ApiError::Conflict("query answer is still being prepared".to_string()))
+    Ok(false)
 }
 
 async fn wait_for_cache_fill_progress(

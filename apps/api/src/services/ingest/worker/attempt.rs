@@ -8,7 +8,7 @@ use std::{
 
 use anyhow::Context;
 use tokio_util::sync::CancellationToken;
-use tracing::{info, warn};
+use tracing::{Instrument as _, info, warn};
 use uuid::Uuid;
 
 use crate::{
@@ -357,6 +357,10 @@ async fn lease_ingest_attempt(
     }
 }
 
+#[expect(
+    clippy::cognitive_complexity,
+    reason = "the ingest job lifecycle is one flat sequence of named stages; the tracing spans add the remaining branches"
+)]
 pub(super) async fn execute_ingest_job(
     state: Arc<AppState>,
     worker_id: &str,
@@ -418,7 +422,24 @@ pub(super) async fn execute_ingest_job(
         expected_queue_lease_token: &expected_queue_lease_token,
         cancellation,
     };
-    let dispatch_result = Box::pin(dispatch_ingest_job(&lifecycle)).await;
+    // One span per leased attempt: the worker root that every stage, provider
+    // and vector-DB span below it hangs from. It records the queue identity
+    // that an API-side `ingest.enqueue` span also carries, so a worker trace
+    // can be joined to the request that queued the job. `run_id` is recorded
+    // later by the web jobs once the subject is resolved.
+    let job_span = tracing::info_span!(
+        "ingest.job",
+        otel.kind = "consumer",
+        "ingest.job.id" = %job_id,
+        "ingest.job.kind" = %job.job_kind,
+        "ingest.attempt.id" = %attempt_id,
+        stage = %initial_stage,
+        run_id = tracing::field::Empty,
+        "library.id" = %job.library_id,
+        "workspace.id" = %job.workspace_id,
+    );
+    let dispatch_result =
+        Box::pin(dispatch_ingest_job(&lifecycle)).instrument(job_span.clone()).await;
     let already_finalized = dispatch_result.as_ref().is_ok_and(IngestDispatchOutcome::is_finalized);
     let result = dispatch_result.map(|_| ());
     drop(heartbeat_guard);
@@ -436,8 +457,8 @@ pub(super) async fn execute_ingest_job(
 
     abort_guard.disarm();
     match result {
-        Ok(()) => finalize_successful_ingest_job(&lifecycle).await,
-        Err(error) => finalize_failed_ingest_job(&lifecycle, error).await,
+        Ok(()) => finalize_successful_ingest_job(&lifecycle).instrument(job_span).await,
+        Err(error) => finalize_failed_ingest_job(&lifecycle, error).instrument(job_span).await,
     }
 }
 

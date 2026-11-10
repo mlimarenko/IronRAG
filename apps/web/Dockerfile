@@ -34,6 +34,9 @@ RUN if [ -z "$(printf '%s' "${APP_VERSION}" | tr -d '[:space:]')" ]; then \
 FROM nginxinc/nginx-unprivileged@sha256:b3f2436575bd5be7386518084d842dac414ab4962712afa31e99e0942a56e3b2
 USER root
 COPY --from=builder /app/dist /usr/share/nginx/html
+# Source maps stay out of the runtime image and are published as a release
+# artifact for symbolication instead.
+RUN find /usr/share/nginx/html -name '*.map' -delete
 RUN apk add --no-cache --upgrade \
         'c-ares>=1.34.8-r0' \
         'curl>=8.22.0-r0' \
@@ -55,6 +58,10 @@ RUN chmod +x /docker-entrypoint.d/05-ironrag-tls-defaults.envsh /docker-entrypoi
 # IRONRAG_API_UPSTREAM defaults to http://127.0.0.1:8080 via this ENV instruction.
 # Override at runtime to point nginx reverse-proxy at the actual API backend.
 ENV IRONRAG_API_UPSTREAM=http://127.0.0.1:8080
+# Same-origin OTLP proxy target. Override where a browser-telemetry collector
+# exists; the default fails fast and is never used unless the bundle was built
+# with VITE_OTEL_EXPORTER_OTLP_ENDPOINT.
+ENV IRONRAG_OTLP_UPSTREAM=http://127.0.0.1:4318
 USER nginx
 EXPOSE 8080 8443/tcp 8443/udp
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=5 \

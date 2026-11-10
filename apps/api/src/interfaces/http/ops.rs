@@ -1109,32 +1109,7 @@ fn map_graph_surface(
     ops_state: &OpsLibraryState,
     first_warning: Option<&OperatorWarning>,
 ) -> GraphSurface {
-    let total_documents = summary.document_counts_by_readiness.values().copied().sum::<i64>();
-    let readable_without_graph_count =
-        summary.document_counts_by_readiness.get("readable").copied().unwrap_or(0);
-    let status = if total_documents == 0 {
-        GraphStatus::Empty
-    } else if ops_state.degraded_state == "rebuilding" || ops_state.running_attempts > 0 {
-        if summary.graph_ready_document_count > 0 {
-            GraphStatus::Rebuilding
-        } else {
-            GraphStatus::Building
-        }
-    } else if summary.graph_ready_document_count > 0
-        && summary.graph_sparse_document_count == 0
-        && readable_without_graph_count == 0
-    {
-        GraphStatus::Ready
-    } else if summary.graph_ready_document_count > 0
-        || summary.graph_sparse_document_count > 0
-        || readable_without_graph_count > 0
-    {
-        GraphStatus::Partial
-    } else if ops_state.failed_document_count > 0 {
-        GraphStatus::Failed
-    } else {
-        GraphStatus::Building
-    };
+    let status = summary.graph_status;
 
     let convergence_status = match status {
         GraphStatus::Ready => Some(GraphConvergenceStatus::Current),

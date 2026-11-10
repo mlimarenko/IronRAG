@@ -3,6 +3,20 @@ use super::lease::lease_commands::scope_for_clear_failure;
 use super::*;
 
 #[test]
+fn user_preference_migration_requires_explicit_apply() {
+    for apply in [false, true] {
+        let mut args = vec!["ironrag-maintenance", "migrate", "user-preference-schema", "--json"];
+        if apply {
+            args.push("--apply");
+        }
+        let cli = Cli::try_parse_from(args).expect("parse account telemetry preference transition");
+        assert!(matches!(cli.command,
+            Command::Migrate(MigrateCommand::UserPreferenceSchema { apply: actual, json: true })
+            if actual == apply));
+    }
+}
+
+#[test]
 fn billing_knowledge_search_migration_requires_explicit_apply() {
     for apply in [false, true] {
         let mut args =

@@ -30,6 +30,7 @@ fn internal_chat_request_never_serializes_provider_credentials() {
         max_output_tokens_override: None,
         response_format: None,
         extra_parameters_json: serde_json::json!({}),
+        dispatch: None,
     };
 
     assert_runtime_secret_is_redacted(&request, "serialization-regression-secret");
@@ -44,6 +45,7 @@ fn internal_chat_request_never_serializes_provider_credentials() {
         top_p: None,
         max_output_tokens_override: None,
         extra_parameters_json: serde_json::json!({}),
+        dispatch: None,
     };
     assert_runtime_secret_is_redacted(&seed, "seed-regression-secret");
 
@@ -59,6 +61,7 @@ fn internal_chat_request_never_serializes_provider_credentials() {
         tools: Vec::new(),
         extra_parameters_json: serde_json::json!({}),
         require_tool_call: false,
+        dispatch: None,
     };
     assert_runtime_secret_is_redacted(&tool, "tool-regression-secret");
 
@@ -69,6 +72,7 @@ fn internal_chat_request_never_serializes_provider_credentials() {
         api_key_override: Some("embedding-regression-secret".to_string()),
         base_url_override: Some("https://example.com".to_string()),
         extra_parameters_json: serde_json::json!({}),
+        dispatch: None,
     };
     assert_runtime_secret_is_redacted(&embedding, "embedding-regression-secret");
 
@@ -79,6 +83,7 @@ fn internal_chat_request_never_serializes_provider_credentials() {
         api_key_override: Some("batch-regression-secret".to_string()),
         base_url_override: Some("https://example.com".to_string()),
         extra_parameters_json: serde_json::json!({}),
+        dispatch: None,
     };
     assert_runtime_secret_is_redacted(&embedding_batch, "batch-regression-secret");
 
@@ -95,6 +100,7 @@ fn internal_chat_request_never_serializes_provider_credentials() {
         top_p: None,
         max_output_tokens_override: None,
         extra_parameters_json: serde_json::json!({}),
+        dispatch: None,
     };
     assert_runtime_secret_is_redacted(&vision, "vision-regression-secret");
 }

@@ -9,6 +9,7 @@ visual-qa/.storage/
 
 # Generated contracts, SDKs, and vendored browser assets
 package-lock.json
+public/medeo/
 public/mockServiceWorker.js
 public/openapi.gen.yaml
 public/swagger-ui-bundle.js

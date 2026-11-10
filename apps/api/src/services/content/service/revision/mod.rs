@@ -82,8 +82,8 @@ use super::{
     ContentMutationAdmission, ContentService, CreateDocumentCommand, CreateRevisionCommand,
     InlineMutationContext, MaterializeRevisionGraphCandidatesCommand, PendingChunkInsert,
     PreparedRevisionPersistenceSummary, PromoteHeadCommand, ReprocessRevisionSource,
-    RevisionGraphCandidateMaterialization, locate_chunk_offsets, map_revision_row,
-    map_structured_revision_data, sha256_hex_text,
+    RevisionGraphCandidateMaterialization, map_revision_row, map_structured_revision_data,
+    sha256_hex_text,
 };
 
 mod extraction;

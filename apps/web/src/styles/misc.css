@@ -1,5 +1,5 @@
 .login-page {
-  min-height: 100dvh;
+  min-height: 100%;
   display: grid;
   grid-template-columns: minmax(0, 1fr);
   place-items: center;

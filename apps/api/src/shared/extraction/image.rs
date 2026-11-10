@@ -1,7 +1,10 @@
 use std::io::Cursor;
 
 use anyhow::{Context, Result, anyhow};
-use image::{DynamicImage, ImageBuffer, ImageFormat, Luma, LumaA, Rgb, Rgba, imageops::FilterType};
+use image::{
+    DynamicImage, ImageBuffer, ImageDecoder, ImageFormat, Luma, LumaA, Rgb, Rgba,
+    imageops::FilterType,
+};
 use png::{
     ColorType as PngColorType, Decoder as PngDecoder, Transformations as PngTransformations,
 };
@@ -32,6 +35,8 @@ pub struct ImageVisionOutput {
 /// interleaved with five positional provider fields.
 #[derive(Clone, Copy)]
 pub struct VisionProviderInput<'a> {
+    pub dispatch: Option<&'a crate::shared::provider_http::DispatchAuthority>,
+    pub max_output_tokens_override: Option<i32>,
     pub provider_kind: &'a str,
     pub model_name: &'a str,
     pub api_key: &'a str,
@@ -57,6 +62,18 @@ pub struct VisionCallReceipt {
 pub struct VisionRecognitionError {
     pub message: &'static str,
     pub calls: Vec<VisionCallReceipt>,
+    pub terminal: bool,
+}
+
+fn terminal_vision_error(error: &anyhow::Error) -> bool {
+    use crate::integrations::{provider_budget::ProviderBudgetError, retry::ProviderCallError};
+    error.downcast_ref::<ProviderCallError>().is_some_and(|error| {
+        error.is_permanent_rejection()
+            || matches!(
+                error,
+                ProviderCallError::Admission { source: ProviderBudgetError::Dispatch(_), .. }
+            )
+    })
 }
 
 impl std::fmt::Display for VisionRecognitionError {
@@ -93,14 +110,19 @@ pub async fn recognize_visual(
     let mut calls = Vec::new();
     for attempt in 0..2 {
         if cancellation_token.is_some_and(tokio_util::sync::CancellationToken::is_cancelled) {
-            return Err(VisionRecognitionError { message: "visual recognition canceled", calls });
+            return Err(VisionRecognitionError {
+                message: "visual recognition canceled",
+                calls,
+                terminal: false,
+            });
         }
         let response = run_vision_image_request(
             gateway, input, mime_type, file_bytes, IMAGE_OCR_PROMPT,
-        ).await.map_err(|_| VisionRecognitionError {
+        ).await.map_err(|error| VisionRecognitionError {
             // Provider errors may contain credentials or response bodies.
             message: "Vision request failed; check the extract_text binding and provider diagnostics",
             calls: calls.clone(),
+            terminal: terminal_vision_error(&error),
         })?;
         calls.push(VisionCallReceipt {
             provider_kind: response.provider_kind,
@@ -114,6 +136,7 @@ pub async fn recognize_visual(
             parse_visual_response(&response.text).ok_or_else(|| VisionRecognitionError {
                 message: "Vision returned an empty or invalid recognition outcome",
                 calls: calls.clone(),
+                terminal: false,
             })?;
         return Ok(RecognizedVisual {
             outcome,
@@ -182,8 +205,15 @@ async fn run_vision_image_request(
     file_bytes: &[u8],
     prompt: &str,
 ) -> Result<ImageVisionOutput> {
-    let VisionProviderInput { provider_kind, model_name, api_key, base_url, extra_parameters_json } =
-        input;
+    let VisionProviderInput {
+        provider_kind,
+        model_name,
+        api_key,
+        base_url,
+        extra_parameters_json,
+        dispatch,
+        max_output_tokens_override,
+    } = input;
     let normalized_payload = prepare_vision_image_payload(file_bytes, mime_type).context(
         "image payload could not be decoded and normalized for vision extraction; re-export as PNG/JPEG and retry",
     )?;
@@ -210,8 +240,9 @@ async fn run_vision_image_request(
             system_prompt: None,
             temperature: None,
             top_p: None,
-            max_output_tokens_override: None,
+            max_output_tokens_override,
             extra_parameters_json: bounded_extra_parameters,
+            dispatch: dispatch.cloned(),
         })
         .await?;
 
@@ -261,6 +292,16 @@ fn prepare_vision_image_payload(
     let width = image.width();
     let height = image.height();
     const MIN_DIMENSION: u32 = 64;
+    if width >= MIN_DIMENSION
+        && height >= MIN_DIMENSION
+        && retain_opaque_jpeg(file_bytes, mime_type)?
+    {
+        return Ok(PreparedVisionPayload {
+            image_bytes: file_bytes.to_vec(),
+            mime_type: "image/jpeg".to_string(),
+            warnings,
+        });
+    }
     if width < MIN_DIMENSION || height < MIN_DIMENSION {
         let target_width = width.max(MIN_DIMENSION);
         let target_height = height.max(MIN_DIMENSION);
@@ -289,6 +330,23 @@ fn prepare_vision_image_payload(
         mime_type: "image/png".to_string(),
         warnings,
     })
+}
+
+// The preceding decode validates the entire image. Do not retain JPEGs with
+// decoder-exposed EXIF, ICC, XMP or IPTC metadata: a provider could apply
+// orientation or color information the decode-and-flatten path discarded.
+fn retain_opaque_jpeg(bytes: &[u8], mime_type: &str) -> Result<bool> {
+    if !mime_type.eq_ignore_ascii_case("image/jpeg")
+        || !matches!(image::guess_format(bytes), Ok(ImageFormat::Jpeg))
+    {
+        return Ok(false);
+    }
+    let mut decoder = image::codecs::jpeg::JpegDecoder::new(Cursor::new(bytes))?;
+    Ok(decoder.color_type() == image::ColorType::Rgb8
+        && decoder.exif_metadata()?.is_none()
+        && decoder.icc_profile()?.is_none()
+        && decoder.xmp_metadata()?.is_none()
+        && decoder.iptc_metadata()?.is_none())
 }
 
 fn load_normalizable_image(file_bytes: &[u8], mime_type: &str) -> Result<DynamicImage> {
@@ -396,6 +454,60 @@ mod tests {
         cursor.into_inner()
     }
 
+    fn synthetic_jpeg(width: u32, height: u32, exif: Option<Vec<u8>>) -> Vec<u8> {
+        use image::ImageEncoder;
+        let image = ImageBuffer::from_fn(width, height, |x, y| Rgb([x as u8, y as u8, 42]));
+        let mut bytes = Vec::new();
+        let mut encoder = image::codecs::jpeg::JpegEncoder::new(&mut bytes);
+        if let Some(exif) = exif {
+            encoder.set_exif_metadata(exif).expect("set EXIF");
+        }
+        encoder
+            .write_image(image.as_raw(), width, height, image::ExtendedColorType::Rgb8)
+            .expect("encode JPEG");
+        bytes
+    }
+
+    #[test]
+    fn jpeg_retention_preserves_decoder_pixels_and_validates_format() {
+        let jpeg = synthetic_jpeg(80, 72, None);
+        let old_pixels =
+            flatten_to_white_rgb8(&load_normalizable_image(&jpeg, "image/jpeg").unwrap());
+        let payload = prepare_vision_image_payload(&jpeg, "image/jpeg").unwrap();
+        assert_eq!(payload.mime_type, "image/jpeg");
+        assert_eq!(payload.image_bytes, jpeg);
+        assert_eq!(image::load_from_memory(&payload.image_bytes).unwrap().to_rgb8(), old_pixels);
+        let wrong_mime = prepare_vision_image_payload(&jpeg, "image/webp").unwrap();
+        assert_eq!(wrong_mime.mime_type, "image/png");
+        assert!(prepare_vision_image_payload(&jpeg[..jpeg.len() / 2], "image/jpeg").is_err());
+        assert!(prepare_vision_image_payload(b"not an image", "image/jpeg").is_err());
+    }
+
+    #[test]
+    fn jpeg_requiring_resize_or_exif_removal_is_normalized() {
+        let tiny = synthetic_jpeg(10, 20, None);
+        let payload = prepare_vision_image_payload(&tiny, "image/jpeg").unwrap();
+        assert_eq!(payload.mime_type, "image/png");
+        assert_eq!(
+            (
+                image::load_from_memory(&payload.image_bytes).unwrap().width(),
+                image::load_from_memory(&payload.image_bytes).unwrap().height()
+            ),
+            (64, 64)
+        );
+        // Little-endian TIFF with orientation 6 (rotate 90 degrees).
+        let exif = vec![
+            b'I', b'I', 42, 0, 8, 0, 0, 0, 1, 0, 0x12, 1, 3, 0, 1, 0, 0, 0, 6, 0, 0, 0, 0, 0, 0, 0,
+        ];
+        let jpeg = synthetic_jpeg(80, 72, Some(exif));
+        let mut decoder = image::codecs::jpeg::JpegDecoder::new(Cursor::new(&jpeg)).unwrap();
+        assert_ne!(decoder.orientation().unwrap(), image::metadata::Orientation::NoTransforms);
+        let old = flatten_to_white_rgb8(&load_normalizable_image(&jpeg, "image/jpeg").unwrap());
+        let payload = prepare_vision_image_payload(&jpeg, "image/jpeg").unwrap();
+        assert_eq!(payload.mime_type, "image/png");
+        assert_eq!(image::load_from_memory(&payload.image_bytes).unwrap().to_rgb8(), old);
+    }
+
     fn tiny_grayscale_alpha_png_bytes() -> Vec<u8> {
         STANDARD
             .decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aF9sAAAAASUVORK5CYII=")
@@ -448,6 +560,8 @@ mod tests {
         let output = extract_image_with_provider(
             &FakeGateway::default(),
             VisionProviderInput {
+                max_output_tokens_override: None,
+                dispatch: None,
                 provider_kind: "openai",
                 model_name: "gpt-5.4-mini",
                 api_key: "test-key",
@@ -475,6 +589,8 @@ mod tests {
         let output = extract_image_with_provider(
             &FakeGateway::default(),
             VisionProviderInput {
+                max_output_tokens_override: None,
+                dispatch: None,
                 provider_kind: "openai",
                 model_name: "gpt-5.4-mini",
                 api_key: "test-key",
@@ -500,6 +616,8 @@ mod tests {
         let output = describe_image_with_provider(
             &FakeGateway::default(),
             VisionProviderInput {
+                max_output_tokens_override: None,
+                dispatch: None,
                 provider_kind: "openai",
                 model_name: "gpt-5.4-mini",
                 api_key: "test-key",
@@ -572,6 +690,8 @@ mod tests {
         extract_image_with_provider(
             &gateway,
             VisionProviderInput {
+                max_output_tokens_override: None,
+                dispatch: None,
                 provider_kind: "deepseek",
                 model_name: "deepseek-flash",
                 api_key: "test-key",
@@ -596,6 +716,8 @@ mod tests {
         extract_image_with_provider(
             &gateway,
             VisionProviderInput {
+                max_output_tokens_override: None,
+                dispatch: None,
                 provider_kind: "openai",
                 model_name: "gpt-5.4-mini",
                 api_key: "test-key",

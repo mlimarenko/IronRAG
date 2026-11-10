@@ -28,6 +28,7 @@ use super::provider::{ResolvedProviderRuntime, apply_provider_auth, provider_end
 pub struct UnifiedGateway {
     pub(super) transport: Arc<ProviderHttpTransport>,
     pub(super) provider_budget: Arc<ProviderBudgetRegistry>,
+    pub(super) admission: Arc<dyn crate::shared::provider_http::ProviderDispatchAdmission>,
     pub(super) retry_policy: RetryPolicy,
 }
 
@@ -36,7 +37,10 @@ impl UnifiedGateway {
     ///
     /// # Errors
     /// Returns an error when the bounded no-redirect client cannot be built.
-    pub fn from_settings(settings: &Settings) -> Result<Self> {
+    pub fn from_settings(
+        settings: &Settings,
+        admission: Arc<dyn crate::shared::provider_http::ProviderDispatchAdmission>,
+    ) -> Result<Self> {
         let timeout = Duration::from_secs(settings.llm_http_timeout_seconds.max(1));
         // Aggressive pool / keep-alive tuning to defeat a 90-second
         // stale-connection hang observed on an SBP turn:
@@ -79,6 +83,7 @@ impl UnifiedGateway {
         Ok(Self {
             transport: Arc::new(transport),
             provider_budget: Arc::new(provider_budget),
+            admission,
             retry_policy,
         })
     }
@@ -183,14 +188,34 @@ impl UnifiedGateway {
     }
 
     /// Dispatches a gateway provider request. The gateway builds only POST
-    /// requests ([`Self::prepared_provider_request`]), so it labels the shared
-    /// provider span with that method.
+    /// requests, and the shared boundary requires the resolved attestation and
+    /// the durable admission owner, so no caller can send around them.
     pub(super) async fn send_provider_request(
+        &self,
         request: reqwest::RequestBuilder,
-        endpoint: &Url,
-        provider_kind: &str,
+        context: &crate::shared::provider_http::ProviderDispatchContext,
         operation: &str,
-    ) -> Result<reqwest::Response, reqwest::Error> {
-        send_provider_http_request(request, endpoint, &Method::POST, provider_kind, operation).await
+    ) -> Result<reqwest::Response, ProviderCallError> {
+        send_provider_http_request(request, context, self.admission.as_ref(), operation)
+            .await
+            .map_err(dispatch_error_to_call_error)
+    }
+}
+
+/// Map a refused or failed dispatch to the shared provider call vocabulary.
+pub(super) fn dispatch_error_to_call_error(
+    error: crate::shared::provider_http::ProviderDispatchError,
+) -> ProviderCallError {
+    use crate::shared::provider_http::ProviderDispatchError;
+    match error {
+        ProviderDispatchError::Refused(refusal) => ProviderCallError::admission(
+            crate::integrations::provider_budget::ProviderBudgetError::Dispatch(refusal),
+        ),
+        ProviderDispatchError::Build => {
+            ProviderCallError::protocol("provider request could not be built")
+        }
+        ProviderDispatchError::Transport(source) => {
+            ProviderCallError::transport("provider dispatch transport failed", source)
+        }
     }
 }

@@ -82,42 +82,33 @@ pub async fn list_tokens(
     Ok(Json(items))
 }
 
-#[utoipa::path(
-    post,
-    path = "/v1/iam/tokens",
-    tag = "iam",
-    operation_id = "mintIamToken",
-    request_body = crate::interfaces::http::iam::types::MintTokenRequest,
-    responses(
-        (status = 200, description = "Newly minted API token (plaintext only returned once)", body = MintTokenResponse),
-        (status = 400, description = "Invalid request payload"),
-        (status = 401, description = "Caller is not authenticated"),
-        (status = 403, description = "Caller is not an IAM administrator"),
-    ),
+/// Validates one API-token mint request and builds the service command.
+///
+/// This is the single construction path for API tokens: `POST /v1/iam/tokens`
+/// and the MCP `mint_iam_token` tool both call it, so the label rule, the
+/// workspace derivation, the library/workspace consistency check, the
+/// permission allow-list and the deduplication cannot drift between the two
+/// surfaces. `workspace_id` is optional here because the MCP tool tolerates its
+/// absence when exactly one library is given; the REST handler keeps its own
+/// stricter "workspaceId is required" rule at the call site.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "one argument per request field the shared command builder validates"
 )]
-#[tracing::instrument(
-    level = "info",
-    name = "http.mint_token",
-    skip_all,
-    fields(workspace_id = ?payload.workspace_id)
-)]
-pub async fn mint_token(
-    auth: AuthContext,
-    State(state): State<AppState>,
-    request_id: Option<axum::Extension<RequestId>>,
-    Json(payload): Json<MintTokenRequest>,
-) -> Result<Json<MintTokenResponse>, ApiError> {
-    require_system_admin(&state, &auth).await?;
-    let mut workspace_id = Some(payload.workspace_id.ok_or_else(|| {
-        ApiError::BadRequest("workspaceId is required for resource-scoped API tokens".to_string())
-    })?);
-    let expires_at = payload.expires_at;
-
-    if payload.label.trim().is_empty() {
+pub(crate) async fn build_mint_token_command(
+    state: &AppState,
+    issued_by_principal_id: Uuid,
+    mut workspace_id: Option<Uuid>,
+    label: String,
+    expires_at: Option<chrono::DateTime<chrono::Utc>>,
+    library_ids: Vec<Uuid>,
+    permission_kinds: Vec<IamPermissionKind>,
+) -> Result<crate::services::iam::service::MintApiTokenCommand, ApiError> {
+    if label.trim().is_empty() {
         return Err(ApiError::BadRequest("label must not be empty".into()));
     }
-    let library_ids = dedupe_uuids(payload.library_ids);
-    let permission_kinds = dedupe_permissions(payload.permission_kinds);
+    let library_ids = dedupe_uuids(library_ids);
+    let permission_kinds = dedupe_permissions(permission_kinds);
 
     if !library_ids.is_empty() && permission_kinds.is_empty() {
         return Err(ApiError::BadRequest(
@@ -133,7 +124,7 @@ pub async fn mint_token(
                     .await
                     .map_err(|error| {
                         error!(
-                            auth_principal_id = %auth.principal_id,
+                            issued_by_principal_id = %issued_by_principal_id,
                             library_id = %library_id,
                             ?error,
                             "failed to load library for iam token mint",
@@ -171,20 +162,60 @@ pub async fn mint_token(
         build_mint_grants(MintGrantScope::Workspace(workspace_id), &permission_kinds, expires_at)?
     };
 
-    let mut outcome = state
-        .application_services
-        .iam
-        .mint_api_token(
-            &state,
-            crate::services::iam::service::MintApiTokenCommand {
-                workspace_id,
-                label: payload.label,
-                expires_at,
-                grants,
-                issued_by_principal_id: Some(auth.principal_id),
-            },
-        )
-        .await?;
+    Ok(crate::services::iam::service::MintApiTokenCommand {
+        workspace_id,
+        label,
+        expires_at,
+        grants,
+        issued_by_principal_id: Some(issued_by_principal_id),
+    })
+}
+
+#[utoipa::path(
+    post,
+    path = "/v1/iam/tokens",
+    tag = "iam",
+    operation_id = "mintIamToken",
+    request_body = crate::interfaces::http::iam::types::MintTokenRequest,
+    responses(
+        (status = 200, description = "Newly minted API token (plaintext only returned once)", body = MintTokenResponse),
+        (status = 400, description = "Invalid request payload"),
+        (status = 401, description = "Caller is not authenticated"),
+        (status = 403, description = "Caller is not an IAM administrator"),
+    ),
+)]
+#[tracing::instrument(
+    level = "info",
+    name = "http.mint_token",
+    skip_all,
+    fields(workspace_id = ?payload.workspace_id)
+)]
+pub async fn mint_token(
+    auth: AuthContext,
+    State(state): State<AppState>,
+    request_id: Option<axum::Extension<RequestId>>,
+    Json(payload): Json<MintTokenRequest>,
+) -> Result<Json<MintTokenResponse>, ApiError> {
+    require_system_admin(&state, &auth).await?;
+    // The REST body always carries a workspace: a resource-scoped API token is
+    // the only shape this route mints. MCP minting tolerates an absent
+    // workspace and derives it from a single library, so the requirement stays
+    // here where it belongs rather than inside the shared helper.
+    let workspace_id = Some(payload.workspace_id.ok_or_else(|| {
+        ApiError::BadRequest("workspaceId is required for resource-scoped API tokens".to_string())
+    })?);
+    let command = build_mint_token_command(
+        &state,
+        auth.principal_id,
+        workspace_id,
+        payload.label,
+        payload.expires_at,
+        payload.library_ids,
+        payload.permission_kinds,
+    )
+    .await?;
+
+    let mut outcome = state.application_services.iam.mint_api_token(&state, command).await?;
 
     let row = iam_repository::get_regular_api_token_by_principal_id(
         &state.persistence.postgres,
@@ -528,12 +559,12 @@ pub async fn delete_token(
     Ok(StatusCode::NO_CONTENT)
 }
 
-pub(super) enum MintGrantScope {
+pub(crate) enum MintGrantScope {
     Workspace(Uuid),
     Libraries(Vec<Uuid>),
 }
 
-pub(super) fn build_mint_grants(
+pub(crate) fn build_mint_grants(
     scope: MintGrantScope,
     permission_kinds: &[IamPermissionKind],
     expires_at: Option<chrono::DateTime<chrono::Utc>>,
@@ -575,7 +606,7 @@ pub(super) fn build_mint_grants(
     }
 }
 
-pub(super) fn dedupe_uuids(values: Vec<Uuid>) -> Vec<Uuid> {
+pub(crate) fn dedupe_uuids(values: Vec<Uuid>) -> Vec<Uuid> {
     let mut seen = BTreeSet::new();
     let mut deduped = Vec::with_capacity(values.len());
     for value in values {
@@ -586,7 +617,7 @@ pub(super) fn dedupe_uuids(values: Vec<Uuid>) -> Vec<Uuid> {
     deduped
 }
 
-pub(super) fn dedupe_permissions(values: Vec<IamPermissionKind>) -> Vec<IamPermissionKind> {
+pub(crate) fn dedupe_permissions(values: Vec<IamPermissionKind>) -> Vec<IamPermissionKind> {
     let mut seen = BTreeSet::new();
     let mut deduped = Vec::with_capacity(values.len());
     for value in values {

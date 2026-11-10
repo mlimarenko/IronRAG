@@ -390,19 +390,19 @@ async fn seed_publication_catalog(pool: &PgPool, suffix: &str) -> Result<(Uuid, 
 }
 
 /// Ids seeded by [`seed_publication_content`].
-struct PublicationContentIds {
-    document_id: Uuid,
-    revision_id: Uuid,
-    revision_number: i32,
-    mutation_id: Uuid,
-    mutation_item_id: Uuid,
-    chunk_id: Uuid,
+pub(super) struct PublicationContentIds {
+    pub(super) document_id: Uuid,
+    pub(super) revision_id: Uuid,
+    pub(super) revision_number: i32,
+    pub(super) mutation_id: Uuid,
+    pub(super) mutation_item_id: Uuid,
+    pub(super) chunk_id: Uuid,
 }
 
 /// Seeds the document, its single upload revision, the running mutation and
 /// item, the document head, one ready chunk and the prepared structured
 /// revision.
-async fn seed_publication_content(
+pub(super) async fn seed_publication_content(
     pool: &PgPool,
     workspace_id: Uuid,
     library_id: Uuid,
@@ -1316,8 +1316,10 @@ async fn assert_successful_publication(graph_state: &str) -> Result<()> {
             ingest_repository::PublishContentIngestSuccessOutcome::Applied {
                 source_truth_version,
                 mutation_completed,
+                publicly_visible,
             } => {
                 assert!(mutation_completed);
+                assert!(publicly_visible);
                 source_truth_version
             }
             other => return Err(anyhow!("unexpected publication outcome: {other:?}")),

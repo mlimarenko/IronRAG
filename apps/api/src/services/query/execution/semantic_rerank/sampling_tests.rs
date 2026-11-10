@@ -5,6 +5,9 @@ fn binding(
     top_p: Option<f64>,
 ) -> crate::services::ai_catalog_service::ResolvedRuntimeBinding {
     crate::services::ai_catalog_service::ResolvedRuntimeBinding {
+        admission: std::sync::Arc::new(
+            crate::integrations::provider_admission::UnqualifiedTestAdmission,
+        ),
         binding_id: Uuid::now_v7(),
         workspace_id: Uuid::nil(),
         library_id: Uuid::nil(),

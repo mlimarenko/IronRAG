@@ -178,6 +178,17 @@ impl PreparedSemanticVerification {
         let mut assessment = self.resolve_assessment(parsed)?;
         self.validate_units(&assessment.units)?;
         Self::validate_completeness(&assessment)?;
+        if matches!(
+            assessment.response_classification,
+            SemanticResponseClassification::FalseRefusal
+                | SemanticResponseClassification::UnresolvedRefusal
+        ) && assessment.completeness == SemanticCompleteness::Complete
+        {
+            // A refusal supplies no requested fact. The server owns that
+            // completeness decision instead of turning a coherent refusal into
+            // an operational provenance failure.
+            assessment.completeness = SemanticCompleteness::Undetermined;
+        }
         validate_classification(&assessment, assessment.claim_support)?;
         // Return server order even when the model reordered its exhaustive list.
         assessment.units.sort_by_key(|verdict| {

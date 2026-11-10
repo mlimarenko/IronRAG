@@ -7,9 +7,9 @@ use crate::{
     interfaces::http::{
         auth::AuthContext,
         authorization::{
-            POLICY_DOCUMENTS_WRITE, POLICY_LIBRARY_READ, POLICY_LIBRARY_WRITE,
-            POLICY_MCP_MEMORY_READ, POLICY_OPERATION_READ, POLICY_QUERY_RUN, POLICY_RUNTIME_READ,
-            POLICY_WORKSPACE_ADMIN,
+            POLICY_CONNECTOR_READ, POLICY_CONNECTOR_WRITE, POLICY_DOCUMENTS_WRITE,
+            POLICY_LIBRARY_READ, POLICY_LIBRARY_WRITE, POLICY_MCP_MEMORY_READ,
+            POLICY_OPERATION_READ, POLICY_QUERY_RUN, POLICY_RUNTIME_READ, POLICY_WORKSPACE_ADMIN,
         },
         router_support::ApiError,
     },
@@ -24,10 +24,13 @@ use document_image::VIEW_DOCUMENT_IMAGE_TOOL_NAME;
 use documents::{READ_DOCUMENT_TOOL_NAME, SEARCH_DOCUMENTS_TOOL_NAME};
 
 pub(crate) mod catalog;
+pub(crate) mod connector;
 pub(crate) mod document_image;
 pub(crate) mod documents;
 pub(crate) mod graph;
 pub(crate) mod grounded;
+pub(crate) mod iam;
+pub(crate) mod ingest;
 pub(crate) mod runtime;
 pub(crate) mod web_ingest;
 
@@ -398,6 +401,69 @@ const TOOL_REGISTRY: &[ToolRegistryEntry] = &[
         mutating: true,
         visible: |auth, _capabilities| auth.can_write_any_library_memory(POLICY_LIBRARY_WRITE),
     },
+    ToolRegistryEntry {
+        name: "list_ingest_jobs",
+        surfaces: ToolSurfaces::DIAGNOSTICS_ONLY,
+        mutating: false,
+        visible: |auth, _capabilities| auth.can_read_any_library_memory(POLICY_CONNECTOR_READ),
+    },
+    ToolRegistryEntry {
+        name: "get_ingest_job",
+        surfaces: ToolSurfaces::DIAGNOSTICS_ONLY,
+        mutating: false,
+        visible: |auth, _capabilities| auth.can_read_any_library_memory(POLICY_CONNECTOR_READ),
+    },
+    ToolRegistryEntry {
+        name: "list_connector_sources",
+        surfaces: ToolSurfaces::DIAGNOSTICS_ONLY,
+        mutating: false,
+        // The bundled catalog is static code with no REST CRUD surface, so the
+        // read policy is the whole contract: the same `POLICY_CONNECTOR_READ`
+        // the ingest diagnostics use.
+        visible: |auth, _capabilities| auth.can_read_any_library_memory(POLICY_CONNECTOR_READ),
+    },
+    ToolRegistryEntry {
+        name: "retry_ingest_job",
+        surfaces: ToolSurfaces::DIAGNOSTICS_ONLY,
+        mutating: true,
+        visible: |auth, _capabilities| auth.can_write_any_library_memory(POLICY_CONNECTOR_WRITE),
+    },
+    ToolRegistryEntry {
+        name: "cancel_ingest_job",
+        surfaces: ToolSurfaces::DIAGNOSTICS_ONLY,
+        mutating: true,
+        visible: |auth, _capabilities| auth.can_write_any_library_memory(POLICY_CONNECTOR_WRITE),
+    },
+    ToolRegistryEntry {
+        name: "list_iam_tokens",
+        surfaces: ToolSurfaces::DIAGNOSTICS_ONLY,
+        mutating: false,
+        visible: |auth, _capabilities| auth.is_system_admin,
+    },
+    ToolRegistryEntry {
+        name: "revoke_iam_token",
+        surfaces: ToolSurfaces::DIAGNOSTICS_ONLY,
+        mutating: true,
+        visible: |auth, _capabilities| auth.is_system_admin,
+    },
+    ToolRegistryEntry {
+        name: "mint_iam_token",
+        surfaces: ToolSurfaces::DIAGNOSTICS_ONLY,
+        mutating: true,
+        visible: |auth, _capabilities| auth.is_system_admin,
+    },
+    ToolRegistryEntry {
+        name: "update_iam_token",
+        surfaces: ToolSurfaces::DIAGNOSTICS_ONLY,
+        mutating: true,
+        visible: |auth, _capabilities| auth.is_system_admin,
+    },
+    ToolRegistryEntry {
+        name: "get_principal_access",
+        surfaces: ToolSurfaces::DIAGNOSTICS_ONLY,
+        mutating: false,
+        visible: |auth, _capabilities| auth.is_system_admin,
+    },
 ];
 
 #[cfg(test)]
@@ -635,12 +701,15 @@ fn redacted_args_summary(arguments: &Value) -> String {
 
 pub(crate) fn descriptor_for(name: &str) -> Option<McpToolDescriptor> {
     catalog::descriptor(name)
+        .or_else(|| connector::descriptor(name))
         .or_else(|| documents::descriptor(name))
         .or_else(|| document_image::descriptor(name))
         .or_else(|| grounded::descriptor(name))
         .or_else(|| runtime::descriptor(name))
         .or_else(|| web_ingest::descriptor(name))
         .or_else(|| graph::descriptor(name))
+        .or_else(|| ingest::descriptor(name))
+        .or_else(|| iam::descriptor(name))
 }
 
 pub(crate) async fn call_named_tool<'a>(
@@ -649,20 +718,33 @@ pub(crate) async fn call_named_tool<'a>(
     arguments: &'a Value,
 ) -> Option<McpToolResult> {
     if let Some(result) = catalog::call_tool(name, context, arguments).await {
-        Some(result)
-    } else if let Some(result) = Box::pin(documents::call_tool(name, context, arguments)).await {
-        Some(result)
-    } else if let Some(result) = document_image::call_tool(name, context, arguments).await {
-        Some(result)
-    } else if let Some(result) = grounded::call_tool(name, context, arguments).await {
-        Some(result)
-    } else if let Some(result) = runtime::call_tool(name, context, arguments).await {
-        Some(result)
-    } else if let Some(result) = web_ingest::call_tool(name, context, arguments).await {
-        Some(result)
-    } else {
-        graph::call_tool(name, context, arguments).await
+        return Some(result);
     }
+    if let Some(result) = connector::call_tool(name, context, arguments) {
+        return Some(result);
+    }
+    if let Some(result) = Box::pin(documents::call_tool(name, context, arguments)).await {
+        return Some(result);
+    }
+    if let Some(result) = document_image::call_tool(name, context, arguments).await {
+        return Some(result);
+    }
+    if let Some(result) = grounded::call_tool(name, context, arguments).await {
+        return Some(result);
+    }
+    if let Some(result) = runtime::call_tool(name, context, arguments).await {
+        return Some(result);
+    }
+    if let Some(result) = web_ingest::call_tool(name, context, arguments).await {
+        return Some(result);
+    }
+    if let Some(result) = Box::pin(ingest::call_tool(name, context, arguments)).await {
+        return Some(result);
+    }
+    if let Some(result) = Box::pin(iam::call_tool(name, context, arguments)).await {
+        return Some(result);
+    }
+    graph::call_tool(name, context, arguments).await
 }
 
 #[cfg(test)]
@@ -676,6 +758,7 @@ mod tests {
         interfaces::http::{
             auth::{AuthContext, AuthGrant, AuthTokenKind},
             authorization::{
+                PERMISSION_CONNECTOR_ADMIN, PERMISSION_LIBRARY_READ, PERMISSION_LIBRARY_WRITE,
                 POLICY_LIBRARY_READ, POLICY_MCP_MEMORY_READ, POLICY_QUERY_RUN, POLICY_RUNTIME_READ,
             },
             mcp::{
@@ -964,10 +1047,125 @@ mod tests {
             "delete_document",
             "submit_web_run",
             "cancel_web_run",
+            "retry_ingest_job",
+            "cancel_ingest_job",
+            "revoke_iam_token",
+            "mint_iam_token",
+            "update_iam_token",
         ]);
         assert_eq!(
             mutating, pinned,
             "the registered mutating tool set changed; classify the new tool explicitly",
         );
+    }
+
+    const INGEST_READ_TOOL_NAMES: [&str; 2] = ["list_ingest_jobs", "get_ingest_job"];
+    const INGEST_WRITE_TOOL_NAMES: [&str; 2] = ["retry_ingest_job", "cancel_ingest_job"];
+    const IAM_TOOL_NAMES: [&str; 5] = [
+        "list_iam_tokens",
+        "revoke_iam_token",
+        "get_principal_access",
+        "mint_iam_token",
+        "update_iam_token",
+    ];
+    const CONNECTOR_CATALOG_TOOL_NAMES: [&str; 1] = ["list_connector_sources"];
+
+    fn auth_with_library_permission(
+        permission: Option<&str>,
+        is_system_admin: bool,
+    ) -> AuthContext {
+        let grants = permission
+            .map(|permission_kind| AuthGrant {
+                id: Uuid::from_u128(9),
+                resource_kind: "library".to_string(),
+                resource_id: Uuid::from_u128(11),
+                permission_kind: permission_kind.to_string(),
+                workspace_id: Some(Uuid::from_u128(101)),
+                library_id: Some(Uuid::from_u128(11)),
+                document_id: None,
+            })
+            .into_iter()
+            .collect();
+
+        AuthContext {
+            token_id: Uuid::from_u128(1),
+            principal_id: Uuid::from_u128(2),
+            parent_principal_id: None,
+            workspace_id: None,
+            // An API token, not a session: the IAM tools must be gated on the
+            // resolved admin flag alone.
+            token_kind: AuthTokenKind::Principal(PrincipalKind::ApiToken),
+            scopes: Vec::new(),
+            grants,
+            workspace_memberships: Vec::new(),
+            visible_workspace_ids: BTreeSet::new(),
+            is_system_admin,
+            system_role: None,
+        }
+    }
+
+    fn visible_diagnostics_names(auth: &AuthContext) -> Vec<String> {
+        super::visible_tool_names_with_capabilities(
+            auth,
+            McpToolSurface::Diagnostics,
+            super::ToolVisibilityCapabilities::default(),
+        )
+    }
+
+    fn assert_tools_visible(visible: &[String], names: &[&str], expected: bool) {
+        for name in names {
+            assert_eq!(
+                visible.iter().any(|visible_name| visible_name == name),
+                expected,
+                "tool {name} visibility mismatch"
+            );
+        }
+    }
+
+    #[test]
+    fn ingest_and_iam_tools_follow_grants() {
+        // The read tools follow `POLICY_CONNECTOR_READ`; the two mutating
+        // tools follow `POLICY_CONNECTOR_WRITE`, the same write-only gating
+        // `submit_web_run`/`cancel_web_run` already use. A `library_read`
+        // holder therefore sees the two read tools but not retry/cancel, even
+        // though it can read the queue.
+        let no_grants = visible_diagnostics_names(&auth_with_library_permission(None, false));
+        assert_tools_visible(&no_grants, &INGEST_READ_TOOL_NAMES, false);
+        assert_tools_visible(&no_grants, &INGEST_WRITE_TOOL_NAMES, false);
+        assert_tools_visible(&no_grants, &CONNECTOR_CATALOG_TOOL_NAMES, false);
+        assert_tools_visible(&no_grants, &IAM_TOOL_NAMES, false);
+
+        let library_read = visible_diagnostics_names(&auth_with_library_permission(
+            Some(PERMISSION_LIBRARY_READ),
+            false,
+        ));
+        assert_tools_visible(&library_read, &INGEST_READ_TOOL_NAMES, true);
+        assert_tools_visible(&library_read, &INGEST_WRITE_TOOL_NAMES, false);
+        assert_tools_visible(&library_read, &CONNECTOR_CATALOG_TOOL_NAMES, true);
+        assert_tools_visible(&library_read, &IAM_TOOL_NAMES, false);
+
+        let library_write = visible_diagnostics_names(&auth_with_library_permission(
+            Some(PERMISSION_LIBRARY_WRITE),
+            false,
+        ));
+        assert_tools_visible(&library_write, &INGEST_READ_TOOL_NAMES, true);
+        assert_tools_visible(&library_write, &INGEST_WRITE_TOOL_NAMES, true);
+        assert_tools_visible(&library_write, &CONNECTOR_CATALOG_TOOL_NAMES, true);
+        assert_tools_visible(&library_write, &IAM_TOOL_NAMES, false);
+
+        let connector_admin = visible_diagnostics_names(&auth_with_library_permission(
+            Some(PERMISSION_CONNECTOR_ADMIN),
+            false,
+        ));
+        assert_tools_visible(&connector_admin, &INGEST_READ_TOOL_NAMES, true);
+        assert_tools_visible(&connector_admin, &INGEST_WRITE_TOOL_NAMES, true);
+        assert_tools_visible(&connector_admin, &CONNECTOR_CATALOG_TOOL_NAMES, true);
+        assert_tools_visible(&connector_admin, &IAM_TOOL_NAMES, false);
+
+        let system_admin = visible_diagnostics_names(&auth_with_library_permission(None, true));
+        assert_tools_visible(&system_admin, &INGEST_READ_TOOL_NAMES, true);
+        assert_tools_visible(&system_admin, &INGEST_WRITE_TOOL_NAMES, true);
+        assert_tools_visible(&system_admin, &CONNECTOR_CATALOG_TOOL_NAMES, true);
+        assert_tools_visible(&system_admin, &IAM_TOOL_NAMES, true);
     }
 }

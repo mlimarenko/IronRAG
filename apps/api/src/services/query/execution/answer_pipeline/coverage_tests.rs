@@ -1,4 +1,5 @@
 use super::*;
+use crate::domains::query_ir::TemporalConstraint;
 
 #[test]
 fn literal_free_answer_is_not_acceptable_when_context_has_requested_technical_literals() {
@@ -751,5 +752,56 @@ fn comparison_coverage_metadata_does_not_count_as_grounding_evidence() {
     assert!(
         matches!(coverage, super::EvidenceCoverage::Insufficient("compare_evidence_empty")),
         "internal coverage markers must not become synthetic evidence"
+    );
+}
+
+#[test]
+fn specific_value_inside_procedure_does_not_require_whole_procedure_anchors() {
+    let question = "Сколько времени даётся оркестратору на подтверждение остановки при перезапуске службы Orbita?";
+    let answer = "Оркестратор должен подтвердить остановку в течение **90 секунд**. Если подтверждение не пришло за это время, перезапуск запрещён.";
+    let context = r#"
+[graph-evidence target="Orbita restart procedure"]
+"Остановить приём новых сборок" "пауза оркестратора"
+"Replay Guild" "журнал за 15 минут"
+"статус готова" "30 секунд"
+"#;
+
+    let mut specific = sample_ir_with_act(QueryAct::RetrieveValue, 0.9, None);
+    specific.target_types = vec![QueryTargetKind::Procedure];
+    specific.target_entities =
+        vec![EntityMention { label: "Orbita".to_string(), role: EntityRole::Subject }];
+    specific.literal_constraints.clear();
+    specific.temporal_constraints =
+        vec![TemporalConstraint { surface: "90 секунд".to_string(), start: None, end: None }];
+    assert!(
+        !super::answer_omits_structural_context_coverage(answer, &specific, context),
+        "a specific value question inside a procedure must not be marked partial for unasked steps"
+    );
+    let mut verification = RuntimeAnswerVerification {
+        semantic_verification: None,
+        state: QueryVerificationState::Verified,
+        warnings: Vec::new(),
+        unsupported_literals: Vec::new(),
+    };
+    super::apply_structural_coverage_warning(
+        question,
+        answer,
+        &specific,
+        context,
+        &serde_json::json!({}),
+        &mut verification,
+    );
+    assert!(verification.warnings.is_empty());
+    assert_eq!(verification.state, QueryVerificationState::Verified);
+
+    let mut full = sample_ir_with_act(QueryAct::Describe, 0.9, None);
+    full.target_types = vec![QueryTargetKind::Procedure];
+    full.target_entities =
+        vec![EntityMention { label: "Orbita".to_string(), role: EntityRole::Subject }];
+    full.literal_constraints.clear();
+    full.temporal_constraints.clear();
+    assert!(
+        super::answer_omits_structural_context_coverage(answer, &full, context),
+        "a full-procedure question must still require the procedure anchors"
     );
 }

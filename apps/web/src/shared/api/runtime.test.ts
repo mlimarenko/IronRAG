@@ -1,6 +1,60 @@
-import { describe, expect, it } from 'vitest'
+import { QueryClient } from '@tanstack/react-query'
+import { describe, expect, it, vi } from 'vitest'
 
-import { ApiError, getApiProblem, unwrap } from './runtime'
+import {
+  ApiError,
+  ResponseContractError,
+  getApiProblem,
+  retryContractViolation,
+  unwrap,
+  validateQueryResponse,
+} from './runtime'
+
+describe('validated query responses', () => {
+  it('keeps malformed data out of the cache and recovers with the original wire value', async () => {
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    const queryKey = ['validated-response'] as const
+    const valid = { items: ['entry'] }
+    const request = vi.fn().mockResolvedValueOnce({ items: null }).mockResolvedValueOnce(valid)
+    const validate = vi.fn((data: { items: unknown }) => {
+      if (!Array.isArray(data.items)) throw new TypeError('items must be an array')
+    })
+    const options = { queryKey, queryFn: validateQueryResponse(request, validate) }
+
+    const failure = await client.fetchQuery(options).catch((error: unknown) => error)
+    expect(failure).toBeInstanceOf(ResponseContractError)
+    expect(failure).toMatchObject({ message: 'items must be an array' })
+    expect(client.getQueryData(queryKey)).toBeUndefined()
+    expect(client.getQueryState(queryKey)?.status).toBe('error')
+
+    await expect(client.fetchQuery(options)).resolves.toBe(valid)
+    expect(client.getQueryData(queryKey)).toBe(valid)
+    expect(request).toHaveBeenCalledTimes(2)
+    expect(validate).toHaveBeenCalledTimes(2)
+    client.clear()
+  })
+
+  it('retries a transport failure once but never a contract violation', () => {
+    const contractError = new ResponseContractError('items must be an array')
+    expect(retryContractViolation(0, contractError)).toBe(false)
+    expect(retryContractViolation(0, new Error('Failed to fetch'))).toBe(true)
+    expect(retryContractViolation(1, new Error('Failed to fetch'))).toBe(false)
+  })
+
+  it('keeps a typed endpoint contract error instead of wrapping it again', async () => {
+    const typed = new ResponseContractError('queue contract')
+    const options = {
+      queryKey: ['typed-contract-error'] as const,
+      queryFn: validateQueryResponse(vi.fn().mockResolvedValue({ items: [] }), () => {
+        throw typed
+      }),
+    }
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+
+    await expect(client.fetchQuery(options)).rejects.toBe(typed)
+    client.clear()
+  })
+})
 
 describe('unwrap', () => {
   it('preserves an Error message from a generated-client failure', () => {

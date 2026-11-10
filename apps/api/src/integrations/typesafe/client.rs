@@ -38,12 +38,6 @@ use super::{
 /// URL's own path prefix.
 pub(super) const SYSTEM_ONE_DECISIONS_PATH: &str = "/v1/systemone";
 
-/// Diagnostics-only label for the shared status error and the request span when
-/// no budget identity exists. It is never used for catalog lookup, provider
-/// profile routing, or budget identity; a real identity always takes
-/// precedence.
-const SYSTEM_ONE_DIAGNOSTIC_PROVIDER_KIND: &str = "typesafe";
-
 /// Budget identity and registry a caller attaches to the client. The identity
 /// is caller-supplied so no provider kind is ever guessed here.
 pub struct SystemOneBudget {
@@ -72,7 +66,12 @@ pub struct SystemOneClientConfig {
     /// call with a typed timeout error instead of hanging or sleeping past it.
     /// The shared `max_attempts` cap is unchanged.
     pub execution_deadline: Duration,
-    pub budget: Option<SystemOneBudget>,
+    pub budget: SystemOneBudget,
+    /// Resolver-issued route/credential attestation required by the shared
+    /// final send boundary.
+    pub dispatch: crate::shared::provider_http::ProviderDispatchContext,
+    /// The durable admission owner every physical decision attempt passes.
+    pub admission: Arc<dyn crate::shared::provider_http::ProviderDispatchAdmission>,
 }
 
 /// Caller-supplied transport policy for a SystemOne decision client: the HTTP
@@ -107,7 +106,9 @@ pub struct SystemOneClient {
     execution_deadline: Duration,
     api_key: Zeroizing<String>,
     allow_private_network: bool,
-    budget: Option<SystemOneBudget>,
+    budget: SystemOneBudget,
+    dispatch: crate::shared::provider_http::ProviderDispatchContext,
+    admission: Arc<dyn crate::shared::provider_http::ProviderDispatchAdmission>,
 }
 
 impl SystemOneClient {
@@ -151,6 +152,8 @@ impl SystemOneClient {
             api_key,
             allow_private_network: config.allow_private_network,
             budget: config.budget,
+            dispatch: config.dispatch,
+            admission: config.admission,
         })
     }
 
@@ -275,26 +278,34 @@ impl SystemOneClient {
     ) -> Result<reqwest::Response, ProviderCallError> {
         send_provider_http_request(
             request,
-            &self.endpoint,
-            &Method::POST,
-            diagnostic_label,
+            &self.dispatch,
+            self.admission.as_ref(),
             "systemone_decision",
         )
         .await
-        .map_err(|error| ProviderCallError::transport("systemone provider request", error))
+        .map_err(|error| match error {
+            crate::shared::provider_http::ProviderDispatchError::Refused(refusal) => {
+                ProviderCallError::admission(
+                    crate::integrations::provider_budget::ProviderBudgetError::Dispatch(refusal),
+                )
+            }
+            crate::shared::provider_http::ProviderDispatchError::Build => {
+                ProviderCallError::protocol(format!(
+                    "systemone provider request could not be built: {diagnostic_label}"
+                ))
+            }
+            crate::shared::provider_http::ProviderDispatchError::Transport(source) => {
+                ProviderCallError::transport("systemone provider request", source)
+            }
+        })
     }
 
     async fn begin_attempt(&self) -> Result<ProviderBudgetGuard, ProviderCallError> {
-        let Some(budget) = &self.budget else {
-            return Ok(ProviderBudgetGuard::Unlimited);
-        };
-        acquire_provider_budget(&budget.registry, &budget.identity).await
+        acquire_provider_budget(&self.budget.registry, &self.budget.identity).await
     }
 
     fn diagnostic_provider_kind(&self) -> &str {
-        self.budget.as_ref().map_or(SYSTEM_ONE_DIAGNOSTIC_PROVIDER_KIND, |budget| {
-            budget.identity.provider_kind.as_str()
-        })
+        self.budget.identity.provider_kind.as_str()
     }
 }
 

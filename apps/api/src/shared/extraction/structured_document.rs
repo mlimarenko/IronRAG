@@ -67,6 +67,21 @@ pub struct StructuredSourceSpan {
     pub end_offset: i32,
 }
 
+/// Evidence computed during preparation, never accepted from stored or public JSON.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ChunkSourceProvenance {
+    Exact(StructuredSourceSpan),
+    Covering(StructuredSourceSpan),
+}
+
+impl ChunkSourceProvenance {
+    pub(crate) const fn span(&self) -> &StructuredSourceSpan {
+        match self {
+            Self::Exact(span) | Self::Covering(span) => span,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct StructuredTableCoordinates {
@@ -121,6 +136,8 @@ pub struct StructuredChunkWindow {
     pub simhash_fingerprint: Option<u64>,
     pub is_near_duplicate: bool,
     pub window_text: Option<String>,
+    #[serde(skip)]
+    pub(crate) runtime_provenance: Option<ChunkSourceProvenance>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
@@ -376,6 +393,7 @@ mod tests {
                 simhash_fingerprint: None,
                 is_near_duplicate: false,
                 window_text: None,
+                runtime_provenance: None,
             }],
             prepared_at: Utc::now(),
         };

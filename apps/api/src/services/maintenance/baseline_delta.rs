@@ -117,6 +117,13 @@ pub const BASELINE_REVISION_BILLING_DOCUMENT_READ_SHA384: &str = "464d53698e9b4a
 /// Frozen IRG-311 baseline: real standalone knowledge-search billing ownership.
 pub const BASELINE_REVISION_BILLING_KNOWLEDGE_SEARCH_SHA384: &str = "7ba1decf37763a53effe39c692b70bcf5281ecb22f7753b67670dde4638611845bd382ae2e7eb55074b3363423e94a95";
 
+/// Frozen IRG-253 baseline: provider source truth ignores runtime financial
+/// admission counters; only non-financial provider configuration advances it.
+pub const BASELINE_REVISION_PROVIDER_SOURCE_GENERATION_FENCE_SHA384: &str = "b54ff5e7a9087bcff86eabc640b38c87b743d9f2b5479fac8c1ec098e8eb3d9f30140b6dc57e051314b384848c493450";
+
+/// Frozen IRG-350 baseline: durable account-scoped telemetry consent preference.
+pub const BASELINE_REVISION_USER_PREFERENCE_SHA384: &str = "e6749be6a755648961fd13e26a9090c9df0f087d1860ab10a7d40cec71ffc439eb77122dca45c1c25f94998a7a4e65af";
+
 /// Serialises every baseline transition in the instance. One key, not one per
 /// delta: two different transitions racing on the same checksum row would each
 /// read a predecessor the other is about to replace.
@@ -185,6 +192,8 @@ pub(crate) const BASELINE_DELTA_SPECS: &[AdditiveBaselineDeltaSpec] = &[
     crate::services::maintenance::vision_recognition_schema::VISION_RECOGNITION_DELTA,
     crate::services::maintenance::billing_document_read_schema::BILLING_DOCUMENT_READ_DELTA,
     crate::services::maintenance::billing_knowledge_search_schema::BILLING_KNOWLEDGE_SEARCH_DELTA,
+    crate::services::maintenance::provider_source_generation_fence_schema::PROVIDER_SOURCE_GENERATION_FENCE_DELTA,
+    crate::services::maintenance::user_preference_schema::USER_PREFERENCE_DELTA,
 ];
 
 /// Derives the ordered revision chain from the specs alone. A predecessor that
@@ -464,10 +473,11 @@ mod tests {
         BASELINE_REVISION_CONTENT_VISIBILITY_INTENT_SHA384,
         BASELINE_REVISION_DECISION_CATALOG_SHA384, BASELINE_REVISION_IRG75_SHA384,
         BASELINE_REVISION_IRG112_SHA384, BASELINE_REVISION_IRG173_SHA384,
+        BASELINE_REVISION_PROVIDER_SOURCE_GENERATION_FENCE_SHA384,
         BASELINE_REVISION_PROVISIONING_SHA384, BASELINE_REVISION_QUERY_RERANK_SHA384,
-        BASELINE_REVISION_VISION_RECOGNITION_SHA384, BASELINE_REVISION_XBERG_RECOGNITION_SHA384,
-        baseline_revision_chain, recorded_revision_object_groups, revision_chain_for,
-        shipped_baseline_sha384_hex,
+        BASELINE_REVISION_USER_PREFERENCE_SHA384, BASELINE_REVISION_VISION_RECOGNITION_SHA384,
+        BASELINE_REVISION_XBERG_RECOGNITION_SHA384, baseline_revision_chain,
+        recorded_revision_object_groups, revision_chain_for, shipped_baseline_sha384_hex,
     };
     use crate::infra::persistence::REQUIRED_BASELINE_OBJECT_GROUPS_QUERY_RERANK;
 
@@ -489,6 +499,8 @@ mod tests {
                 BASELINE_REVISION_VISION_RECOGNITION_SHA384,
                 BASELINE_REVISION_BILLING_DOCUMENT_READ_SHA384,
                 BASELINE_REVISION_BILLING_KNOWLEDGE_SEARCH_SHA384,
+                BASELINE_REVISION_PROVIDER_SOURCE_GENERATION_FENCE_SHA384,
+                BASELINE_REVISION_USER_PREFERENCE_SHA384,
             ]
         );
         let shipped = shipped_baseline_sha384_hex();

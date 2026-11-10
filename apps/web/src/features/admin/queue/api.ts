@@ -1,6 +1,11 @@
 import { keepPreviousData, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 
-import { queries } from '@/shared/api'
+import {
+  ResponseContractError,
+  queries,
+  retryContractViolation,
+  validateQueryResponse,
+} from '@/shared/api'
 import type {
   IngestQueueBulkAction,
   IngestQueueMoveDirection,
@@ -22,10 +27,18 @@ function queueOptions(scope: QueueScope) {
 }
 
 export function useIngestQueue(scope: QueueScope) {
+  const options = queueOptions(scope)
   return useQuery({
-    ...queueOptions(scope),
+    ...options,
+    queryFn: validateQueryResponse(options.queryFn, mapQueue),
     enabled: scope.libraryId !== '',
-    refetchInterval: 5_000,
+    // A poll that starts without data clears the settled error and renders the
+    // screen as loading again. A contract violation cannot repair itself, so it
+    // stops the poll and leaves the localized error and its retry action on
+    // screen; a transport failure keeps polling for automatic recovery.
+    refetchInterval: (query) =>
+      query.state.error instanceof ResponseContractError ? false : 5_000,
+    retry: retryContractViolation,
     select: mapQueue,
   })
 }
@@ -38,30 +51,46 @@ export function useQueueLibrary(libraryId: string | undefined) {
 }
 
 export function useQueueInspector(jobId: string | null, attemptId: string | null) {
+  const jobOptions = queries.getIngestJobOptions({ path: { jobId: jobId ?? '' } })
   const jobQuery = useQuery({
-    ...queries.getIngestJobOptions({ path: { jobId: jobId ?? '' } }),
+    ...jobOptions,
+    queryFn: validateQueryResponse(jobOptions.queryFn, mapJob),
     enabled: Boolean(jobId),
+    retry: retryContractViolation,
     select: mapJob,
   })
+  const attemptsOptions = queries.listIngestJobAttemptsOptions({
+    path: { jobId: jobId ?? '' },
+    query: { limit: 50 },
+  })
   const attemptsQuery = useQuery({
-    ...queries.listIngestJobAttemptsOptions({
-      path: { jobId: jobId ?? '' },
-      query: { limit: 50 },
-    }),
+    ...attemptsOptions,
+    queryFn: validateQueryResponse(attemptsOptions.queryFn, mapAttempts),
     enabled: Boolean(jobId),
     placeholderData: keepPreviousData,
+    retry: retryContractViolation,
     select: mapAttempts,
   })
   const resolvedAttemptId = attemptId ?? attemptsQuery.data?.[0]?.id ?? null
+  const attemptOptions = queries.getIngestAttemptOptions({
+    path: { attemptId: resolvedAttemptId ?? '' },
+  })
   const attemptQuery = useQuery({
-    ...queries.getIngestAttemptOptions({ path: { attemptId: resolvedAttemptId ?? '' } }),
+    ...attemptOptions,
+    queryFn: validateQueryResponse(attemptOptions.queryFn, mapAttempt),
     enabled: Boolean(resolvedAttemptId),
+    retry: retryContractViolation,
     select: mapAttempt,
   })
+  const stageOptions = queries.listIngestStageEventsOptions({
+    path: { attemptId: resolvedAttemptId ?? '' },
+  })
   const stagesQuery = useQuery({
-    ...queries.listIngestStageEventsOptions({ path: { attemptId: resolvedAttemptId ?? '' } }),
+    ...stageOptions,
+    queryFn: validateQueryResponse(stageOptions.queryFn, mapStageEvents),
     enabled: Boolean(resolvedAttemptId),
     refetchInterval: attemptQuery.data?.attempt.attempt_state === 'running' ? 3_000 : false,
+    retry: retryContractViolation,
     select: mapStageEvents,
   })
 

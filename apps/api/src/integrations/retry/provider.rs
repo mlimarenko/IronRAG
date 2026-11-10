@@ -4,6 +4,8 @@ use rand::RngExt as _;
 
 #[derive(Debug, Error)]
 pub enum ProviderCallError {
+    #[error("provider request rejected locally before send")]
+    LocalRequestRejected,
     #[error("provider request admission failed: {source}")]
     Admission {
         #[source]
@@ -57,6 +59,7 @@ pub enum ProviderCallError {
         /// redacted non-empty body both render opaque operator text, so only
         /// this flag may drive the bounded empty-404 retry.
         empty_body: bool,
+        metadata: ProviderErrorMetadata,
     },
     #[error("{message}")]
     Protocol { message: String },
@@ -65,6 +68,17 @@ pub enum ProviderCallError {
 }
 
 impl ProviderCallError {
+    /// Reject a locally invalid request before acquiring admission or sending it.
+    #[must_use]
+    pub const fn local_request_rejected() -> Self {
+        Self::LocalRequestRejected
+    }
+
+    #[must_use]
+    pub fn is_permanent_rejection(&self) -> bool {
+        matches!(self, Self::LocalRequestRejected)
+            || matches!(self, Self::HttpStatus { status, quota_exhausted: false, .. } if *status == StatusCode::BAD_REQUEST)
+    }
     #[must_use]
     pub const fn admission(source: ProviderBudgetError) -> Self {
         Self::Admission { source }
@@ -120,6 +134,7 @@ impl ProviderCallError {
             // emptiness is not proven and the bounded empty-404 retry cannot
             // fire; a real response goes through `provider_http_status_error`.
             empty_body: false,
+            metadata: ProviderErrorMetadata::unknown(),
         }
     }
 
@@ -194,13 +209,14 @@ impl ProviderCallError {
     #[must_use]
     pub fn redacted_detail(&self) -> String {
         match self {
+            Self::LocalRequestRejected => "origin=local request_rejected".to_string(),
             Self::Admission { source } => source.redacted_detail().to_string(),
             Self::Transport { source, .. } => transport_redacted_detail("transport", source),
             Self::ResponseBody { source, .. } => transport_redacted_detail("response_body", source),
             Self::ResponsePolicy { .. } => "response_policy".to_string(),
             Self::ResponseJson { source, .. } => transport_redacted_detail("response_json", source),
             Self::Json { .. } => "json_decode".to_string(),
-            Self::HttpStatus { provider_kind, status, quota_exhausted, .. } => {
+            Self::HttpStatus { provider_kind, status, quota_exhausted, metadata, .. } => {
                 let mut detail = format!(
                     "provider={} http_status={}",
                     sanitized_provider_kind(provider_kind),
@@ -209,11 +225,37 @@ impl ProviderCallError {
                 if *quota_exhausted {
                     detail.push_str(" quota_exhausted");
                 }
+                if *status == StatusCode::BAD_REQUEST {
+                    detail.push_str(&format!(
+                        " origin=remote type={} code={} param={}",
+                        metadata.error_type, metadata.code, metadata.param
+                    ));
+                }
                 detail
             }
             Self::Protocol { .. } => "protocol".to_string(),
             Self::Timeout { .. } => "timeout".to_string(),
         }
+    }
+
+    /// Emits the canonical error record for one terminal provider failure.
+    ///
+    /// The record's message is the existing value-free
+    /// [`Self::redacted_detail`] token, so the redacted provider detail
+    /// contract is unchanged; the shared fingerprint groups repeats of the
+    /// same provider/status class.
+    ///
+    /// Operational, self-healing conditions are not terminal and are skipped:
+    /// a rate limit or an exhausted local admission budget recovers once the
+    /// window resets, so it must not raise an error record of its own.
+    pub fn report_terminal_failure(&self) {
+        if self.is_rate_limited() || self.admission_error().is_some() {
+            return;
+        }
+        crate::observability::error_tracking::report_message(
+            "llm.provider_call",
+            &self.redacted_detail(),
+        );
     }
 }
 
@@ -299,6 +341,44 @@ fn sanitized_provider_kind(provider_kind: &str) -> String {
 /// the structured `error.code` / `error.type` fields only.
 const PROVIDER_QUOTA_EXHAUSTED_CODE: &str = "insufficient_quota";
 
+/// Strictly allowlisted wire categories; unknown upstream strings are discarded.
+#[derive(Debug)]
+pub struct ProviderErrorMetadata {
+    error_type: &'static str,
+    code: &'static str,
+    param: &'static str,
+}
+
+impl ProviderErrorMetadata {
+    const fn unknown() -> Self {
+        Self { error_type: "unknown", code: "unknown", param: "unknown" }
+    }
+
+    fn from_body(body: Option<&serde_json::Value>) -> Self {
+        let field = |name| {
+            body.and_then(|v| v.get("error"))
+                .and_then(|v| v.get(name))
+                .and_then(serde_json::Value::as_str)
+        };
+        Self {
+            error_type: match field("type") {
+                Some("invalid_request_error") => "invalid_request_error",
+                _ => "unknown",
+            },
+            code: match field("code") {
+                Some("context_length_exceeded") => "context_length_exceeded",
+                Some("invalid_request_error") => "invalid_request_error",
+                _ => "unknown",
+            },
+            param: match field("param") {
+                Some("input") => "input",
+                Some("model") => "model",
+                _ => "unknown",
+            },
+        }
+    }
+}
+
 #[must_use]
 pub fn provider_http_status_error(
     provider_kind: &str,
@@ -325,6 +405,7 @@ pub fn provider_http_status_error(
         },
         quota_exhausted,
         empty_body,
+        metadata: ProviderErrorMetadata::from_body(body.as_ref()),
     }
 }
 
@@ -346,6 +427,7 @@ pub fn provider_http_status_error_unread(
         detail: "upstream provider request failed; response details were redacted".to_string(),
         quota_exhausted: false,
         empty_body: false,
+        metadata: ProviderErrorMetadata::unknown(),
     }
 }
 
@@ -396,7 +478,9 @@ pub(super) const fn abort_retry<E>(_error: &E) -> RetryDecision {
 
 pub(super) fn classify_provider_call_error(error: &ProviderCallError) -> RetryDecision {
     match error {
-        ProviderCallError::Admission { .. } => RetryDecision::Abort,
+        ProviderCallError::Admission { .. } | ProviderCallError::LocalRequestRejected => {
+            RetryDecision::Abort
+        }
         ProviderCallError::Transport { source, .. }
         | ProviderCallError::ResponseBody { source, .. } => {
             if is_retryable_transport_error(source) {

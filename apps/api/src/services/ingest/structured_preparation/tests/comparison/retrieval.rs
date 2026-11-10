@@ -1343,6 +1343,7 @@ fn fact_remapping_is_deterministic_scoped_and_preserves_conditions() -> Result<(
             simhash_fingerprint: None,
             is_near_duplicate: false,
             window_text: None,
+            runtime_provenance: None,
         }],
     };
     let seed = DocumentSeed {

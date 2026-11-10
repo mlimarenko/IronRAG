@@ -349,6 +349,30 @@ Historical command reruns validate the recorded revision's current certificates,
 not an obsolete predecessor enum. Never reset data or edit the SQLx ledger to
 bypass refusal. Command availability does not authorize a live transition.
 
+### `migrate user-preference-schema`
+
+Adds the `public.iam_user_preference` table for durable account-scoped telemetry
+consent. The exact predecessor is the provider source-generation fence baseline
+`b54ff5e7a9087bcff86eabc640b38c87b743d9f2b5479fac8c1ec098e8eb3d9f30140b6dc57e051314b384848c493450`.
+Complete all earlier applicable guarded hops first.
+
+```bash
+ironrag-maintenance migrate user-preference-schema --json
+# Only after reviewing the dry run and authorizing the runtime cutover:
+ironrag-maintenance migrate user-preference-schema --apply --json
+```
+
+Stop and drain API, workers and maintenance writers before replacing the runtime.
+This hop creates only the preference table: `principal_id` (primary key, foreign
+key to `iam_principal` with `ON DELETE CASCADE`), `telemetry_consent` (`granted`
+or `denied`) and `updated_at`. An absent row means unset. The certificate checks
+the exact columns, primary key, consent check and foreign key before the checksum
+CAS. Dry-run rolls back without persistent writes; unknown checksums,
+partial/pre-applied DDL and a damaged current certificate refuse without a stamp.
+Reruns at the current revision validate the objects and return `alreadyCurrent`.
+Never reset data or edit the SQLx ledger to bypass refusal. Command availability
+does not authorize a live transition.
+
 ## `audit` — read-only inspection
 
 The audit family answers "what is going on" without changing anything.

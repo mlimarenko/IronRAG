@@ -204,18 +204,8 @@ pub async fn publish_content_ingest_success_revision_fenced_with_graph_guard(
     // Upgrade the already-held parent row instead: every vector writer locks
     // this row before touching vector data, so FOR UPDATE both observes all
     // prior writers and excludes new ones through publication commit.
-    let observed_source_truth_version = sqlx::query_scalar::<_, i64>(
-        "select source_truth_version
-         from catalog_library
-         where id = $1 and workspace_id = $2
-         for update",
-    )
-    .bind(input.library_id)
-    .bind(input.workspace_id)
-    .fetch_optional(&mut *transaction)
-    .await
-    .context("upgrade guarded content-ingest publication source lock")?
-    .context("guarded content-ingest publication library disappeared")?;
+    let observed_source_truth_version =
+        lock_guarded_publication_source(&mut transaction, input).await?;
     let observed_embedding_profile_key =
         active_embedding_profile_key_with_transaction(&mut transaction, input.library_id).await?;
     publish_content_ingest_success_in_transaction(
@@ -224,9 +214,27 @@ pub async fn publish_content_ingest_success_revision_fenced_with_graph_guard(
         effects,
         RevisionPublicationProfileFence::Observed(observed_embedding_profile_key),
         observed_source_truth_version,
-        true,
+        ContentGraphPublication::Staged,
     )
     .await
+}
+
+async fn lock_guarded_publication_source(
+    transaction: &mut Transaction<'_, Postgres>,
+    input: &PublishContentIngestSuccess,
+) -> anyhow::Result<i64> {
+    sqlx::query_scalar::<_, i64>(
+        "select source_truth_version
+         from catalog_library
+         where id = $1 and workspace_id = $2
+         for update",
+    )
+    .bind(input.library_id)
+    .bind(input.workspace_id)
+    .fetch_optional(&mut **transaction)
+    .await
+    .context("upgrade guarded content-ingest publication source lock")?
+    .context("guarded content-ingest publication library disappeared")
 }
 
 fn ensure_valid_content_publication_fence(
@@ -259,7 +267,7 @@ async fn publish_content_ingest_success_with_profile_source(
             RevisionPublicationProfileFence::External,
         ),
         observed_source_truth_version,
-        false,
+        ContentGraphPublication::None,
     )
     .await
 }
@@ -313,13 +321,20 @@ fn ensure_publication_job_matches_request(
     Ok(())
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ContentGraphPublication {
+    None,
+    Staged,
+    Discarded,
+}
+
 async fn publish_content_ingest_success_in_transaction(
     mut transaction: Transaction<'static, Postgres>,
     input: &PublishContentIngestSuccess,
     effects: &ContentIngestPublicationEffects,
     profile_fence: RevisionPublicationProfileFence<'_>,
     observed_source_truth_version: i64,
-    graph_guarded: bool,
+    graph_publication: ContentGraphPublication,
 ) -> anyhow::Result<PublishContentIngestSuccessOutcome> {
     // Required lock order is library -> job -> attempt. Lock the job through
     // the supplied attempt identity first, then lock and prove that exact
@@ -328,7 +343,7 @@ async fn publish_content_ingest_success_in_transaction(
         ContentAuthority::Lost { rollback_context, commit_context } => {
             finish_lost_authority_transaction(
                 transaction,
-                graph_guarded,
+                graph_publication == ContentGraphPublication::Staged,
                 rollback_context,
                 commit_context,
             )
@@ -348,9 +363,74 @@ async fn publish_content_ingest_success_in_transaction(
     )
     .await?;
 
+    let decision = prepare_content_publication_decision(&mut transaction, input).await?;
+    if !decision.publicly_visible && graph_publication == ContentGraphPublication::Staged {
+        // Retained model/extraction results predate this savepoint. Discard the
+        // derived graph and the tentative lifecycle decision together, then
+        // revalidate authority and complete only the unpublished revision. The
+        // savepoint rollback releases later row-lock upgrades, so the source
+        // fence and profile must be read again before completing the lifecycle.
+        sqlx::query("rollback to savepoint ingest_graph_projection")
+            .execute(&mut *transaction)
+            .await?;
+        let source_version = lock_guarded_publication_source(&mut transaction, input).await?;
+        let profile =
+            active_embedding_profile_key_with_transaction(&mut transaction, input.library_id)
+                .await?;
+        return Box::pin(publish_content_ingest_success_in_transaction(
+            transaction,
+            input,
+            effects,
+            RevisionPublicationProfileFence::Observed(profile),
+            source_version,
+            ContentGraphPublication::Discarded,
+        ))
+        .await;
+    }
+    anyhow::ensure!(
+        graph_publication != ContentGraphPublication::Discarded || !decision.publicly_visible,
+        "publication eligibility changed after discarding unpublished graph"
+    );
+    if decision.publicly_visible {
+        publish_content_document_head(&mut transaction, input, effects).await?;
+        crate::infra::repositories::invalidate_unpublished_runtime_graph_snapshot(
+            &mut transaction,
+            input.library_id,
+            false,
+        )
+        .await?;
+    }
+
+    let mutation_completed = decision.mutation_completed;
+    let publicly_visible = decision.publicly_visible;
+    let source_truth_version = finalize_content_publication(
+        &mut transaction,
+        input,
+        &job,
+        effects,
+        decision,
+        observed_source_truth_version,
+    )
+    .await?;
+
+    transaction.commit().await.context("commit content-ingest publication")?;
+
+    Ok(PublishContentIngestSuccessOutcome::Applied {
+        source_truth_version,
+        mutation_completed,
+        publicly_visible,
+    })
+}
+
+/// Tentative lifecycle writes precede the canonical membership decision. A
+/// staged, denied graph rolls these writes back and revalidates this same path.
+async fn prepare_content_publication_decision(
+    transaction: &mut Transaction<'_, Postgres>,
+    input: &PublishContentIngestSuccess,
+) -> anyhow::Result<ContentPublicationDecision> {
     let document =
         crate::infra::repositories::content_document_repository::lock_document_by_id_with_executor(
-            &mut *transaction,
+            &mut **transaction,
             input.document_id,
         )
         .await?
@@ -360,42 +440,23 @@ async fn publish_content_ingest_success_in_transaction(
         "publication document scope mismatch"
     );
     content_document_head_repository::get_document_head_for_update_with_executor(
-        &mut *transaction,
+        &mut **transaction,
         input.document_id,
     )
     .await?
     .context("publication head disappeared")?;
-
-    publish_content_revision_readiness(&mut transaction, input).await?;
-
-    lock_content_mutation_scope(&mut transaction, input).await?;
-    apply_content_mutation_item(&mut transaction, input).await?;
-    let mutation_completed = complete_content_aggregate(&mut transaction, input).await?;
-
+    publish_content_revision_readiness(transaction, input).await?;
+    lock_content_mutation_scope(transaction, input).await?;
+    apply_content_mutation_item(transaction, input).await?;
+    let mutation_completed = complete_content_aggregate(transaction, input).await?;
     let publicly_visible = content_document_head_repository::publication_item_is_visible(
-        &mut transaction,
+        transaction,
         input.document_id,
         input.revision_id,
         input.mutation_item_id,
     )
     .await?;
-    if publicly_visible {
-        publish_content_document_head(&mut transaction, input, effects).await?;
-    }
-
-    let source_truth_version = finalize_content_publication(
-        &mut transaction,
-        input,
-        &job,
-        effects,
-        ContentPublicationDecision { mutation_completed, publicly_visible },
-        observed_source_truth_version,
-    )
-    .await?;
-
-    transaction.commit().await.context("commit content-ingest publication")?;
-
-    Ok(PublishContentIngestSuccessOutcome::Applied { source_truth_version, mutation_completed })
+    Ok(ContentPublicationDecision { mutation_completed, publicly_visible })
 }
 
 /// Authority for one content-ingest publication. `Lost` carries the exact

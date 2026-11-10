@@ -213,6 +213,9 @@ pub(super) fn preserved_snapshot_terminal_state(
             last_error_message: snapshot.last_error_message.as_deref(),
         };
     }
+    if snapshot.graph_status == "stale" {
+        return PreservedSnapshotTerminalState { graph_status: "stale", last_error_message: None };
+    }
     PreservedSnapshotTerminalState {
         graph_status: if snapshot.node_count <= 0 && snapshot.edge_count <= 0 {
             GRAPH_STATUS_EMPTY

@@ -72,6 +72,9 @@ const ADMISSION_ENV: &str = "IRONRAG_SEMANTIC_CONTROLS_ADMISSION";
 const MAX_INPUT_BYTES: u64 = 262_144;
 const CONVERSATION_CAP: usize = 1000;
 
+#[cfg(test)]
+mod native_tests;
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct Manifest {
@@ -577,6 +580,10 @@ async fn read_source(
     })
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "controlled semantic context takes exact identity and manifest arguments"
+)]
 async fn create_context(
     state: &AppState,
     auth: &AuthContext,
@@ -649,6 +656,10 @@ async fn create_context(
     .await?)
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "observation requires state, manifest, admission, case, pin, ledger, and key"
+)]
 async fn observe(
     state: &AppState,
     manifest: &Manifest,
@@ -676,7 +687,7 @@ async fn observe(
         "sourceFileSha256":pin.source_file_sha256,"canonicalTextSha256":pin.canonical_text_sha256,
         "state":"started_not_observed","automaticReplayPermitted":false}),
     )?;
-    let result = observe_inner(Observation {
+    let result = Box::pin(observe_inner(Observation {
         state,
         manifest,
         admission,
@@ -688,7 +699,7 @@ async fn observe(
         request_id: &request_id,
         ledger,
         key,
-    })
+    }))
     .await;
     if result.is_err() {
         write_new(
@@ -876,7 +887,7 @@ async fn observe_inner(input: Observation<'_>) -> Result<()> {
     admission_window(admission)?;
     let mut calls = Vec::new();
     let mut iterations = Vec::new();
-    let outcome = with_single_provider_attempt(with_controlled_binding(
+    let outcome = Box::pin(with_single_provider_attempt(with_controlled_binding(
         binding,
         verify_selected_candidate(
             SemanticCandidateContext {
@@ -889,7 +900,7 @@ async fn observe_inner(input: Observation<'_>) -> Result<()> {
             &mut calls,
             &mut iterations,
         ),
-    ))
+    )))
     .await;
     // Retain paid/unknown results before checking any post-dispatch assertion.
     write_new(
@@ -924,7 +935,7 @@ async fn observe_inner(input: Observation<'_>) -> Result<()> {
 #[tokio::test]
 #[ignore = "fresh independently accepted native financial/target admission required; never ordinary CI"]
 async fn measure_authored_candidates() -> Result<()> {
-    let result = async {
+    let result = Box::pin(async {
         // This guard precedes settings, credentials, clients, DB and provider construction.
         let (manifest_path, admission_path) =
             explicit_paths(std::env::var(MANIFEST_ENV).ok(), std::env::var(ADMISSION_ENV).ok())?;
@@ -962,10 +973,10 @@ async fn measure_authored_candidates() -> Result<()> {
                 .find(|source| source.label == case.source)
                 .context("source pin missing")?;
             let key = observation_key(admission.lifecycle_id, &manifest, &case, pin)?;
-            observe(&state, &manifest, &admission, &case, pin, &ledger, &key).await?;
+            Box::pin(observe(&state, &manifest, &admission, &case, pin, &ledger, &key)).await?;
         }
         Ok(())
-    }
+    })
     .await;
     // Do not print underlying DSN, cookie, provider or settings diagnostics.
     result.map_err(|_: anyhow::Error| anyhow::anyhow!(

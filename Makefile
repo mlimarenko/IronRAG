@@ -38,6 +38,7 @@ IRONRAG_BENCHMARK_MAX_LATENCY_REGRESSION_PERCENT ?= 10
 BACKEND_CARGO_TARGET_DIR ?= $(CURDIR)/.cargo-target/api
 BACKEND_NATIVE_TEST_ENV = IRONRAG_XBERG_EXTRACT_BIN="$(abspath $(BACKEND_CARGO_TARGET_DIR))/debug/ironrag-extract"
 BACKEND_LIB_TEST_FILTER ?=
+BACKEND_INTEGRATION_TEST_FILTERS ?=
 GITLEAKS ?= gitleaks
 GITLEAKS_LOG_OPTS ?=
 
@@ -159,11 +160,14 @@ backend-test-lib: backend-native-test-runtime
 BACKEND_LIB_IGNORED_SUITES ?= \
   infra::postgres::pg_search_store::vector_support_tests:1 \
   infra::postgres::pg_search_store::vector_inventory::tests:5 \
+  infra::repositories::runtime_graph_repository::coordination::tests:1 \
   infra::repositories::webhook_outbox_repository::tests:4 \
   interfaces::http::mcp::tests:1 \
   services::graph::extract::persistence_retry::tests::native:1 \
   services::graph::gc::tests:2 \
+  services::maintenance::provider_source_generation_fence_schema::tests:1 \
   services::query::execution::semantic_rerank::binding_tests:2 \
+  services::query::service::turn::controlled_semantic::native_tests:3 \
   services::query::result_cache::tests:2 \
   services::query::search::tests:1
 
@@ -175,6 +179,7 @@ backend-test-lib-ignored: backend-native-test-runtime
 	  --skip services::graph::extract::extraction_bench_tests:: \
 	  --skip services::query::execution::semantic_rerank::rerank_bench_tests:: \
 	  --skip services::ingest::structured_preparation::tests::comparison:: \
+	  --skip services::query::service::turn::controlled_semantic::measure_authored_candidates \
 	  >"$$log" 2>&1; then \
 	  cargo_status=0; \
 	else \
@@ -209,29 +214,34 @@ backend-doc:
 # to close.
 # Derive it from cargo, never by hand:
 #   cargo test -p ironrag-backend --all-features --test it 2>&1 | tail -1
-BACKEND_FAST_TEST_COUNT ?= 43
+BACKEND_FAST_TEST_COUNT ?= 45
 
-BACKEND_INTEGRATION_SUITES ?= governance_auth:13 greenfield_bootstrap:45 \
-  ai_catalog_repository:3 ai_catalog_service:6 ai_config_generation_fencing:4 atomic_admission:33 canonical_read_visibility:6 graph_visibility_race:2 mcp_public_writers:3 \
-  billing_rollups:16 bootstrap_stack:3 cancellation_class:8 catalog_repository:16 credential_encryption:1 \
-  iam_user_repository:2 incremental_graph_reconcile:2 knowledge_lifecycle:21 knowledge_search:37 login_rate_limit:3 \
-  mcp_knowledge:3 \
-  mcp_memory_contracts:6 mcp_memory_permissions:5 mcp_memory_reads:12 mcp_memory_search:11 \
-  query_grounding:24 content_lifecycle:19 ingest_repository:18 ingest_attempts:6 \
-  ingest_cancellation:2 ingest_preparation_fencing:3 ingest_unit_fencing:1 ingest_publication:16 \
-  webhook_delivery:15 webhook_outbound:15 runtime_graph_extraction_repository:8 \
-  runtime_graph_node_hints:1 runtime_orphan_reconcile:18 \
-  audit_events:17 content_repository:22 content_document_graph_coverage:7 \
-  structured_block_repository:1 content_revision_lineage:1 extract_graph:1 \
-  extract_repository:1 graph_projection_repository:3 graph_atomicity_fencing:12 \
-   graph_rebuild_guard_lifecycle:1 graph_reextract_repository:19 graph_snapshot_fencing:4 \
-  graph_summary_executor_fencing:5 knowledge_revision_states:1 ops_state:6 \
-  provider_batch_resolution:1 web_ingest_repository:8 web_ingest_recursive_crawl:5 \
-  web_ingest_single_page:6 web_ingest_visibility:2 document_external_key_reclaim:4 \
-    revision_prefix_fetch:1 snapshot_transfer:30 oidc_sso:9 \
-  terminal_graph_state_repair:6 \
-  stranded_fan_out_repair:9 \
-  workspace_restore_atomicity:3
+BACKEND_INTEGRATION_SUITES ?= ai_catalog_repository:3 ai_catalog_service:6 ai_config_generation_fencing:4 \
+  atomic_admission:33 audit_events:17 billing_rollups:16 \
+  bootstrap_stack:6 cancellation_class:8 canonical_read_visibility:6 \
+  catalog_repository:16 content_document_graph_coverage:7 content_lifecycle:22 \
+  content_repository:22 content_revision_lineage:1 credential_encryption:1 \
+  document_external_key_reclaim:4 extract_graph:1 extract_repository:1 \
+  governance_auth:13 graph_atomicity_fencing:16 graph_projection_repository:3 \
+  graph_rebuild_guard_lifecycle:3 graph_reextract_repository:25 graph_snapshot_fencing:4 \
+  graph_summary_executor_fencing:5 graph_visibility_race:2 greenfield_bootstrap:36 \
+  greenfield_bootstrap::billing_document_read:3 greenfield_bootstrap::billing_knowledge_search:3 \
+  greenfield_bootstrap::user_preference:1 greenfield_bootstrap::vision_recognition:2 \
+  greenfield_bootstrap::xberg_recognition:1 iam_preferences:1 iam_user_repository:2 \
+  incremental_graph_reconcile:2 \
+  ingest_attempts:6 ingest_cancellation:2 ingest_preparation_fencing:4 \
+  ingest_publication:16 ingest_repository:19 ingest_unit_fencing:1 \
+  knowledge_lifecycle:21 knowledge_revision_states:1 knowledge_search:24 \
+  knowledge_search::embedding_accounting:12 knowledge_search::lexical_intent:1 login_rate_limit:3 \
+  mcp_knowledge:3 mcp_memory_contracts:6 mcp_memory_permissions:5 \
+  mcp_memory_reads:8 mcp_memory_reads::image_accounting:4 mcp_memory_search:11 \
+  mcp_public_writers:3 oidc_sso:9 ops_state:6 \
+  provider_batch_resolution:1 query_grounding:24 revision_prefix_fetch:1 \
+  runtime_graph_extraction_repository:8 runtime_graph_node_hints:1 runtime_orphan_reconcile:18 \
+  snapshot_transfer:30 stranded_fan_out_repair:9 structured_block_repository:1 \
+  terminal_graph_state_repair:6 web_ingest_recursive_crawl:5 web_ingest_repository:8 \
+  web_ingest_single_page:6 web_ingest_visibility:2 webhook_delivery:15 \
+  webhook_outbound:15 workspace_restore_atomicity:3
 
 # `--features test-support` is required, not optional: six suites are entirely
 # behind `#![cfg(feature = "test-support")]` and three more hide individual
@@ -283,15 +293,16 @@ backend-test-fast: backend-native-test-runtime
 
 backend-test-integration: backend-native-test-runtime
 	@log="$$(mktemp)"; \
-	if $(BACKEND_NATIVE_TEST_ENV) CARGO_TARGET_DIR="$(BACKEND_CARGO_TARGET_DIR)" cargo test --locked --color never -p ironrag-backend \
-	  --all-features --test it -- --ignored --test-threads=1 \
+	if $(BACKEND_NATIVE_TEST_ENV) CARGO_TARGET_DIR="$(BACKEND_CARGO_TARGET_DIR)" TEST_LOG="$$log" \
+	  bash -c '"$$@" 2>&1 | tee "$$TEST_LOG"; exit "$${PIPESTATUS[0]}"' cargo-test \
+	  cargo test --locked --color never -p ironrag-backend \
+	  --all-features --test it -- --ignored --test-threads=1 $(BACKEND_INTEGRATION_TEST_FILTERS) \
 	  --skip query_compiler_openai_smoke:: \
-	  >"$$log" 2>&1; then \
+	  ; then \
 	  cargo_status=0; \
 	else \
 	  cargo_status=$$?; \
 	fi; \
-	cat "$$log"; \
 	if [ "$$cargo_status" -ne 0 ]; then \
 	  rm -f "$$log"; \
 	  echo "FAIL: cargo test exited $$cargo_status" >&2; \

@@ -15,6 +15,8 @@
 | [WEBHOOK.md](./WEBHOOK.md) | Исходящие события, подписи, повторы и недоставленные сообщения. |
 | [CAPACITY-PLANNING.md](./CAPACITY-PLANNING.md) | Расчёт ресурсов, Docker Compose и Helm. |
 | [VECTOR-LIFECYCLE-OBSERVABILITY.md](./VECTOR-LIFECYCLE-OBSERVABILITY.md) | Метрики векторов, оповещения и расследование. |
+| [SLO.md](./SLO.md) | Цели уровня сервиса, окна алертов и контракт владельца/runbook. |
+| [OBSERVABILITY.md](./OBSERVABILITY.md) | Поля логов, записи об ошибках, отпечатки и редактирование секретов. |
 | [BILLING-COSTS.md](./BILLING-COSTS.md) | Использование провайдеров, начисления и сводная стоимость. |
 | [FRONTEND-TRANSPORT.md](./FRONTEND-TRANSPORT.md) | Настройка nginx и обратного прокси. |
 | [OLLAMA.md](./OLLAMA.md) | Локальная работа с Ollama и пересборка векторов. |

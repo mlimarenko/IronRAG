@@ -179,19 +179,7 @@ pub(super) async fn run_fixed_context_turn(
 
     let messages = fixed_context_answer_messages(&request);
 
-    let tool_use_request = ToolUseRequest {
-        provider_kind: binding.provider_kind.clone(),
-        model_name: binding.model_name.clone(),
-        api_key_override: binding.api_key.clone(),
-        base_url_override: binding.provider_base_url.clone(),
-        temperature: binding.temperature,
-        top_p: binding.top_p,
-        max_output_tokens_override: binding.max_output_tokens_override,
-        messages: messages.clone(),
-        tools: Vec::new(),
-        extra_parameters_json: binding.extra_parameters_json.clone(),
-        require_tool_call: false,
-    };
+    let tool_use_request = fixed_context_tool_request(&binding, messages.clone());
 
     let llm_call_started = std::time::Instant::now();
     let response = match crate::observability::with_provider_call_id(
@@ -251,6 +239,29 @@ pub(super) fn fixed_context_answer_messages(
         request.tool_name,
         request.context,
     )
+}
+
+/// Build the fixed-context answer request with the resolved binding's sealed
+/// dispatch authority. The final provider sender refuses a request without it,
+/// exactly as it does for the agent-loop iteration request.
+fn fixed_context_tool_request(
+    binding: &crate::services::ai_catalog_service::ResolvedRuntimeBinding,
+    messages: Vec<ChatMessage>,
+) -> ToolUseRequest {
+    ToolUseRequest {
+        provider_kind: binding.provider_kind.clone(),
+        model_name: binding.model_name.clone(),
+        api_key_override: binding.api_key.clone(),
+        base_url_override: binding.provider_base_url.clone(),
+        temperature: binding.temperature,
+        top_p: binding.top_p,
+        max_output_tokens_override: binding.max_output_tokens_override,
+        messages,
+        tools: Vec::new(),
+        extra_parameters_json: binding.extra_parameters_json.clone(),
+        require_tool_call: false,
+        dispatch: Some(binding.dispatch_authority()),
+    }
 }
 
 pub(super) fn missing_query_answer_binding_error(library_id: Uuid) -> QueryServiceError {
@@ -358,4 +369,49 @@ pub(crate) fn merge_usage_into(accumulator: &mut serde_json::Value, iteration: &
     let existing_iterations =
         obj.get("iteration_count").and_then(serde_json::Value::as_i64).unwrap_or(0);
     obj.insert("iteration_count".to_string(), serde_json::json!(existing_iterations + 1));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::integrations::provider_admission::UnqualifiedTestAdmission;
+    use crate::services::ai_catalog_service::ResolvedRuntimeBinding;
+    use std::sync::Arc;
+
+    fn binding() -> ResolvedRuntimeBinding {
+        ResolvedRuntimeBinding {
+            admission: Arc::new(UnqualifiedTestAdmission),
+            binding_id: Uuid::from_u128(1),
+            workspace_id: Uuid::from_u128(2),
+            library_id: Uuid::from_u128(3),
+            binding_purpose: AiBindingPurpose::QueryAnswer,
+            provider_catalog_id: Uuid::from_u128(4),
+            provider_kind: "neutral-provider".into(),
+            provider_base_url: Some("https://provider.invalid/v1".into()),
+            provider_api_style: "openai_compatible".into(),
+            account_id: Uuid::from_u128(5),
+            api_key: Some("test-key".into()),
+            model_catalog_id: Uuid::from_u128(6),
+            model_name: "neutral-model".into(),
+            effective_embedding_dimensions: None,
+            system_prompt: None,
+            temperature: None,
+            top_p: None,
+            max_output_tokens_override: None,
+            extra_parameters_json: serde_json::json!({
+                "_providerProfile": {
+                    "runtime": {"kind": "openai_compatible", "structuredOutput": "json_schema"}
+                }
+            }),
+        }
+    }
+
+    #[test]
+    fn fixed_context_tool_request_carries_dispatch_authority() {
+        let request = fixed_context_tool_request(&binding(), vec![ChatMessage::user("q")]);
+        assert!(
+            request.dispatch.is_some(),
+            "the fixed-context answer request must carry the resolved binding authority"
+        );
+    }
 }

@@ -104,6 +104,9 @@ fn sample_binding() -> ResolvedRuntimeBinding {
         top_p: None,
         max_output_tokens_override: None,
         extra_parameters_json: serde_json::json!({}),
+        admission: std::sync::Arc::new(
+            crate::integrations::provider_admission::UnqualifiedTestAdmission,
+        ),
     }
 }
 

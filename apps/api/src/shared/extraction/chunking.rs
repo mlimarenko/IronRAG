@@ -8,6 +8,7 @@ use crate::shared::extraction::structured_document::{
 };
 use crate::shared::extraction::table_summary::is_table_summary_text;
 
+mod bounds;
 mod code_boundaries;
 mod code_splitting;
 #[cfg(test)]
@@ -16,26 +17,30 @@ mod quality;
 #[cfg(test)]
 mod tests;
 
+pub use bounds::StructuredChunkingError;
 pub use code_splitting::split_large_code_blocks;
 
 #[derive(Debug, Clone, Copy)]
 pub struct StructuredChunkingProfile {
+    /// Preferred grouping size; the model byte bound is the hard input limit.
     pub max_chars: usize,
     pub overlap_chars: usize,
+    pub max_input_bytes: Option<usize>,
 }
 
-#[must_use]
 pub fn build_structured_chunk_windows(
     blocks: &[StructuredBlockData],
     profile: StructuredChunkingProfile,
-) -> Vec<StructuredChunkWindow> {
+    normalized_source: Option<&str>,
+) -> Result<Vec<StructuredChunkWindow>, StructuredChunkingError> {
     let filtered_blocks = filter_chunkable_blocks(blocks);
-    let mut chunks = StructuredChunkWindowBuilder::new(&filtered_blocks, profile).build();
+    let windows = StructuredChunkWindowBuilder::new(&filtered_blocks, profile).build();
+    let mut chunks = bounds::constrain_chunk_windows(windows, blocks, profile, normalized_source)?;
 
     mark_near_duplicates(&mut chunks);
     compute_window_text_pass(&mut chunks);
 
-    chunks
+    Ok(chunks)
 }
 
 fn filter_chunkable_blocks(blocks: &[StructuredBlockData]) -> Vec<StructuredBlockData> {
@@ -249,6 +254,7 @@ fn push_structured_chunk_window(
         simhash_fingerprint,
         is_near_duplicate: false,
         window_text: None,
+        runtime_provenance: None,
     });
 }
 

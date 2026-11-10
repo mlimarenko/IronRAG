@@ -638,6 +638,17 @@ async fn canonical_read_family_denies_old_a_with_preaccepted_b_and_permits_bound
             content_fingerprint_repository::get_current_revision_id(pg, document_id).await?,
             None
         );
+        let metadata = Box::pin(content::get_document_by_external_key(
+            auth.clone(),
+            State(fixture.state.clone()),
+            Path(fixture.library_id),
+            Query(content::ExternalKeyQuery { external_key: "restricted-a".to_owned() }),
+        ))
+        .await?
+        .0;
+        assert_eq!(metadata.id, document_id);
+        assert_eq!(metadata.visibility_intent_id, Some(intent.receipt.visibility_intent_id));
+        assert_eq!(metadata.readable_revision_id, None);
         for selected in [None, Some(a_id), Some(b_id)] {
             let response = Box::pin(download_document_source(
                 auth.clone(),

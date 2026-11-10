@@ -3,6 +3,7 @@ import { unwrap } from './runtime'
 import type {
   BootstrapSetupRequest,
   BootstrapStatus,
+  IamPreferencesResponse,
   LoginSessionRequest,
   SessionResolveResponse,
   SessionResponse,
@@ -50,5 +51,23 @@ export const authApi = {
   bootstrapSetup: (data: BootstrapSetupRequest): Promise<SessionResponse> =>
     Iam.createIamBootstrap({ body: data }).then((result) =>
       unwrapRequired<SessionResponse>(result, 'bootstrapSetup'),
+    ),
+  getIamPreferences: (): Promise<IamPreferencesResponse> =>
+    Iam.getIamPreferences().then((result) =>
+      unwrapRequired<IamPreferencesResponse>(result, 'getIamPreferences'),
+    ),
+  updateIamPreferences: (
+    expectedPrincipalId: string,
+    telemetryConsent: 'granted' | 'denied',
+  ): Promise<IamPreferencesResponse> =>
+    Iam.updateIamPreferences({ body: { expectedPrincipalId, telemetryConsent } }).then((result) =>
+      unwrapRequired<IamPreferencesResponse>(result, 'updateIamPreferences'),
+    ),
+  seedIamPreferences: (
+    expectedPrincipalId: string,
+    telemetryConsent: 'granted' | 'denied',
+  ): Promise<IamPreferencesResponse> =>
+    Iam.seedIamPreferences({ body: { expectedPrincipalId, telemetryConsent } }).then((result) =>
+      unwrapRequired<IamPreferencesResponse>(result, 'seedIamPreferences'),
     ),
 }

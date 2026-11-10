@@ -8,6 +8,7 @@ pub mod catalog;
 pub mod content;
 pub mod health;
 pub mod iam;
+pub mod ingest_pagination;
 pub mod ingestion;
 pub mod knowledge;
 pub mod mcp;

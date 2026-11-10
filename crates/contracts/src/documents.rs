@@ -8,7 +8,11 @@ use crate::diagnostics::{MessageLevel, OperatorWarning};
 use crate::graph::GraphSurface;
 
 /// Fixed protocol capability; absence is not permission to use an older protocol.
-pub const CONTENT_VISIBILITY_CONTRACT: &str = "visibility-intent/1";
+///
+/// Version 2 requires `visibilityIntentId` and `readableRevisionId` on the
+/// exact-key document lookup, so a connector and backend that disagree fail at
+/// the handshake instead of at first reconciliation.
+pub const CONTENT_VISIBILITY_CONTRACT: &str = "visibility-intent/2";
 
 /// Complete semantic descriptor of replacement bytes and request metadata.
 /// Storage paths and inherited document metadata are deliberately excluded.

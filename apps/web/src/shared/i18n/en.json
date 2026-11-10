@@ -758,6 +758,15 @@
     "webhooksTitle": "Webhooks",
     "writeOnly": "Write-only; leave empty to keep the current value"
   },
+  "analytics": {
+    "consentTitle": "Anonymous product analytics",
+    "consentBody": "Help improve IronRAG with anonymous page speed, JavaScript error and feature-usage signals. No document content, questions, logins, emails, phone numbers or other personal data are collected. Before sign-in the choice stays in this browser; after sign-in it is saved to your account and applies on every device.",
+    "consentAllow": "Allow",
+    "consentDecline": "Decline",
+    "menuEnable": "Turn on product analytics",
+    "menuDisable": "Turn off product analytics",
+    "menuUnavailable": "Telemetry setting is unavailable"
+  },
   "assistant": {
     "activity": {
       "modelFinal": "Model returned the final answer",
@@ -1851,7 +1860,6 @@
     "defaultWorkspaceLabel": "Default workspace",
     "devMode": "Developer mode",
     "expand": "Expand navigation",
-    "github": "GitHub",
     "libraryCount": "Showing {{shown}} of {{total}}",
     "logout": "Sign out",
     "menu": "Menu",

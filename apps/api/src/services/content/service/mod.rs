@@ -33,7 +33,7 @@ pub(crate) use readiness::{
 pub(crate) use revision::PersistedRevisionSourceGuard;
 pub(crate) use revision::preparation_fence_text;
 
-use chunking::{PendingChunkInsert, locate_chunk_offsets};
+use chunking::PendingChunkInsert;
 use internal::{InlineMutationContext, PrefetchedDocumentSummaryData};
 use mappers::{
     map_document_pipeline_job, map_document_row, map_knowledge_document_row,

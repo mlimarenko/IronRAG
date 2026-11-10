@@ -4,7 +4,14 @@
 // sub-tree (an ESLint boundary rule will be added with the feature-folder
 // migration in a later sprint).
 export { Catalog } from './generated'
-export { ApiError, getApiProblem, unwrap } from './runtime'
+export {
+  ApiError,
+  ResponseContractError,
+  getApiProblem,
+  retryContractViolation,
+  unwrap,
+  validateQueryResponse,
+} from './runtime'
 
 // Generated TanStack Query 5 query/mutation options + key factories for
 // server-state hooks.

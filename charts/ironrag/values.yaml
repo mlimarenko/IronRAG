@@ -1,6 +1,9 @@
 nameOverride: ""
 fullnameOverride: ""
 
+# Optional override of IRONRAG_MAINTENANCE_ENABLED; unset keeps the application default.
+maintenance: {}
+
 # CPU/memory tiers mirror the docker-compose role-based resource anchors 1:1
 # (requests ≈ compose `reservations`, limits ≈ compose `limits`). The memory
 # LIMIT is the load-bearing number: it is the cgroup ceiling that decides OOM
@@ -76,6 +79,15 @@ podAnnotations: {}
 serviceAccount:
   create: true
   name: ""
+
+# Optional financial dispatch barrier. All three values are empty by default and
+# are rendered into the runtime ConfigMap only when non-empty. An empty value is
+# never emitted: a present-but-empty setting would be parsed as invalid and
+# would fail startup. Populate them only for an approved forward-grant scope.
+financial:
+  requiredProviderId: ""
+  requiredScopeId: ""
+  requiredPolicyFingerprint: ""
 
 runtimeSecret:
   # When set, this Secret replaces every inline value rendered by
@@ -379,6 +391,10 @@ web:
     tag: ""
     digest: ""
     pullPolicy: IfNotPresent
+  # Same-origin OTLP proxy target used by browser telemetry. Only meaningful
+  # when the frontend image was built with VITE_OTEL_EXPORTER_OTLP_ENDPOINT;
+  # the image default points at a non-existent local collector and fails fast.
+  otlpUpstream: ""
   service:
     type: ClusterIP
     port: 80

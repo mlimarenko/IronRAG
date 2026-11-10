@@ -18,6 +18,7 @@ use crate::integrations::retry::ProviderCallError;
 pub enum ProviderFailureKind {
     Unavailable,
     QuotaExhausted,
+    RequestRejected,
 }
 
 /// Bounded, value-free failure detail. The only constructors are private and
@@ -27,7 +28,7 @@ pub enum ProviderFailureKind {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RedactedFailureDetail(String);
 
-const MAX_REDACTED_DETAIL_CHARS: usize = 120;
+const MAX_REDACTED_DETAIL_CHARS: usize = 200;
 
 impl RedactedFailureDetail {
     fn sanitized(detail: &str) -> Option<Self> {
@@ -94,6 +95,7 @@ impl ProviderFailure {
         match self.kind {
             ProviderFailureKind::Unavailable => "unavailable",
             ProviderFailureKind::QuotaExhausted => "quota exhausted",
+            ProviderFailureKind::RequestRejected => "request rejected",
         }
     }
 
@@ -112,6 +114,8 @@ impl From<&ProviderCallError> for ProviderFailure {
     fn from(error: &ProviderCallError) -> Self {
         let kind = if error.is_quota_exhausted() {
             ProviderFailureKind::QuotaExhausted
+        } else if error.is_permanent_rejection() {
+            ProviderFailureKind::RequestRejected
         } else {
             ProviderFailureKind::Unavailable
         };

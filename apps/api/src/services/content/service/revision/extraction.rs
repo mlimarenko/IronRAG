@@ -47,7 +47,7 @@ impl ContentService {
             UploadAdmissionError::from_file_extract_error(file_name, mime_type, size, &error)
         };
         let kind = validate_upload_file_admission(Some(file_name), mime_type, file_bytes)
-            .map_err(&rejection)?;
+            .map_err(rejection)?;
         if let Some(source_format) = xberg_source_format(kind, Some(file_name), mime_type) {
             let source =
                 xberg::XbergSource { file_name: Some(file_name), mime_type, source_format };
@@ -68,7 +68,7 @@ impl ContentService {
                 cancellation_token,
             )
             .await
-            .map_err(&rejection)?;
+            .map_err(rejection)?;
             let calls = receipt.calls.clone();
             let mut output = xberg::project_native(native, source).map_err(|_| {
                 rejection(FileExtractError::VisionFailed {
@@ -90,7 +90,7 @@ impl ContentService {
             return Ok(build_plan_from_extraction(
                 kind,
                 output,
-                xberg_owned_recognition_profile(kind, source_format).map_err(&rejection)?,
+                xberg_owned_recognition_profile(kind, source_format).map_err(rejection)?,
             ));
         }
         if kind != UploadFileKind::Image {
@@ -136,7 +136,12 @@ impl ContentService {
                     })
                 },
             )?;
+        let dispatch = binding.as_ref().map(|binding| binding.dispatch_authority());
         let mut plan = build_runtime_file_extraction_plan(FileExtractionRequest {
+            vision_dispatch: dispatch.as_ref(),
+            max_output_tokens_override: binding
+                .as_ref()
+                .and_then(|binding| binding.max_output_tokens_override),
             cancellation_token: Some(cancellation_token),
             gateway: state.llm_gateway.as_ref(),
             vision_provider: provider.as_ref(),
@@ -153,7 +158,7 @@ impl ContentService {
             recognition_policy: &policy,
         })
         .await
-        .map_err(&rejection)?;
+        .map_err(rejection)?;
         if let Some(identity) = binding_identity
             && let Some(outcomes) = plan
                 .source_map
@@ -215,10 +220,13 @@ impl ContentService {
             provider_kind: binding.provider_kind.clone(),
             model_name: binding.model_name.clone(),
         };
+        let dispatch = binding.dispatch_authority();
         let mut receipt = recognize_native_visuals(
             native,
             kind,
             VisualRecognitionInput {
+                dispatch: Some(&dispatch),
+                max_output_tokens_override: binding.max_output_tokens_override,
                 gateway: state.llm_gateway.as_ref(),
                 vision_provider: Some(&provider),
                 api_key: binding.api_key.as_deref().unwrap_or_default(),

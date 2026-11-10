@@ -2,6 +2,10 @@ import type { GraphStatus } from '@/shared/types'
 
 export type StreamPhase = 'loading' | 'ready' | 'error'
 
+export function hasPublishedGraphCounts(status: GraphStatus): boolean {
+  return status === 'ready' || status === 'partial' || status === 'empty'
+}
+
 /**
  * What the graph screen should claim while a stream is in flight. Two things
  * are being combined: whether the stream itself is still running or failed,
@@ -17,6 +21,7 @@ export function resolveGraphStatus(
     loadedNodeCount: number
   }>,
 ): GraphStatus {
+  if (input.serverStatus === 'stale') return 'stale'
   if (input.streamPhase === 'loading') {
     return input.knownNodeCount > 0 ? 'rebuilding' : 'building'
   }

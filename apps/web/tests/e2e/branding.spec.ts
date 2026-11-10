@@ -5,9 +5,9 @@ import { openMockedApp, watchBrowserIssues } from './mock-app'
 const displayName = 'Team Knowledge'
 const longName = 'W'.repeat(120)
 
-test('uses deployment branding in shell, footer, translations and browser metadata', async ({
+test('uses deployment branding in shell, translations and browser metadata', async ({
   page,
-}) => {
+}, testInfo) => {
   const issues = watchBrowserIssues(page)
   await openMockedApp(page, '/dashboard', {
     authenticated: true,
@@ -19,13 +19,24 @@ test('uses deployment branding in shell, footer, translations and browser metada
     },
   })
   await expect(page.locator('.dashboard-metrics')).toBeVisible()
+  const consent = page.getByTestId('analytics-consent')
+  await expect(consent).toBeVisible()
+  const shellBounds = await page.locator('.app-shell').boundingBox()
+  const consentBounds = await consent.boundingBox()
+  expect(shellBounds).not.toBeNull()
+  expect(consentBounds).not.toBeNull()
+  expect(shellBounds!.y + shellBounds!.height).toBeLessThanOrEqual(consentBounds!.y + 1)
   await expect(page).toHaveTitle(displayName)
   await expect(page.locator('.sidebar .brand')).toHaveAttribute('aria-label', displayName)
   await expect(page.locator('.sidebar .brand-mark')).toHaveAttribute(
     'src',
     '/favicon.svg?brand=logo',
   )
-  await expect(page.locator('.shell-footer')).toContainText(`${displayName} v`)
+  // IRG-328 reduced the footer to the clickable version tag on purpose; the
+  // deployment display name is asserted on the shell, not in the footer.
+  const footerTag = page.locator('.shell-footer__tag')
+  await expect(footerTag).toHaveText(/^v\d+\.\d+\.\d+/)
+  await expect(footerTag).toHaveAttribute('href', 'https://github.com/mlimarenko/IronRAG/releases')
   await expect(page.locator('link[rel="icon"]')).toHaveAttribute(
     'href',
     '/favicon.svg?brand=favicon',
@@ -35,6 +46,26 @@ test('uses deployment branding in shell, footer, translations and browser metada
     'src',
     '/favicon.svg?brand=icon',
   )
+  await page.screenshot({ path: testInfo.outputPath('branding-with-consent.png'), fullPage: true })
+
+  await page.setViewportSize({ width: 390, height: 844 })
+  await expect(consent).toBeVisible()
+  const mobileShell = await page.locator('.app-shell').boundingBox()
+  const mobileConsent = await consent.boundingBox()
+  expect(mobileShell).not.toBeNull()
+  expect(mobileConsent).not.toBeNull()
+  expect(mobileShell!.y + mobileShell!.height).toBeLessThanOrEqual(mobileConsent!.y + 1)
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
+  await page.screenshot({
+    path: testInfo.outputPath('branding-with-consent-mobile.png'),
+    fullPage: true,
+  })
+  await consent.getByRole('button', { name: 'Decline', exact: true }).focus()
+  await page.keyboard.press('Enter')
+  await expect(consent).toHaveCount(0)
+  await expect
+    .poll(() => page.evaluate(() => localStorage.getItem('ironrag.v1.telemetry.consent')))
+    .toBe('denied')
 
   await page.goto('/unrecognized-route?mocks=1')
   await expect(page.getByRole('heading', { level: 1 })).toContainText(displayName)
