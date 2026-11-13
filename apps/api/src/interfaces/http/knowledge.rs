@@ -1,14 +1,14 @@
 use std::collections::{BTreeMap, HashSet};
 
 pub mod library;
+mod result_encoding;
 pub mod search;
 
 use axum::{
     Json, Router,
-    body::Body,
     extract::{Path, Query, State},
     http::{StatusCode, header},
-    response::Response,
+    response::{IntoResponse, Response},
     routing::{get, post},
 };
 use chrono::{DateTime, Utc};
@@ -35,7 +35,12 @@ use crate::{
             },
             extract::GRAPH_EXTRACTION_VERSION,
         },
-        knowledge::graph_stream::build_graph_topology_bytes,
+        knowledge::{
+            graph_stream::artifact,
+            preparation::{
+                self, KnowledgeGraphPreparationResponse, PreparationError, PreparationStatus,
+            },
+        },
     },
 };
 
@@ -47,7 +52,19 @@ pub fn router() -> Router<AppState> {
             get(library::list_context_bundles),
         )
         .route("/knowledge/libraries/{library_id}/summary", get(library::get_library_summary))
-        .route("/knowledge/libraries/{library_id}/graph", get(get_graph))
+        .route(
+            "/knowledge/libraries/{library_id}/graph/preparations",
+            post(create_graph_preparation),
+        )
+        .route(
+            "/knowledge/libraries/{library_id}/graph/preparations/{preparation_id}",
+            get(get_graph_preparation),
+        )
+        .route(
+            "/knowledge/libraries/{library_id}/graph/preparations/{preparation_id}/result",
+            get(get_graph_preparation_result)
+                .layer(axum::middleware::from_fn(result_encoding::compress)),
+        )
         .route(
             "/knowledge/libraries/{library_id}/graph/reextract",
             get(get_graph_reextract_progress).post(enqueue_graph_reextract_batch),
@@ -491,46 +508,126 @@ impl From<KnowledgeChunkRow> for KnowledgeMentionedChunkRow {
     }
 }
 
-// Removed in the 2026-04-15 perf audit: `list_entities`, `list_relations`
-// and `get_graph_workbench` were huge endpoints (17–27 MiB payloads, no
-// pagination) that were never called from the web UI. The only graph
-// surface that survives is the compact NDJSON stream at
-// `/v1/knowledge/libraries/{id}/graph`, which the React graph page has
-// used exclusively since the B4 release. Single-entity and
-// single-relation detail endpoints are still wired up below.
-
-#[tracing::instrument(
-    level = "info",
-    name = "http.get_graph",
-    skip_all,
-    fields(%library_id)
-)]
 #[utoipa::path(
-    get,
-    path = "/v1/knowledge/libraries/{libraryId}/graph",
+    post,
+    path = "/v1/knowledge/libraries/{libraryId}/graph/preparations",
     tag = "knowledge",
-    operation_id = "getKnowledgeGraphWorkbench",
+    operation_id = "createKnowledgeGraphPreparation",
     params(("libraryId" = uuid::Uuid, Path, description = "Library identifier")),
     responses(
-        (status = 200, description = "Knowledge graph topology streamed as ND-JSON", content_type = "application/x-ndjson", body = String),
+        (status = 200, description = "Existing terminal graph preparation", body = KnowledgeGraphPreparationResponse),
+        (status = 202, description = "Graph preparation admitted in the background", body = KnowledgeGraphPreparationResponse),
         (status = 401, description = "Caller is not authenticated"),
         (status = 403, description = "Caller is not authorized for the library"),
+        (status = 404, description = "Library not found"),
+        (status = 409, description = "Graph projection is not published"),
+        (status = 503, description = "Preparation capacity is temporarily awaiting cleanup"),
     ),
 )]
-pub async fn get_graph(
+pub async fn create_graph_preparation(
     auth: AuthContext,
     State(state): State<AppState>,
     Path(library_id): Path<Uuid>,
 ) -> Result<Response, ApiError> {
     let _ = load_library_and_authorize(&auth, &state, library_id, POLICY_KNOWLEDGE_READ).await?;
+    let descriptor = preparation::admit(&state, library_id).await.map_err(preparation_api_error)?;
+    let status = if matches!(
+        descriptor.status,
+        PreparationStatus::Ready
+            | PreparationStatus::Failed
+            | PreparationStatus::Superseded
+            | PreparationStatus::Expired
+    ) {
+        StatusCode::OK
+    } else {
+        StatusCode::ACCEPTED
+    };
+    Ok((status, [(header::CACHE_CONTROL, "no-store")], Json(descriptor)).into_response())
+}
 
-    let bytes = build_graph_topology_bytes(&state, library_id).await.map_err(ApiError::from)?;
+#[utoipa::path(
+    get,
+    path = "/v1/knowledge/libraries/{libraryId}/graph/preparations/{preparationId}",
+    tag = "knowledge",
+    operation_id = "getKnowledgeGraphPreparation",
+    params(
+        ("libraryId" = uuid::Uuid, Path, description = "Library identifier"),
+        ("preparationId" = uuid::Uuid, Path, description = "Preparation identifier"),
+    ),
+    responses(
+        (status = 200, description = "Small graph preparation status and validated identity", body = KnowledgeGraphPreparationResponse),
+        (status = 401, description = "Caller is not authenticated"),
+        (status = 403, description = "Caller is not authorized for the library"),
+        (status = 404, description = "Preparation not found in this library"),
+    ),
+)]
+pub async fn get_graph_preparation(
+    auth: AuthContext,
+    State(state): State<AppState>,
+    Path((library_id, preparation_id)): Path<(Uuid, Uuid)>,
+) -> Result<Response, ApiError> {
+    let _ = load_library_and_authorize(&auth, &state, library_id, POLICY_KNOWLEDGE_READ).await?;
+    let descriptor = preparation::status(&state, library_id, preparation_id)
+        .await
+        .map_err(preparation_api_error)?;
+    Ok(([(header::CACHE_CONTROL, "no-store")], Json(descriptor)).into_response())
+}
+
+#[utoipa::path(
+    get,
+    path = "/v1/knowledge/libraries/{libraryId}/graph/preparations/{preparationId}/result",
+    tag = "knowledge",
+    operation_id = "getKnowledgeGraphPreparationResult",
+    params(
+        ("libraryId" = uuid::Uuid, Path, description = "Library identifier"),
+        ("preparationId" = uuid::Uuid, Path, description = "Preparation identifier"),
+    ),
+    responses(
+        (status = 200, description = "Complete compact NDJSON graph with validated terminal frame", content_type = "application/x-ndjson", body = String),
+        (status = 401, description = "Caller is not authenticated"),
+        (status = 403, description = "Caller is not authorized for the library"),
+        (status = 404, description = "Preparation not found in this library"),
+        (status = 409, description = "Preparation is not ready or is superseded"),
+        (status = 410, description = "Preparation has expired"),
+    ),
+)]
+pub async fn get_graph_preparation_result(
+    auth: AuthContext,
+    State(state): State<AppState>,
+    Path((library_id, preparation_id)): Path<(Uuid, Uuid)>,
+) -> Result<Response, ApiError> {
+    let _ = load_library_and_authorize(&auth, &state, library_id, POLICY_KNOWLEDGE_READ).await?;
+    let record = preparation::result_record(&state, library_id, preparation_id)
+        .await
+        .map_err(preparation_api_error)?;
+    let body = artifact::result_body(state, record)
+        .await
+        .map_err(|error| ApiError::internal_with_log(error, "prepared graph result unavailable"))?;
     Response::builder()
         .status(200)
         .header(header::CONTENT_TYPE, "application/x-ndjson")
         .header(header::CACHE_CONTROL, "no-store")
-        .body(Body::from(bytes))
+        // The route's streaming encoder negotiates gzip; global compression stays disabled.
+        .header(header::CONTENT_ENCODING, "identity")
+        .body(body)
         .map_err(|error| ApiError::internal_with_log(error, "internal"))
+}
+
+fn preparation_api_error(error: PreparationError) -> ApiError {
+    match error {
+        PreparationError::NotFound => ApiError::NotFound("graph preparation not found".into()),
+        PreparationError::Expired => ApiError::GraphPreparationExpired,
+        PreparationError::NotReady => {
+            ApiError::Conflict("graph preparation is not ready or is superseded".into())
+        }
+        PreparationError::CapacityExhausted => ApiError::service_unavailable(
+            "graph preparation cleanup is pending; retry later",
+            "graph_preparation_capacity",
+        ),
+        PreparationError::Internal(error) => {
+            ApiError::internal_with_log(error, "graph preparation unavailable")
+        }
+    }
 }
 
 #[tracing::instrument(

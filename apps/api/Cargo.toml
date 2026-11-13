@@ -114,7 +114,7 @@ serde-saphyr = { version = "2.0.0", default-features = false, features = ["deser
 serde-value = "0.7.0"
 toml_edit = { version = "0.25.12", features = ["serde"] }
 async-tar = { version = "0.6.1", default-features = false, features = ["runtime-tokio"] }
-async-compression = { version = "0.4", features = ["zstd", "tokio"] }
+async-compression = { version = "0.4", features = ["gzip", "zstd", "tokio"] }
 base64 = "0.23.1"
 chacha20poly1305 = "0.11.0"
 tempfile = "3.27.0"

@@ -262,6 +262,21 @@ impl S3ContentStorageProvider {
         Ok(bytes.to_vec())
     }
 
+    pub(super) async fn read_stream(
+        &self,
+        storage_key: &str,
+    ) -> Result<std::pin::Pin<Box<dyn AsyncRead + Send>>, ContentServiceError> {
+        let response = self
+            .client
+            .get_object()
+            .bucket(&self.bucket)
+            .key(self.absolute_object_key(storage_key))
+            .send()
+            .await
+            .with_context(|| format!("failed to fetch object storage key {storage_key}"))?;
+        Ok(Box::pin(response.body.into_async_read()))
+    }
+
     pub(super) async fn presign_download(
         &self,
         storage_key: &str,

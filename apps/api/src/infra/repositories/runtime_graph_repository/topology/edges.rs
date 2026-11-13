@@ -2,7 +2,8 @@ use sqlx::{Executor, FromRow, PgPool, Postgres};
 use uuid::Uuid;
 
 use super::super::query_fragments::{
-    admitted_runtime_graph_edges_select_query, current_graph_target, runtime_graph_edge_columns,
+    admitted_runtime_graph_edges_select_query, bulk_current_graph_targets, current_graph_target,
+    runtime_graph_edge_columns,
 };
 use super::super::types::{RuntimeGraphEdgeRow, RuntimeGraphQueryEdgeRow};
 use super::scan_transaction::begin_topology_scan_tx;
@@ -95,15 +96,15 @@ pub async fn list_admitted_runtime_graph_edges_compact_by_library(
 ) -> Result<Vec<RuntimeGraphEdgeCompactRow>, sqlx::Error> {
     let mut tx = begin_topology_scan_tx(pool).await?;
     let rows = sqlx::query_as::<_, RuntimeGraphEdgeCompactRow>(concat!(
-        "select from_node_id, to_node_id, relation_type, support_count
+        bulk_current_graph_targets!("edge"),
+        "select edge.from_node_id, edge.to_node_id, edge.relation_type, edge.support_count
          from runtime_graph_edge as edge
-         where library_id = $1
-           and projection_version = $2
-           and btrim(relation_type) <> ''
-           and from_node_id <> to_node_id
-           and ",
-        current_graph_target!("edge", "edge"),
-        " order by relation_type asc, support_count desc, from_node_id asc, to_node_id asc"
+         join admitted on admitted.target_id = edge.id
+         where edge.library_id = $1
+           and edge.projection_version = $2
+           and btrim(edge.relation_type) <> ''
+           and edge.from_node_id <> edge.to_node_id
+         order by edge.relation_type asc, edge.support_count desc, edge.from_node_id asc, edge.to_node_id asc"
     ))
     .bind(library_id)
     .bind(projection_version)

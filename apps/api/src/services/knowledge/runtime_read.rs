@@ -82,7 +82,7 @@ impl RuntimeGraphProjectionCache {
     }
 
     #[cfg(feature = "test-support")]
-    async fn pause_selected_graph_read(&self, library_id: Uuid) {
+    pub(crate) async fn pause_selected_graph_read(&self, library_id: Uuid) {
         pause_library_read(&self.read_pause, library_id).await;
     }
 

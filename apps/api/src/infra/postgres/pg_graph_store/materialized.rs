@@ -279,15 +279,24 @@ impl PgGraphStore {
         if keys.is_empty() {
             return Ok(0);
         }
+        let mut transaction =
+            crate::infra::repositories::begin_runtime_graph_source_mutation(&self.pool, library_id)
+                .await?;
         let result = sqlx::query(
             "delete from runtime_graph_node
              where library_id = $1 and \u{63}anonical_key = any($2)",
         )
         .bind(library_id)
         .bind(keys)
-        .execute(&self.pool)
+        .execute(&mut *transaction)
         .await
         .context("failed to delete runtime graph nodes by identity keys")?;
+        crate::infra::repositories::commit_runtime_graph_source_mutation(
+            transaction,
+            library_id,
+            result.rows_affected() > 0,
+        )
+        .await?;
         Ok(result.rows_affected())
     }
 
@@ -299,15 +308,24 @@ impl PgGraphStore {
         if keys.is_empty() {
             return Ok(0);
         }
+        let mut transaction =
+            crate::infra::repositories::begin_runtime_graph_source_mutation(&self.pool, library_id)
+                .await?;
         let result = sqlx::query(
             "delete from runtime_graph_edge
              where library_id = $1 and \u{63}anonical_key = any($2)",
         )
         .bind(library_id)
         .bind(keys)
-        .execute(&self.pool)
+        .execute(&mut *transaction)
         .await
         .context("failed to delete runtime graph edges by identity keys")?;
+        crate::infra::repositories::commit_runtime_graph_source_mutation(
+            transaction,
+            library_id,
+            result.rows_affected() > 0,
+        )
+        .await?;
         Ok(result.rows_affected())
     }
 

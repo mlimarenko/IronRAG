@@ -20,9 +20,8 @@ Usage:
         --login admin \\
         --runs 5
 
-The script is READ-ONLY: it never calls POST/PUT/DELETE endpoints. Mutating
-surfaces (upload, delete, batch rerun, snapshot import) are profiled
-separately in their own runbooks.
+The graph probe admits a shared preparation with POST before timing result
+downloads. Other mutating surfaces are profiled separately.
 
 Thresholds (configurable via CLI):
     ok    p95 < 300ms  AND  bytes < 500 KiB
@@ -56,8 +55,7 @@ DEFAULT_ADMIN_LIBRARY_PAGE_LIMIT = 50
 # `axum-prometheus` will emit). Query params are filled with --library-id,
 # --document-id, --entity-id at runtime.
 #
-# Mutating endpoints (POST/PUT/DELETE) are intentionally excluded — they need
-# their own write fixtures and are out of scope for a read-only probe.
+# Graph preparation is admitted once before timing its result download.
 # --------------------------------------------------------------------------
 
 @dataclass(frozen=True)
@@ -155,8 +153,8 @@ PROBES: list[Probe] = [
     # Graph
     Probe(
         "knowledge.library.graph",
-        "/v1/knowledge/libraries/{library_id}/graph",
-        "/v1/knowledge/libraries/{library_id}/graph",
+        "/v1/knowledge/libraries/{library_id}/graph/preparations/{preparation_id}/result",
+        "/v1/knowledge/libraries/{library_id}/graph/preparations/{preparation_id}/result",
     ),
     Probe(
         "knowledge.library.summary",
@@ -164,19 +162,9 @@ PROBES: list[Probe] = [
         "/v1/knowledge/libraries/{library_id}/summary",
     ),
     Probe(
-        "knowledge.library.entities",
-        "/v1/knowledge/libraries/{library_id}/entities",
-        "/v1/knowledge/libraries/{library_id}/entities",
-    ),
-    Probe(
         "knowledge.library.relations",
         "/v1/knowledge/libraries/{library_id}/relations",
         "/v1/knowledge/libraries/{library_id}/relations",
-    ),
-    Probe(
-        "knowledge.library.graph_workbench",
-        "/v1/knowledge/libraries/{library_id}/graph-workbench",
-        "/v1/knowledge/libraries/{library_id}/graph-workbench",
     ),
     # Assistant
     Probe(
@@ -269,6 +257,28 @@ class CurlClient:
         time_total = float(parts[1])
         size_download = int(parts[2])
         return status, time_total, size_download
+
+    def preparation(self, library_id: str) -> str:
+        base = f"/v1/knowledge/libraries/{library_id}/graph/preparations"
+
+        def descriptor(uri: str, post: bool = False) -> dict:
+            args = ["curl", "-fsS", "--max-time", "120", "-b", self.cookie_jar]
+            if post:
+                args.extend(["-X", "POST"])
+            args.append(f"{self.base_url}{uri}")
+            proc = subprocess.run(args, capture_output=True, check=True)
+            return json.loads(proc.stdout)
+
+        value = descriptor(base, post=True)
+        preparation_id = value["id"]
+        while value["status"] != "ready":
+            if value["status"] not in {"queued", "validating", "building", "publishing", "retrying"}:
+                raise RuntimeError(f"Graph preparation {value['status']}: {value.get('errorCode')}")
+            time.sleep(max(0.1, min(value["retryAfterMs"] / 1000, 30)))
+            value = descriptor(f"{base}/{preparation_id}")
+            if value["id"] != preparation_id:
+                raise RuntimeError("Graph preparation identity changed")
+        return preparation_id
 
 
 # --- Prometheus histogram parsing ------------------------------------------
@@ -433,6 +443,7 @@ def resolve_probe_context(
     return {
         "library_id": library_id,
         "document_id": items[0]["id"],
+        "preparation_id": client.preparation(library_id),
     }
 
 

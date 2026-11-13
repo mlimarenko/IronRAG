@@ -1,5 +1,46 @@
 # Changelog
 
+## 0.6.3
+
+### Added
+
+- Full graphs prepare in the background, with status updates and a separate
+  streamed download. Leaving the page stops local polling and downloading while
+  shared preparation continues.
+
+### Breaking
+
+- The full-graph REST API now uses
+  `POST /v1/knowledge/libraries/{libraryId}/graph/preparations`, followed by
+  `GET /v1/knowledge/libraries/{libraryId}/graph/preparations/{preparationId}`
+  for status and the same path with `/result` for the ready stream. It replaces
+  `GET /v1/knowledge/libraries/{libraryId}/graph`. Custom clients must adopt the
+  preparation flow; the bundled frontend and generated SDK already use it.
+
+### Fixed
+
+- Graph preparation polls at most once per second during active work, and result
+  downloads use streaming gzip when the client accepts it.
+- Graph search and filter controls remain usable on narrow screens.
+- Leaving the graph page or switching libraries cancels the topology request and
+  stops reading its NDJSON stream.
+- Bulk graph edge reads check each distinct source lineage once, while retaining
+  the existing visibility and all-evidence-current admission rules.
+- Helm's bundled PostgreSQL uses the configured `imagePullSecrets`, just like
+  the application pods.
+
+### Upgrade
+
+- No schema migration is needed from public v0.6.2: the baseline and migration
+  checksum are unchanged. Normal startup validates the existing schema and
+  refuses an inconsistent migration history; it does not rewrite that history.
+- Replace the backend image for startup, API, and worker together, plus the
+  frontend and any enabled connector images. Keep PostgreSQL and its vector
+  extension, the credential master key, and content storage unchanged.
+  See [the image-only upgrade instructions](./docs/en/INSTALL.md#upgrade-from-v062-to-v063).
+- This application release does not upgrade the PostgreSQL container or the
+  vector extension.
+
 ## 0.6.2
 
 ### Added

@@ -46,8 +46,8 @@ use crate::{
             merge_chunk_graph_candidates_with_connection,
         },
         graph::projection::{
-            GraphProjectionOutcome, GraphProjectionScope, next_projection_version,
-            project_rebuild_normalized_graph_with_connection, schedule_topology_prewarm,
+            GraphProjectionOutcome, GraphProjectionScope, admit_topology_preparation,
+            next_projection_version, project_rebuild_normalized_graph_with_connection,
         },
         graph::summary::PendingGraphSummaryRefresh,
         ingest::cancellation::ensure_not_cancelled,
@@ -121,7 +121,7 @@ pub(crate) async fn rebuild_library_graph(
                 });
             }
             guard.commit().await.context("failed to commit atomic runtime graph rebuild")?;
-            schedule_topology_prewarm(state, library_id);
+            admit_topology_preparation(state, library_id).await;
             Ok(outcome)
         }
         Ok(RebuildTransactionOutcome::CoverageRejected(failure)) => {

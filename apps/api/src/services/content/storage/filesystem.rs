@@ -124,22 +124,10 @@ impl FilesystemContentStorageProvider {
 
         let temp_path = target_path.with_extension(format!("tmp-{}", Uuid::now_v7()));
         let write_result = async {
-            let mut temp_file = fs::File::create(&temp_path)
+            let temp_file = fs::File::create(&temp_path)
                 .await
                 .with_context(|| format!("failed to create {}", temp_path.display()))?;
-            let copied =
-                tokio::io::copy(&mut reader.take(max_bytes.saturating_add(1)), &mut temp_file)
-                    .await
-                    .with_context(|| format!("failed to write {}", temp_path.display()))?;
-            if copied > max_bytes {
-                return Err(ContentServiceError::InvalidRequest {
-                    message: format!("content revision source exceeds the {max_bytes}-byte limit"),
-                });
-            }
-            temp_file
-                .sync_all()
-                .await
-                .with_context(|| format!("failed to sync {}", temp_path.display()))?;
+            write_stream_file(temp_file, &temp_path, reader, max_bytes).await?;
             fs::rename(&temp_path, &target_path).await.with_context(|| {
                 format!(
                     "failed to promote temporary content source {} to {}",
@@ -154,6 +142,32 @@ impl FilesystemContentStorageProvider {
             let _ = fs::remove_file(&temp_path).await;
         }
         write_result
+    }
+
+    pub(super) async fn write_topology_stream<R>(
+        &self,
+        storage_key: &str,
+        reader: &mut R,
+        max_bytes: u64,
+    ) -> Result<(), ContentServiceError>
+    where
+        R: AsyncRead + Unpin,
+    {
+        let path = self.resolve_storage_path(storage_key)?;
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).await.with_context(|| {
+                format!("failed to create content storage directory {}", parent.display())
+            })?;
+        }
+        // The coordinator recorded this unique attempt key as cleanup debt before
+        // opening it; a cancelled or crashed write remains at that exact key.
+        let file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .await
+            .with_context(|| format!("failed to create {}", path.display()))?;
+        write_stream_file(file, &path, reader, max_bytes).await
     }
 
     pub(super) async fn has(&self, storage_key: &str) -> Result<bool, ContentServiceError> {
@@ -199,6 +213,17 @@ impl FilesystemContentStorageProvider {
         fs::read(&path).await.map_err(|error| {
             content_source_read_error(error, &path, "failed to read stored content source")
         })
+    }
+
+    pub(super) async fn read_stream(
+        &self,
+        storage_key: &str,
+    ) -> Result<std::pin::Pin<Box<dyn AsyncRead + Send>>, ContentServiceError> {
+        let path = self.resolve_storage_path(storage_key)?;
+        let file = fs::File::open(&path).await.map_err(|error| {
+            content_source_read_error(error, &path, "failed to read stored graph artifact")
+        })?;
+        Ok(Box::pin(file))
     }
 
     /// Removes exactly one stored object. Returns whether a file was removed;
@@ -331,6 +356,24 @@ impl FilesystemContentStorageProvider {
         }
         Ok(())
     }
+}
+
+async fn write_stream_file<R: AsyncRead + Unpin>(
+    mut file: fs::File,
+    path: &Path,
+    reader: &mut R,
+    max_bytes: u64,
+) -> Result<(), ContentServiceError> {
+    let copied = tokio::io::copy(&mut reader.take(max_bytes.saturating_add(1)), &mut file)
+        .await
+        .with_context(|| format!("failed to write {}", path.display()))?;
+    if copied > max_bytes {
+        return Err(ContentServiceError::InvalidRequest {
+            message: format!("content revision source exceeds the {max_bytes}-byte limit"),
+        });
+    }
+    file.sync_all().await.with_context(|| format!("failed to sync {}", path.display()))?;
+    Ok(())
 }
 
 /// Classifies a stored-source read failure so a missing blob surfaces as

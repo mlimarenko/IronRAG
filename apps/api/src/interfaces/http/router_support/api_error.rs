@@ -27,6 +27,8 @@ pub enum ApiError {
     InaccessibleMemoryScope(String),
     #[error("not found: {0}")]
     NotFound(String),
+    #[error("graph preparation expired")]
+    GraphPreparationExpired,
     #[error("conflict: {0}")]
     BootstrapAlreadyClaimed(String),
     #[error("conflict: {0}")]
@@ -241,6 +243,7 @@ impl ApiError {
             Self::Unauthorized | Self::InaccessibleMemoryScope(_) => StatusCode::UNAUTHORIZED,
             Self::Forbidden(_) => StatusCode::FORBIDDEN,
             Self::NotFound(_) => StatusCode::NOT_FOUND,
+            Self::GraphPreparationExpired => StatusCode::GONE,
             Self::BootstrapAlreadyClaimed(_)
             | Self::Conflict(_)
             | Self::UnreadableDocument(_)
@@ -275,6 +278,7 @@ impl ApiError {
             Self::Unauthorized => "unauthorized",
             Self::InaccessibleMemoryScope(_) => "inaccessible_memory_scope",
             Self::NotFound(_) => "not_found",
+            Self::GraphPreparationExpired => "graph_preparation_expired",
             Self::BootstrapAlreadyClaimed(_) => "bootstrap_already_claimed",
             Self::Conflict(_) => "conflict",
             Self::UnreadableDocument(_) => "unreadable_document",

@@ -97,8 +97,16 @@ payloads and graph, alongside concurrent worker jobs.
 
 Bounded reading does not cap the number of records processed or permit partial
 publication. Coverage checks and graph publication remain transactional: a
-failure leaves the previous published graph unchanged. Post-commit topology
-prewarm is a separate allocation phase and belongs in memory verification too.
+failure leaves the previous published graph unchanged. Publication admits durable
+background topology preparation rather than rendering the download itself.
+
+Topology preparation still retains compact rows and ID indexes proportional to
+the complete graph. Rendering and compression use disk spools, so temporary disk
+must accommodate both the decoded NDJSON and its compressed copy. Result downloads
+use bounded buffers and have no 128 MiB decoded-output cap. The API and worker
+must share the private content store; filesystem storage requires the same root.
+Each browser tab retains the complete topology and its display model. A drawing
+cap does not reduce the downloaded graph or make browser memory constant.
 
 Free host RAM does not override a container's hard memory limit. When investigating
 an OOM, correlate kernel `CONSTRAINT_MEMCG` or host-wide OOM evidence with the

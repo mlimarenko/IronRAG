@@ -15,8 +15,8 @@ import { useNavigate, useSearchParams } from 'react-router-dom'
 import { ChooseLibraryButton } from '@/app/ChooseLibraryButton'
 import { useApp } from '@/shared/contexts/app-context'
 import { knowledgeApi, queries } from '@/shared/api'
+import { GraphPreparationError } from '@/shared/api/knowledge'
 import { formatNumber } from '@/shared/format'
-import { errorMessage } from '@/shared/lib/errorMessage'
 import { graphStatusLabel } from '@/shared/lib/enumLabels'
 import type { GraphEdge, GraphMetadata, GraphNode, GraphStatus } from '@/shared/types'
 import { Badge, Button, Drawer, PageHeader, Progress } from '@/shared/ui'
@@ -82,10 +82,12 @@ function GraphWorkbench({ libraryId }: Readonly<{ libraryId: string }>) {
 
   useEffect(() => {
     let cancelled = false
+    const controller = new AbortController()
 
     // eslint-disable-next-line no-restricted-syntax -- NDJSON topology progress is not representable by a generated query option.
     void knowledgeApi
       .getGraphTopology(libraryId, {
+        signal: controller.signal,
         onProgress: (nextProgress) => {
           if (cancelled) return
           setProgress({
@@ -108,12 +110,17 @@ function GraphWorkbench({ libraryId }: Readonly<{ libraryId: string }>) {
       })
       .catch((error: unknown) => {
         if (cancelled) return
-        setStreamError(errorMessage(error, t('graph.failedToLoad')))
+        setStreamError(
+          error instanceof GraphPreparationError
+            ? t(`graph.preparation.${error.status}`)
+            : t('graph.failedToLoad'),
+        )
         setStreamPhase('error')
       })
 
     return () => {
       cancelled = true
+      controller.abort()
     }
   }, [libraryId, retryToken, t])
 

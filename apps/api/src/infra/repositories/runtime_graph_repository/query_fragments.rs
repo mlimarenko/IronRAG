@@ -52,6 +52,42 @@ macro_rules! current_graph_target {
 
 pub(super) use current_graph_target;
 
+// Evaluate the canonical current-revision view once per distinct lineage for
+// bulk scans. OFFSET 0 prevents the planner from flattening the EXISTS back
+// into the per-evidence join, which produced a much worse plan on large graphs.
+macro_rules! bulk_current_graph_targets {
+    ($kind:literal) => {
+        concat!(
+            "with lineage as materialized (
+                select distinct document_id, revision_id, library_id
+                from runtime_graph_evidence
+                where library_id = $1 and target_kind = '",
+            $kind,
+            "'
+                  and document_id is not null and revision_id is not null
+            ), checked as materialized (
+                select l.*, exists (
+                    select 1 from content_current_revision r
+                    where r.library_id = l.library_id and r.document_id = l.document_id
+                      and r.revision_id = l.revision_id offset 0
+                ) as current
+                from lineage l
+            ), admitted as materialized (
+                select e.target_id
+                from runtime_graph_evidence e
+                left join checked c on c.library_id = e.library_id
+                  and c.document_id = e.document_id and c.revision_id = e.revision_id
+                where e.library_id = $1 and e.target_kind = '",
+            $kind,
+            "'
+                group by e.target_id having bool_and(coalesce(c.current, false))
+            ) "
+        )
+    };
+}
+
+pub(super) use bulk_current_graph_targets;
+
 /// The shared `on conflict` body every runtime graph node upsert uses.
 ///
 /// A longer non-empty summary wins over a shorter or absent one, so a later

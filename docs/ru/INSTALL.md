@@ -42,6 +42,49 @@ Native rendering и кодирование изображений по-преж�
 Полный список флагов и переменных — `./install.sh --help`; `--plan-only`
 печатает обнаруженный профиль без записи и деплоя.
 
+## Обновление с v0.6.2 до v0.6.3
+
+Сохраните существующий проект Compose, `.env`, том PostgreSQL, том или bucket
+хранилища файлов и `IRONRAG_CREDENTIAL_MASTER_KEY`. Перед обновлением сделайте
+резервную копию. Не пересоздавайте тома и ключ шифрования.
+
+В существующем `.env` измените только образы приложения:
+
+```dotenv
+IRONRAG_BACKEND_IMAGE=pipingspace/ironrag-backend:v0.6.3
+IRONRAG_FRONTEND_IMAGE=pipingspace/ironrag-frontend:v0.6.3
+```
+
+Из каталога этой установки загрузите образы и замените сервисы приложения:
+
+```bash
+docker compose pull startup backend worker frontend
+docker compose up -d startup backend worker frontend
+docker compose ps -a
+docker compose logs --tail=80 startup
+```
+
+Образ backend общий для `startup`, `backend` и `worker`. Compose запускает новый
+контейнер startup перед API и worker. Для исправной установки публичного v0.6.2
+SQL-миграция не требуется: в v0.6.3 те же baseline и checksum. Startup
+автоматически проверяет существующую схему и завершается без изменения журнала
+миграций. Некорректный журнал или отсутствие объектов схемы останавливают запуск,
+а не исправляются скрыто.
+
+Убедитесь, что `startup` завершился с кодом 0, а сервисы приложения имеют статус
+healthy. Эти команды не загружают и не заменяют PostgreSQL, Redis или объектное
+хранилище. Обновление major-версии PostgreSQL или расширения vector в эту
+процедуру не входит.
+
+Отдельно развернутые комплектные коннекторы переведите на теги образов `v0.6.3`,
+сохранив их настройки. В Helm обновите backend-образы API и worker вместе с
+образом web, сохраните существующие Secrets и хранилища и дождитесь штатного
+startup job перед запуском приложения.
+
+Собственные REST-клиенты полного графа должны заменить
+`GET /v1/knowledge/libraries/{libraryId}/graph` на подготовку графа, описанную в
+[release notes](../../CHANGELOG.md#063). Встроенный frontend уже использует ее.
+
 ## Из исходников
 
 ```bash

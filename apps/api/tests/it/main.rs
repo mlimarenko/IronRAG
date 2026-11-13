@@ -116,6 +116,8 @@ mod stranded_fan_out_repair;
 mod structured_block_repository;
 mod structured_preparation;
 mod terminal_graph_state_repair;
+#[cfg(feature = "test-support")]
+mod topology_preparation;
 mod web_ingest_contracts;
 #[cfg(feature = "test-support")]
 mod web_ingest_recursive_crawl;

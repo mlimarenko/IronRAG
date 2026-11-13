@@ -572,6 +572,10 @@
     min-height: 520px;
   }
 
+  .graph-toolbar .search-box {
+    flex-basis: 100%;
+  }
+
   .graph-toolbar > .button span {
     display: none;
   }

@@ -3,6 +3,50 @@ import documentGridItems from '../../src/shared/api/mocks/fixtures/document-grid
 
 import { openMockedApp, watchBrowserIssues } from './mock-app'
 
+for (const width of [1440, 390]) {
+  test(`keeps graph controls usable at ${width}px`, async ({ page }) => {
+    const fixtureModule = '../../scripts/graph-bench-lib.mjs'
+    const { buildFixtureTopology, topologyToNdjsonFrames } = await import(fixtureModule)
+    const graphNdjson =
+      topologyToNdjsonFrames(buildFixtureTopology({ nodeCount: 30, edgeCount: 20 }))
+        .map((frame: unknown) => JSON.stringify(frame))
+        .join('\n') + '\n'
+    await page.setViewportSize({ width, height: 844 })
+    await openMockedApp(page, '/graph', {
+      authenticated: true,
+      telemetryConsent: 'denied',
+      graphNdjson,
+    })
+    const toolbar = page.getByRole('toolbar', { name: 'Connection view tools' })
+    const search = toolbar.getByPlaceholder('Search nodes...')
+    const layout = toolbar.getByRole('combobox', { name: 'Layout' })
+    const fit = toolbar.getByRole('button', { name: 'Show everything' })
+    await expect(search).toBeVisible()
+    await expect(layout).toBeVisible()
+    await expect(fit).toBeVisible()
+    if (width === 390) await expect(toolbar.getByRole('button', { name: 'Filters' })).toBeVisible()
+    const searchBox = await search.boundingBox()
+    const layoutBox = await layout.boundingBox()
+    expect(searchBox!.width).toBeGreaterThan(180)
+    if (width === 390) expect(layoutBox!.y).toBeGreaterThan(searchBox!.y + searchBox!.height)
+    else expect(Math.abs(layoutBox!.y - searchBox!.y)).toBeLessThan(10)
+    expect(
+      await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth),
+    ).toBe(true)
+    await search.focus()
+    await expect(search).toBeFocused()
+    await page.keyboard.press('Tab')
+    await expect(layout).toBeFocused()
+    await fit.click()
+    if (width === 390) {
+      await toolbar.getByRole('button', { name: 'Filters' }).click()
+      await expect(page.getByRole('dialog', { name: 'Filters' })).toBeVisible()
+      await page.keyboard.press('Escape')
+    }
+    await page.screenshot({ path: `test-results/e2e/graph-controls-${width}.png` })
+  })
+}
+
 function luminance(hex: string) {
   const channels = hex.match(/[a-f\d]{2}/gi)?.map((channel) => parseInt(channel, 16) / 255)
   if (!channels || channels.length !== 3) throw new Error(`Expected an RGB token: ${hex}`)

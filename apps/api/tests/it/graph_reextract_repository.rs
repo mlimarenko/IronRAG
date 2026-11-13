@@ -522,7 +522,7 @@ async fn bounded_memory_rebuild_preserves_large_graph_payloads() -> Result<()> {
 
 async fn bounded_memory_rebuild(record_count: i32, large_graph_payload: bool) -> Result<()> {
     let fixture = GraphReextractFixture::create().await?;
-    let result = async {
+    let result = Box::pin(async {
         let (document_id, revision_id) = fixture.create_readable_revision("memory-corpus").await?;
         let chunk_id = fixture.create_revision_chunk(revision_id, "memory-corpus").await?;
         let attempt_id = fixture.create_completed_graph_stage_with_count(document_id, revision_id,
@@ -634,11 +634,42 @@ async fn bounded_memory_rebuild(record_count: i32, large_graph_payload: bool) ->
                 "select count(*) from runtime_graph_node where aliases_json ? label")
                 .fetch_one(&fixture.pool).await?;
             assert_eq!(aliases, i64::from(record_count)+1);
-            let topology = ironrag_backend::services::knowledge::graph_stream::build_graph_topology_bytes(
-                &fixture.state, fixture.library_id).await?;
-            assert!(topology.len() > usize::try_from(record_count)? * 16384);
-            assert!(topology.ends_with(b"{\"s\":\"end\"}\n"));
-            tracing::info!(topology_bytes = topology.len(), "rendered graph memory fixture topology");
+            #[cfg(feature = "test-support")]
+            {
+                use axum::extract::{Path, State};
+                use http_body_util::BodyExt;
+                use ironrag_backend::{infra::repositories::iam_repository, interfaces::http::knowledge::get_graph_preparation_result};
+                let principal = iam_repository::create_principal(&fixture.pool, "api_token", "graph memory fixture", None).await?;
+                let auth = crate::iam_token_support::scoped_workspace_auth(principal.id, fixture.workspace_id, &["knowledge_read", "library_read"]);
+                let prepared = crate::graph_visibility_race::prepare_graph_for(&fixture.state, fixture.library_id, auth.clone(), std::time::Duration::from_secs(1200)).await?;
+                let response = Box::pin(get_graph_preparation_result(auth, State(fixture.state.clone()), Path((fixture.library_id, prepared.id)))).await?;
+                let mut body = response.into_body();
+                let mut total = 0usize;
+                let mut suffix = std::collections::VecDeque::with_capacity(4096);
+                while let Some(frame) = body.frame().await {
+                    if let Some(bytes) = frame?.data_ref() {
+                        total = total.checked_add(bytes.len()).context("topology byte count overflow")?;
+                        for byte in bytes {
+                            if suffix.len() == 4096 { suffix.pop_front(); }
+                            suffix.push_back(*byte);
+                        }
+                    }
+                }
+                assert!(total > usize::try_from(record_count)? * 16384);
+                let suffix: Vec<u8> = suffix.into_iter().collect();
+                let end_line = suffix.split(|byte| *byte == b'\n').rfind(|line| !line.is_empty()).context("missing terminal topology frame")?;
+                let end: serde_json::Value = serde_json::from_slice(end_line)?;
+                assert_eq!(end["s"], "end");
+                assert_eq!(end["preparation_id"], prepared.id.to_string());
+                assert_eq!(end["node_count"].as_u64(), Some(u64::try_from(outcome.node_count)?));
+                assert_eq!(end["edge_count"].as_u64(), Some(u64::try_from(outcome.edge_count)?));
+                assert_eq!(end["document_count"].as_u64(), Some(1));
+                tracing::info!(topology_bytes = total, "streamed graph memory fixture topology");
+            }
+            #[cfg(not(feature = "test-support"))]
+            if large_graph_payload {
+                anyhow::bail!("the streamed large graph fixture requires test-support");
+            }
             tracing::info!(graph_payload_bytes_per_target = 262144, retained_targets = payloads.0,
                 "preserved graph memory fixture payloads");
         }
@@ -646,7 +677,7 @@ async fn bounded_memory_rebuild(record_count: i32, large_graph_payload: bool) ->
             normalized_summary_bytes_per_record = 16384, nodes = outcome.node_count,
             edges = outcome.edge_count, evidence_count, "rebuilt complete graph memory fixture");
         Ok::<_, anyhow::Error>(())
-    }.await;
+    }).await;
     let cleanup = fixture.cleanup().await;
     result?;
     cleanup

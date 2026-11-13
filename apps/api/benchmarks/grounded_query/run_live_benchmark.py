@@ -1686,40 +1686,83 @@ def fetch_library_summary(client: BenchmarkClient, library_id: str) -> dict[str,
 
 
 def fetch_topology_counts(client: BenchmarkClient, library_id: str) -> dict[str, int]:
+    base = f"{client.base_url}/knowledge/libraries/{library_id}/graph/preparations"
+    response = client.http.post(base, timeout=120, allow_redirects=False)
+    client._require_2xx(response)
+    preparation = response.json()
+    preparation_id = preparation["id"]
+    identity = {
+        "libraryId": library_id,
+        "id": preparation_id,
+        "formatVersion": 1,
+        "projectionVersion": preparation["projectionVersion"],
+        "topologyGeneration": preparation["topologyGeneration"],
+        "sourceTruthVersion": preparation["sourceTruthVersion"],
+    }
+    if not isinstance(preparation_id, str) or not preparation_id or any(
+        type(identity[key]) is not int or identity[key] < 0
+        for key in ("projectionVersion", "topologyGeneration", "sourceTruthVersion")
+    ) or any(preparation.get(key) != value for key, value in identity.items()):
+        raise RuntimeError("Invalid graph preparation receipt")
+    while preparation["status"] != "ready":
+        if preparation["status"] in {"failed", "superseded", "expired"}:
+            raise RuntimeError(f"Graph preparation {preparation['status']}: {preparation.get('errorCode')}")
+        if preparation["status"] not in {"queued", "validating", "building", "publishing", "retrying"}:
+            raise RuntimeError(f"Unknown graph preparation status: {preparation['status']}")
+        time.sleep(max(0.1, min(preparation["retryAfterMs"] / 1000, 30)))
+        response = client.http.get(f"{base}/{preparation_id}", timeout=120, allow_redirects=False)
+        client._require_2xx(response)
+        preparation = response.json()
+        if any(preparation.get(key) != value for key, value in identity.items()):
+            raise RuntimeError("Graph preparation identity changed")
     response = client.http.get(
-        f"{client.base_url}/knowledge/libraries/{library_id}/graph",
+        f"{base}/{preparation_id}/result",
         headers={"Accept": "application/x-ndjson"},
         timeout=120,
         allow_redirects=False,
+        stream=True,
     )
-    client._require_2xx(response)
-
-    documents = 0
-    entities = 0
-    relations = 0
-    document_links = 0
-    for line in response.text.splitlines():
-        payload = line.strip()
-        if not payload:
-            continue
-        frame = json.loads(payload)
-        section = frame.get("s")
-        rows = frame.get("d")
-        if section == "docs" and isinstance(rows, list):
-            documents += len(rows)
-        elif section == "nodes" and isinstance(rows, list):
-            entities += len(rows)
-        elif section == "edges" and isinstance(rows, list):
-            relations += len(rows)
-        elif section == "doc_links" and isinstance(rows, list):
-            document_links += len(rows)
-
-    return {
-        "documents": documents,
-        "entities": entities,
-        "relations": relations,
-        "documentLinks": document_links,
-    }
+    try:
+        client._require_2xx(response)
+        counts = {"documents": 0, "entities": 0, "relations": 0, "documentLinks": 0}
+        sections = {"docs": "documents", "nodes": "entities", "edges": "relations", "doc_links": "documentLinks"}
+        order = {name: index for index, name in enumerate(("meta", "id_map", "docs", "nodes", "edges", "doc_links", "end"))}
+        previous = -1
+        meta = None
+        ended = False
+        for line in response.iter_lines():
+            if not line.strip():
+                raise RuntimeError("Empty graph frame")
+            frame = json.loads(line)
+            if not isinstance(frame, dict):
+                raise RuntimeError("Invalid graph frame")
+            section = frame.get("s")
+            if ended or section not in order or order[section] < previous or (previous == -1 and section != "meta"):
+                raise RuntimeError("Invalid graph frame order")
+            previous = order[section]
+            if section == "meta":
+                if meta is not None or any(frame.get(field) != identity[key] for field, key in (
+                    ("v", "formatVersion"), ("library_id", "libraryId"), ("preparation_id", "id"),
+                    ("projection_version", "projectionVersion"), ("topology_generation", "topologyGeneration"),
+                    ("source_truth_version", "sourceTruthVersion"),
+                )) or any(type(frame.get(key)) is not int or frame[key] < 0 for key in ("node_count", "edge_count", "document_count")):
+                    raise RuntimeError("Invalid graph metadata")
+                meta = frame
+            elif section in sections:
+                if not isinstance(frame.get("d"), list):
+                    raise RuntimeError("Invalid graph rows")
+                counts[sections[section]] += len(frame["d"])
+            elif section == "end":
+                if meta is None or frame.get("preparation_id") != preparation_id or any(
+                    frame.get(key) != meta[key] for key in ("node_count", "edge_count", "document_count")
+                ) or meta["node_count"] != counts["documents"] + counts["entities"] or meta["edge_count"] != counts["relations"] + counts["documentLinks"] or meta["document_count"] != counts["documents"]:
+                    raise RuntimeError("Invalid graph terminal counts")
+                ended = True
+        if not ended:
+            raise RuntimeError("Graph terminal frame missing")
+        return counts
+    finally:
+        response.close()
 
 
 def pipeline_is_idle(point: dict[str, Any]) -> bool:

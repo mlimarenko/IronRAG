@@ -1,472 +1,53 @@
-//! Compact, cacheable NDJSON graph topology stream.
-//!
-//! The graph viewer needs every node and every edge — no truncation, no
-//! top-N. The old JSON endpoint shipped the full `RuntimeKnowledgeEntityRow`
-//! / `RuntimeKnowledgeRelationRow` shape which is wasteful: long UUIDs are
-//! repeated in every edge, `metadata_json` fields the client never reads are
-//! serialized, and nested object envelopes cost bytes. This module produces
-//! the compact wire format used by the graph page.
-//!
-//! Wire format: NDJSON, one JSON object per line. Sections arrive in this
-//! strict order:
-//!
-//! 1. `meta`     — `{ s: "meta", v, library_id, projection_version, topology_generation, generated_at, node_count, edge_count, document_count }`
-//! 2. `id_map`   — `{ s: "id_map", m: { "019d..." : 1, "019d..." : 2, ... } }`
-//! 3. `docs`     — `{ s: "docs", d: [ { i, k, t, fn? }, ... ] }` (batched)
-//! 4. `nodes`    — `{ s: "nodes", d: [ { i, l, t, ts?, s?, c?, es?, a?, sm? }, ... ] }` (batched)
-//! 5. `edges`    — `{ s: "edges", d: [ [from, to, rel, support], ... ] }` (batched)
-//! 6. `doc_links`— `{ s: "doc_links", d: [ [doc, target, rel, support], ... ] }` (batched)
-//! 7. `end`      — `{ s: "end" }`
-//!
-//! Field key legend:
-//!   i  id (u32 assigned by `id_map`)
-//!   l  label
-//!   k  `identity_key` / document `external_key`
-//!   t  type (entityType / nodeType)
-//!   ts `sub_type` (only when present)
-//!   s  `support_count` (only when > 1)
-//!   c  confidence (only when present)
-//!   es `entity_state` (only when not "active")
-//!   a  aliases (only when non-empty)
-//!   sm summary (only when present)
-//!   fn `file_name` (only when present, for docs)
-//!
-//! Defaults omitted from wire: client must treat missing as default (empty
-//! aliases, null `sub_type`, "active" state, `support_count` = 1, null summary).
-//! `metadata_json`, `workspace_id`, `library_id`, `contradiction_state`,
-//! `freshness_generation`, `created_at`, `updated_at`, `normalized_assertion`
-//! are NOT serialized — the frontend never reads them from this endpoint.
+//! Complete compact topology materialization for durable background preparation.
+//! Output rendering and private artifact streaming live in the child modules.
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 
 use anyhow::Context;
 use chrono::{DateTime, Utc};
-use redis::AsyncCommands;
 use serde_json::{Value, json};
 use uuid::Uuid;
 
+use super::preparation::GraphTopologyIdentity;
+#[cfg(test)]
+use super::snapshot_identity::published_snapshot_identity;
 use crate::{
     app::state::AppState,
     infra::repositories::{self, RuntimeGraphTopologyNodeRow},
-    services::knowledge::error::KnowledgeServiceError,
 };
 
-mod cache;
+pub(crate) mod artifact;
 mod render;
 #[cfg(test)]
 mod tests;
-
-use super::runtime_read::{ensure_selected_graph_current, selected_graph_projection};
-#[cfg(test)]
-use super::snapshot_identity::published_snapshot_identity;
-use cache::{CacheWrite, redis_get_bytes, redis_set_bytes};
-use render::render_compact_topology;
 
 const NODE_BATCH: usize = 512;
 const EDGE_BATCH: usize = 1024;
 const DOC_LINK_BATCH: usize = 1024;
 const DOC_BATCH: usize = 512;
-const CACHE_TTL_SECONDS: i64 = 24 * 60 * 60;
-const MAX_CACHE_VALUE_BYTES: usize = 64 * 1024 * 1024;
-const INITIAL_PROJECTION_VERSION: i64 = 1;
-const UNPUBLISHED_TOPOLOGY_GENERATION: i64 = 0;
 
-/// Builds the Redis cache key for one published graph topology generation.
-fn cache_key(library_id: Uuid, projection_version: i64, topology_generation: i64) -> String {
-    format!("graph:{library_id}:v{projection_version}:g{topology_generation}")
-}
-
-/// Per-library prewarm state — tracks both "in-flight" and
-/// "another publish arrived while in-flight, run again after" so a
-/// burst of publishes never leaves the cache stale. When `pending` is
-/// set on exit, the task re-runs itself, coalescing bursts into
-/// "one run now + one final run at the end" without thrashing.
-static PREWARM_STATE: std::sync::OnceLock<
-    std::sync::Mutex<std::collections::HashMap<Uuid, PrewarmState>>,
-> = std::sync::OnceLock::new();
-
-#[derive(Debug, Default, Clone, Copy)]
-struct PrewarmState {
-    /// A prewarm task is currently running for this library.
-    running: bool,
-    /// Another publish arrived while a task was running; when the
-    /// current task finishes, it should start one more to pick up
-    /// the latest state.
-    pending: bool,
-}
-
-fn prewarm_state() -> &'static std::sync::Mutex<std::collections::HashMap<Uuid, PrewarmState>> {
-    PREWARM_STATE.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
-}
-
-/// Forces a fresh build of the NDJSON topology and writes it straight
-/// to Redis under the current topology generation key —
-/// **bypassing** the `build_graph_topology_bytes` cache check so a
-/// prior cached value cannot short-circuit into returning stale bytes
-/// during the projection publish window.
-///
-/// Call site: projection publish path and API boot. Intentionally
-/// does not invalidate first — the SET completes atomically in Redis,
-/// so concurrent reads either see the old bytes or the new bytes,
-/// never an empty window.
-///
-/// Debounced via `PREWARM_STATE` so a burst of publishes only
-/// runs one rebuild at a time per library; the tail is dropped because
-/// any in-flight rebuild is already reading the latest projection
-/// state from Postgres anyway.
-pub async fn prewarm_graph_topology_cache(state: &AppState, library_id: Uuid) {
-    {
-        let mut state_map =
-            prewarm_state().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-        let entry = state_map.entry(library_id).or_default();
-        if entry.running {
-            // A task is already running: mark pending so the running task
-            // re-runs itself at the end and picks up our publish.
-            entry.pending = true;
-            tracing::debug!(
-                %library_id,
-                "graph topology cache prewarm coalesced: existing task will re-run for latest state",
-            );
-            return;
-        }
-        entry.running = true;
-        entry.pending = false;
-        drop(state_map);
-    }
-
-    // Loop so coalesced publishes re-run without re-entry. Exit when
-    // no pending arrived during the last run. The lock is only held
-    // during the short state transition — never across the actual
-    // rebuild.
-    loop {
-        run_prewarm_once(state, library_id).await;
-
-        let mut state_map =
-            prewarm_state().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-        let entry = state_map.entry(library_id).or_default();
-        let should_rerun = if entry.pending {
-            entry.pending = false;
-            entry.running = true;
-            true
-        } else {
-            // No task is active and no tail run is pending. Remove the slot
-            // entirely so one-off libraries cannot grow this registry forever.
-            state_map.remove(&library_id);
-            false
-        };
-        drop(state_map);
-        if should_rerun {
-            continue;
-        }
-        return;
-    }
-}
-
-async fn run_prewarm_once(state: &AppState, library_id: Uuid) {
-    let Some(snapshot) = ready_prewarm_snapshot(state, library_id).await else {
-        return;
-    };
-    let projection_version = snapshot.projection_version;
-    let topology_generation = snapshot.topology_generation;
-    let Some(buffer) =
-        build_prewarm_bytes(state, library_id, projection_version, topology_generation).await
-    else {
-        return;
-    };
-    store_prewarm_bytes(state, library_id, projection_version, topology_generation, &buffer).await;
-}
-
-fn log_prewarm_snapshot_skip(library_id: Uuid) {
-    tracing::debug!(
-        %library_id,
-        "graph topology cache prewarm skipped: no ready snapshot",
-    );
-}
-
-fn log_prewarm_snapshot_lookup_failed(library_id: Uuid, error: &impl std::fmt::Display) {
-    tracing::warn!(
-        %library_id,
-        error = format!("{error:#}"),
-        "graph topology cache prewarm: snapshot lookup failed",
-    );
-}
-
-/// Loads the snapshot a prewarm may build from. A missing or non-ready
-/// snapshot is a routine skip, not an error.
-async fn ready_prewarm_snapshot(
+async fn load_compact_topology(
     state: &AppState,
-    library_id: Uuid,
-) -> Option<repositories::RuntimeGraphSnapshotRow> {
-    match repositories::get_runtime_graph_snapshot(&state.persistence.postgres, library_id).await {
-        Ok(Some(snapshot)) if snapshot.graph_status == "ready" => Some(snapshot),
-        Ok(_) => {
-            log_prewarm_snapshot_skip(library_id);
-            None
-        }
-        Err(error) => {
-            log_prewarm_snapshot_lookup_failed(library_id, &error);
-            None
-        }
+    identity: &GraphTopologyIdentity,
+) -> anyhow::Result<CompactTopology> {
+    if identity.topology_generation == 0 {
+        return Ok(empty_topology(identity.library_id, identity.projection_version, 0));
     }
-}
-
-async fn build_prewarm_bytes(
-    state: &AppState,
-    library_id: Uuid,
-    projection_version: i64,
-    topology_generation: i64,
-) -> Option<Vec<u8>> {
-    match build_compact_topology(state, library_id, projection_version, topology_generation).await {
-        Ok(topology) => Some(render_compact_topology(&topology)),
-        Err(error) => {
-            tracing::warn!(
-                %library_id,
-                projection_version,
-                error = format!("{error:#}"),
-                "graph topology cache prewarm: build failed",
-            );
-            None
-        }
-    }
-}
-
-fn log_prewarm_written(
-    library_id: Uuid,
-    projection_version: i64,
-    topology_generation: i64,
-    bytes: usize,
-) {
-    tracing::info!(
-        %library_id,
-        projection_version,
-        topology_generation,
-        bytes,
-        "graph topology cache prewarmed",
-    );
-}
-
-fn log_prewarm_skipped_too_large(
-    library_id: Uuid,
-    projection_version: i64,
-    topology_generation: i64,
-    bytes: usize,
-) {
-    tracing::warn!(
-        %library_id,
-        projection_version,
-        topology_generation,
-        bytes,
-        max_bytes = MAX_CACHE_VALUE_BYTES,
-        "graph topology cache prewarm skipped: payload exceeds cache value budget",
-    );
-}
-
-fn log_prewarm_set_failed(
-    library_id: Uuid,
-    projection_version: i64,
-    error: &impl std::fmt::Display,
-) {
-    tracing::warn!(
-        %library_id,
-        projection_version,
-        error = format!("{error:#}"),
-        "graph topology cache prewarm: SET failed",
-    );
-}
-
-async fn store_prewarm_bytes(
-    state: &AppState,
-    library_id: Uuid,
-    projection_version: i64,
-    topology_generation: i64,
-    buffer: &[u8],
-) {
-    let cache_key = cache_key(library_id, projection_version, topology_generation);
-    match redis_set_bytes(&state.persistence.redis, &cache_key, buffer, CACHE_TTL_SECONDS).await {
-        Ok(CacheWrite::Written) => {
-            log_prewarm_written(library_id, projection_version, topology_generation, buffer.len());
-        }
-        Ok(CacheWrite::SkippedTooLarge) => {
-            log_prewarm_skipped_too_large(
-                library_id,
-                projection_version,
-                topology_generation,
-                buffer.len(),
-            );
-        }
-        Err(error) => {
-            log_prewarm_set_failed(library_id, projection_version, &error);
-        }
-    }
-}
-
-/// Builds the full compact NDJSON graph topology for one library and
-/// returns it as a single in-memory buffer. Fast path: Redis cache hit
-/// returns the stored bytes verbatim. Slow path: loads from PostgreSQL-backed
-/// stores, renders, and backfills Redis.
-///
-/// The handler wraps the returned `Vec<u8>` in a regular
-/// `Body::from(bytes)` response. We deliberately do NOT use
-/// `Body::from_stream` here: the NDJSON is produced in memory in full
-/// anyway (documents + entities must be known before `id_map` can be
-/// emitted), and `tower_http::CompressionLayer` currently mis-frames
-/// chunked+gzip responses whose body uses `Body::from_stream`, producing
-/// `ERR_INCOMPLETE_CHUNKED_ENCODING` in the browser. A single-buffer
-/// body is both simpler and correctly compressed.
-pub async fn build_graph_topology_bytes(
-    state: &AppState,
-    library_id: Uuid,
-) -> Result<Vec<u8>, KnowledgeServiceError> {
-    let (selected, bytes) = load_graph_topology_bytes(state, library_id).await?;
-    if let Some(selected) = selected {
-        ensure_selected_graph_current(state, selected).await?;
-    }
-    Ok(bytes)
-}
-
-async fn load_graph_topology_bytes(
-    state: &AppState,
-    library_id: Uuid,
-) -> Result<(Option<repositories::RuntimeGraphProjectionIdentity>, Vec<u8>), KnowledgeServiceError>
-{
-    let snapshot =
-        repositories::get_runtime_graph_snapshot(&state.persistence.postgres, library_id)
-            .await
-            .context("load runtime_graph_snapshot for graph topology")?;
-
-    let Some(snapshot) = snapshot else {
-        return Ok((
-            None,
-            render_empty(library_id, INITIAL_PROJECTION_VERSION, UNPUBLISHED_TOPOLOGY_GENERATION),
-        ));
-    };
-
-    let selected = selected_graph_projection(&snapshot)?;
-    let projection_version = selected.projection_version;
-    let topology_generation = selected.topology_generation;
-    if snapshot.graph_status == "empty" {
-        return Ok((
-            Some(selected),
-            render_empty(library_id, projection_version, topology_generation),
-        ));
-    }
-    let cache_key = cache_key(library_id, projection_version, topology_generation);
-
-    if let Some(cached) = cached_topology_bytes(
+    build_compact_topology(
         state,
-        library_id,
-        &cache_key,
-        projection_version,
-        topology_generation,
+        identity.library_id,
+        identity.projection_version,
+        identity.topology_generation,
     )
     .await
-    {
-        return Ok((Some(selected), cached));
-    }
-
-    let built =
-        build_compact_topology(state, library_id, projection_version, topology_generation).await?;
-    let buffer = render_compact_topology(&built);
-    backfill_topology_cache(
-        state,
-        library_id,
-        &cache_key,
-        projection_version,
-        topology_generation,
-        &buffer,
-    )
-    .await;
-
-    Ok((Some(selected), buffer))
 }
 
-/// Reads back a cached topology buffer, warning and rebuilding on a Redis
-/// failure so a cache outage never fails the endpoint.
-async fn cached_topology_bytes(
-    state: &AppState,
-    library_id: Uuid,
-    cache_key: &str,
-    projection_version: i64,
-    topology_generation: i64,
-) -> Option<Vec<u8>> {
-    let cached =
-        redis_get_bytes(&state.persistence.redis, cache_key).await.unwrap_or_else(|error| {
-            tracing::warn!(
-                %library_id,
-                projection_version,
-                topology_generation,
-                error = format!("{error:#}"),
-                "graph topology cache GET failed; rebuilding",
-            );
-            None
-        })?;
-    tracing::debug!(
-        %library_id,
-        projection_version,
-        topology_generation,
-        bytes = cached.len(),
-        "graph topology cache hit",
-    );
-    Some(cached)
-}
-
-fn log_backfill_skipped_too_large(
+fn empty_topology(
     library_id: Uuid,
     projection_version: i64,
     topology_generation: i64,
-    bytes: usize,
-) {
-    tracing::warn!(
-        %library_id,
-        projection_version,
-        topology_generation,
-        bytes,
-        max_bytes = MAX_CACHE_VALUE_BYTES,
-        "graph topology cache backfill skipped: payload exceeds cache value budget",
-    );
-}
-
-fn log_backfill_set_failed(
-    library_id: Uuid,
-    projection_version: i64,
-    topology_generation: i64,
-    error: &impl std::fmt::Display,
-) {
-    tracing::warn!(
-        %library_id,
-        projection_version,
-        topology_generation,
-        error = format!("{error:#}"),
-        "graph topology cache SET failed",
-    );
-}
-
-async fn backfill_topology_cache(
-    state: &AppState,
-    library_id: Uuid,
-    cache_key: &str,
-    projection_version: i64,
-    topology_generation: i64,
-    buffer: &[u8],
-) {
-    match redis_set_bytes(&state.persistence.redis, cache_key, buffer, CACHE_TTL_SECONDS).await {
-        Ok(CacheWrite::Written) => {}
-        Ok(CacheWrite::SkippedTooLarge) => {
-            log_backfill_skipped_too_large(
-                library_id,
-                projection_version,
-                topology_generation,
-                buffer.len(),
-            );
-        }
-        Err(error) => {
-            log_backfill_set_failed(library_id, projection_version, topology_generation, &error);
-        }
-    }
-}
-
-fn render_empty(library_id: Uuid, projection_version: i64, topology_generation: i64) -> Vec<u8> {
-    let built = CompactTopology {
+) -> CompactTopology {
+    CompactTopology {
         library_id,
         projection_version,
         topology_generation,
@@ -476,14 +57,8 @@ fn render_empty(library_id: Uuid, projection_version: i64, topology_generation: 
         entities: Vec::new(),
         edges: Vec::new(),
         document_links: Vec::new(),
-    };
-    render_compact_topology(&built)
+    }
 }
-
-// ---------------------------------------------------------------------------
-// Postgres → compact topology
-// ---------------------------------------------------------------------------
-
 struct CompactTopology {
     library_id: Uuid,
     projection_version: i64,

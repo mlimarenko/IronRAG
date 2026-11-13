@@ -21,11 +21,14 @@ test('uses deployment branding in shell, translations and browser metadata', asy
   await expect(page.locator('.dashboard-metrics')).toBeVisible()
   const consent = page.getByTestId('analytics-consent')
   await expect(consent).toBeVisible()
-  const shellBounds = await page.locator('.app-shell').boundingBox()
-  const consentBounds = await consent.boundingBox()
-  expect(shellBounds).not.toBeNull()
-  expect(consentBounds).not.toBeNull()
-  expect(shellBounds!.y + shellBounds!.height).toBeLessThanOrEqual(consentBounds!.y + 1)
+  const shellFitsAboveConsent = async () => {
+    const shellBounds = await page.locator('.app-shell').boundingBox()
+    const consentBounds = await consent.boundingBox()
+    return (
+      !!shellBounds && !!consentBounds && shellBounds.y + shellBounds.height <= consentBounds.y + 1
+    )
+  }
+  await expect.poll(shellFitsAboveConsent).toBe(true)
   await expect(page).toHaveTitle(displayName)
   await expect(page.locator('.sidebar .brand')).toHaveAttribute('aria-label', displayName)
   await expect(page.locator('.sidebar .brand-mark')).toHaveAttribute(
@@ -50,22 +53,23 @@ test('uses deployment branding in shell, translations and browser metadata', asy
 
   await page.setViewportSize({ width: 390, height: 844 })
   await expect(consent).toBeVisible()
-  const mobileShell = await page.locator('.app-shell').boundingBox()
-  const mobileConsent = await consent.boundingBox()
-  expect(mobileShell).not.toBeNull()
-  expect(mobileConsent).not.toBeNull()
-  expect(mobileShell!.y + mobileShell!.height).toBeLessThanOrEqual(mobileConsent!.y + 1)
+  await expect.poll(shellFitsAboveConsent).toBe(true)
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
   await page.screenshot({
     path: testInfo.outputPath('branding-with-consent-mobile.png'),
     fullPage: true,
   })
   await consent.getByRole('button', { name: 'Decline', exact: true }).focus()
+  const preferenceUpdate = page.waitForResponse(
+    (response) =>
+      new URL(response.url()).pathname === '/v1/iam/preferences' &&
+      response.request().method() === 'PUT',
+  )
   await page.keyboard.press('Enter')
   await expect(consent).toHaveCount(0)
-  await expect
-    .poll(() => page.evaluate(() => localStorage.getItem('ironrag.v1.telemetry.consent')))
-    .toBe('denied')
+  const response = await preferenceUpdate
+  expect(response.ok()).toBe(true)
+  expect(await response.json()).toMatchObject({ telemetryConsent: 'denied' })
 
   await page.goto('/unrecognized-route?mocks=1')
   await expect(page.getByRole('heading', { level: 1 })).toContainText(displayName)

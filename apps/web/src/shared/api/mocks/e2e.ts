@@ -113,6 +113,7 @@ export type AiMockConfig = {
 }
 
 export type BrowserMockConfig = {
+  graphNdjson?: string
   libraries?: CatalogLibraryResponse[]
   workspaces?: NonNullable<SessionResolvePayload['shellBootstrap']>['workspaces']
   branding?: Partial<Branding>
@@ -1020,6 +1021,57 @@ export function createBrowserMockHandlers(config: BrowserMockConfig = {}): HttpH
   })
 
   return [
+    ...(config.graphNdjson
+      ? [
+          http.post('/v1/knowledge/libraries/:libraryId/graph/preparations', ({ params }) =>
+            HttpResponse.json({
+              id: 'mock-preparation',
+              libraryId: params.libraryId,
+              formatVersion: 1,
+              projectionVersion: 1,
+              topologyGeneration: 1,
+              sourceTruthVersion: 1,
+              status: 'ready',
+              attempts: 1,
+              retryAfterMs: 100,
+              expiresAt: null,
+              errorCode: null,
+            }),
+          ),
+          http.get(
+            '/v1/knowledge/libraries/:libraryId/graph/preparations/:preparationId/result',
+            ({ params }) => {
+              const frames = config
+                .graphNdjson!.trim()
+                .split('\n')
+                .map((line) => JSON.parse(line))
+              const meta = frames.find((frame) => frame.s === 'meta')
+              Object.assign(meta, {
+                v: 1,
+                library_id: params.libraryId,
+                preparation_id: 'mock-preparation',
+                projection_version: 1,
+                topology_generation: 1,
+                source_truth_version: 1,
+                generated_at: '2026-01-01T00:00:00Z',
+              })
+              const end = frames.find((frame) => frame.s === 'end')
+              Object.assign(end, {
+                preparation_id: 'mock-preparation',
+                node_count: meta.node_count,
+                edge_count: meta.edge_count,
+                document_count: meta.document_count,
+              })
+              return new HttpResponse(
+                frames.map((frame) => JSON.stringify(frame)).join('\n') + '\n',
+                {
+                  headers: { 'Content-Type': 'application/x-ndjson' },
+                },
+              )
+            },
+          ),
+        ]
+      : []),
     http.get('/v1/iam/context', () =>
       HttpResponse.json(
         resolveSessionPayload(

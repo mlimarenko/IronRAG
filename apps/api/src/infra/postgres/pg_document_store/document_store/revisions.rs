@@ -1,11 +1,62 @@
 use super::*;
 
+// Readiness is part of content_current_revision membership, independently of
+// head-pointer publication. Fence only a membership transition so operational
+// timestamps and updates to a nonpublic revision do not churn source receipts.
+pub(super) async fn lock_revision_readability(
+    connection: &mut sqlx::PgConnection,
+    revision_id: Uuid,
+) -> anyhow::Result<Option<(Uuid, bool)>> {
+    let library_id = sqlx::query_scalar::<_, Uuid>(
+        "select library.id from catalog_library library
+         join content_revision revision on revision.library_id = library.id
+         where revision.id = $1 for no key update of library",
+    )
+    .bind(revision_id)
+    .fetch_optional(&mut *connection)
+    .await?;
+    let Some(library_id) = library_id else {
+        return Ok(None);
+    };
+    Ok(Some((library_id, revision_is_readable(connection, revision_id).await?)))
+}
+
+pub(super) async fn invalidate_changed_revision_readability(
+    connection: &mut sqlx::PgConnection,
+    revision_id: Uuid,
+    before: Option<(Uuid, bool)>,
+) -> anyhow::Result<()> {
+    if let Some((library_id, was_readable)) = before
+        && was_readable != revision_is_readable(connection, revision_id).await?
+    {
+        catalog_repository::touch_library_source_truth_version_with_executor(
+            connection, library_id,
+        )
+        .await?;
+    }
+    Ok(())
+}
+
+async fn revision_is_readable(
+    connection: &mut sqlx::PgConnection,
+    revision_id: Uuid,
+) -> Result<bool, sqlx::Error> {
+    sqlx::query_scalar(
+        "select exists (select 1 from content_current_revision where revision_id = $1)",
+    )
+    .bind(revision_id)
+    .fetch_one(connection)
+    .await
+}
+
 impl PgDocumentStore {
     pub(super) async fn upsert_revision_impl(
         &self,
         row: &KnowledgeRevisionRow,
     ) -> anyhow::Result<KnowledgeRevisionRow> {
-        sqlx::query_as::<_, KnowledgeRevisionRow>(sqlx::AssertSqlSafe(format!(
+        let mut transaction = self.pool.begin().await?;
+        let readability = lock_revision_readability(&mut transaction, row.revision_id).await?;
+        let revision = sqlx::query_as::<_, KnowledgeRevisionRow>(sqlx::AssertSqlSafe(format!(
             "INSERT INTO knowledge_revision (
                 revision_id, workspace_id, library_id, document_id, revision_number,
                 revision_state, revision_kind, storage_ref, source_uri, document_hint, mime_type,
@@ -64,9 +115,13 @@ impl PgDocumentStore {
         .bind(row.graph_ready_at)
         .bind(row.superseded_by_revision_id)
         .bind(row.created_at)
-        .fetch_one(&self.pool)
+        .fetch_one(&mut *transaction)
         .await
-        .context("failed to upsert knowledge revision")
+        .context("failed to upsert knowledge revision")?;
+        invalidate_changed_revision_readability(&mut transaction, row.revision_id, readability)
+            .await?;
+        transaction.commit().await?;
+        Ok(revision)
     }
 
     pub(super) async fn update_revision_document_hint_impl(
@@ -263,7 +318,9 @@ impl PgDocumentStore {
             graph_ready_at,
             superseded_by_revision_id,
         } = update;
-        sqlx::query_as::<_, KnowledgeRevisionRow>(sqlx::AssertSqlSafe(format!(
+        let mut transaction = self.pool.begin().await?;
+        let readability = lock_revision_readability(&mut transaction, revision_id).await?;
+        let revision = sqlx::query_as::<_, KnowledgeRevisionRow>(sqlx::AssertSqlSafe(format!(
             "UPDATE knowledge_revision SET
                 text_state = $2,
                 vector_state = $3,
@@ -283,9 +340,12 @@ impl PgDocumentStore {
         .bind(vector_ready_at)
         .bind(graph_ready_at)
         .bind(superseded_by_revision_id)
-        .fetch_optional(&self.pool)
+        .fetch_optional(&mut *transaction)
         .await
-        .context("failed to update knowledge revision readiness")
+        .context("failed to update knowledge revision readiness")?;
+        invalidate_changed_revision_readability(&mut transaction, revision_id, readability).await?;
+        transaction.commit().await?;
+        Ok(revision)
     }
 
     pub(super) async fn update_revision_text_content_impl(
@@ -296,7 +356,9 @@ impl PgDocumentStore {
         text_state: &str,
         text_readable_at: Option<DateTime<Utc>>,
     ) -> anyhow::Result<Option<KnowledgeRevisionRow>> {
-        sqlx::query_as::<_, KnowledgeRevisionRow>(sqlx::AssertSqlSafe(format!(
+        let mut transaction = self.pool.begin().await?;
+        let readability = lock_revision_readability(&mut transaction, revision_id).await?;
+        let revision = sqlx::query_as::<_, KnowledgeRevisionRow>(sqlx::AssertSqlSafe(format!(
             "UPDATE knowledge_revision SET
                 normalized_text = $2,
                 text_checksum = $3,
@@ -310,9 +372,12 @@ impl PgDocumentStore {
         .bind(text_checksum)
         .bind(text_state)
         .bind(text_readable_at)
-        .fetch_optional(&self.pool)
+        .fetch_optional(&mut *transaction)
         .await
-        .context("failed to update knowledge revision text content")
+        .context("failed to update knowledge revision text content")?;
+        invalidate_changed_revision_readability(&mut transaction, revision_id, readability).await?;
+        transaction.commit().await?;
+        Ok(revision)
     }
 
     pub(super) async fn update_revision_image_checksum_impl(

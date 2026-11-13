@@ -72,15 +72,33 @@ async function installMocks(page, meta) {
         },
       })
     }
-    if (url.pathname.endsWith('/graph') && url.pathname.includes('/knowledge/libraries/')) {
+    const preparationPath = `/v1/knowledge/libraries/${LIBRARY_ID}/graph/preparations`
+    if (url.pathname === preparationPath && route.request().method() === 'POST') {
+      return route.fulfill({
+        json: {
+          id: meta.preparation_id,
+          libraryId: meta.library_id,
+          formatVersion: meta.v,
+          projectionVersion: meta.projection_version,
+          topologyGeneration: meta.topology_generation,
+          sourceTruthVersion: meta.source_truth_version,
+          status: 'ready',
+          attempts: 1,
+          retryAfterMs: 100,
+          expiresAt: null,
+          errorCode: null,
+        },
+      })
+    }
+    if (url.pathname === `${preparationPath}/${encodeURIComponent(meta.preparation_id)}/result`) {
       return route.continue({ url: `${url.origin}/bench/graph.ndjson` })
     }
     if (url.pathname.endsWith('/summary')) {
       return route.fulfill({
         json: {
           libraryId: LIBRARY_ID,
-          nodeCount: meta.nodeCount,
-          edgeCount: meta.edgeCount,
+          nodeCount: meta.node_count,
+          edgeCount: meta.edge_count,
           graphReadyDocumentCount: 1,
           graphSparseDocumentCount: 0,
           typedFactDocumentCount: 0,
@@ -120,13 +138,14 @@ async function main() {
   await mkdir(args.out, { recursive: true })
   const metaLine = (await import('node:fs')).readFileSync(fixturePath, 'utf8').split('\n', 1)[0]
   const metaFrame = JSON.parse(metaLine)
-  const meta = { nodeCount: metaFrame.node_count, edgeCount: metaFrame.edge_count }
+  const meta = metaFrame
 
   const server = spawn(
     process.execPath,
     [VITE_CLI, 'preview', '--host', '127.0.0.1', '--port', String(args.port), '--strictPort'],
     { cwd: webRoot, stdio: 'ignore', detached: true },
   )
+  const serverExited = new Promise((resolve) => server.once('exit', resolve))
   const stopServer = () => {
     try {
       process.kill(-server.pid, 'SIGTERM')
@@ -135,11 +154,12 @@ async function main() {
     }
   }
 
-  const browser = await chromium.launch({
-    headless: true,
-    args: ['--use-angle=gl-egl', '--enable-gpu', '--ignore-gpu-blocklist', '--no-sandbox'],
-  })
+  let browser
   try {
+    browser = await chromium.launch({
+      headless: true,
+      args: ['--use-angle=gl-egl', '--enable-gpu', '--ignore-gpu-blocklist', '--no-sandbox'],
+    })
     await sleep(1500)
     const context = await browser.newContext({ viewport: { width: 1680, height: 1000 } })
     await context.addInitScript(
@@ -207,8 +227,9 @@ async function main() {
     }
     console.log(`shots written to ${args.out}`)
   } finally {
-    await browser.close().catch(() => undefined)
+    await browser?.close().catch(() => undefined)
     stopServer()
+    await serverExited
   }
 }
 

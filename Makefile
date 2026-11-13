@@ -223,8 +223,8 @@ BACKEND_INTEGRATION_SUITES ?= ai_catalog_repository:3 ai_catalog_service:6 ai_co
   content_repository:22 content_revision_lineage:1 credential_encryption:1 \
   document_external_key_reclaim:4 extract_graph:1 extract_repository:1 \
   governance_auth:13 graph_atomicity_fencing:16 graph_projection_repository:3 \
-  graph_rebuild_guard_lifecycle:3 graph_reextract_repository:25 graph_snapshot_fencing:4 \
-  graph_summary_executor_fencing:5 graph_visibility_race:2 greenfield_bootstrap:36 \
+  graph_rebuild_guard_lifecycle:3 graph_reextract_repository:25 graph_snapshot_fencing:7 \
+  graph_summary_executor_fencing:5 graph_visibility_race:2 topology_preparation:9 greenfield_bootstrap:36 \
   greenfield_bootstrap::billing_document_read:3 greenfield_bootstrap::billing_knowledge_search:3 \
   greenfield_bootstrap::user_preference:1 greenfield_bootstrap::vision_recognition:2 \
   greenfield_bootstrap::xberg_recognition:1 iam_preferences:1 iam_user_repository:2 \
@@ -497,11 +497,6 @@ frontend-test:
 frontend-coverage:
 	cd apps/web && npm run test:coverage && test -s coverage/lcov.info
 
-# Browser scenarios. A Playwright run that collects nothing still exits 0, so
-# the run is compared with apps/web/tests/e2e/spec-manifest.json -- the same
-# reason BACKEND_INTEGRATION_SUITES exists one level down. The gate is a node
-# script, not a Make step, because CI runs this in Playwright's own image,
-# which carries the browser but neither make nor python3.
 frontend-e2e:
 	cd apps/web && npm run test:e2e
 

@@ -81,7 +81,7 @@ const PAGE_INSTRUMENTATION = `
   try {
     new PerformanceObserver((list) => {
       for (const entry of list.getEntries()) {
-        if (entry.name.includes('/knowledge/libraries/') && entry.name.endsWith('/graph')) {
+        if (entry.name.includes('/knowledge/libraries/') && entry.name.endsWith('/result')) {
           M.dataEndMs = entry.responseEnd;
         }
       }
@@ -188,7 +188,31 @@ async function installApiMocks(page, meta) {
     if (path === '/v1/iam/context') {
       return route.fulfill({ json: sessionPayload() })
     }
-    if (/^\/v1\/knowledge\/libraries\/[^/]+\/graph$/.test(path)) {
+    if (
+      /^\/v1\/knowledge\/libraries\/[^/]+\/graph\/preparations$/.test(path) &&
+      request.method() === 'POST'
+    ) {
+      return route.fulfill({
+        json: {
+          id: 'bench-preparation',
+          libraryId: LIBRARY_ID,
+          formatVersion: 1,
+          projectionVersion: 1,
+          topologyGeneration: 1,
+          sourceTruthVersion: 1,
+          status: 'ready',
+          attempts: 1,
+          retryAfterMs: 100,
+          expiresAt: null,
+          errorCode: null,
+        },
+      })
+    }
+    if (
+      /^\/v1\/knowledge\/libraries\/[^/]+\/graph\/preparations\/bench-preparation\/result$/.test(
+        path,
+      )
+    ) {
       return route.continue({ url: `${url.origin}/bench/graph.ndjson` })
     }
     if (/^\/v1\/knowledge\/libraries\/[^/]+\/summary$/.test(path)) {

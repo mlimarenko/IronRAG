@@ -60,6 +60,12 @@ async fn run_ingestion_worker_pool(state: Arc<AppState>, mut shutdown: broadcast
         tokio::spawn(run_graph_backfill_loop(state.clone(), shutdown.resubscribe()));
     let graph_maintenance_handle =
         tokio::spawn(run_graph_maintenance_loop(state.clone(), shutdown.resubscribe()));
+    let topology_preparation_handle = tokio::spawn(
+        crate::services::knowledge::preparation_worker::run_topology_preparation_worker(
+            state.clone(),
+            shutdown.resubscribe(),
+        ),
+    );
 
     // Out-of-band stale-lease reaper. Unlike the in-tokio
     // recovery loop above, this runs on a dedicated OS thread with its
@@ -82,9 +88,7 @@ async fn run_ingestion_worker_pool(state: Arc<AppState>, mut shutdown: broadcast
     )
     .await;
 
-    while let Some(result) = active_jobs.join_next().await {
-        handle_job_join_result(&state, result).await;
-    }
+    drain_active_jobs(&state, &mut active_jobs).await;
 
     state.worker_runtime.mark_idle().await;
 
@@ -95,6 +99,19 @@ async fn run_ingestion_worker_pool(state: Arc<AppState>, mut shutdown: broadcast
         graph_maintenance_handle,
     )
     .await;
+    join_topology_worker(topology_preparation_handle).await;
+}
+
+async fn join_topology_worker(topology_preparation_handle: JoinHandle<()>) {
+    if let Err(error) = topology_preparation_handle.await {
+        error!(?error, "graph topology preparation worker crashed");
+    }
+}
+
+async fn drain_active_jobs(state: &Arc<AppState>, active_jobs: &mut JoinSet<IngestJobOutcome>) {
+    while let Some(result) = active_jobs.join_next().await {
+        handle_job_join_result(state, result).await;
+    }
 }
 
 struct IngestDispatcherCapacity {

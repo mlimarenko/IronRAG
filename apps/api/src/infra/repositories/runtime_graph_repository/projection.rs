@@ -4,7 +4,7 @@ use futures::TryStreamExt;
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use super::coordination::{acquire_runtime_library_graph_lock, release_runtime_library_graph_lock};
+use super::coordination::acquire_runtime_library_graph_lock;
 use super::query_fragments::{
     admitted_runtime_graph_counts_query, authorized_runtime_graph_counts_query,
 };
@@ -221,6 +221,7 @@ pub const RECALCULATE_RUNTIME_GRAPH_EDGE_SUPPORT_COUNTS_SQL: &str = "with target
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct RuntimeGraphProjectionPruneOutcome {
+    pub updated_support_count: u64,
     pub deleted_node_count: u64,
     pub deleted_edge_count: u64,
     pub deleted_summary_count: u64,
@@ -229,6 +230,9 @@ pub struct RuntimeGraphProjectionPruneOutcome {
 impl RuntimeGraphProjectionPruneOutcome {
     fn combined_with(self, other: Self) -> Self {
         Self {
+            updated_support_count: self
+                .updated_support_count
+                .saturating_add(other.updated_support_count),
             deleted_node_count: self.deleted_node_count.saturating_add(other.deleted_node_count),
             deleted_edge_count: self.deleted_edge_count.saturating_add(other.deleted_edge_count),
             deleted_summary_count: self
@@ -250,13 +254,21 @@ pub async fn synchronize_runtime_graph_support_and_prune(
     projection_version: i64,
 ) -> Result<RuntimeGraphProjectionPruneOutcome, sqlx::Error> {
     let mut transaction = acquire_runtime_library_graph_lock(pool, library_id).await?;
+    super::coordination::lock_runtime_graph_source_mutation(&mut transaction, library_id).await?;
     let outcome = synchronize_runtime_graph_support_and_prune_with_connection(
         &mut transaction,
         library_id,
         projection_version,
     )
     .await?;
-    release_runtime_library_graph_lock(transaction, library_id).await?;
+    super::coordination::commit_runtime_graph_source_mutation(
+        transaction,
+        library_id,
+        outcome.updated_support_count > 0
+            || outcome.deleted_node_count > 0
+            || outcome.deleted_edge_count > 0,
+    )
+    .await?;
     Ok(outcome)
 }
 
@@ -265,16 +277,18 @@ pub async fn synchronize_runtime_graph_support_and_prune_with_connection(
     library_id: Uuid,
     projection_version: i64,
 ) -> Result<RuntimeGraphProjectionPruneOutcome, sqlx::Error> {
-    sqlx::query(RECALCULATE_RUNTIME_GRAPH_NODE_SUPPORT_COUNTS_SQL)
+    let updated_node_support = sqlx::query(RECALCULATE_RUNTIME_GRAPH_NODE_SUPPORT_COUNTS_SQL)
         .bind(library_id)
         .bind(projection_version)
         .execute(&mut *connection)
-        .await?;
-    sqlx::query(RECALCULATE_RUNTIME_GRAPH_EDGE_SUPPORT_COUNTS_SQL)
+        .await?
+        .rows_affected();
+    let updated_edge_support = sqlx::query(RECALCULATE_RUNTIME_GRAPH_EDGE_SUPPORT_COUNTS_SQL)
         .bind(library_id)
         .bind(projection_version)
         .execute(&mut *connection)
-        .await?;
+        .await?
+        .rows_affected();
     let unsupported_outcome = prune_runtime_graph_projection_rows_without_support_with_connection(
         connection,
         library_id,
@@ -297,7 +311,9 @@ pub async fn synchronize_runtime_graph_support_and_prune_with_connection(
         deleted_orphan_evidence_count,
         "swept orphan runtime graph evidence during support synchronization",
     );
-    Ok(unsupported_outcome.combined_with(superseded_outcome))
+    let mut outcome = unsupported_outcome.combined_with(superseded_outcome);
+    outcome.updated_support_count = updated_node_support.saturating_add(updated_edge_support);
+    Ok(outcome)
 }
 
 async fn delete_runtime_graph_evidence_for_targets_with_connection(
@@ -497,6 +513,7 @@ async fn delete_runtime_graph_projection_targets_with_connection(
     )
     .await?;
     Ok(RuntimeGraphProjectionPruneOutcome {
+        updated_support_count: 0,
         deleted_node_count,
         deleted_edge_count,
         deleted_summary_count,
@@ -582,6 +599,7 @@ pub async fn prune_runtime_graph_projection_rows(
         return Ok(RuntimeGraphProjectionPruneOutcome::default());
     }
     let mut transaction = acquire_runtime_library_graph_lock(pool, library_id).await?;
+    super::coordination::lock_runtime_graph_source_mutation(&mut transaction, library_id).await?;
     let (node_ids, edge_ids) = resolve_runtime_graph_projection_prune_targets_with_connection(
         &mut transaction,
         library_id,
@@ -598,7 +616,12 @@ pub async fn prune_runtime_graph_projection_rows(
         &edge_ids,
     )
     .await?;
-    release_runtime_library_graph_lock(transaction, library_id).await?;
+    super::coordination::commit_runtime_graph_source_mutation(
+        transaction,
+        library_id,
+        outcome.deleted_node_count > 0 || outcome.deleted_edge_count > 0,
+    )
+    .await?;
     Ok(outcome)
 }
 
@@ -641,7 +664,9 @@ pub async fn delete_runtime_graph_edges_without_support_by_ids(
         return Ok(Vec::new());
     }
 
-    sqlx::query_scalar::<_, String>(
+    let mut transaction =
+        super::coordination::begin_runtime_graph_source_mutation(pool, library_id).await?;
+    let keys = sqlx::query_scalar::<_, String>(
         "delete from runtime_graph_edge
          where library_id = $1
            and projection_version = $2
@@ -652,8 +677,15 @@ pub async fn delete_runtime_graph_edges_without_support_by_ids(
     .bind(library_id)
     .bind(projection_version)
     .bind(edge_ids)
-    .fetch_all(pool)
-    .await
+    .fetch_all(&mut *transaction)
+    .await?;
+    super::coordination::commit_runtime_graph_source_mutation(
+        transaction,
+        library_id,
+        !keys.is_empty(),
+    )
+    .await?;
+    Ok(keys)
 }
 
 /// Lists graph edge ids incident to any node in `node_ids`.
@@ -707,7 +739,9 @@ pub async fn delete_runtime_graph_nodes_without_support_by_ids(
         return Ok(Vec::new());
     }
 
-    sqlx::query_scalar::<_, String>(
+    let mut transaction =
+        super::coordination::begin_runtime_graph_source_mutation(pool, library_id).await?;
+    let keys = sqlx::query_scalar::<_, String>(
         "delete from runtime_graph_node
          where library_id = $1
            and projection_version = $2
@@ -718,8 +752,15 @@ pub async fn delete_runtime_graph_nodes_without_support_by_ids(
     .bind(library_id)
     .bind(projection_version)
     .bind(node_ids)
-    .fetch_all(pool)
-    .await
+    .fetch_all(&mut *transaction)
+    .await?;
+    super::coordination::commit_runtime_graph_source_mutation(
+        transaction,
+        library_id,
+        !keys.is_empty(),
+    )
+    .await?;
+    Ok(keys)
 }
 
 /// Counts admitted graph nodes and relationships for one projection version.

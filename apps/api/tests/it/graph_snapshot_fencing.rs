@@ -384,3 +384,195 @@ async fn deferred_terminal_publish_leaves_source_generation_for_lifecycle_commit
     temp_database.drop().await?;
     result
 }
+
+#[tokio::test]
+#[ignore = "requires local postgres service"]
+async fn alias_backfill_advances_source_receipts_only_for_changed_topology() -> Result<()> {
+    let (pool, temp_database) = connect_postgres().await?;
+    let fixture = Fixture::create(&pool).await?;
+    let result = async {
+        let node = create_receipt_fence_node(&pool, fixture.library_id).await?;
+        let mut source =
+            catalog_repository::get_library_source_truth_version(&pool, fixture.library_id).await?;
+        assert_eq!(
+            repositories::add_runtime_graph_node_aliases(&pool, node, 1, &["AS".into()]).await?,
+            1
+        );
+        let next =
+            catalog_repository::get_library_source_truth_version(&pool, fixture.library_id).await?;
+        assert!(next > source, "an artifact receipt must not survive alias insertion");
+        source = next;
+        assert_eq!(
+            repositories::add_runtime_graph_node_aliases(&pool, node, 1, &["AS".into()]).await?,
+            0
+        );
+        assert_eq!(
+            catalog_repository::get_library_source_truth_version(&pool, fixture.library_id).await?,
+            source,
+            "an alias no-op must not retire a usable receipt"
+        );
+        assert_eq!(
+            repositories::recompute_runtime_graph_node_structural_aliases(
+                &pool,
+                node,
+                1,
+                "AS",
+                &[]
+            )
+            .await?,
+            1
+        );
+        let next =
+            catalog_repository::get_library_source_truth_version(&pool, fixture.library_id).await?;
+        assert!(next > source, "an artifact receipt must not survive alias removal");
+        source = next;
+        assert_eq!(
+            repositories::recompute_runtime_graph_node_fullform_aliases(
+                &pool,
+                node,
+                1,
+                &["Alpha Suite".into()]
+            )
+            .await?,
+            1
+        );
+        let next =
+            catalog_repository::get_library_source_truth_version(&pool, fixture.library_id).await?;
+        assert!(next > source, "reverse alias backfill must retire the prior receipt");
+        source = next;
+        assert_eq!(
+            repositories::recompute_runtime_graph_node_fullform_aliases(
+                &pool,
+                node,
+                1,
+                &["Alpha Suite".into()]
+            )
+            .await?,
+            0
+        );
+        assert_eq!(
+            catalog_repository::get_library_source_truth_version(&pool, fixture.library_id).await?,
+            source
+        );
+        Ok(())
+    }
+    .await;
+    fixture.cleanup(&pool).await?;
+    pool.close().await;
+    temp_database.drop().await?;
+    result
+}
+
+#[tokio::test]
+#[ignore = "requires local postgres service"]
+async fn support_recalculation_retires_source_receipt_with_the_changed_rows() -> Result<()> {
+    let (pool, temp_database) = connect_postgres().await?;
+    let fixture = Fixture::create(&pool).await?;
+    let result = async {
+        let node = create_receipt_fence_node(&pool, fixture.library_id).await?;
+        let source =
+            catalog_repository::get_library_source_truth_version(&pool, fixture.library_id).await?;
+        // No evidence supports the fixture's deliberately nonzero count.
+        assert_eq!(
+            repositories::recalculate_runtime_graph_node_support_counts_by_ids(
+                &pool,
+                fixture.library_id,
+                1,
+                &[node]
+            )
+            .await?,
+            1
+        );
+        let next =
+            catalog_repository::get_library_source_truth_version(&pool, fixture.library_id).await?;
+        assert!(next > source, "a validated artifact must not retain the old support count");
+        assert_eq!(
+            repositories::recalculate_runtime_graph_node_support_counts_by_ids(
+                &pool,
+                fixture.library_id,
+                1,
+                &[node]
+            )
+            .await?,
+            0
+        );
+        assert_eq!(
+            catalog_repository::get_library_source_truth_version(&pool, fixture.library_id).await?,
+            next
+        );
+        assert_eq!(
+            repositories::delete_runtime_graph_nodes_without_support_by_ids(
+                &pool,
+                fixture.library_id,
+                1,
+                &[node]
+            )
+            .await?,
+            vec!["receipt-fence".to_string()]
+        );
+        assert!(
+            catalog_repository::get_library_source_truth_version(&pool, fixture.library_id).await?
+                > next,
+            "the subsequent prune is a separate mutation and must fence a newer receipt"
+        );
+        Ok(())
+    }
+    .await;
+    fixture.cleanup(&pool).await?;
+    pool.close().await;
+    temp_database.drop().await?;
+    result
+}
+
+async fn create_receipt_fence_node(pool: &PgPool, library_id: Uuid) -> Result<Uuid> {
+    Ok(repositories::upsert_runtime_graph_node(
+        pool,
+        repositories::RuntimeGraphNodeInput {
+            library_id,
+            identity_key: "receipt-fence",
+            label: "Alpha Suite",
+            node_type: "concept",
+            document_id: None,
+            aliases_json: serde_json::json!([]),
+            summary: None,
+            metadata_json: serde_json::json!({}),
+            support_count: 1,
+            projection_version: 1,
+        },
+    )
+    .await?
+    .id)
+}
+
+#[tokio::test]
+#[ignore = "requires local postgres service"]
+async fn graph_store_deletion_fences_receipts_and_preserves_noop_generation() -> Result<()> {
+    use ironrag_backend::infra::{
+        knowledge_plane::GraphStore, postgres::pg_graph_store::PgGraphStore,
+    };
+
+    let (pool, temp_database) = connect_postgres().await?;
+    let fixture = Fixture::create(&pool).await?;
+    let result = async {
+        create_receipt_fence_node(&pool, fixture.library_id).await?;
+        let store = PgGraphStore { pool: pool.clone() };
+        let source =
+            catalog_repository::get_library_source_truth_version(&pool, fixture.library_id).await?;
+        let keys = vec!["receipt-fence".to_string()];
+        assert_eq!(store.delete_entities_by_identity_keys(fixture.library_id, &keys).await?, 1);
+        let next =
+            catalog_repository::get_library_source_truth_version(&pool, fixture.library_id).await?;
+        assert!(next > source, "identity-key deletion must retire the prepared artifact receipt");
+        assert_eq!(store.delete_entities_by_identity_keys(fixture.library_id, &keys).await?, 0);
+        assert_eq!(
+            catalog_repository::get_library_source_truth_version(&pool, fixture.library_id).await?,
+            next
+        );
+        Ok(())
+    }
+    .await;
+    fixture.cleanup(&pool).await?;
+    pool.close().await;
+    temp_database.drop().await?;
+    result
+}

@@ -2,7 +2,7 @@
 //! not a clean successor that happens to be current at the final read boundary.
 #![cfg(feature = "test-support")]
 
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
 
 use anyhow::{Context, Result, ensure};
 use axum::extract::{Path, State};
@@ -15,10 +15,16 @@ use ironrag_backend::{
         },
         content_fingerprint_repository, iam_repository,
     },
-    interfaces::http::{auth::AuthContext, knowledge::get_graph},
+    interfaces::http::{
+        auth::AuthContext,
+        knowledge::{create_graph_preparation, get_graph_preparation_result},
+    },
+    services::knowledge::{
+        preparation::{self, KnowledgeGraphPreparationResponse, PreparationStatus},
+        preparation_worker::run_topology_preparation_worker,
+    },
 };
 use ironrag_contracts::documents::{CreateVisibilityIntentRequest, ReplacementIdentity};
-use redis::AsyncCommands;
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
@@ -27,7 +33,7 @@ use crate::content_lifecycle_support::ContentLifecycleFixture;
 const RESTRICTED_LABEL: &str = "restricted A graph label";
 const RESTRICTED_SUMMARY: &str = "restricted A graph summary";
 
-async fn graph_auth(fixture: &ContentLifecycleFixture) -> Result<AuthContext> {
+pub(crate) async fn graph_auth(fixture: &ContentLifecycleFixture) -> Result<AuthContext> {
     let principal = iam_repository::create_principal(
         &fixture.state.persistence.postgres,
         "api_token",
@@ -56,7 +62,7 @@ fn replacement(file_name: &str) -> ReplacementIdentity {
     }
 }
 
-async fn seed_published_graph(
+pub(crate) async fn seed_published_graph(
     fixture: &ContentLifecycleFixture,
 ) -> Result<(Uuid, Vec<Uuid>, Uuid)> {
     let pg = &fixture.state.persistence.postgres;
@@ -183,7 +189,7 @@ async fn seed_published_graph(
     Ok((document_id, node_ids, edge.id))
 }
 
-async fn publish_snapshot(
+pub(crate) async fn publish_snapshot(
     fixture: &ContentLifecycleFixture,
     version: i64,
     status: &str,
@@ -210,6 +216,48 @@ async fn publish_snapshot(
         .context("frozen snapshot publication must own its claim")?;
     }
     Ok(())
+}
+
+pub(crate) async fn prepare_graph(
+    fixture: &ContentLifecycleFixture,
+    auth: AuthContext,
+) -> Result<KnowledgeGraphPreparationResponse> {
+    prepare_graph_for(&fixture.state, fixture.library_id, auth, Duration::from_secs(30)).await
+}
+
+pub(crate) async fn prepare_graph_for(
+    state: &ironrag_backend::app::state::AppState,
+    library_id: Uuid,
+    auth: AuthContext,
+    timeout: Duration,
+) -> Result<KnowledgeGraphPreparationResponse> {
+    let response = create_graph_preparation(auth, State(state.clone()), Path(library_id)).await?;
+    let body = axum::body::to_bytes(response.into_body(), 64 * 1024).await?;
+    let admitted: KnowledgeGraphPreparationResponse = serde_json::from_slice(&body)?;
+    let (shutdown, receiver) = tokio::sync::broadcast::channel(1);
+    let worker = tokio::spawn(run_topology_preparation_worker(Arc::new(state.clone()), receiver));
+    let result = tokio::time::timeout(timeout, async {
+        loop {
+            let descriptor = preparation::status(state, library_id, admitted.id).await?;
+            match descriptor.status {
+                PreparationStatus::Ready => return Ok(descriptor),
+                PreparationStatus::Failed
+                | PreparationStatus::Superseded
+                | PreparationStatus::Expired => anyhow::bail!(
+                    "preparation terminated: {:?} {:?}",
+                    descriptor.status,
+                    descriptor.error_code
+                ),
+                _ => tokio::time::sleep(Duration::from_millis(50)).await,
+            }
+        }
+    })
+    .await
+    .context("graph preparation timed out")
+    .and_then(|value: Result<KnowledgeGraphPreparationResponse>| value);
+    let _ = shutdown.send(());
+    worker.await.context("graph preparation worker join")?;
+    result
 }
 
 #[tokio::test]
@@ -263,15 +311,10 @@ async fn cold_graph_currentness_scaled_and_adversarial() -> Result<()> {
         let selected = snapshot.projection_identity();
         ensure!(content_fingerprint_repository::graph_projection_is_current(pg, selected).await?, "scaled valid graph refused");
         let auth = graph_auth(&fixture).await?;
-        let started = std::time::Instant::now();
-        let response = Box::pin(get_graph(auth, State(fixture.state.clone()), Path(fixture.library_id))).await?;
+        let prepared = prepare_graph(&fixture, auth.clone()).await?;
+        let response = Box::pin(get_graph_preparation_result(auth, State(fixture.state.clone()), Path((fixture.library_id, prepared.id)))).await?;
         let body = axum::body::to_bytes(response.into_body(), 128 * 1024 * 1024).await?;
-        let _cold_ms = started.elapsed().as_millis();
-        ensure!(body.len() > 64 * 1024 * 1024, "fixture must exceed the topology cache value limit");
-        let key = format!("graph:{}:v{}:g{}", fixture.library_id, snapshot.projection_version, snapshot.topology_generation);
-        let mut redis = fixture.state.persistence.redis.get_multiplexed_async_connection().await?;
-        let cached: bool = redis.exists(key).await?;
-        ensure!(!cached, "oversized graph must not be retained in Redis");
+        ensure!(body.len() > 64 * 1024 * 1024, "fixture must produce a large topology");
         let stale = Uuid::now_v7();
         sqlx::query("insert into runtime_graph_evidence (id,library_id,evidence_identity_key,target_kind,target_id,document_id,revision_id,evidence_text) values ($1,$2,'stale-check','node',$3,$4,null,'stale')")
             .bind(stale).bind(fixture.library_id).bind(nodes[0]).bind(document_id).execute(pg).await?;
@@ -311,16 +354,20 @@ async fn cold_graph_currentness_scaled_and_adversarial() -> Result<()> {
 
 #[tokio::test]
 #[ignore = "requires isolated postgres and redis services"]
-async fn http_cached_g1_is_denied_after_source_intent_and_clean_g2_publication() -> Result<()> {
+async fn http_retained_g1_is_denied_after_source_intent_and_clean_g2_publication() -> Result<()> {
     let fixture = ContentLifecycleFixture::create().await?;
     let result = Box::pin(async {
         let pg = &fixture.state.persistence.postgres;
         let (document_id, node_ids, edge_id) = seed_published_graph(&fixture).await?;
         let auth = graph_auth(&fixture).await?;
         let library_id = fixture.library_id;
-        let initial =
-            Box::pin(get_graph(auth.clone(), State(fixture.state.clone()), Path(library_id)))
-                .await?;
+        let prepared = prepare_graph(&fixture, auth.clone()).await?;
+        let initial = Box::pin(get_graph_preparation_result(
+            auth.clone(),
+            State(fixture.state.clone()),
+            Path((library_id, prepared.id)),
+        ))
+        .await?;
         let g1 = axum::body::to_bytes(initial.into_body(), 128 * 1024).await?;
         let text = std::str::from_utf8(&g1)?;
         ensure!(text.contains(RESTRICTED_LABEL) && text.contains(RESTRICTED_SUMMARY));
@@ -331,20 +378,17 @@ async fn http_cached_g1_is_denied_after_source_intent_and_clean_g2_publication()
         ensure!(
             content_fingerprint_repository::graph_projection_is_current(pg, selected_g1).await?
         );
-        let key = format!(
-            "graph:{library_id}:v{}:g{}",
-            snapshot.projection_version, snapshot.topology_generation
-        );
-        let mut redis = fixture.state.persistence.redis.get_multiplexed_async_connection().await?;
-        let cached: Vec<u8> = redis.get(&key).await?;
-        ensure!(cached == g1.as_ref(), "the actual HTTP handler must warm G1 bytes in Redis");
-
         let (reached, release) =
             fixture.state.runtime_graph_projection_cache.pause_next_graph_read(library_id).await;
-        let state = fixture.state.clone();
+        let response = Box::pin(get_graph_preparation_result(
+            auth,
+            State(fixture.state.clone()),
+            Path((library_id, prepared.id)),
+        ))
+        .await?;
         let reader =
             tokio::spawn(
-                async move { Box::pin(get_graph(auth, State(state), Path(library_id))).await },
+                async move { axum::body::to_bytes(response.into_body(), 128 * 1024).await },
             );
         let mut reader = ironrag_backend::shared::cancellation::AbortOnDrop::new(reader);
         tokio::time::timeout(Duration::from_secs(10), reached)
@@ -412,24 +456,9 @@ async fn http_cached_g1_is_denied_after_source_intent_and_clean_g2_publication()
         )
         .await
         .context("HTTP graph reader did not finish after release")??;
-        let denied = returned.is_err();
-        let leaked = match returned {
-            Err(_) => false,
-            Ok(response) => {
-                let body = axum::body::to_bytes(response.into_body(), 128 * 1024).await?;
-                std::str::from_utf8(&body)?.contains(RESTRICTED_LABEL)
-            }
-        };
-        let _: usize = redis.del(&key).await?;
-        // Assert after collecting the response, so this is a behavioural RED
-        // against the unmodified read decision, not a source-pattern assertion.
         ensure!(
-            !leaked,
-            "selected G1 restricted label leaked after A intent and clean G2 publication"
-        );
-        ensure!(
-            denied,
-            "a superseded selection must be denied, not replaced with a different payload"
+            returned.is_err(),
+            "a superseded result stream must fail before the terminal frame"
         );
         Ok(())
     })

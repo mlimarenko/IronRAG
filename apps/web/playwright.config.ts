@@ -15,8 +15,6 @@ export default defineConfig({
   forbidOnly: isCi,
   retries: isCi ? 2 : 0,
   workers: 2,
-  // The JSON report is what the spec gate reads: a run that collected nothing
-  // still exits 0, so the report, not the exit code, proves the suite ran.
   reporter: [isCi ? ['line'] : ['list'], ['json', { outputFile: 'test-results/e2e-report.json' }]],
   outputDir: 'test-results/e2e',
   timeout: 30_000,

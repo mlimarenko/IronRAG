@@ -38,6 +38,13 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- end -}}
 {{- end -}}
 
+{{- define "ironrag.imagePullSecrets" -}}
+{{- with .Values.imagePullSecrets }}
+imagePullSecrets:
+{{- toYaml . | nindent 2 }}
+{{- end }}
+{{- end -}}
+
 {{- define "ironrag.postgresHost" -}}
 {{- if eq .Values.dependencies.postgres.mode "bundled" -}}
 {{ include "ironrag.fullname" . }}-postgres

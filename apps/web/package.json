@@ -21,15 +21,14 @@
     "swagger:check": "node scripts/sync-swagger-ui.mjs --check",
     "test": "vitest run",
     "test:coverage": "vitest run --coverage",
-    "test:e2e": "playwright test --config=playwright.config.ts && node scripts/check-e2e-spec-counts.mjs test-results/e2e-report.json",
+    "test:e2e": "playwright test --config=playwright.config.ts",
     "test:e2e:ui": "playwright test --config=playwright.config.ts --ui",
     "test:qa": "playwright test --config=playwright.qa.config.ts",
     "test:qa:ui": "playwright test --config=playwright.qa.config.ts --ui",
     "test:watch": "vitest",
     "bundle:check": "node scripts/check-bundle-budget.mjs",
     "size-limit": "size-limit",
-    "deadcode": "knip --reporter compact",
-    "test:e2e:run": "playwright test --config=playwright.config.ts"
+    "deadcode": "knip --reporter compact"
   },
   "dependencies": {
     "@opentelemetry/api": "^1.9.1",

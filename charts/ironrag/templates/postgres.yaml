@@ -44,6 +44,7 @@ spec:
         {{- include "ironrag.bundledDependencyPodAnnotations" . | nindent 8 }}
     spec:
       automountServiceAccountToken: false
+      {{- include "ironrag.imagePullSecrets" . | nindent 6 }}
       securityContext:
         runAsNonRoot: true
         runAsUser: 999

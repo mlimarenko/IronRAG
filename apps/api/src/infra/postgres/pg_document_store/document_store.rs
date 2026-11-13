@@ -130,6 +130,8 @@ impl DocumentStore for PgDocumentStore {
                 .context("failed to finish preserved stale knowledge projection self-heal")?;
             return Ok(IngestAttemptMutationOutcome::AuthorityLost);
         }
+        let readability =
+            revisions::lock_revision_readability(&mut transaction, authority.revision_id).await?;
         sqlx::query(
             "INSERT INTO knowledge_document (
                 document_id, workspace_id, library_id, external_key, file_name, title,
@@ -265,6 +267,12 @@ impl DocumentStore for PgDocumentStore {
             .await
             .context("failed to lock ensured knowledge revision projection")?
             .context("existing knowledge revision projection has incompatible authority scope")?;
+        revisions::invalidate_changed_revision_readability(
+            &mut transaction,
+            authority.revision_id,
+            readability,
+        )
+        .await?;
         transaction
             .commit()
             .await
@@ -371,6 +379,8 @@ impl DocumentStore for PgDocumentStore {
                     image_checksum,
                 ),
             };
+        let readability =
+            revisions::lock_revision_readability(&mut transaction, authority.revision_id).await?;
         let row = sqlx::query_as::<_, KnowledgeRevisionRow>(sqlx::AssertSqlSafe(format!(
             "UPDATE knowledge_revision SET
                 normalized_text = CASE WHEN $2 THEN $3 ELSE normalized_text END,
@@ -396,6 +406,12 @@ impl DocumentStore for PgDocumentStore {
         .await
         .context("failed to update fenced knowledge revision extract artifact")?
         .context("fenced knowledge revision extract artifact does not exist in authority scope")?;
+        revisions::invalidate_changed_revision_readability(
+            &mut transaction,
+            authority.revision_id,
+            readability,
+        )
+        .await?;
         transaction.commit().await.context("failed to commit fenced revision extract update")?;
         Ok(IngestAttemptMutationOutcome::Applied(row))
     }

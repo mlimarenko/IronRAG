@@ -1,4 +1,4 @@
-use sqlx::{FromRow, PgPool};
+use sqlx::{FromRow, PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
 /// One multi-word entity node eligible for acronym-alias backfill.
@@ -169,6 +169,11 @@ pub async fn add_runtime_graph_node_aliases(
     let incoming_json = serde_json::Value::Array(
         trimmed.iter().map(|alias| serde_json::Value::String(alias.clone())).collect(),
     );
+    let Some((mut transaction, library_id)) =
+        lock_alias_source_generation(pool, node_id, projection_version).await?
+    else {
+        return Ok(0);
+    };
     let result = sqlx::query(
         "update runtime_graph_node n
          set aliases_json = (
@@ -195,9 +200,9 @@ pub async fn add_runtime_graph_node_aliases(
     .bind(projection_version)
     .bind(&trimmed)
     .bind(incoming_json)
-    .execute(pool)
+    .execute(&mut *transaction)
     .await?;
-    Ok(result.rows_affected())
+    commit_alias_source_generation(transaction, library_id, result.rows_affected()).await
 }
 
 /// Recomputes the structural (parenthetical-gloss) acronym alias subset for a
@@ -240,6 +245,11 @@ pub async fn recompute_runtime_graph_node_structural_aliases(
     let justified_json = serde_json::Value::Array(
         justified_trimmed.iter().map(|a| serde_json::Value::String(a.clone())).collect(),
     );
+    let Some((mut transaction, library_id)) =
+        lock_alias_source_generation(pool, node_id, projection_version).await?
+    else {
+        return Ok(0);
+    };
     let result = sqlx::query(
         // $1 = node_id, $2 = projection_version,
         // $3 = upper_initials (the stale-slot discriminator),
@@ -288,9 +298,9 @@ pub async fn recompute_runtime_graph_node_structural_aliases(
     .bind(&upper_initials)
     .bind(&justified_trimmed)
     .bind(justified_json)
-    .execute(pool)
+    .execute(&mut *transaction)
     .await?;
-    Ok(result.rows_affected())
+    commit_alias_source_generation(transaction, library_id, result.rows_affected()).await
 }
 
 /// Recomputes the structural (parenthetical-gloss) **full-form** alias subset
@@ -340,6 +350,11 @@ pub async fn recompute_runtime_graph_node_fullform_aliases(
     // legitimate extraction-derived aliases of OTHER senses on polysemous
     // short-labeled nodes. A stale gloss-derived full form lingering after a
     // gloss disappears is the lesser harm and is corrected by re-ingest.
+    let Some((mut transaction, library_id)) =
+        lock_alias_source_generation(pool, node_id, projection_version).await?
+    else {
+        return Ok(0);
+    };
     let result = sqlx::query(
         // $1 = node_id, $2 = projection_version,
         // $3 = justified aliases as text[], $4 = same as jsonb (no-op guard).
@@ -368,7 +383,48 @@ pub async fn recompute_runtime_graph_node_fullform_aliases(
     .bind(projection_version)
     .bind(&justified_trimmed)
     .bind(justified_json)
-    .execute(pool)
+    .execute(&mut *transaction)
     .await?;
-    Ok(result.rows_affected())
+    commit_alias_source_generation(transaction, library_id, result.rows_affected()).await
+}
+
+// Alias backfill can change a published topology without republishing its
+// snapshot. Lock the library before the node and commit the receipt fence with
+// the changed aliases, so a validated prepared artifact cannot survive the write.
+async fn lock_alias_source_generation(
+    pool: &PgPool,
+    node_id: Uuid,
+    projection_version: i64,
+) -> Result<Option<(Transaction<'static, Postgres>, Uuid)>, sqlx::Error> {
+    let mut transaction = pool.begin().await?;
+    let library_id = sqlx::query_scalar::<_, Uuid>(
+        "select library.id from catalog_library library
+         join runtime_graph_node node on node.library_id = library.id
+         where node.id = $1 and node.projection_version = $2
+         for no key update of library",
+    )
+    .bind(node_id)
+    .bind(projection_version)
+    .fetch_optional(&mut *transaction)
+    .await?;
+    if let Some(library_id) = library_id {
+        Ok(Some((transaction, library_id)))
+    } else {
+        transaction.rollback().await?;
+        Ok(None)
+    }
+}
+
+async fn commit_alias_source_generation(
+    transaction: Transaction<'static, Postgres>,
+    library_id: Uuid,
+    rows_affected: u64,
+) -> Result<u64, sqlx::Error> {
+    super::coordination::commit_runtime_graph_source_mutation(
+        transaction,
+        library_id,
+        rows_affected > 0,
+    )
+    .await?;
+    Ok(rows_affected)
 }

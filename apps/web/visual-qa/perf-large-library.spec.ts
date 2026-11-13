@@ -115,11 +115,30 @@ test.describe('large library perf', () => {
   })
 
   test('backend graph topology cold + warm', async ({ request }) => {
-    const url = `/v1/knowledge/libraries/${PERF_LIBRARY_ID}/graph`
+    const url = `/v1/knowledge/libraries/${PERF_LIBRARY_ID}/graph/preparations`
     const timings: number[] = []
     for (let i = 0; i < 5; i += 1) {
       const start = Date.now()
-      const res = await request.get(url)
+      const admission = await request.post(url)
+      expect(admission.ok()).toBe(true)
+      let preparation = await admission.json()
+      const id = preparation.id as string
+      while (preparation.status !== 'ready') {
+        if (
+          !['queued', 'validating', 'building', 'publishing', 'retrying'].includes(
+            preparation.status,
+          )
+        )
+          throw new Error(`Graph preparation ${preparation.status}`)
+        await new Promise((resolve) =>
+          setTimeout(resolve, Math.max(100, Math.min(preparation.retryAfterMs, 30000))),
+        )
+        const status = await request.get(`${url}/${encodeURIComponent(id)}`)
+        expect(status.ok()).toBe(true)
+        preparation = await status.json()
+        expect(preparation.id).toBe(id)
+      }
+      const res = await request.get(`${url}/${encodeURIComponent(id)}/result`)
       expect(res.status()).toBe(200)
       const bytes = (await res.body()).byteLength
       const elapsed = Date.now() - start

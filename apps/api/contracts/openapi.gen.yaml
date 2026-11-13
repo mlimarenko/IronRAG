@@ -4164,13 +4164,13 @@ paths:
           description: Caller is not authorized for the library
         '404':
           description: Library not found
-  /v1/knowledge/libraries/{libraryId}/graph:
-    get:
+  /v1/knowledge/libraries/{libraryId}/graph/preparations:
+    post:
       tags:
       - knowledge
-      summary: Get knowledge graph workbench.
-      description: Reads the knowledge model derived from ingested documents. These endpoints power graph workbench views, document memory search, context-bundle inspection, and entity/relation drill-downs. Call it when the caller already has the resource identifier and needs the latest authorized server view.
-      operationId: getKnowledgeGraphWorkbench
+      summary: Create knowledge graph preparation.
+      description: Reads the knowledge model derived from ingested documents. These endpoints power graph workbench views, document memory search, context-bundle inspection, and entity/relation drill-downs. Call it to create work or submit a command. Some commands complete synchronously, while ingest, mutation, and runtime work can continue asynchronously.
+      operationId: createKnowledgeGraphPreparation
       parameters:
       - name: libraryId
         in: path
@@ -4181,7 +4181,87 @@ paths:
           format: uuid
       responses:
         '200':
-          description: Knowledge graph topology streamed as ND-JSON
+          description: Existing terminal graph preparation
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/KnowledgeGraphPreparationResponse'
+        '202':
+          description: Graph preparation admitted in the background
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/KnowledgeGraphPreparationResponse'
+        '401':
+          description: Caller is not authenticated
+        '403':
+          description: Caller is not authorized for the library
+        '404':
+          description: Library not found
+        '409':
+          description: Graph projection is not published
+        '503':
+          description: Preparation capacity is temporarily awaiting cleanup
+  /v1/knowledge/libraries/{libraryId}/graph/preparations/{preparationId}:
+    get:
+      tags:
+      - knowledge
+      summary: Get knowledge graph preparation.
+      description: Reads the knowledge model derived from ingested documents. These endpoints power graph workbench views, document memory search, context-bundle inspection, and entity/relation drill-downs. Call it when the caller already has the resource identifier and needs the latest authorized server view.
+      operationId: getKnowledgeGraphPreparation
+      parameters:
+      - name: libraryId
+        in: path
+        description: Library identifier
+        required: true
+        schema:
+          type: string
+          format: uuid
+      - name: preparationId
+        in: path
+        description: Preparation identifier
+        required: true
+        schema:
+          type: string
+          format: uuid
+      responses:
+        '200':
+          description: Small graph preparation status and validated identity
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/KnowledgeGraphPreparationResponse'
+        '401':
+          description: Caller is not authenticated
+        '403':
+          description: Caller is not authorized for the library
+        '404':
+          description: Preparation not found in this library
+  /v1/knowledge/libraries/{libraryId}/graph/preparations/{preparationId}/result:
+    get:
+      tags:
+      - knowledge
+      summary: Get knowledge graph preparation result.
+      description: Reads the knowledge model derived from ingested documents. These endpoints power graph workbench views, document memory search, context-bundle inspection, and entity/relation drill-downs. Call it when the caller already has the resource identifier and needs the latest authorized server view.
+      operationId: getKnowledgeGraphPreparationResult
+      parameters:
+      - name: libraryId
+        in: path
+        description: Library identifier
+        required: true
+        schema:
+          type: string
+          format: uuid
+      - name: preparationId
+        in: path
+        description: Preparation identifier
+        required: true
+        schema:
+          type: string
+          format: uuid
+      responses:
+        '200':
+          description: Complete compact NDJSON graph with validated terminal frame
           content:
             application/x-ndjson:
               schema:
@@ -4190,6 +4270,12 @@ paths:
           description: Caller is not authenticated
         '403':
           description: Caller is not authorized for the library
+        '404':
+          description: Preparation not found in this library
+        '409':
+          description: Preparation is not ready or is superseded
+        '410':
+          description: Preparation has expired
   /v1/knowledge/libraries/{libraryId}/graph/reextract:
     get:
       tags:
@@ -11782,6 +11868,56 @@ components:
         factBackedCount:
           type: integer
           minimum: 0
+    KnowledgeGraphPreparationResponse:
+      type: object
+      required:
+      - id
+      - libraryId
+      - formatVersion
+      - projectionVersion
+      - topologyGeneration
+      - sourceTruthVersion
+      - status
+      - attempts
+      - retryAfterMs
+      - expiresAt
+      - errorCode
+      properties:
+        attempts:
+          type: integer
+          format: int32
+        errorCode:
+          type:
+          - string
+          - 'null'
+        expiresAt:
+          type:
+          - string
+          - 'null'
+          format: date-time
+        formatVersion:
+          type: integer
+          format: int32
+        id:
+          type: string
+          format: uuid
+        libraryId:
+          type: string
+          format: uuid
+        projectionVersion:
+          type: integer
+          format: int64
+        retryAfterMs:
+          type: integer
+          format: int64
+        sourceTruthVersion:
+          type: integer
+          format: int64
+        status:
+          $ref: '#/components/schemas/PreparationStatus'
+        topologyGeneration:
+          type: integer
+          format: int64
     KnowledgeLibraryGeneration:
       type: object
       required:
@@ -13444,6 +13580,18 @@ components:
       - query_run
       - ops_read
       - audit_read
+    PreparationStatus:
+      type: string
+      enum:
+      - queued
+      - validating
+      - building
+      - publishing
+      - ready
+      - retrying
+      - failed
+      - superseded
+      - expired
     PreparedSegmentDetail:
       type: object
       required:

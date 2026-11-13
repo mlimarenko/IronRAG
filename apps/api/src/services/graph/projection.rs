@@ -19,7 +19,7 @@ use crate::{
         repositories::{self, RuntimeGraphSnapshotRow, content_document_list_repository},
     },
     services::graph::{error::GraphServiceError, quality_guard::GraphQualityGuardService},
-    services::knowledge::graph_stream::prewarm_graph_topology_cache,
+    services::knowledge::preparation,
     shared::json_coercion::from_value_or_default,
 };
 
@@ -332,13 +332,7 @@ pub(crate) async fn project_normalized_graph(
     )
     .await
     .context("failed to mark graph snapshot as ready")?;
-    // No explicit invalidate: `schedule_topology_prewarm` rebuilds the
-    // NDJSON and writes it with `SET EX` under the fresh
-    // `graph:{library_id}:v{projection_version}:g{topology_generation}`
-    // key. The generation is advanced by the snapshot upsert, so new
-    // readers naturally miss old bytes while in-flight readers can keep
-    // using the previous key until its TTL expires.
-    schedule_topology_prewarm(state, scope.library_id);
+    admit_topology_preparation(state, scope.library_id).await;
     Ok(GraphProjectionOutcome {
         projection_version: scope.projection_version,
         node_count: projection_writes.nodes.len(),
@@ -724,16 +718,11 @@ async fn persist_rebuild_runtime_graph_snapshot_with_connection(
     Ok(())
 }
 
-/// Dispatches a detached task that rebuilds the NDJSON topology under
-/// the newly published topology generation key so
-/// the next operator GET lands a cache hit. The projection pipeline
-/// returns without waiting: prewarm failure is a soft degradation
-/// (lazy rebuild still works), not a projection failure.
-pub(crate) fn schedule_topology_prewarm(state: &AppState, library_id: Uuid) {
-    let state = state.clone();
-    tokio::spawn(async move {
-        prewarm_graph_topology_cache(&state, library_id).await;
-    });
+/// Publication only admits durable demand; the worker owns preparation.
+pub(crate) async fn admit_topology_preparation(state: &AppState, library_id: Uuid) {
+    if let Err(error) = preparation::admit(state, library_id).await {
+        tracing::warn!(%library_id, %error, "graph topology preparation admission failed");
+    }
 }
 
 async fn synchronize_projection_support_counts(

@@ -48,7 +48,9 @@ pub async fn deactivate_runtime_graph_evidence_by_document(
     library_id: Uuid,
     document_id: Uuid,
 ) -> Result<Vec<RuntimeGraphEvidenceTargetRow>, sqlx::Error> {
-    sqlx::query_as::<_, RuntimeGraphEvidenceTargetRow>(
+    let mut transaction =
+        super::coordination::begin_runtime_graph_source_mutation(pool, library_id).await?;
+    let targets = sqlx::query_as::<_, RuntimeGraphEvidenceTargetRow>(
         "delete from runtime_graph_evidence as evidence
          where evidence.library_id = $1
            and (
@@ -65,8 +67,15 @@ pub async fn deactivate_runtime_graph_evidence_by_document(
     )
     .bind(library_id)
     .bind(document_id)
-    .fetch_all(pool)
-    .await
+    .fetch_all(&mut *transaction)
+    .await?;
+    super::coordination::commit_runtime_graph_source_mutation(
+        transaction,
+        library_id,
+        !targets.is_empty(),
+    )
+    .await?;
+    Ok(targets)
 }
 
 /// Deletes graph evidence for a batch of just-deleted documents and self-heals
@@ -80,7 +89,9 @@ pub async fn deactivate_runtime_graph_evidence_by_documents(
     library_id: Uuid,
     document_ids: &[Uuid],
 ) -> Result<Vec<RuntimeGraphEvidenceTargetRow>, sqlx::Error> {
-    sqlx::query_as::<_, RuntimeGraphEvidenceTargetRow>(
+    let mut transaction =
+        super::coordination::begin_runtime_graph_source_mutation(pool, library_id).await?;
+    let targets = sqlx::query_as::<_, RuntimeGraphEvidenceTargetRow>(
         "delete from runtime_graph_evidence as evidence
          where evidence.library_id = $1
            and (
@@ -97,8 +108,15 @@ pub async fn deactivate_runtime_graph_evidence_by_documents(
     )
     .bind(library_id)
     .bind(document_ids)
-    .fetch_all(pool)
-    .await
+    .fetch_all(&mut *transaction)
+    .await?;
+    super::coordination::commit_runtime_graph_source_mutation(
+        transaction,
+        library_id,
+        !targets.is_empty(),
+    )
+    .await?;
+    Ok(targets)
 }
 
 /// Lists document graph nodes for soft-deleted documents, including nodes

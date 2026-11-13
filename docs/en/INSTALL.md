@@ -45,6 +45,49 @@ Run `./install.sh --help` for the full flag and environment-variable list, or
 `--plan-only` to print the detected profile without writing or deploying
 anything.
 
+## Upgrade from v0.6.2 to v0.6.3
+
+Keep the existing Compose project, `.env`, PostgreSQL volume, content-storage
+volume or bucket, and `IRONRAG_CREDENTIAL_MASTER_KEY`. Take a backup before
+upgrading. Do not recreate volumes or regenerate the key.
+
+In the existing `.env`, change only the application image pins:
+
+```dotenv
+IRONRAG_BACKEND_IMAGE=pipingspace/ironrag-backend:v0.6.3
+IRONRAG_FRONTEND_IMAGE=pipingspace/ironrag-frontend:v0.6.3
+```
+
+From that installation's directory, pull and replace the application services:
+
+```bash
+docker compose pull startup backend worker frontend
+docker compose up -d startup backend worker frontend
+docker compose ps -a
+docker compose logs --tail=80 startup
+```
+
+The backend pin is shared by `startup`, `backend`, and `worker`. Compose runs
+the new startup container before allowing the API and worker to start. For a
+healthy public v0.6.2 installation, no SQL migration is needed: v0.6.3 has the
+same baseline and checksum. Startup validates the existing schema automatically
+and exits successfully without changing the migration ledger. An inconsistent
+ledger or missing schema objects stop startup instead of being silently repaired.
+
+Confirm that `startup` exited with code 0 and the application services are
+healthy. These commands do not pull or replace PostgreSQL, Redis, or object
+storage. No PostgreSQL major-version or vector-extension upgrade is part of
+this procedure.
+
+Update any separately deployed bundled connectors to their `v0.6.3` image tags,
+preserving their configuration. With Helm, update the API and worker backend
+images and the web image together, retain the existing Secrets and storage,
+and let the chart's startup job complete before the application pods start.
+
+Custom full-graph REST clients must replace
+`GET /v1/knowledge/libraries/{libraryId}/graph` with the preparation flow in the
+[release notes](../../CHANGELOG.md#063). The bundled frontend already uses it.
+
 ## From source
 
 ```bash

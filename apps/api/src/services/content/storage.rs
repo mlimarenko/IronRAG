@@ -2,7 +2,10 @@ mod filesystem;
 mod s3;
 pub mod types;
 
-use std::path::{Component, Path, PathBuf};
+use std::{
+    path::{Component, Path, PathBuf},
+    pin::Pin,
+};
 
 use anyhow::anyhow;
 use percent_encoding::percent_decode_str;
@@ -79,6 +82,59 @@ impl StashedContentDirectory {
 }
 
 impl ContentStorageService {
+    pub(crate) async fn write_graph_topology_artifact<R>(
+        &self,
+        workspace_id: Uuid,
+        library_id: Uuid,
+        storage_key: &str,
+        reader: &mut R,
+        max_bytes: u64,
+    ) -> Result<(), ContentServiceError>
+    where
+        R: AsyncRead + Unpin + Send,
+    {
+        validate_graph_topology_key(workspace_id, library_id, storage_key)?;
+        if max_bytes == 0 {
+            return Err(ContentServiceError::InvalidRequest {
+                message: "graph topology artifact stream limit must be greater than zero"
+                    .to_string(),
+            });
+        }
+        match &self.backend {
+            ContentStorageBackend::Filesystem(provider) => {
+                provider.write_topology_stream(storage_key, reader, max_bytes).await
+            }
+            ContentStorageBackend::S3(provider) => {
+                provider.write_stream(storage_key, reader, max_bytes).await
+            }
+        }
+    }
+
+    pub(crate) async fn read_graph_topology_artifact(
+        &self,
+        workspace_id: Uuid,
+        library_id: Uuid,
+        storage_key: &str,
+    ) -> Result<Pin<Box<dyn AsyncRead + Send>>, ContentServiceError> {
+        validate_graph_topology_key(workspace_id, library_id, storage_key)?;
+        match &self.backend {
+            ContentStorageBackend::Filesystem(provider) => provider.read_stream(storage_key).await,
+            ContentStorageBackend::S3(provider) => provider.read_stream(storage_key).await,
+        }
+    }
+
+    pub(crate) async fn delete_graph_topology_artifact(
+        &self,
+        workspace_id: Uuid,
+        library_id: Uuid,
+        storage_key: &str,
+    ) -> Result<bool, ContentServiceError> {
+        validate_graph_topology_key(workspace_id, library_id, storage_key)?;
+        match &self.backend {
+            ContentStorageBackend::Filesystem(provider) => provider.delete(storage_key).await,
+            ContentStorageBackend::S3(provider) => provider.delete(storage_key).await,
+        }
+    }
     pub fn from_settings(settings: &Settings) -> Result<Self, ContentServiceError> {
         let provider = settings.content_storage_provider_kind().map_err(|error| anyhow!(error))?;
         let topology = settings.content_storage_topology_kind().map_err(|error| anyhow!(error))?;
@@ -447,6 +503,32 @@ impl ContentStorageService {
     }
 }
 
+fn validate_graph_topology_key(
+    workspace_id: Uuid,
+    library_id: Uuid,
+    key: &str,
+) -> Result<(), ContentServiceError> {
+    validate_raw_storage_key(key)?;
+    let prefix = format!("graph-topology/{workspace_id}/{library_id}/");
+    let valid = key
+        .strip_prefix(&prefix)
+        .and_then(|suffix| {
+            let (preparation, attempt) = suffix.split_once('/')?;
+            let attempt = attempt.strip_suffix(".ndjson.zst")?;
+            let preparation_id = Uuid::parse_str(preparation).ok()?;
+            let attempt_id = Uuid::parse_str(attempt).ok()?;
+            (preparation == preparation_id.to_string() && attempt == attempt_id.to_string())
+                .then_some(())
+        })
+        .is_some();
+    if !valid {
+        return Err(ContentServiceError::InvalidRequest {
+            message: "invalid graph topology artifact key or scope".to_string(),
+        });
+    }
+    Ok(())
+}
+
 fn validate_raw_storage_key(storage_key: &str) -> Result<(), ContentServiceError> {
     let relative = Path::new(storage_key);
     if storage_key.trim().is_empty()
@@ -545,7 +627,7 @@ fn required_s3_setting(name: &str, value: Option<&str>) -> anyhow::Result<String
 #[cfg(test)]
 mod tests {
     use tempfile::tempdir;
-    use tokio::io::AsyncWriteExt;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use uuid::Uuid;
 
     use crate::domains::deployment::DeploymentTopology;
@@ -570,6 +652,132 @@ mod tests {
                 bucket: None,
             },
         }
+    }
+
+    #[tokio::test]
+    async fn topology_artifacts_are_scoped_and_streamed() {
+        let dir = tempdir().unwrap();
+        let storage = filesystem_storage(&dir);
+        let workspace = Uuid::now_v7();
+        let library = Uuid::now_v7();
+        let key = format!(
+            "graph-topology/{workspace}/{library}/{}/{}.ndjson.zst",
+            Uuid::now_v7(),
+            Uuid::now_v7()
+        );
+        let mut input = &b"artifact bytes"[..];
+        storage
+            .write_graph_topology_artifact(workspace, library, &key, &mut input, 14)
+            .await
+            .unwrap();
+        assert!(storage.read_graph_topology_artifact(Uuid::now_v7(), library, &key).await.is_err());
+        assert!(
+            storage.delete_graph_topology_artifact(workspace, Uuid::now_v7(), &key).await.is_err()
+        );
+        assert!(
+            storage
+                .read_graph_topology_artifact(workspace, library, &format!("{key}/../other"))
+                .await
+                .is_err()
+        );
+        let mut reader =
+            storage.read_graph_topology_artifact(workspace, library, &key).await.unwrap();
+        let mut output = Vec::new();
+        reader.read_to_end(&mut output).await.unwrap();
+        assert_eq!(output, b"artifact bytes");
+        assert!(storage.delete_graph_topology_artifact(workspace, library, &key).await.unwrap());
+        assert!(storage.read_graph_topology_artifact(workspace, library, &key).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn cancelled_topology_write_leaves_only_debt_key_for_cleanup() {
+        use std::{
+            pin::Pin,
+            task::{Context, Poll},
+        };
+        use tokio::io::{AsyncRead, ReadBuf};
+
+        struct PausedReader {
+            started: Option<tokio::sync::oneshot::Sender<()>>,
+            sent: u8,
+        }
+        impl AsyncRead for PausedReader {
+            fn poll_read(
+                mut self: Pin<&mut Self>,
+                _: &mut Context<'_>,
+                buf: &mut ReadBuf<'_>,
+            ) -> Poll<std::io::Result<()>> {
+                if self.sent < 2 {
+                    self.sent += 1;
+                    buf.put_slice(b"partial artifact");
+                    return Poll::Ready(Ok(()));
+                }
+                if let Some(started) = self.started.take() {
+                    started.send(()).expect("test still waits for the staging barrier");
+                }
+                Poll::Pending
+            }
+        }
+
+        let dir = tempdir().unwrap();
+        let storage = filesystem_storage(&dir);
+        let workspace = Uuid::now_v7();
+        let library = Uuid::now_v7();
+        let preparation = Uuid::now_v7();
+        let attempt = Uuid::now_v7();
+        let key =
+            format!("graph-topology/{workspace}/{library}/{preparation}/{attempt}.ndjson.zst");
+        let (started, barrier) = tokio::sync::oneshot::channel();
+        let writer_storage = storage.clone();
+        let writer_key = key.clone();
+        let task = tokio::spawn(async move {
+            let mut reader = PausedReader { started: Some(started), sent: 0 };
+            writer_storage
+                .write_graph_topology_artifact(workspace, library, &writer_key, &mut reader, 128)
+                .await
+        });
+        barrier.await.expect("writer reached the paused read after staging");
+        task.abort();
+        assert!(task.await.unwrap_err().is_cancelled());
+
+        let directory =
+            dir.path().join(format!("graph-topology/{workspace}/{library}/{preparation}"));
+        let mut entries = tokio::fs::read_dir(&directory).await.unwrap();
+        let entry = entries.next_entry().await.unwrap().expect("the debt key remains");
+        assert_eq!(entry.file_name(), std::ffi::OsString::from(format!("{attempt}.ndjson.zst")));
+        assert!(entries.next_entry().await.unwrap().is_none(), "no unowned sibling staging file");
+        assert!(tokio::fs::read(entry.path()).await.unwrap().starts_with(b"partial artifact"));
+        assert!(storage.delete_graph_topology_artifact(workspace, library, &key).await.unwrap());
+        assert!(storage.read_graph_topology_artifact(workspace, library, &key).await.is_err());
+        assert!(!storage.delete_graph_topology_artifact(workspace, library, &key).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn topology_write_guards_scope_and_keeps_oversize_under_debt_key() {
+        let dir = tempdir().unwrap();
+        let storage = filesystem_storage(&dir);
+        let workspace = Uuid::now_v7();
+        let library = Uuid::now_v7();
+        let key = format!(
+            "graph-topology/{workspace}/{library}/{}/{}.ndjson.zst",
+            Uuid::now_v7(),
+            Uuid::now_v7()
+        );
+        let mut input = &b"oversized"[..];
+        assert!(
+            storage
+                .write_graph_topology_artifact(Uuid::now_v7(), library, &key, &mut input, 3)
+                .await
+                .is_err()
+        );
+        assert!(!dir.path().join(&key).exists());
+        assert!(
+            storage
+                .write_graph_topology_artifact(workspace, library, &key, &mut input, 3)
+                .await
+                .is_err()
+        );
+        assert!(storage.delete_graph_topology_artifact(workspace, library, &key).await.unwrap());
     }
 
     #[tokio::test]

@@ -3124,6 +3124,20 @@ export type KnowledgeGraphEvidenceSummary = {
     factBackedCount: number;
 };
 
+export type KnowledgeGraphPreparationResponse = {
+    attempts: number;
+    errorCode: string | null;
+    expiresAt: string | null;
+    formatVersion: number;
+    id: string;
+    libraryId: string;
+    projectionVersion: number;
+    retryAfterMs: number;
+    sourceTruthVersion: number;
+    status: PreparationStatus;
+    topologyGeneration: number;
+};
+
 export type KnowledgeLibraryGeneration = {
     completed_at?: string | null;
     created_at: string;
@@ -3870,6 +3884,8 @@ export type PatchTokenRequest = {
  * Actions that may be granted to a principal.
  */
 export type PermissionKind = 'iam_admin' | 'workspace_admin' | 'workspace_read' | 'library_read' | 'library_write' | 'document_read' | 'document_write' | 'connector_admin' | 'credential_admin' | 'binding_admin' | 'query_run' | 'ops_read' | 'audit_read';
+
+export type PreparationStatus = 'queued' | 'validating' | 'building' | 'publishing' | 'ready' | 'retrying' | 'failed' | 'superseded' | 'expired';
 
 export type PreparedSegmentDetail = {
     codeLanguage?: string | null;
@@ -10003,7 +10019,7 @@ export type ListKnowledgeLibraryGenerationsResponses = {
 
 export type ListKnowledgeLibraryGenerationsResponse = ListKnowledgeLibraryGenerationsResponses[keyof ListKnowledgeLibraryGenerationsResponses];
 
-export type GetKnowledgeGraphWorkbenchData = {
+export type CreateKnowledgeGraphPreparationData = {
     body?: never;
     path: {
         /**
@@ -10012,10 +10028,10 @@ export type GetKnowledgeGraphWorkbenchData = {
         libraryId: string;
     };
     query?: never;
-    url: '/v1/knowledge/libraries/{libraryId}/graph';
+    url: '/v1/knowledge/libraries/{libraryId}/graph/preparations';
 };
 
-export type GetKnowledgeGraphWorkbenchErrors = {
+export type CreateKnowledgeGraphPreparationErrors = {
     /**
      * Caller is not authenticated
      */
@@ -10024,16 +10040,120 @@ export type GetKnowledgeGraphWorkbenchErrors = {
      * Caller is not authorized for the library
      */
     403: unknown;
+    /**
+     * Library not found
+     */
+    404: unknown;
+    /**
+     * Graph projection is not published
+     */
+    409: unknown;
+    /**
+     * Preparation capacity is temporarily awaiting cleanup
+     */
+    503: unknown;
 };
 
-export type GetKnowledgeGraphWorkbenchResponses = {
+export type CreateKnowledgeGraphPreparationResponses = {
     /**
-     * Knowledge graph topology streamed as ND-JSON
+     * Existing terminal graph preparation
+     */
+    200: KnowledgeGraphPreparationResponse;
+    /**
+     * Graph preparation admitted in the background
+     */
+    202: KnowledgeGraphPreparationResponse;
+};
+
+export type CreateKnowledgeGraphPreparationResponse = CreateKnowledgeGraphPreparationResponses[keyof CreateKnowledgeGraphPreparationResponses];
+
+export type GetKnowledgeGraphPreparationData = {
+    body?: never;
+    path: {
+        /**
+         * Library identifier
+         */
+        libraryId: string;
+        /**
+         * Preparation identifier
+         */
+        preparationId: string;
+    };
+    query?: never;
+    url: '/v1/knowledge/libraries/{libraryId}/graph/preparations/{preparationId}';
+};
+
+export type GetKnowledgeGraphPreparationErrors = {
+    /**
+     * Caller is not authenticated
+     */
+    401: unknown;
+    /**
+     * Caller is not authorized for the library
+     */
+    403: unknown;
+    /**
+     * Preparation not found in this library
+     */
+    404: unknown;
+};
+
+export type GetKnowledgeGraphPreparationResponses = {
+    /**
+     * Small graph preparation status and validated identity
+     */
+    200: KnowledgeGraphPreparationResponse;
+};
+
+export type GetKnowledgeGraphPreparationResponse = GetKnowledgeGraphPreparationResponses[keyof GetKnowledgeGraphPreparationResponses];
+
+export type GetKnowledgeGraphPreparationResultData = {
+    body?: never;
+    path: {
+        /**
+         * Library identifier
+         */
+        libraryId: string;
+        /**
+         * Preparation identifier
+         */
+        preparationId: string;
+    };
+    query?: never;
+    url: '/v1/knowledge/libraries/{libraryId}/graph/preparations/{preparationId}/result';
+};
+
+export type GetKnowledgeGraphPreparationResultErrors = {
+    /**
+     * Caller is not authenticated
+     */
+    401: unknown;
+    /**
+     * Caller is not authorized for the library
+     */
+    403: unknown;
+    /**
+     * Preparation not found in this library
+     */
+    404: unknown;
+    /**
+     * Preparation is not ready or is superseded
+     */
+    409: unknown;
+    /**
+     * Preparation has expired
+     */
+    410: unknown;
+};
+
+export type GetKnowledgeGraphPreparationResultResponses = {
+    /**
+     * Complete compact NDJSON graph with validated terminal frame
      */
     200: string;
 };
 
-export type GetKnowledgeGraphWorkbenchResponse = GetKnowledgeGraphWorkbenchResponses[keyof GetKnowledgeGraphWorkbenchResponses];
+export type GetKnowledgeGraphPreparationResultResponse = GetKnowledgeGraphPreparationResultResponses[keyof GetKnowledgeGraphPreparationResultResponses];
 
 export type GetKnowledgeGraphReextractProgressData = {
     body?: never;

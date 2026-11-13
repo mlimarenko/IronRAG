@@ -1,9 +1,11 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import type { ReactNode } from 'react'
 import { MemoryRouter } from 'react-router-dom'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { ScopeSwitcherContext } from '@/app/scope-switcher-context'
+import { GraphPreparationError } from '@/shared/api/knowledge'
+import i18n from '@/shared/i18n'
 import GraphPage from './GraphPage'
 
 const mocks = vi.hoisted(() => ({
@@ -147,6 +149,67 @@ describe('GraphPage', () => {
     renderGraph()
 
     expect(await screen.findByText(/3 \/ 10 nodes/)).toBeInTheDocument()
+  })
+
+  it('aborts the previous library request and the active request on unmount', async () => {
+    mocks.getGraphTopology.mockImplementation(() => new Promise(() => undefined))
+    const view = renderGraph()
+    await waitFor(() => expect(mocks.getGraphTopology).toHaveBeenCalledTimes(1))
+    const first = mocks.getGraphTopology.mock.calls[0]![1].signal as AbortSignal
+    expect(first.aborted).toBe(false)
+    mocks.app.activeLibrary = { id: 'library-2', name: 'Other' }
+    view.rerender(<GraphPage />)
+    await waitFor(() => expect(mocks.getGraphTopology).toHaveBeenCalledTimes(2))
+    expect(first.aborted).toBe(true)
+    const second = mocks.getGraphTopology.mock.calls[1]![1].signal as AbortSignal
+    expect(second.aborted).toBe(false)
+    view.unmount()
+    expect(second.aborted).toBe(true)
+  })
+
+  it('does not install a result from the previous library after navigation', async () => {
+    let resolvePrevious!: (value: typeof topology) => void
+    mocks.getGraphTopology.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          resolvePrevious = resolve
+        }),
+    )
+    const view = renderGraph()
+    await waitFor(() => expect(mocks.getGraphTopology).toHaveBeenCalledTimes(1))
+    mocks.app.activeLibrary = { id: 'library-2', name: 'Other' }
+    view.rerender(<GraphPage />)
+    expect(await screen.findByTestId('graph-canvas')).toHaveTextContent('Pipeline')
+    await act(async () =>
+      resolvePrevious({
+        ...topology,
+        entities: [{ ...topology.entities[0]!, canonicalLabel: 'Obsolete' }],
+      }),
+    )
+    expect(screen.getByTestId('graph-canvas')).not.toHaveTextContent('Obsolete')
+  })
+
+  it('shows a terminal preparation error and retries only on request', async () => {
+    mocks.getGraphTopology.mockRejectedValueOnce(new GraphPreparationError('expired'))
+    renderGraph()
+    expect(await screen.findByRole('alert')).toHaveTextContent('Graph preparation expired')
+    expect(mocks.getGraphTopology).toHaveBeenCalledTimes(1)
+    fireEvent.click(screen.getByRole('button', { name: 'Try again' }))
+    expect(await screen.findByTestId('graph-canvas')).toHaveTextContent('Pipeline')
+    expect(mocks.getGraphTopology).toHaveBeenCalledTimes(2)
+  })
+
+  it('shows a localized failure rather than a parser error', async () => {
+    await i18n.changeLanguage('ru')
+    try {
+      mocks.getGraphTopology.mockRejectedValueOnce(new Error('Invalid graph terminal counts'))
+      renderGraph()
+      const alert = await screen.findByRole('alert')
+      expect(alert).toHaveTextContent('Не удалось загрузить граф')
+      expect(alert).not.toHaveTextContent('Invalid graph terminal counts')
+    } finally {
+      await i18n.changeLanguage('en')
+    }
   })
 
   it('opens a deep-linked entity and fetches its real detail', async () => {

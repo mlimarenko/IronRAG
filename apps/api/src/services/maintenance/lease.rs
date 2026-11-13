@@ -52,6 +52,7 @@ pub enum MaintenanceClass {
     GcHistoricalProjection,
     GraphProjection,
     GraphReextractAdmission,
+    GraphTopologyPreparation,
 }
 
 impl MaintenanceClass {
@@ -64,6 +65,7 @@ impl MaintenanceClass {
             Self::GcHistoricalProjection => "gc.historical-projection",
             Self::GraphProjection => "graph.projection",
             Self::GraphReextractAdmission => "graph.reextract-periodic-admission",
+            Self::GraphTopologyPreparation => "graph.topology-preparation",
         }
     }
 
@@ -77,6 +79,7 @@ impl MaintenanceClass {
             "gc.historical-projection" => Self::GcHistoricalProjection,
             "graph.projection" => Self::GraphProjection,
             "graph.reextract-periodic-admission" => Self::GraphReextractAdmission,
+            "graph.topology-preparation" => Self::GraphTopologyPreparation,
             _ => return None,
         })
     }

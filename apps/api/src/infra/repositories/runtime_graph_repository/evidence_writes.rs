@@ -325,12 +325,20 @@ async fn recalculate_runtime_graph_support_counts_by_ids(
 
     let mut rows_affected = 0_u64;
     for batch in target_ids.chunks(SUPPORT_COUNT_RECALCULATION_BATCH_SIZE) {
+        let mut transaction =
+            super::coordination::begin_runtime_graph_source_mutation(pool, library_id).await?;
         let result = sqlx::query(sqlx::AssertSqlSafe(sql))
             .bind(library_id)
             .bind(projection_version)
             .bind(batch)
-            .execute(pool)
+            .execute(&mut *transaction)
             .await?;
+        super::coordination::commit_runtime_graph_source_mutation(
+            transaction,
+            library_id,
+            result.rows_affected() > 0,
+        )
+        .await?;
         rows_affected = rows_affected.saturating_add(result.rows_affected());
     }
     Ok(rows_affected)

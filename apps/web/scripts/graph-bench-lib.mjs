@@ -251,11 +251,24 @@ export function topologyToNdjsonFrames(topology, { rowsPerFrame = 4000 } = {}) {
   const frames = []
   const nodeCount = entities.length + documents.length
   const edgeCount = relations.length + documentLinks.length
-  frames.push({ s: 'meta', node_count: nodeCount, edge_count: edgeCount })
+  frames.push({
+    s: 'meta',
+    v: 1,
+    library_id: 'bench-library',
+    preparation_id: 'bench-preparation',
+    projection_version: 1,
+    topology_generation: 1,
+    source_truth_version: 1,
+    generated_at: '2026-01-01T00:00:00Z',
+    node_count: nodeCount,
+    edge_count: edgeCount,
+    document_count: documents.length,
+  })
 
   const idEntries = []
   for (const entity of entities) idEntries.push([fixtureUuid(entity.num), entity.num])
   for (const doc of documents) idEntries.push([fixtureUuid(doc.num), doc.num])
+  if (idEntries.length === 0) frames.push({ s: 'id_map', m: {} })
   for (let start = 0; start < idEntries.length; start += rowsPerFrame * 2) {
     frames.push({
       s: 'id_map',
@@ -289,7 +302,13 @@ export function topologyToNdjsonFrames(topology, { rowsPerFrame = 4000 } = {}) {
     frames.push({ s: 'doc_links', d: documentLinks.slice(start, start + rowsPerFrame * 2) })
   }
 
-  frames.push({ s: 'end' })
+  frames.push({
+    s: 'end',
+    preparation_id: 'bench-preparation',
+    node_count: nodeCount,
+    edge_count: edgeCount,
+    document_count: documents.length,
+  })
   return frames
 }
 

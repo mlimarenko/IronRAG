@@ -197,6 +197,7 @@ async fn targeted_admission_requires_every_source_and_scopes_incident_edges() ->
             ("missing-document", true, Some((None, Some(current.1))), "related", false, 1),
             ("missing-revision", true, Some((Some(current.0), None)), "related", false, 1),
             ("mismatched-lineage", true, Some((Some(current.0), Some(stale.1))), "related", false, 1),
+            ("foreign-lineage", true, Some((Some(foreign_source.0), Some(foreign_source.1))), "related", false, 1),
             ("suppressed", true, Some((Some(suppressed.0), Some(suppressed.1))), "related", false, 1),
             ("no-evidence", false, None, "related", false, 1),
             ("blank", true, None, "   ", false, 1),
@@ -250,6 +251,12 @@ async fn targeted_admission_requires_every_source_and_scopes_incident_edges() ->
                 if let Some(source) = extra_source.filter(|_| id != peer_id) {
                     seed_admission_evidence(&pool, fixture.library.id, kind, id, source).await?;
                 }
+            }
+            if name == "no-evidence" {
+                // Neither a different kind nor a different library can support this edge.
+                seed_admission_evidence(&pool, fixture.library.id, "node", edge_id, current_source).await?;
+                seed_admission_evidence(&pool, other.library.id, "edge", edge_id,
+                    (Some(foreign_source.0), Some(foreign_source.1))).await?;
             }
             requested_nodes.extend([node_id, peer_id]);
             requested_edges.push(edge_id);

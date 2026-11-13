@@ -1,5 +1,57 @@
-use super::render::{doc_to_value, entity_to_value, push_batched_section, render_compact_topology};
+use super::render::{doc_to_value, entity_to_value, push_batched_section, render_ndjson_into};
+use crate::services::knowledge::preparation::GraphTopologyIdentity;
+
+#[test]
+fn rendering_propagates_writer_failure() {
+    struct FailingWriter;
+    impl std::io::Write for FailingWriter {
+        fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+            Err(std::io::Error::other("storage unavailable"))
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    let result = push_batched_section(&mut FailingWriter, "items", &[1], 1, |value| json!(value));
+    assert!(result.is_err());
+}
 use super::*;
+
+#[test]
+fn renderer_batches_id_map_and_emits_empty_receipt() {
+    let library_id = Uuid::nil();
+    let identity = GraphTopologyIdentity {
+        workspace_id: Uuid::nil(),
+        library_id,
+        projection_version: 1,
+        topology_generation: 0,
+        source_truth_version: 1,
+    };
+    let preparation_id = Uuid::from_u128(77);
+    let mut topology = empty_topology(library_id, 1, 0);
+    let mut bytes = Vec::new();
+    render_ndjson_into(&mut bytes, &topology, &identity, preparation_id).unwrap();
+    let frames: Vec<Value> = bytes
+        .split(|b| *b == b'\n')
+        .filter(|line| !line.is_empty())
+        .map(|line| serde_json::from_slice(line).unwrap())
+        .collect();
+    assert_eq!(frames.len(), 3);
+    assert_eq!(frames[1], json!({"s": "id_map", "m": {}}));
+    assert_eq!(frames[2]["node_count"], 0);
+    topology.id_map = (1..=2049).map(|n| (Uuid::from_u128(n), n as u32)).collect();
+    bytes.clear();
+    render_ndjson_into(&mut bytes, &topology, &identity, preparation_id).unwrap();
+    let frames: Vec<Value> = bytes
+        .split(|b| *b == b'\n')
+        .filter(|line| !line.is_empty())
+        .map(|line| serde_json::from_slice(line).unwrap())
+        .collect();
+    let maps: Vec<_> = frames.iter().filter(|frame| frame["s"] == "id_map").collect();
+    assert_eq!(maps.len(), 3);
+    assert_eq!(maps.iter().map(|frame| frame["m"].as_object().unwrap().len()).sum::<usize>(), 2049);
+}
 
 fn snapshot(
     graph_status: &str,
@@ -42,45 +94,6 @@ fn published_snapshot_identity_rejects_invalid_states_and_counts() {
             .expect("published snapshot identity"),
         (7, 11)
     );
-}
-
-#[test]
-fn cache_key_includes_topology_generation() {
-    let library_id = Uuid::parse_str("019dcb4d-49f4-7cb1-a19b-f9ee0a10c509").expect("valid uuid");
-
-    assert_eq!(cache_key(library_id, 7, 42), "graph:019dcb4d-49f4-7cb1-a19b-f9ee0a10c509:v7:g42");
-}
-
-#[test]
-fn render_empty_emits_expected_unpublished_topology() {
-    let library_id = Uuid::nil();
-    let lines: Vec<Value> = String::from_utf8(render_empty(
-        library_id,
-        INITIAL_PROJECTION_VERSION,
-        UNPUBLISHED_TOPOLOGY_GENERATION,
-    ))
-    .expect("NDJSON is UTF-8")
-    .lines()
-    .map(|line| serde_json::from_str(line).expect("valid JSON frame"))
-    .collect();
-
-    assert_eq!(lines.len(), 3);
-    assert_eq!(
-        lines[0],
-        json!({
-            "s": "meta",
-            "v": 1,
-            "library_id": library_id,
-            "projection_version": 1,
-            "topology_generation": 0,
-            "generated_at": lines[0]["generated_at"],
-            "node_count": 0,
-            "edge_count": 0,
-            "document_count": 0,
-        })
-    );
-    assert_eq!(lines[1], json!({ "s": "id_map", "m": {} }));
-    assert_eq!(lines[2], json!({ "s": "end" }));
 }
 
 #[test]
@@ -128,7 +141,17 @@ fn render_compact_topology_preserves_the_compact_ndjson_contract() {
         }],
     };
 
-    let lines: Vec<Value> = String::from_utf8(render_compact_topology(&topology))
+    let identity = GraphTopologyIdentity {
+        workspace_id: Uuid::nil(),
+        library_id,
+        projection_version: 3,
+        topology_generation: 5,
+        source_truth_version: 9,
+    };
+    let preparation_id = Uuid::from_u128(42);
+    let mut bytes = Vec::new();
+    render_ndjson_into(&mut bytes, &topology, &identity, preparation_id).unwrap();
+    let lines: Vec<Value> = String::from_utf8(bytes)
         .expect("NDJSON is UTF-8")
         .lines()
         .map(|line| serde_json::from_str(line).expect("valid JSON frame"))
@@ -148,7 +171,11 @@ fn render_compact_topology_preserves_the_compact_ndjson_contract() {
     );
     assert_eq!(lines[4], json!({ "s": "edges", "d": [[2, 2, "relates_to", 1]] }));
     assert_eq!(lines[5], json!({ "s": "doc_links", "d": [[1, 2, "supports", 4]] }));
-    assert_eq!(lines[6], json!({ "s": "end" }));
+    assert_eq!(lines[0]["source_truth_version"], 9);
+    assert_eq!(
+        lines[6],
+        json!({ "s": "end", "preparation_id": preparation_id, "node_count": 2, "edge_count": 2, "document_count": 1 })
+    );
 }
 
 #[test]
@@ -381,7 +408,7 @@ fn compact_values_omit_defaults_and_invalid_aliases() {
 fn batched_sections_keep_all_values_in_order() {
     let mut buffer = Vec::new();
 
-    push_batched_section(&mut buffer, "items", &[1, 2, 3], 2, |value| json!(value));
+    push_batched_section(&mut buffer, "items", &[1, 2, 3], 2, |value| json!(value)).unwrap();
 
     let lines: Vec<Value> = String::from_utf8(buffer)
         .expect("NDJSON is UTF-8")

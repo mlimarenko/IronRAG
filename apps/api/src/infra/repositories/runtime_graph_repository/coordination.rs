@@ -814,6 +814,44 @@ pub async fn release_runtime_library_graph_lock(
     transaction.commit().await
 }
 
+/// Starts one bounded standalone graph mutation under the source receipt lock.
+/// Lifecycle-owned writes use their existing transaction and generation policy.
+pub(crate) async fn begin_runtime_graph_source_mutation(
+    pool: &PgPool,
+    library_id: Uuid,
+) -> Result<Transaction<'static, Postgres>, sqlx::Error> {
+    let mut transaction = pool.begin().await?;
+    lock_runtime_graph_source_mutation(&mut transaction, library_id).await?;
+    Ok(transaction)
+}
+
+pub(crate) async fn lock_runtime_graph_source_mutation(
+    connection: &mut sqlx::PgConnection,
+    library_id: Uuid,
+) -> Result<(), sqlx::Error> {
+    sqlx::query_scalar::<_, Uuid>("select id from catalog_library where id = $1 for no key update")
+        .bind(library_id)
+        .fetch_optional(connection)
+        .await?;
+    Ok(())
+}
+
+/// Commits a graph change and its source receipt invalidation atomically.
+pub(crate) async fn commit_runtime_graph_source_mutation(
+    mut transaction: Transaction<'static, Postgres>,
+    library_id: Uuid,
+    changed: bool,
+) -> Result<(), sqlx::Error> {
+    if changed {
+        catalog_repository::touch_library_source_truth_version_with_executor(
+            &mut *transaction,
+            library_id,
+        )
+        .await?;
+    }
+    transaction.commit().await
+}
+
 /// Acquires the cross-process library merge lock. It deliberately uses a
 /// separate advisory namespace from projection publication so a reconcile can
 /// publish its projection without self-deadlocking on a second connection.

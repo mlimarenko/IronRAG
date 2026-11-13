@@ -1660,6 +1660,11 @@
       "suppressed": "Suppressed"
     },
     "failedToLoad": "Could not load the graph",
+    "preparation": {
+      "failed": "Graph preparation failed. Try again.",
+      "expired": "Graph preparation expired. Try again.",
+      "superseded": "The graph changed during preparation. Try again."
+    },
     "filters": "Filters",
     "fit": "Show everything",
     "goToDocuments": "Go to documents",
