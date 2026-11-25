@@ -80,6 +80,12 @@ spec:
           volumeMounts:
             - name: tmp
               mountPath: /tmp
+            # The native Xberg extractor stages its private disk workspace in
+            # /var/tmp (integrations/xberg/runtime.rs). readOnlyRootFilesystem
+            # makes that path unwritable unless the workload mounts the shared
+            # disk-backed tmp volume there, exactly as the worker template does.
+            - name: tmp
+              mountPath: /var/tmp
             {{- if eq .Values.storage.provider "filesystem" }}
             - name: content-storage
               mountPath: {{ .Values.storage.rootPath }}

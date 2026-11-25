@@ -277,6 +277,64 @@ def verified_case_definition(case: dict[str, Any]) -> BenchmarkCase:
     return definition
 
 
+def verified_history_turn(
+    definition: BenchmarkCase,
+    turns: list[dict[str, Any]],
+    index: int,
+    recorded: dict[str, Any],
+) -> BenchmarkCase:
+    """Rebind one recorded turn to its expected policy and check the persisted identity."""
+    expected = (
+        preceding_turn_case(definition, turns[index])
+        if index < len(turns)
+        else definition
+    )
+    recorded_definition = verified_case_definition(recorded)
+    if recorded_definition != replace(expected, preceding_turns=[]):
+        raise ValueError("turn history expectation definition differs")
+    if (
+        recorded.get("question") != expected.question
+        or recorded.get("caseId") != expected.case_id
+    ):
+        raise ValueError("turn history identity differs")
+    return expected
+
+
+def turn_history_failures(
+    definition: BenchmarkCase,
+    turns: list[dict[str, Any]],
+    history: list[dict[str, Any]],
+    case: dict[str, Any],
+    *,
+    expected_library_id: str | None,
+    expected_workspace_id: str | None,
+) -> list[str]:
+    """Recompute every recorded turn and return its prefixed failures."""
+    failures: list[str] = []
+    seen: set[str] = set()
+    for index, recorded in enumerate(history):
+        expected = verified_history_turn(definition, turns, index, recorded)
+        verdict = recompute_turn_evaluation(
+            recorded,
+            expected_library_id=expected_library_id,
+            expected_workspace_id=expected_workspace_id,
+        )
+        execution = recorded["rawEvaluationEvidence"]["turnPayload"]["execution"]
+        if execution["id"] in seen or (
+            turns and execution["conversationId"] != case.get("querySessionId")
+        ):
+            raise ValueError("turn history execution/session identity differs")
+        seen.add(execution["id"])
+        if index < len(turns):
+            failures.extend(
+                f"turn:{expected.case_id}:{failure}"
+                for failure in verdict["failedChecks"]
+            )
+        elif recorded["rawEvaluationEvidence"] != case["rawEvaluationEvidence"]:
+            raise ValueError("final turn history differs from final query evidence")
+    return failures
+
+
 def recompute_case_evaluation(
     case: dict[str, Any],
     *,
@@ -301,39 +359,16 @@ def recompute_case_evaluation(
     )
     if history is None:
         return final
-    seen: set[str] = set()
-    for index, recorded in enumerate(history):
-        expected = (
-            preceding_turn_case(definition, turns[index])
-            if index < len(turns)
-            else definition
-        )
-        recorded_definition = verified_case_definition(recorded)
-        if recorded_definition != replace(expected, preceding_turns=[]):
-            raise ValueError("turn history expectation definition differs")
-        if (
-            recorded.get("question") != expected.question
-            or recorded.get("caseId") != expected.case_id
-        ):
-            raise ValueError("turn history identity differs")
-        verdict = recompute_turn_evaluation(
-            recorded,
+    final["failedChecks"].extend(
+        turn_history_failures(
+            definition,
+            turns,
+            history,
+            case,
             expected_library_id=expected_library_id,
             expected_workspace_id=expected_workspace_id,
         )
-        execution = recorded["rawEvaluationEvidence"]["turnPayload"]["execution"]
-        if execution["id"] in seen or (
-            turns and execution["conversationId"] != case.get("querySessionId")
-        ):
-            raise ValueError("turn history execution/session identity differs")
-        seen.add(execution["id"])
-        if index < len(turns):
-            final["failedChecks"].extend(
-                f"turn:{expected.case_id}:{failure}"
-                for failure in verdict["failedChecks"]
-            )
-        elif recorded["rawEvaluationEvidence"] != case["rawEvaluationEvidence"]:
-            raise ValueError("final turn history differs from final query evidence")
+    )
     final["passed"] = not final["failedChecks"]
     return final
 
@@ -1566,6 +1601,123 @@ def build_completeness_comparison(
     }
 
 
+def cost_scope_summaries(
+    scope: str,
+    baseline_cases: dict[str, dict[str, Any]],
+    candidate_cases: dict[str, dict[str, Any]],
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Build both scope summaries; the scope names the audited accounting unit."""
+    if scope == "conversation_query_execution_union":
+        return (
+            build_conversation_cost_summary(list(baseline_cases.values())),
+            build_conversation_cost_summary(list(candidate_cases.values())),
+        )
+    if scope == "final_turn_query_execution_tree":
+        return (
+            build_cost_summary(list(baseline_cases.values())),
+            build_cost_summary(list(candidate_cases.values())),
+        )
+    raise ValueError("invalid cost comparison scope")
+
+
+def indexed_turn_costs(
+    cases: dict[str, dict[str, Any]]
+) -> dict[str, dict[str, Any]]:
+    """Index conversation turns by case and turn for the union scope."""
+    return {
+        f"{key}/{turn.get('caseId')}": turn
+        for key, case in cases.items()
+        for turn in conversation_cost_records([case])
+    }
+
+
+def cost_coverage_rank(counts: dict[str, int]) -> int:
+    ranks = {"complete": 3, "partial": 2, "unknown": 1}
+    return max((ranks.get(key, 0) for key, count in counts.items() if count), default=0)
+
+
+def cost_coverage_downgrades(
+    baseline_cases: dict[str, dict[str, Any]],
+    candidate_cases: dict[str, dict[str, Any]],
+) -> list[str]:
+    """Cases whose best observed cost coverage fell between the runs."""
+    downgrades: list[str] = []
+    for key, case in baseline_cases.items():
+        before = build_cost_summary([case])["coverageCounts"]
+        after = (
+            build_cost_summary([candidate_cases[key]])["coverageCounts"]
+            if key in candidate_cases
+            else {}
+        )
+        if cost_coverage_rank(before) > cost_coverage_rank(after):
+            downgrades.append(key)
+    return downgrades
+
+
+def currency_change(
+    old: str | None, new: str | None, budget: Decimal | None
+) -> tuple[dict[str, Any], bool]:
+    """One currency's delta, percentage and whether it exceeds the budget."""
+    delta = percent = None
+    regressed = False
+    if old is not None and new is not None:
+        with localcontext() as context:
+            context.prec = 256
+            before, after = Decimal(old), Decimal(new)
+            delta = format(after - before, "f")
+            if before:
+                percent = format((after - before) * 100 / before, "f")
+            elif after == 0:
+                percent = "0"
+            regressed = budget is not None and (after - before) * 100 > before * budget
+    return {
+        "baseline": old,
+        "candidate": new,
+        "delta": delta,
+        "regressionPercent": percent,
+    }, regressed
+
+
+def currency_changes(
+    baseline: dict[str, Any], candidate: dict[str, Any], budget: Decimal | None
+) -> tuple[dict[str, dict[str, Any]], list[str]]:
+    """Per-currency deltas and the currencies that exceed the regression budget."""
+    currencies = sorted(
+        set(baseline["observedTotalsByCurrency"])
+        | set(candidate["observedTotalsByCurrency"])
+    )
+    changes: dict[str, dict[str, Any]] = {}
+    regressions: list[str] = []
+    for currency in currencies:
+        change, regressed = currency_change(
+            baseline["observedTotalsByCurrency"].get(currency),
+            candidate["observedTotalsByCurrency"].get(currency),
+            budget,
+        )
+        changes[currency] = change
+        if regressed:
+            regressions.append(currency)
+    return changes, regressions
+
+
+def paired_cost_currencies(
+    baseline: dict[str, Any],
+    candidate: dict[str, Any],
+    baseline_cases: dict[str, dict[str, Any]],
+    candidate_cases: dict[str, dict[str, Any]],
+) -> bool:
+    """Both runs complete and every case reports the same currency coverage."""
+    if not (baseline["complete"] and candidate["complete"]):
+        return False
+    return all(
+        build_cost_summary([baseline_cases[key]])["observedTotalsByCurrency"].keys()
+        == build_cost_summary([candidate_cases.get(key, {})])[
+            "observedTotalsByCurrency"
+        ].keys()
+        for key in baseline_cases
+    )
+
+
 def build_cost_comparison(
     baseline_matrix: dict[str, Any],
     candidate_matrix: dict[str, Any],
@@ -1581,80 +1733,17 @@ def build_cost_comparison(
         == candidate_cases[key].get("casePolicy", {}).get("preceding_turns", [])
         for key, case in baseline_cases.items()
     )
+    baseline, candidate = cost_scope_summaries(scope, baseline_cases, candidate_cases)
     if scope == "conversation_query_execution_union":
-        baseline = build_conversation_cost_summary(list(baseline_cases.values()))
-        candidate = build_conversation_cost_summary(list(candidate_cases.values()))
-
-        def indexed_turn_costs(cases):
-            return {
-                f"{key}/{turn.get('caseId')}": turn
-                for key, case in cases.items()
-                for turn in conversation_cost_records([case])
-            }
-
         baseline_cases = indexed_turn_costs(baseline_cases)
         candidate_cases = indexed_turn_costs(candidate_cases)
-    elif scope == "final_turn_query_execution_tree":
-        baseline = build_cost_summary(list(baseline_cases.values()))
-        candidate = build_cost_summary(list(candidate_cases.values()))
-    else:
-        raise ValueError("invalid cost comparison scope")
-    downgrades: list[str] = []
-    ranks = {"complete": 3, "partial": 2, "unknown": 1}
-    for key, case in baseline_cases.items():
-        before = build_cost_summary([case])["coverageCounts"]
-        after = (
-            build_cost_summary([candidate_cases[key]])["coverageCounts"]
-            if key in candidate_cases
-            else {}
-        )
-        if max(
-            (ranks.get(k, 0) for k, count in before.items() if count), default=0
-        ) > max((ranks.get(k, 0) for k, count in after.items() if count), default=0):
-            downgrades.append(key)
-    currencies = sorted(
-        set(baseline["observedTotalsByCurrency"])
-        | set(candidate["observedTotalsByCurrency"])
-    )
-    changes = {}
-    regressions = []
-    for currency in currencies:
-        old = baseline["observedTotalsByCurrency"].get(currency)
-        new = candidate["observedTotalsByCurrency"].get(currency)
-        delta = percent = None
-        if old is not None and new is not None:
-            with localcontext() as context:
-                context.prec = 256
-                before, after = Decimal(old), Decimal(new)
-                delta = format(after - before, "f")
-                if before:
-                    percent = format((after - before) * 100 / before, "f")
-                elif after == 0:
-                    percent = "0"
-                if budget is not None and (after - before) * 100 > before * budget:
-                    regressions.append(currency)
-        changes[currency] = {
-            "baseline": old,
-            "candidate": new,
-            "delta": delta,
-            "regressionPercent": percent,
-        }
-    paired_currencies = (
-        all(
-            build_cost_summary([baseline_cases[key]])["observedTotalsByCurrency"].keys()
-            == build_cost_summary([candidate_cases.get(key, {})])[
-                "observedTotalsByCurrency"
-            ].keys()
-            for key in baseline_cases
-        )
-        if baseline["complete"] and candidate["complete"]
-        else False
-    )
+    downgrades = cost_coverage_downgrades(baseline_cases, candidate_cases)
+    changes, regressions = currency_changes(baseline, candidate, budget)
     comparable = (
         baseline["complete"]
         and candidate["complete"]
         and baseline_cases.keys() == candidate_cases.keys()
-        and paired_currencies
+        and paired_cost_currencies(baseline, candidate, baseline_cases, candidate_cases)
         and definitions_match
     )
     return {

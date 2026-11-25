@@ -267,6 +267,26 @@ export function auditSelectedFacets(
   return result
 }
 
+function auditAssistantCostLabel(
+  call: NonNullable<AuditEvent['assistantCall']>,
+  locale: Locale,
+  t: TFunction,
+): string {
+  if (call.costCoverage === 'unknown') {
+    return t('admin.auditAssistantCostUnknown', { count: call.unpricedProviderCallCount })
+  }
+  if (call.costCoverage && call.totalCost != null && call.currencyCode) {
+    const amount = formatCurrencyAmount(call.totalCost, call.currencyCode, locale, 4)
+    return call.costCoverage === 'partial'
+      ? t('admin.auditAssistantCostPartial', {
+          cost: amount,
+          count: call.unpricedProviderCallCount,
+        })
+      : amount
+  }
+  return t('admin.auditAssistantCostUnavailable')
+}
+
 export function auditGridColumns({
   locale,
   t,
@@ -303,18 +323,15 @@ export function auditGridColumns({
                   : t('admin.auditAssistantNoModel')}
               </small>
               <small>
-                {t('admin.auditAssistantMeta', {
-                  count: event.assistantCall.providerCallCount,
-                  cost:
-                    event.assistantCall.totalCost != null && event.assistantCall.currencyCode
-                      ? formatCurrencyAmount(
-                          event.assistantCall.totalCost,
-                          event.assistantCall.currencyCode,
-                          locale,
-                          4,
-                        )
-                      : t('admin.auditAssistantCostUnavailable'),
-                })}
+                {t(
+                  event.assistantCall.costCoverage
+                    ? 'admin.auditAssistantCompletedMeta'
+                    : 'admin.auditAssistantMeta',
+                  {
+                    count: event.assistantCall.providerCallCount,
+                    cost: auditAssistantCostLabel(event.assistantCall, locale, t),
+                  },
+                )}
               </small>
             </>
           ) : null}

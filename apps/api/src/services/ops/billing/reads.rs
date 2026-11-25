@@ -1,5 +1,17 @@
 use super::*;
 
+/// Absence contract for one execution cost read: no fabricated row identity,
+/// timestamp or currency is produced for an execution without cost evidence.
+fn no_execution_cost_evidence(
+    execution_kind: BillingExecutionOwnerKind,
+    execution_id: Uuid,
+) -> ApiError {
+    ApiError::NotFound(format!(
+        "billing_execution_cost for {} {execution_id} has no measured provider call",
+        execution_kind.as_str()
+    ))
+}
+
 impl BillingService {
     /// Lists a keyset page of provider-call rows for a single execution,
     /// newest-first. `cursor` is the `(started_at, id)` of the last row of
@@ -93,10 +105,18 @@ impl BillingService {
 
     /// Loads the rolled-up billing cost for a single execution.
     ///
+    /// There is no fabricated measurement: an execution with no provider call,
+    /// and no stored row that records one, has no cost evidence to serve, so this
+    /// returns [`ApiError::NotFound`] for the `billing_execution_cost`
+    /// sub-resource instead of inventing a row identity, currency and a complete
+    /// zero. A stored row is mapped only when it records at least one settled or
+    /// unpriced call.
+    ///
     /// # Errors
     ///
-    /// Returns an [`ApiError`] when the execution kind is invalid, the repository query fails, or a
-    /// persisted billing row cannot be mapped back into the domain type.
+    /// Returns an [`ApiError`] when the execution kind is invalid, the repository
+    /// query fails, a persisted billing row cannot be mapped back into the domain
+    /// type, or no cost evidence exists for the execution.
     pub async fn get_execution_cost(
         &self,
         state: &AppState,
@@ -119,49 +139,54 @@ impl BillingService {
             snapshot.terminal_error_code.as_deref(),
         )?;
         let expected_aggregate_count =
-            i32::try_from(snapshot.grounded_answer_provider_call_count).unwrap_or(i32::MAX);
+            i32::try_from(snapshot.settled_provider_call_count).unwrap_or(i32::MAX);
+        // A missing aggregate is repairable only while a settled call exists;
+        // a mismatched count means the derived row no longer describes the
+        // ledger. Reservations that never completed are not settled calls,
+        // so they never make the aggregate look stale.
         let aggregate_missing_or_mismatched = snapshot.execution_cost.as_ref().map_or_else(
-            || snapshot.grounded_answer_provider_call_count > 0,
-            |cost| {
-                snapshot.grounded_answer_provider_call_count == 0
-                    || cost.provider_call_count != expected_aggregate_count
-            },
+            || snapshot.settled_provider_call_count > 0,
+            |cost| cost.provider_call_count != expected_aggregate_count,
         );
         let untracked_pipeline_cost = !snapshot.rollup_state_present
-            && (snapshot.grounded_answer_provider_call_count > 0
-                || snapshot.execution_cost.is_some());
+            && (snapshot.settled_provider_call_count > 0 || snapshot.execution_cost.is_some());
         if snapshot.rollup_dirty || untracked_pipeline_cost || aggregate_missing_or_mismatched {
             // Dirty generations, missing durable cursors, and defensive count
             // mismatches repair under the same advisory lock used by writers.
             // Clean, matching rows no longer pay for an unconditional
             // aggregate rebuild on every GET.
-            return self
+            let repaired = self
                 .roll_up_execution_cost_with_retry(state, execution_kind_key, execution_id)
-                .await?
-                .ok_or_else(|| {
-                    ApiError::resource_not_found("billing_execution_cost", execution_id)
-                });
+                .await?;
+            return match repaired {
+                Some(cost)
+                    if execution_cost_has_observation(
+                        cost.provider_call_count,
+                        cost.unpriced_provider_call_count,
+                    ) =>
+                {
+                    Ok(cost)
+                }
+                _ => Err(no_execution_cost_evidence(execution_kind, execution_id)),
+            };
         }
 
-        if let Some(row) = snapshot.execution_cost {
-            return map_execution_cost_row(row).map_err(ApiError::BadRequest);
+        // The evidence rule is applied to the mapped domain value so the stored
+        // row and the just-repaired rollup share one boundary.
+        match snapshot.execution_cost {
+            Some(row) => {
+                let cost = map_execution_cost_row(row).map_err(ApiError::BadRequest)?;
+                if execution_cost_has_observation(
+                    cost.provider_call_count,
+                    cost.unpriced_provider_call_count,
+                ) {
+                    Ok(cost)
+                } else {
+                    Err(no_execution_cost_evidence(execution_kind, execution_id))
+                }
+            }
+            None => Err(no_execution_cost_evidence(execution_kind, execution_id)),
         }
-
-        // An execution with no rollup row captured no billable provider call
-        // at all, so zero cost is the complete truth here. Executions whose
-        // calls exist but carry no catalog price are a different case: they
-        // do have a rollup row, and it reports its unpriced calls.
-        Ok(BillingExecutionCost {
-            id: Uuid::now_v7(),
-            owning_execution_kind: execution_kind,
-            owning_execution_id: execution_id,
-            total_cost: Decimal::ZERO,
-            currency_code: "USD".to_string(),
-            provider_call_count: 0,
-            unpriced_provider_call_count: 0,
-            cost_coverage: CostCoverageStatus::Complete,
-            updated_at: Utc::now(),
-        })
     }
 
     /// Lists document-level cost summaries for a library, with the freshness
@@ -204,16 +229,20 @@ impl BillingService {
                 if !seen_documents.insert(r.document_id) {
                     return Err(mixed_currency_billing_scope("document", r.document_id));
                 }
+                let (total_cost, currency_code, cost_coverage) = measured_scope_cost(
+                    r.derived_cost_present,
+                    r.total_cost.unwrap_or(Decimal::ZERO),
+                    r.currency_code.as_deref().unwrap_or_default(),
+                    r.provider_call_count,
+                    r.unpriced_provider_call_count,
+                );
                 Ok(DocumentCostSummary {
                     document_id: r.document_id,
-                    total_cost: r.total_cost,
-                    currency_code: r.currency_code,
+                    total_cost,
+                    currency_code,
                     provider_call_count: r.provider_call_count,
                     unpriced_provider_call_count: r.unpriced_provider_call_count,
-                    cost_coverage: CostCoverageStatus::from_call_counts(
-                        r.provider_call_count,
-                        r.unpriced_provider_call_count,
-                    ),
+                    cost_coverage,
                 })
             })
             .collect::<Result<Vec<DocumentCostSummary>, ApiError>>()?;
@@ -291,26 +320,36 @@ impl BillingService {
             return Ok(reconciling_library_summary());
         }
         match snapshot.rows.as_slice() {
-            [r] => Ok(LibraryCostSummary {
-                cost_rollup_freshness: CostRollupFreshness::Current,
-                total_cost: Some(r.total_cost),
-                currency_code: Some(r.currency_code.clone()),
-                document_count: Some(r.document_count),
-                provider_call_count: Some(r.provider_call_count),
-                unpriced_provider_call_count: Some(r.unpriced_provider_call_count),
-                cost_coverage: Some(CostCoverageStatus::from_call_counts(
+            [r] => {
+                let (total_cost, currency_code, cost_coverage) = measured_scope_cost(
+                    // A derived row exists by construction: this row *is* one.
+                    true,
+                    r.total_cost,
+                    &r.currency_code,
                     r.provider_call_count,
                     r.unpriced_provider_call_count,
-                )),
-            }),
+                );
+                Ok(LibraryCostSummary {
+                    cost_rollup_freshness: CostRollupFreshness::Current,
+                    total_cost,
+                    currency_code,
+                    document_count: Some(r.document_count),
+                    provider_call_count: Some(r.provider_call_count),
+                    unpriced_provider_call_count: Some(r.unpriced_provider_call_count),
+                    cost_coverage,
+                })
+            }
+            // No execution in this library has a derived cost row: nothing was
+            // measured, so no total and no currency are reported. The recorded
+            // call counts stay factual zeros.
             [] => Ok(LibraryCostSummary {
                 cost_rollup_freshness: CostRollupFreshness::Current,
-                total_cost: Some(Decimal::ZERO),
-                currency_code: Some("USD".to_string()),
+                total_cost: None,
+                currency_code: None,
                 document_count: Some(0),
                 provider_call_count: Some(0),
                 unpriced_provider_call_count: Some(0),
-                cost_coverage: Some(CostCoverageStatus::Complete),
+                cost_coverage: None,
             }),
             _ => Err(mixed_currency_billing_scope("library", library_id)),
         }
@@ -344,28 +383,37 @@ impl BillingService {
             return Ok(reconciling_workspace_summary());
         }
         match snapshot.rows.as_slice() {
-            [r] => Ok(WorkspaceCostSummary {
-                cost_rollup_freshness: CostRollupFreshness::Current,
-                total_cost: Some(r.total_cost),
-                currency_code: Some(r.currency_code.clone()),
-                library_count: Some(r.library_count),
-                document_count: Some(r.document_count),
-                provider_call_count: Some(r.provider_call_count),
-                unpriced_provider_call_count: Some(r.unpriced_provider_call_count),
-                cost_coverage: Some(CostCoverageStatus::from_call_counts(
+            [r] => {
+                let (total_cost, currency_code, cost_coverage) = measured_scope_cost(
+                    // A derived row exists by construction: this row *is* one.
+                    true,
+                    r.total_cost,
+                    &r.currency_code,
                     r.provider_call_count,
                     r.unpriced_provider_call_count,
-                )),
-            }),
+                );
+                Ok(WorkspaceCostSummary {
+                    cost_rollup_freshness: CostRollupFreshness::Current,
+                    total_cost,
+                    currency_code,
+                    library_count: Some(r.library_count),
+                    document_count: Some(r.document_count),
+                    provider_call_count: Some(r.provider_call_count),
+                    unpriced_provider_call_count: Some(r.unpriced_provider_call_count),
+                    cost_coverage,
+                })
+            }
+            // Same contract as the library scope: no derived cost row means no
+            // measurement, never a free workspace.
             [] => Ok(WorkspaceCostSummary {
                 cost_rollup_freshness: CostRollupFreshness::Current,
-                total_cost: Some(Decimal::ZERO),
-                currency_code: Some("USD".to_string()),
+                total_cost: None,
+                currency_code: None,
                 library_count: Some(0),
                 document_count: Some(0),
                 provider_call_count: Some(0),
                 unpriced_provider_call_count: Some(0),
-                cost_coverage: Some(CostCoverageStatus::Complete),
+                cost_coverage: None,
             }),
             _ => Err(mixed_currency_billing_scope("workspace", workspace_id)),
         }

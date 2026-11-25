@@ -1123,6 +1123,7 @@ async fn reconciling_a_failed_mutation_retires_its_ingest_job() -> Result<()> {
                         storage_key: revision.storage_ref.clone(),
                     }),
                     parent_async_operation_id: None,
+                    enrichment_scope: None,
                 },
             )
             .await

@@ -319,17 +319,16 @@ Below ~95 % means the working set does not fit and every query pays disk
 latency. Raising `shared_buffers` narrows the gap but cannot close it when the
 database is tens of times larger than the container.
 
-### PostgreSQL 18 asynchronous I/O
+### PostgreSQL 19 asynchronous I/O
 
-PostgreSQL 18 reads sequential scans, **bitmap heap scans**, and vacuum
-asynchronously. IronRAG's trigram and full-text lanes are bitmap heap scans, so
-they are exactly the shape that benefits, and the shipped defaults
-(`io_method=worker`, `io_workers=3`, `effective_io_concurrency=16`) are sized
-for a small host.
+Asynchronous reads help IronRAG's trigram and full-text bitmap heap scans.
+With `io_method=worker`, PostgreSQL 19 grows the I/O worker pool on demand
+between `io_min_workers=2` and `io_max_workers=8` by default. The old
+`io_workers` setting was removed; do not copy it when migrating from 18.
 
 | Setting | Default | Suggested for a disk-bound node | Why |
 | --- | --- | --- | --- |
-| `io_workers` | 3 | 8 | Three workers cannot keep a concurrent bitmap-scan workload's read queue full. |
+| `io_min_workers` / `io_max_workers` | 2 / 8 | Keep the defaults until measurements show a bottleneck | The pool already grows as concurrent reads require more workers. |
 | `effective_io_concurrency` | 16 | 256 (SSD/NVMe) | Read-ahead depth for bitmap heap scans. |
 | `maintenance_io_concurrency` | 16 | 64 | Same, for vacuum and index builds. |
 | `random_page_cost` | 4.0 | 1.1 (SSD/NVMe) | The 4.0 default encodes seek time on **rotating** disks and pushes the planner away from index scans. Confirm the device first: `lsblk -d -o NAME,ROTA` (`ROTA=0` is solid state). |
@@ -339,7 +338,7 @@ for a small host.
 seccomp profile blocks the io_uring syscalls**: Postgres refuses to start with
 `could not setup io_uring queue: Operation not permitted`. Using it requires a
 custom seccomp profile on the container, which is a deliberate security
-decision — `worker` with more `io_workers` needs no such exemption.
+decision. The `worker` pool needs no such exemption.
 
 Recovering from a failed `io_method` is awkward, because the server will not
 start to accept an `ALTER SYSTEM` that undoes it. Edit
@@ -414,8 +413,8 @@ helm upgrade --install ironrag charts/ironrag \
 By default the chart deploys the API, worker, and web images with the
 `v<appVersion>` image tag derived from `Chart.appVersion`. Override
 `api.image.tag`, `worker.image.tag`, and `web.image.tag` only when pinning a
-different published image. Bundled dependencies match Docker Compose:
-`pgvector/pgvector:pg18` and `redis:8.10.1`.
+different published image. Bundled PostgreSQL and Redis use the same image
+versions as [Docker Compose](../../docker-compose.yml).
 
 See also: [AI bindings](./AI-BINDINGS.md) (embedding dimension changes),
 [Install](./INSTALL.md), [Helm chart](../../charts/ironrag/values.yaml).

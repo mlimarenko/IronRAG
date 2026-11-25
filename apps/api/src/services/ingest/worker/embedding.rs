@@ -7,7 +7,7 @@ use tracing::warn;
 use crate::{
     infra::repositories::catalog_repository,
     services::ingest::service::{INGEST_STAGE_EMBED_CHUNK, RecordStageEventCommand},
-    services::query::{error::QueryServiceError, search::EmbedChunksStageOutcome},
+    services::query::error::QueryServiceError,
 };
 
 use super::{
@@ -68,23 +68,22 @@ pub(super) async fn embed_ingest_content(
     .await
     .context("failed to capture embed_chunk source-truth fence")?;
     let embed_chunk_start = Instant::now();
-    let embed_chunk_outcome = state
-        .application_services
-        .search
-        .embed_chunks_for_revision(crate::services::query::search::EmbedRevisionChunksInput {
-            state,
-            library_id: revision.library_id,
-            revision_id,
-            attempt_id,
-            vector_write_source_truth_version,
-            cancellation_token: cancellation.token,
-        })
+    let embed_chunk_outcome =
+        Box::pin(state.application_services.search.embed_chunks_for_revision(
+            crate::services::query::search::EmbedRevisionChunksInput {
+                state,
+                library_id: revision.library_id,
+                revision_id,
+                attempt_id,
+                vector_write_source_truth_version,
+                cancellation_token: cancellation.token,
+            },
+        ))
         .await;
     let embed_chunk_elapsed_ms = Some(embed_chunk_start.elapsed().as_millis() as i64);
     let mut embed_chunk_failure: Option<anyhow::Error> = None;
     match &embed_chunk_outcome {
         Ok(outcome) => {
-            capture_embedding_billing(context, outcome).await;
             state
                 .application_services
                 .ingest
@@ -126,27 +125,6 @@ pub(super) async fn embed_ingest_content(
     })
 }
 
-async fn capture_embedding_billing(
-    context: &IngestStageContext<'_>,
-    outcome: &EmbedChunksStageOutcome,
-) {
-    let state = context.state;
-    let worker_id = context.worker_id;
-    let job = context.job;
-    if let Some(command) =
-        crate::services::ops::billing::CaptureIngestAttemptBillingCommand::for_chunk_embedding(
-            job.workspace_id,
-            job.library_id,
-            context.attempt_id,
-            outcome,
-        )
-        && let Err(e) =
-            state.application_services.billing.capture_ingest_attempt(state, command).await
-    {
-        warn!(%worker_id, job_id = %job.id, ?e, "embed_chunk billing capture failed");
-    }
-}
-
 async fn record_embedding_failure(
     context: &IngestStageContext<'_>,
     error: &QueryServiceError,
@@ -176,10 +154,9 @@ async fn record_embedding_failure(
                 message: Some("chunk embedding failed".to_string()),
                 details_json: serde_json::json!({
                     "error": format!("{error:#}"),
-                    "providerDetailRedacted": match error {
-                        QueryServiceError::Provider(failure) => failure.detail_redacted(),
-                        _ => None,
-                    },
+                    "providerCallId": error.provider_call_id(),
+                    "providerDetailRedacted": error.provider_failure()
+                        .and_then(|failure| failure.detail_redacted()),
                 }),
                 provider_kind: None,
                 model_name: None,
@@ -198,23 +175,24 @@ async fn record_embedding_failure(
 }
 
 fn embedding_failure(error: &QueryServiceError) -> anyhow::Error {
+    if let Some(failure) = error.provider_failure() {
+        match failure.kind() {
+            ProviderFailureKind::QuotaExhausted | ProviderFailureKind::AllowanceExhausted => {
+                return anyhow::Error::new(ContentProviderQuotaError {
+                    message: format!("chunk embedding failed: {}", failure.message()),
+                });
+            }
+            ProviderFailureKind::RequestRejected | ProviderFailureKind::AdmissionRefused => {
+                return anyhow::Error::new(failure.clone());
+            }
+            ProviderFailureKind::Unavailable => {}
+        }
+    }
     match error {
         QueryServiceError::BindingNotConfigured { message } => {
             anyhow::Error::new(ContentConfigurationError::embedding_binding_not_configured(
                 format!("chunk embedding failed: {message}"),
             ))
-        }
-        QueryServiceError::Provider(failure)
-            if failure.kind() == ProviderFailureKind::QuotaExhausted =>
-        {
-            anyhow::Error::new(ContentProviderQuotaError {
-                message: format!("chunk embedding failed: {}", failure.message()),
-            })
-        }
-        QueryServiceError::Provider(failure)
-            if failure.kind() == ProviderFailureKind::RequestRejected =>
-        {
-            anyhow::Error::new(failure.clone())
         }
         _ => anyhow::anyhow!(format!("chunk embedding failed: {error:#}")),
     }
@@ -226,8 +204,7 @@ mod tests {
         ContentConfigurationError, ContentProviderQuotaError, QueryServiceError, embedding_failure,
     };
     use crate::services::{
-        ingest::service::RecordStageEventCommand, ops::billing::CaptureIngestAttemptBillingCommand,
-        query::search::EmbedChunksStageOutcome,
+        ingest::service::RecordStageEventCommand, query::search::EmbedChunksStageOutcome,
     };
     use crate::shared::provider_failure::ProviderFailure;
     use uuid::Uuid;
@@ -301,40 +278,12 @@ mod tests {
     }
 
     #[test]
-    fn embedding_commands_preserve_scope_usage_and_completed_event_metadata() {
-        let workspace_id = Uuid::now_v7();
-        let library_id = Uuid::now_v7();
+    fn embedding_completed_event_preserves_usage_and_scope_metadata() {
         let attempt_id = Uuid::now_v7();
         let outcome = embedding_outcome();
-        let billing = CaptureIngestAttemptBillingCommand::for_chunk_embedding(
-            workspace_id,
-            library_id,
-            attempt_id,
-            &outcome,
-        )
-        .expect("complete embedding usage must produce billing attribution");
-        assert_embedding_billing_attribution(&billing, workspace_id, library_id, attempt_id);
-
         for elapsed_ms in [None, Some(0), Some(42)] {
             assert_embedding_completed_event(attempt_id, &outcome, elapsed_ms);
         }
-    }
-
-    fn assert_embedding_billing_attribution(
-        billing: &CaptureIngestAttemptBillingCommand,
-        workspace_id: Uuid,
-        library_id: Uuid,
-        attempt_id: Uuid,
-    ) {
-        assert_eq!(
-            (billing.workspace_id, billing.library_id, billing.attempt_id),
-            (workspace_id, library_id, attempt_id)
-        );
-        assert_eq!(billing.binding_id, None);
-        assert_eq!(billing.provider_kind, "provider");
-        assert_eq!(billing.model_name, "model");
-        assert_eq!(billing.call_kind, "embed_chunk");
-        assert_eq!(billing.usage_json, serde_json::json!({ "tokens": 9 }));
     }
 
     fn assert_embedding_completed_event(
@@ -368,25 +317,6 @@ mod tests {
     }
 
     #[test]
-    fn embedding_billing_requires_all_three_optional_usage_fields() {
-        let scope = (Uuid::now_v7(), Uuid::now_v7(), Uuid::now_v7());
-        for missing in 0..3 {
-            let mut outcome = embedding_outcome();
-            match missing {
-                0 => outcome.provider_kind = None,
-                1 => outcome.model_name = None,
-                _ => outcome.usage_json = None,
-            }
-            assert!(
-                CaptureIngestAttemptBillingCommand::for_chunk_embedding(
-                    scope.0, scope.1, scope.2, &outcome,
-                )
-                .is_none()
-            );
-        }
-    }
-
-    #[test]
     fn embedding_failure_preserves_terminal_configuration_and_quota_types() {
         let configuration = embedding_failure(&QueryServiceError::BindingNotConfigured {
             message: "missing binding".to_string(),
@@ -399,6 +329,13 @@ mod tests {
         ));
         assert!(quota.downcast_ref::<ContentProviderQuotaError>().is_some());
         assert_eq!(quota.to_string(), "chunk embedding failed: budget exhausted");
+
+        let reserved_quota = embedding_failure(&QueryServiceError::EmbeddingProvider {
+            provider_call_id: Uuid::from_u128(42),
+            failure: ProviderFailure::quota_exhausted("budget exhausted"),
+        });
+        assert!(reserved_quota.downcast_ref::<ContentProviderQuotaError>().is_some());
+        assert_eq!(reserved_quota.to_string(), "chunk embedding failed: budget exhausted");
     }
 
     #[test]

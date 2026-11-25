@@ -1,22 +1,31 @@
 use super::*;
+use crate::services::query::execution::{
+    PROTECTED_STATEMENT_MAX_CHARS, applicable_preserved_source_spans, protected_statement,
+};
 
 pub(super) fn grounded_answer_must_preserve_spans(
     answer_text: &str,
     execution_detail: &ironrag_contracts::assistant::AssistantExecutionDetail,
-    include_source_titles: bool,
+    include_source_statements: bool,
 ) -> Vec<String> {
-    let graph_spans = if include_source_titles {
-        grounded_answer_graph_preserve_span_candidates(execution_detail)
+    // Only applicable verbatim source statements verified against the same
+    // authorized primary source excerpts belong here; unverified graph
+    // assertions, entity summaries, and raw document titles are excluded.
+    let verified_source_spans = if include_source_statements {
+        applicable_preserved_source_spans(
+            &execution_detail.execution.query_text,
+            grounded_answer_graph_preserve_span_candidates(execution_detail),
+            execution_detail.semantic_verification.as_ref(),
+            GROUNDED_ANSWER_GRAPH_PRESERVE_SPAN_LIMIT,
+        )
     } else {
-        Default::default()
+        Vec::new()
     };
-    let source_titles = include_source_titles.then_some(()).into_iter().flat_map(|()| {
-        execution_detail
-            .prepared_segment_references
-            .iter()
-            .filter_map(|reference| reference.document_title.as_deref())
-    });
-    grounded_answer_must_preserve_spans_for_evidence(answer_text, graph_spans, source_titles)
+    grounded_answer_must_preserve_spans_for_evidence(
+        answer_text,
+        verified_source_spans.iter().map(String::as_str),
+        std::iter::empty(),
+    )
 }
 
 #[cfg(test)]
@@ -46,16 +55,14 @@ pub(crate) fn grounded_answer_must_preserve_spans_for_evidence<'a>(
             break;
         }
     }
-    for graph_span in graph_spans {
-        push_grounded_answer_preserve_evidence_span(&mut spans, &mut seen, graph_span);
+    for value in graph_spans.into_iter().chain(source_titles) {
         if spans.len() >= GROUNDED_ANSWER_MUST_PRESERVE_SPAN_LIMIT {
             break;
         }
-    }
-    for title in source_titles {
-        push_grounded_answer_preserve_source_title(&mut spans, &mut seen, title);
-        if spans.len() >= GROUNDED_ANSWER_MUST_PRESERVE_SPAN_LIMIT {
-            break;
+        if let Some(span) = protected_statement(value)
+            && seen.insert(span.to_owned())
+        {
+            spans.push(span.to_owned());
         }
     }
     spans
@@ -64,70 +71,14 @@ pub(crate) fn grounded_answer_must_preserve_spans_for_evidence<'a>(
 pub(super) fn grounded_answer_graph_preserve_span_candidates(
     execution_detail: &ironrag_contracts::assistant::AssistantExecutionDetail,
 ) -> Vec<&str> {
-    let mut candidates = Vec::new();
-    for relation in execution_detail.relation_references.iter().filter(|reference| {
-        reference.rank > 0 && reference.rank <= GROUNDED_ANSWER_GRAPH_PRESERVE_MAX_RANK
-    }) {
-        if let Some(assertion) = relation.normalized_assertion.as_deref() {
-            candidates.push(assertion);
-        }
-        if candidates.len() >= GROUNDED_ANSWER_GRAPH_PRESERVE_SPAN_LIMIT {
-            return candidates;
-        }
-    }
-    for entity in execution_detail.entity_references.iter().filter(|reference| {
-        reference.rank > 0 && reference.rank <= GROUNDED_ANSWER_GRAPH_PRESERVE_MAX_RANK
-    }) {
-        candidates.push(entity.label.as_str());
-        if let Some(summary) = entity.summary.as_deref() {
-            candidates.push(summary);
-        }
-        if candidates.len() >= GROUNDED_ANSWER_GRAPH_PRESERVE_SPAN_LIMIT {
-            candidates.truncate(GROUNDED_ANSWER_GRAPH_PRESERVE_SPAN_LIMIT);
-            return candidates;
-        }
-    }
-    candidates
-}
-
-pub(super) fn push_grounded_answer_preserve_evidence_span(
-    spans: &mut Vec<String>,
-    seen: &mut BTreeSet<String>,
-    evidence: &str,
-) {
-    if spans.len() >= GROUNDED_ANSWER_MUST_PRESERVE_SPAN_LIMIT {
-        return;
-    }
-    let evidence = evidence.trim();
-    if evidence.is_empty()
-        || evidence.chars().count() > GROUNDED_ANSWER_MUST_PRESERVE_SPAN_MAX_CHARS
-        || !evidence.chars().any(char::is_alphanumeric)
-    {
-        return;
-    }
-    if seen.insert(evidence.to_string()) {
-        spans.push(evidence.to_string());
-    }
-}
-
-pub(super) fn push_grounded_answer_preserve_source_title(
-    spans: &mut Vec<String>,
-    seen: &mut BTreeSet<String>,
-    title: &str,
-) {
-    if spans.len() >= GROUNDED_ANSWER_MUST_PRESERVE_SPAN_LIMIT {
-        return;
-    }
-    let title = title.trim();
-    if title.is_empty()
-        || title.chars().count() > GROUNDED_ANSWER_MUST_PRESERVE_SPAN_MAX_CHARS
-        || !title.chars().any(char::is_alphanumeric)
-    {
-        return;
-    }
-    if seen.insert(title.to_string()) {
-        spans.push(title.to_string());
-    }
+    execution_detail
+        .relation_references
+        .iter()
+        .filter(|reference| {
+            reference.rank > 0 && reference.rank <= GROUNDED_ANSWER_GRAPH_PRESERVE_MAX_RANK
+        })
+        .filter_map(|relation| relation.normalized_assertion.as_deref())
+        .collect()
 }
 
 pub(super) fn push_grounded_answer_preserve_span(
@@ -193,7 +144,7 @@ pub(super) fn push_grounded_answer_preserve_candidate(
 pub(super) fn is_grounded_answer_preserve_candidate(candidate: &str) -> bool {
     let candidate = candidate.trim();
     if candidate.is_empty()
-        || candidate.chars().count() > GROUNDED_ANSWER_MUST_PRESERVE_SPAN_MAX_CHARS
+        || candidate.chars().count() > PROTECTED_STATEMENT_MAX_CHARS
         || !candidate.chars().any(char::is_alphanumeric)
     {
         return false;

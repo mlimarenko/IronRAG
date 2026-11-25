@@ -42,11 +42,14 @@ fn list_row(job_queue_state: Option<&str>, mutation_state: Option<&str>) -> Cont
         revision_document_hint: None,
         revision_content_source_kind: Some("upload".to_string()),
         revision_storage_key: None,
+        knowledge_vector_state: Some("accepted".to_string()),
+        knowledge_graph_state: Some("accepted".to_string()),
         mutation_id: mutation_state.map(|_| Uuid::now_v7()),
         mutation_state: mutation_state.map(str::to_string),
         mutation_failure_code: None,
         mutation_requested_at: mutation_state.map(|_| now),
         job_id: job_queue_state.map(|_| Uuid::now_v7()),
+        job_kind: job_queue_state.map(|_| "content_mutation".to_string()),
         job_queue_state: job_queue_state.map(str::to_string),
         job_queued_at: job_queue_state.map(|_| now),
         job_completed_at: job_queue_state.map(|_| now),
@@ -62,11 +65,26 @@ fn list_row(job_queue_state: Option<&str>, mutation_state: Option<&str>) -> Cont
         pipeline_time_ms: None,
         cost_total: Some(Decimal::ZERO),
         cost_currency_code: Some("USD".to_string()),
+        billing_cost_mixed_currency: false,
         billing_rollup_dirty: false,
         billing_rollup_terminal_error_code: None,
     }
 }
 
+/// Overrides the enrichment channel states of the exact current revision, the
+/// same two columns the page query selects from `knowledge_revision`.
+fn with_channels(
+    mut row: ContentDocumentListRow,
+    vector_state: &str,
+    graph_state: &str,
+) -> ContentDocumentListRow {
+    row.knowledge_vector_state = Some(vector_state.to_string());
+    row.knowledge_graph_state = Some(graph_state.to_string());
+    row
+}
+
+/// Readiness row for the summary-resolution test below; the list path no longer
+/// takes one, it reads the channel columns of `ContentDocumentListRow`.
 fn revision(
     row: &ContentDocumentListRow,
     text_state: &str,
@@ -126,6 +144,15 @@ fn knowledge_document(row: &ContentDocumentListRow) -> KnowledgeDocumentRow {
         updated_at: now,
         deleted_at: None,
     }
+}
+
+/// A row whose newest job is a publish-enriching refresh (`graph_refresh` /
+/// `reembed`) rather than a materializing `content_mutation` ingest — the two
+/// kinds the shared status CASE treats as non-destructive over readable content.
+fn enrichment_job_row(job_kind: &str, job_queue_state: &str) -> ContentDocumentListRow {
+    let mut row = list_row(Some(job_queue_state), None);
+    row.job_kind = Some(job_kind.to_string());
+    row
 }
 
 fn document_summary_with_active_revision(revision_id: Uuid) -> ContentDocumentSummary {
@@ -215,10 +242,8 @@ fn document_hint_patch_detail_roundtrip_uses_updated_active_revision_hint() {
 #[test]
 fn list_entry_keeps_canceled_job_with_readable_revision_ready() {
     let row = list_row(Some("canceled"), None);
-    let revision = revision(&row, "text_readable", "pending", "pending");
 
-    let entry = build_document_list_entry(&row, Some(&knowledge_document(&row)), Some(&revision))
-        .expect("single-currency list row should map");
+    let entry = build_document_list_entry(&row).expect("single-currency list row should map");
 
     assert_eq!(entry.status, DocumentStatus::Ready);
     assert_eq!(entry.readiness, DocumentReadiness::Readable);
@@ -229,22 +254,37 @@ fn list_entry_rejects_mixed_currency_cost_sentinel() {
     let mut row = list_row(None, None);
     row.cost_total = None;
     row.cost_currency_code = None;
-    let revision = revision(&row, "text_readable", "ready", "ready");
+    row.billing_cost_mixed_currency = true;
 
-    let error = build_document_list_entry(&row, Some(&knowledge_document(&row)), Some(&revision))
-        .expect_err("mixed-currency totals must fail closed");
+    let error =
+        build_document_list_entry(&row).expect_err("mixed-currency totals must fail closed");
 
     assert!(error.to_string().contains("multiple currencies"));
 }
 
 #[test]
-fn list_entry_keeps_metadata_and_withholds_cost_from_dirty_scope_snapshot() {
+fn list_entry_withholds_cost_without_measured_provider_evidence() {
     let mut row = list_row(None, None);
+    row.cost_total = None;
+    row.cost_currency_code = None;
+
+    let entry = build_document_list_entry(&row)
+        .expect("an unmeasured document is not a mixed-currency failure");
+
+    assert_eq!(
+        entry.cost_total, None,
+        "a document without a measured price must not read as a free zero"
+    );
+    assert_eq!(entry.cost_currency_code, None);
+}
+
+#[test]
+fn list_entry_keeps_metadata_and_withholds_cost_from_dirty_scope_snapshot() {
+    let mut row = with_channels(list_row(None, None), "ready", "ready");
     row.billing_rollup_dirty = true;
     row.cost_total = Some(Decimal::new(12345, 2));
-    let revision = revision(&row, "text_readable", "ready", "ready");
 
-    let entry = build_document_list_entry(&row, Some(&knowledge_document(&row)), Some(&revision))
+    let entry = build_document_list_entry(&row)
         .expect("metadata remains available while the billing rollup reconciles");
 
     assert_eq!(entry.id, row.id);
@@ -261,9 +301,8 @@ fn list_entry_rejects_terminal_mixed_currency_even_when_dirty() {
     let mut row = list_row(None, None);
     row.billing_rollup_dirty = true;
     row.billing_rollup_terminal_error_code = Some("mixed_currency".to_string());
-    let revision = revision(&row, "text_readable", "ready", "ready");
 
-    let error = build_document_list_entry(&row, Some(&knowledge_document(&row)), Some(&revision))
+    let error = build_document_list_entry(&row)
         .expect_err("terminal mixed-currency costs must not become reconciling metadata");
 
     assert!(matches!(error, super::ApiError::Conflict(_)));
@@ -271,14 +310,120 @@ fn list_entry_rejects_terminal_mixed_currency_even_when_dirty() {
 
 #[test]
 fn list_entry_keeps_graph_failure_readable_for_search() {
-    let row = list_row(None, None);
-    let revision = revision(&row, "text_readable", "ready", "failed");
+    let row = with_channels(list_row(None, None), "ready", "failed");
 
-    let entry = build_document_list_entry(&row, Some(&knowledge_document(&row)), Some(&revision))
-        .expect("single-currency list row should map");
+    let entry = build_document_list_entry(&row).expect("single-currency list row should map");
 
     assert_eq!(entry.status, DocumentStatus::Ready);
     assert_eq!(entry.readiness, DocumentReadiness::Readable);
+}
+
+#[test]
+fn list_entry_keeps_readable_content_when_graph_refresh_failed() {
+    let row = with_channels(enrichment_job_row("graph_refresh", "failed"), "ready", "failed");
+
+    let entry = build_document_list_entry(&row).expect("single-currency list row should map");
+
+    assert_eq!(
+        entry.status,
+        DocumentStatus::Ready,
+        "a failed graph refresh leaves the readable revision intact"
+    );
+    assert_eq!(entry.readiness, DocumentReadiness::Readable);
+}
+
+#[test]
+fn list_entry_keeps_readable_content_when_reembed_failed() {
+    let row = with_channels(enrichment_job_row("reembed", "failed"), "ready", "ready");
+
+    let entry = build_document_list_entry(&row).expect("single-currency list row should map");
+
+    assert_eq!(
+        entry.status,
+        DocumentStatus::Ready,
+        "a failed re-embed leaves the readable revision intact"
+    );
+}
+
+#[test]
+fn list_entry_marks_failed_materializing_job_as_failed() {
+    let row = list_row(Some("failed"), None);
+
+    let entry = build_document_list_entry(&row).expect("single-currency list row should map");
+
+    assert_eq!(
+        entry.status,
+        DocumentStatus::Failed,
+        "only enrichment kinds may fail without hiding readable content"
+    );
+}
+
+#[test]
+fn list_entry_marks_failed_enrichment_without_readable_revision_as_failed() {
+    let mut row = enrichment_job_row("graph_refresh", "failed");
+    row.readable_revision_id = None;
+    row.active_revision_id = None;
+
+    let entry = build_document_list_entry(&row)
+        .expect("a failed enrichment without content must still map");
+
+    assert_eq!(entry.status, DocumentStatus::Failed);
+}
+
+#[test]
+fn list_entry_reports_readiness_from_current_revision_channels() {
+    let cases = [
+        // Text readable is the base capability; optional enrichment being
+        // pending or failed never demotes the readable state.
+        ("pending", "pending", DocumentReadiness::Readable),
+        ("failed", "pending", DocumentReadiness::Readable),
+        ("ready", "graph_degraded", DocumentReadiness::GraphSparse),
+        ("ready", "ready", DocumentReadiness::GraphReady),
+    ];
+    for (vector_state, graph_state, expected) in cases {
+        let row = with_channels(list_row(None, None), vector_state, graph_state);
+        let entry = build_document_list_entry(&row).expect("single-currency list row should map");
+
+        assert_eq!(
+            entry.readiness, expected,
+            "vector `{vector_state}` with graph `{graph_state}` must report {expected:?}"
+        );
+        assert_eq!(
+            entry.status,
+            DocumentStatus::Ready,
+            "readable text keeps the operational status ready while enrichment is partial"
+        );
+    }
+}
+
+#[test]
+fn list_entry_keeps_operational_status_independent_of_readiness_capability() {
+    // A leased newer job is operational work: the bucket follows the pipeline,
+    // while readiness still reports the capability the current revision serves.
+    let mut leased = with_channels(list_row(Some("leased"), Some("running")), "ready", "ready");
+    leased.attempt_progress_percent = Some(40);
+    let entry = build_document_list_entry(&leased).expect("single-currency list row should map");
+    assert_eq!(entry.status, DocumentStatus::Processing);
+    assert_eq!(
+        entry.readiness,
+        DocumentReadiness::GraphReady,
+        "in-flight work must not downgrade the current revision's capability"
+    );
+
+    // A newer queued job over readable content: the bucket stays ready (readable
+    // wins) and capability is unchanged. The MCP summary sees the same job as
+    // active work and must still report GraphReady.
+    let queued = with_channels(list_row(Some("queued"), None), "ready", "ready");
+    let entry = build_document_list_entry(&queued).expect("single-currency list row should map");
+    assert_eq!(entry.status, DocumentStatus::Ready);
+    assert_eq!(entry.readiness, DocumentReadiness::GraphReady);
+
+    // Held work over readable content keeps both facts: ready bucket, degraded
+    // capability reported as sparse.
+    let paused = with_channels(list_row(Some("paused"), None), "ready", "graph_degraded");
+    let entry = build_document_list_entry(&paused).expect("single-currency list row should map");
+    assert_eq!(entry.status, DocumentStatus::Ready);
+    assert_eq!(entry.readiness, DocumentReadiness::GraphSparse);
 }
 
 #[test]
@@ -286,10 +431,8 @@ fn list_entry_uses_attempt_processing_progress() {
     let mut row = list_row(Some("leased"), Some("running"));
     row.attempt_current_stage = Some("extract_graph".to_string());
     row.attempt_progress_percent = Some(76);
-    let revision = revision(&row, "text_readable", "ready", "ready");
 
-    let entry = build_document_list_entry(&row, Some(&knowledge_document(&row)), Some(&revision))
-        .expect("single-currency list row should map");
+    let entry = build_document_list_entry(&row).expect("single-currency list row should map");
 
     assert_eq!(entry.status, DocumentStatus::Processing);
     assert_eq!(entry.progress_percent, Some(76));
@@ -298,10 +441,8 @@ fn list_entry_uses_attempt_processing_progress() {
 #[test]
 fn list_entry_marks_ready_documents_as_complete() {
     let row = list_row(None, None);
-    let revision = revision(&row, "text_readable", "ready", "ready");
 
-    let entry = build_document_list_entry(&row, Some(&knowledge_document(&row)), Some(&revision))
-        .expect("single-currency list row should map");
+    let entry = build_document_list_entry(&row).expect("single-currency list row should map");
 
     assert_eq!(entry.status, DocumentStatus::Ready);
     assert_eq!(entry.progress_percent, Some(100));
@@ -312,10 +453,8 @@ fn list_entry_surfaces_failed_mutation_message() {
     let mut row = list_row(None, Some("failed"));
     row.mutation_failure_code = Some("parser_failed".to_string());
     row.attempt_failure_message = Some("Parser failed on page 2".to_string());
-    let revision = revision(&row, "pending", "pending", "pending");
 
-    let entry = build_document_list_entry(&row, Some(&knowledge_document(&row)), Some(&revision))
-        .expect("single-currency list row should map");
+    let entry = build_document_list_entry(&row).expect("single-currency list row should map");
 
     assert_eq!(entry.status, DocumentStatus::Failed);
     assert_eq!(entry.failure_code.as_deref(), Some("parser_failed"));
@@ -332,10 +471,7 @@ fn unpublished_document_has_no_display_name_or_name_cursor_value() {
     row.revision_byte_size = None;
     row.revision_title = None;
     row.revision_content_source_kind = None;
-    let stale_revision = revision(&row, "text_readable", "ready", "ready");
-    let entry =
-        build_document_list_entry(&row, Some(&knowledge_document(&row)), Some(&stale_revision))
-            .expect("unpublished operational row must map");
+    let entry = build_document_list_entry(&row).expect("unpublished operational row must map");
     assert_eq!(entry.file_name, None);
     assert_eq!(entry.file_type, None);
     assert_eq!(entry.file_size, None);
@@ -353,10 +489,8 @@ fn unpublished_document_has_no_display_name_or_name_cursor_value() {
 fn list_entry_keeps_terminal_failure_progress_within_display_range() {
     let mut row = list_row(Some("failed"), None);
     row.attempt_progress_percent = Some(145);
-    let revision = revision(&row, "pending", "pending", "pending");
 
-    let entry = build_document_list_entry(&row, Some(&knowledge_document(&row)), Some(&revision))
-        .expect("single-currency list row should map");
+    let entry = build_document_list_entry(&row).expect("single-currency list row should map");
 
     assert_eq!(entry.status, DocumentStatus::Failed);
     assert_eq!(entry.progress_percent, Some(99));
@@ -364,11 +498,11 @@ fn list_entry_keeps_terminal_failure_progress_within_display_range() {
 
 #[test]
 fn list_entry_marks_unreadable_canceled_document_as_canceled() {
-    let row = list_row(Some("canceled"), Some("canceled"));
-    let revision = revision(&row, "pending", "pending", "pending");
+    let mut row = list_row(Some("canceled"), Some("canceled"));
+    row.readable_revision_id = None;
+    row.active_revision_id = None;
 
-    let entry = build_document_list_entry(&row, Some(&knowledge_document(&row)), Some(&revision))
-        .expect("single-currency list row should map");
+    let entry = build_document_list_entry(&row).expect("single-currency list row should map");
 
     assert_eq!(entry.status, DocumentStatus::Canceled);
     assert_eq!(entry.readiness, DocumentReadiness::Failed);
@@ -377,46 +511,89 @@ fn list_entry_marks_unreadable_canceled_document_as_canceled() {
 
 #[test]
 fn list_entry_marks_completed_unreadable_job_as_failed() {
-    let row = list_row(Some("completed"), None);
-    let revision = revision(&row, "pending", "pending", "pending");
+    let mut row = list_row(Some("completed"), None);
+    row.readable_revision_id = None;
+    row.active_revision_id = None;
 
-    let entry = build_document_list_entry(&row, Some(&knowledge_document(&row)), Some(&revision))
-        .expect("single-currency list row should map");
+    let entry = build_document_list_entry(&row).expect("single-currency list row should map");
 
     assert_eq!(entry.status, DocumentStatus::Failed);
 }
 
 #[test]
 fn list_entry_marks_document_with_no_mutation_no_job_and_no_readable_revision_as_empty() {
-    let row = list_row(None, None);
-    let revision = revision(&row, "pending", "pending", "pending");
+    let mut row = list_row(None, None);
+    row.readable_revision_id = None;
+    row.active_revision_id = None;
 
-    let entry = build_document_list_entry(&row, Some(&knowledge_document(&row)), Some(&revision))
-        .expect("single-currency list row should map");
+    let entry = build_document_list_entry(&row).expect("single-currency list row should map");
 
     assert_eq!(entry.status, DocumentStatus::Empty);
 }
 
 #[test]
 fn list_entry_marks_paused_job_with_running_mutation_as_processing() {
-    let row = list_row(Some("paused"), Some("running"));
-    let revision = revision(&row, "pending", "pending", "pending");
+    let mut row = list_row(Some("paused"), Some("running"));
+    row.readable_revision_id = None;
+    row.active_revision_id = None;
 
-    let entry = build_document_list_entry(&row, Some(&knowledge_document(&row)), Some(&revision))
-        .expect("single-currency list row should map");
+    let entry = build_document_list_entry(&row).expect("single-currency list row should map");
 
     assert_eq!(entry.status, DocumentStatus::Processing);
 }
 
 #[test]
-fn list_entry_marks_paused_job_without_active_mutation_as_queued() {
-    let row = list_row(Some("paused"), None);
-    let revision = revision(&row, "pending", "pending", "pending");
+fn list_entry_marks_held_job_without_active_mutation_as_paused() {
+    let mut row = list_row(Some("paused"), None);
+    row.readable_revision_id = None;
+    row.active_revision_id = None;
 
-    let entry = build_document_list_entry(&row, Some(&knowledge_document(&row)), Some(&revision))
-        .expect("single-currency list row should map");
+    let entry = build_document_list_entry(&row).expect("single-currency list row should map");
 
-    assert_eq!(entry.status, DocumentStatus::Queued);
+    assert_eq!(
+        entry.status,
+        DocumentStatus::Paused,
+        "a held job waits for an explicit resume, not for a worker"
+    );
+    assert_eq!(entry.progress_percent, Some(0));
+}
+
+#[test]
+fn list_entry_distinguishes_pending_materialization_from_empty() {
+    let mut row = list_row(None, None);
+    row.visibility_intent_id = Some(Uuid::now_v7());
+    row.readable_revision_id = None;
+    row.active_revision_id = None;
+
+    let entry =
+        build_document_list_entry(&row).expect("an accepted publication commitment must still map");
+
+    assert_eq!(
+        entry.status,
+        DocumentStatus::PendingMaterialization,
+        "an accepted intent without a current readable revision is a pending materialization"
+    );
+    assert!(entry.source_access.is_none(), "a pending publication has no source access");
+    assert_eq!(
+        entry.progress_percent, None,
+        "no ingest attempt exists yet, so the catalog must not fabricate progress"
+    );
+}
+
+#[test]
+fn list_entry_keeps_observed_work_ahead_of_pending_materialization() {
+    let mut row = list_row(Some("queued"), None);
+    row.visibility_intent_id = Some(Uuid::now_v7());
+    row.readable_revision_id = None;
+    row.active_revision_id = None;
+
+    let entry = build_document_list_entry(&row).expect("a queued materialization must still map");
+
+    assert_eq!(
+        entry.status,
+        DocumentStatus::Queued,
+        "confirmed work is queued work, not an unstarted publication commitment"
+    );
 }
 
 #[test]
@@ -426,15 +603,8 @@ fn list_entry_does_not_reconstruct_missing_publication_metadata_from_knowledge()
     row.revision_byte_size = None;
     row.revision_content_source_kind = None;
     row.revision_source_uri = None;
-    let mut effective_revision = revision(&row, "text_readable", "ready", "ready");
-    effective_revision.mime_type = "text/plain".to_string();
-    effective_revision.byte_size = 512;
-    effective_revision.revision_kind = "web_page".to_string();
-    effective_revision.source_uri = Some("https://example.invalid/reference".to_string());
 
-    let entry =
-        build_document_list_entry(&row, Some(&knowledge_document(&row)), Some(&effective_revision))
-            .expect("single-currency list row should map");
+    let entry = build_document_list_entry(&row).expect("single-currency list row should map");
 
     assert_eq!(entry.file_type, None);
     assert_eq!(entry.file_size, None);
@@ -470,9 +640,7 @@ fn document_list_cursor_preserves_sort_specific_last_row_values() {
     row.projection_file_name = Some("Reports/Visible-Name.PDF".to_string());
     row.revision_mime_type = None;
     row.revision_byte_size = None;
-    let revision = revision(&row, "text_readable", "ready", "ready");
-    let entry = build_document_list_entry(&row, Some(&knowledge_document(&row)), Some(&revision))
-        .expect("single-currency list row should map");
+    let entry = build_document_list_entry(&row).expect("single-currency list row should map");
 
     assert!(
         next_document_list_cursor(
@@ -526,4 +694,23 @@ fn document_list_cursor_preserves_sort_specific_last_row_values() {
     )
     .expect("a non-empty page with more rows has a cursor");
     assert_eq!(status_cursor.text_value.as_deref(), Some("ready"));
+}
+
+#[test]
+fn document_list_cost_cursor_orders_unmeasured_rows_in_the_null_bucket() {
+    let mut row = list_row(None, None);
+    row.cost_total = None;
+    row.cost_currency_code = None;
+    let entry = build_document_list_entry(&row).expect("an unmeasured cost still maps");
+
+    let cursor = next_document_list_cursor(
+        std::slice::from_ref(&row),
+        std::slice::from_ref(&entry),
+        DocumentListSortColumn::Cost,
+        true,
+    )
+    .expect("an unmeasured cost still has a deterministic null-bucket continuation");
+
+    assert!(cursor.value_is_null);
+    assert_eq!(cursor.text_value, None);
 }

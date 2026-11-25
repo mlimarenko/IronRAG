@@ -98,6 +98,7 @@ impl ContentService {
             revision: command.revision,
             parent_async_operation_id: None,
             priority: DEFAULT_JOB_PRIORITY,
+            enrichment_scope: command.enrichment_scope,
         };
         let outcome = match staged_bytes {
             Some(bytes) => {
@@ -175,6 +176,7 @@ impl ContentService {
             revision: Some(revision),
             parent_async_operation_id: command.parent_async_operation_id,
             priority: DEFAULT_JOB_PRIORITY,
+            enrichment_scope: command.enrichment_scope,
         };
         let outcome = admission_repository::admit_content_with_failpoint(
             &state.persistence.postgres,
@@ -269,6 +271,7 @@ impl ContentService {
             revision: None,
             parent_async_operation_id: command.parent_async_operation_id,
             priority: DEFAULT_JOB_PRIORITY,
+            enrichment_scope: None,
         };
         let outcome = admission_repository::admit_content_with_failpoint(
             &state.persistence.postgres,

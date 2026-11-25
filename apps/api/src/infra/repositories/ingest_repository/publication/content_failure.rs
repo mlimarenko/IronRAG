@@ -151,6 +151,12 @@ async fn terminally_fail_job(
 /// current content-ingest attempt. It deliberately fences against the current
 /// source generation rather than a pre-provider snapshot because exact partial
 /// vector cleanup may already have advanced that generation.
+///
+/// A failure that arrives after base publication already applied the exact
+/// mutation item keeps that published outcome: the head, item, aggregate and
+/// async operation stay exactly as published, and only the failed channel states,
+/// the attempt/job transition and payload cleanup belong to this path. Optional
+/// enrichment never revokes permitted readable text.
 pub async fn fail_content_ingest_attempt(
     postgres: &PgPool,
     input: &FailContentIngestAttempt,
@@ -172,12 +178,12 @@ pub async fn fail_content_ingest_attempt(
 
     let deleted = fail_content_revision_readiness(&mut transaction, input).await?;
 
-    lock_failed_mutation_scope(&mut transaction, input).await?;
+    let published = lock_failed_mutation_scope(&mut transaction, input).await?;
 
     let web_run_owns_aggregate = web_run_owns_content_aggregate(&mut transaction, input).await?;
 
     let plan = plan_failed_attempt(input, &attempt, web_run_owns_aggregate);
-    if !plan.retry_scheduled {
+    if !plan.retry_scheduled && !published {
         fail_mutation_item_and_aggregate(
             &mut transaction,
             input,
@@ -191,6 +197,7 @@ pub async fn fail_content_ingest_attempt(
 
     if let Some(async_operation_id) = job.async_operation_id
         && !web_run_owns_aggregate
+        && !published
     {
         transition_failed_content_operation(
             &mut transaction,
@@ -213,7 +220,9 @@ pub async fn fail_content_ingest_attempt(
         deleted,
         source_truth_version,
         retry_scheduled: plan.retry_scheduled,
-        mutation_failed: plan.mutation_failed,
+        // A published item is never failed afterwards, so the aggregate stays as
+        // published even when this attempt terminates.
+        mutation_failed: plan.mutation_failed && !published,
     })
 }
 
@@ -325,11 +334,13 @@ async fn fail_content_revision_readiness(
 
 /// Locks the aggregate mutation and the exact mutation item and proves both
 /// still belong to the input's workspace, library, document, and revision. The
-/// item may only be `pending` or `failed` at this point.
+/// item may be `pending`, `failed`, or already `applied`; `applied` reports that
+/// this revision was published before the failure arrived, so the failure belongs
+/// to enrichment only.
 async fn lock_failed_mutation_scope(
     transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     input: &FailContentIngestAttempt,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<bool> {
     let mutation = sqlx::query_as::<_, (Uuid, Uuid)>(
         "select workspace_id, library_id
          from content_mutation
@@ -359,20 +370,22 @@ async fn lock_failed_mutation_scope(
 }
 
 /// The locked item must belong to the failure input's mutation, document, and
-/// revision, and may only be `pending` or `failed`.
+/// revision, and may be `pending`, `failed`, or already `applied`. The returned
+/// flag is true when base publication already applied the item: the head, the
+/// aggregate and the async operation then stay exactly as published.
 fn ensure_failed_item_matches_input(
     item: &(Uuid, Option<Uuid>, Option<Uuid>, String),
     input: &FailContentIngestAttempt,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<bool> {
     anyhow::ensure!(item.0 == input.mutation_id, "failure item mutation mismatch");
     anyhow::ensure!(item.1 == Some(input.document_id), "failure item document mismatch");
     anyhow::ensure!(item.2 == Some(input.revision_id), "failure item revision mismatch");
     anyhow::ensure!(
-        item.3 == "pending" || item.3 == "failed",
+        item.3 == "pending" || item.3 == "failed" || item.3 == "applied",
         "failure item has incompatible terminal state {}",
         item.3
     );
-    Ok(())
+    Ok(item.3 == "applied")
 }
 
 /// Reports whether the mutation's aggregate is owned by a web ingest run. A
@@ -634,8 +647,8 @@ mod failed_attempt_plan_tests {
     }
 
     #[test]
-    fn failed_item_rejects_an_applied_or_foreign_state() {
-        assert!(ensure_failed_item_matches_input(&item("applied"), &input(false, None)).is_err());
+    fn failed_item_reports_a_published_item_and_rejects_unknown_states() {
+        assert!(ensure_failed_item_matches_input(&item("applied"), &input(false, None)).unwrap());
         assert!(ensure_failed_item_matches_input(&item("skipped"), &input(false, None)).is_err());
     }
 

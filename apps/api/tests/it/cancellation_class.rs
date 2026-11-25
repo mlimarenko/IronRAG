@@ -533,6 +533,62 @@ async fn wait_for_no_non_terminal_parent_ops(
     }
 }
 
+#[tokio::test]
+#[ignore = "requires local postgres with required extensions"]
+async fn reprocess_refuses_historical_bytes_without_current_head()
+-> Result<(), Box<dyn Error + Send + Sync>> {
+    let fixture = ContentLifecycleFixture::create().await?;
+    let result = async {
+        let document_id = create_reprocessable_document(&fixture).await?;
+        let principal_id = create_reprocess_principal(&fixture).await?;
+        let pool = &fixture.state.persistence.postgres;
+        assert!(
+            fixture
+                .state
+                .application_services
+                .content
+                .get_current_revision(&fixture.state, document_id)
+                .await?
+                .is_some(),
+            "fixture must start with a current readable revision"
+        );
+        sqlx::query(
+            "update content_document_head set active_revision_id = null, \
+             readable_revision_id = null where document_id = $1",
+        )
+        .bind(document_id)
+        .execute(pool)
+        .await?;
+        let before: i64 =
+            sqlx::query_scalar("select count(*) from content_revision where document_id = $1")
+                .bind(document_id)
+                .fetch_one(pool)
+                .await?;
+
+        let outcome =
+            reprocess_single_document(&fixture.state, None, principal_id, None, document_id).await;
+        assert!(outcome.is_err(), "historical source bytes must not be reprocessed");
+        let after: i64 =
+            sqlx::query_scalar("select count(*) from content_revision where document_id = $1")
+                .bind(document_id)
+                .fetch_one(pool)
+                .await?;
+        assert_eq!(before, after);
+        let head = fixture
+            .state
+            .application_services
+            .content
+            .get_document_head(&fixture.state, document_id)
+            .await?
+            .expect("head exists");
+        assert_eq!(head.readable_revision_id, None);
+        Ok(())
+    }
+    .await;
+    fixture.cleanup().await?;
+    result
+}
+
 /// IRG-203 SITE-2: aborting the reprocess caller between
 /// `cancel_jobs_for_document` and its reconciliation must not leave the head
 /// mutation accepted/running with its jobs already canceled. The detached
@@ -1022,6 +1078,7 @@ async fn aborted_inline_upload_reclaims_staged_source_blob()
                     .upload_inline_document(
                         &state,
                         UploadInlineDocumentCommand {
+                            enrichment_scope: None,
                             workspace_id,
                             library_id,
                             external_key: Some(format!("irg203-site6-{}", Uuid::now_v7())),

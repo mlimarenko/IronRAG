@@ -7,7 +7,15 @@ import {
   Send,
   Sparkles,
 } from 'lucide-react'
-import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from 'react'
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  type CSSProperties,
+} from 'react'
 import { useTranslation } from 'react-i18next'
 import { useNavigate, useSearchParams } from 'react-router-dom'
 
@@ -71,6 +79,47 @@ export default function AssistantPage() {
     (value: string) => setComposerState({ scope: composerScope, value }),
     [composerScope],
   )
+  const composerRef = useRef<HTMLTextAreaElement | null>(null)
+  const resizeComposer = useCallback((element = composerRef.current) => {
+    if (!element) return
+    // The stylesheet owns the compact minimum and the viewport-relative cap.
+    // Resetting to `auto` first lets a shrinking draft lose its old height;
+    // the content height then wins wherever the cap allows it.
+    element.style.height = 'auto'
+    element.style.height = `${element.scrollHeight}px`
+  }, [])
+  // The field is replaced whenever the early returns swap to the chat surface,
+  // so the sizing follows the node itself instead of one effect per draft value.
+  const attachComposer = useCallback(
+    (element: HTMLTextAreaElement | null) => {
+      composerRef.current = element
+      if (!element) return
+      resizeComposer(element)
+      let width = element.clientWidth
+      let frame = 0
+      const observer = new ResizeObserver(() => {
+        // Defer to the next frame: writing the height in the observer's own
+        // delivery would schedule another notification and trip the browser's
+        // "undelivered notifications" loop warning.
+        if (frame !== 0) return
+        frame = requestAnimationFrame(() => {
+          frame = 0
+          if (!element.isConnected || element.clientWidth === width) return
+          width = element.clientWidth
+          resizeComposer(element)
+        })
+      })
+      observer.observe(element)
+      return () => {
+        observer.disconnect()
+        cancelAnimationFrame(frame)
+      }
+    },
+    [resizeComposer],
+  )
+  useLayoutEffect(() => {
+    resizeComposer()
+  }, [composer, resizeComposer])
   const [evidenceMessageId, setEvidenceMessageId] = useState<string | null>(null)
   const [evidenceOpen, setEvidenceOpen] = useState(false)
   const [sessionsOpen, setSessionsOpen] = useState(false)
@@ -324,13 +373,16 @@ export default function AssistantPage() {
         <div>
           <div className="composer">
             <textarea
+              ref={attachComposer}
               value={composer}
               onChange={(event) => setComposer(event.target.value)}
               onKeyDown={(event) => {
-                if (event.key === 'Enter' && !event.shiftKey) {
-                  event.preventDefault()
-                  send()
-                }
+                if (event.key !== 'Enter' || event.shiftKey) return
+                // Enter confirms an IME composition before the word is ready;
+                // sending there would submit a half-typed question.
+                if (event.nativeEvent.isComposing || event.nativeEvent.keyCode === 229) return
+                event.preventDefault()
+                send()
               }}
               placeholder={t('assistant.placeholder')}
               aria-label={t('assistant.placeholder')}

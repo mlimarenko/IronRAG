@@ -48,7 +48,9 @@ fn chunk_vector_similarity_sql_with_order(
           and d.library_id = v.library_id
           and exists (select 1 from content_current_revision current_revision
                       where current_revision.document_id = d.document_id
-                        and current_revision.revision_id = v.revision_id)
+                        and current_revision.revision_id = v.revision_id
+                        and current_revision.vector_state = 'ready'
+                        and current_revision.vector_ready_at is not null)
           and d.document_state = 'active'
           and d.deleted_at is null
          join knowledge_structured_revision sr
@@ -103,7 +105,9 @@ pub(super) fn chunk_vector_document_rescue_sql(relation: &str, cast_type: &str) 
              and d.library_id = v.library_id
              and exists (select 1 from content_current_revision current_revision
                          where current_revision.document_id = d.document_id
-                           and current_revision.revision_id = v.revision_id)
+                           and current_revision.revision_id = v.revision_id
+                           and current_revision.vector_state = 'ready'
+                           and current_revision.vector_ready_at is not null)
              and d.document_state = 'active'
              and d.deleted_at is null
             join knowledge_structured_revision sr
@@ -148,7 +152,8 @@ fn entity_vector_similarity_sql_with_order(
     let entity_visibility = current_knowledge_graph_target!(
         "knowledge_evidence_entity_support",
         "e.entity_id",
-        "e.library_id"
+        "e.library_id",
+        ENTITY_VECTOR_LANE_READINESS
     );
     let order_expression = if exact_retry {
         format!("(v.embedding <=> $3::{cast_type}) + 0.0")
@@ -392,9 +397,8 @@ pub(super) async fn configure_hnsw_search(
     // pgvector applies ordinary filters after an approximate HNSW scan. During
     // a rebuild, opaque staging rows share the dimension shard with active
     // rows, so a fixed candidate list can otherwise be consumed by staging.
-    // PostgreSQL 18 is the project baseline and its pgvector image is >= 0.8.1;
-    // strict iterative scans (introduced in 0.8.0) continue until the filtered
-    // LIMIT is satisfied or pgvector's configured scan bound is reached.
+    // Strict iterative scans continue until the filtered LIMIT is satisfied
+    // or pgvector's configured scan bound is reached.
     sqlx::query(HNSW_SEARCH_CONFIG_SQL)
         .bind(params.ef_search.to_string())
         .bind(params.max_scan_tuples.to_string())

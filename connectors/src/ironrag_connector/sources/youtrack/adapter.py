@@ -80,6 +80,11 @@ class YouTrackApi(Protocol):
     async def aclose(self) -> None: ...
 
 
+@dataclass(frozen=True)
+class ItemObservationSkipped:
+    reason: str
+
+
 class YouTrackAdapter(SourceAdapter):
     name = CONNECTOR_NAME
     kinds = KINDS
@@ -120,6 +125,69 @@ class YouTrackAdapter(SourceAdapter):
         # longer contribute a safe composite document, regardless of the
         # operator's retention preference.
         return SourceDeleteEnforcement.REQUIRED
+
+    async def observe_item(self, kind: str, item_id: str) -> SourceItemRef | ItemObservationSkipped:
+        """Observe one canonical source ID without treating its ID as authority."""
+        if kind not in self.primary_kinds or not item_id or item_id != item_id.strip():
+            raise ValueError("a supported kind and nonempty canonical item ID are required")
+        initial = _required_string(await self._client.validate_credentials(), "id")
+        try:
+            if kind == KIND_ARTICLE:
+                item = await self._client.get_article(item_id)
+            else:
+                item = await self._client.get_issue(item_id)
+        except YouTrackNotFoundError:
+            return ItemObservationSkipped("source item is absent or inaccessible")
+        if _required_string(item, "id") != item_id:
+            raise YouTrackError("YouTrack returned a different item identity")
+        if kind == KIND_ARTICLE:
+            projected = await self._project_article(item_id, item)
+        else:
+            projected = await self._project_issue(item_id, item)
+        if isinstance(projected, ItemObservationSkipped):
+            return projected
+        item_projection, ref = projected
+        if _required_string(await self._client.validate_credentials(), "id") != initial:
+            raise YouTrackError("YouTrack authenticated identity changed during observation")
+        if _projection_requires_security_delete(item_projection):
+            return ItemObservationSkipped("source visibility or related content is not safe")
+        return ref
+
+    async def _project_article(
+        self, item_id: str, item: dict[str, Any]
+    ) -> tuple[dict[str, Any], SourceItemRef] | ItemObservationSkipped:
+        """Project one article and its visible ancestry, or skip it as out of scope."""
+        if not self._include_article(item):
+            return ItemObservationSkipped("source item is outside configured scope")
+        try:
+            chain = await self._live_article_access_chain(item)
+        except YouTrackNotFoundError:
+            return ItemObservationSkipped("article ancestry is inaccessible")
+        related = (
+            await self._stable_related_snapshot(KIND_ARTICLE, item_id)
+            if _access_chain_is_unlimited(chain)
+            else _empty_related_snapshot()
+        )
+        projected = _with_projection(item, chain=chain, related=related)
+        return projected, self._article_ref(item_id, projected)
+
+    async def _project_issue(
+        self, item_id: str, item: dict[str, Any]
+    ) -> tuple[dict[str, Any], SourceItemRef] | ItemObservationSkipped:
+        """Project one issue and its visible related content, or skip it as out of scope."""
+        item = self._with_allowed_custom_fields(item)
+        if not self._include_issue(item):
+            return ItemObservationSkipped("source item is outside configured scope")
+        chain = ({"item_id": item_id, **_visibility_descriptor(item.get("visibility"))},)
+        related = (
+            await self._stable_related_snapshot(
+                KIND_ISSUE, item_id, expected_comment_count=self._issue_expected_comment_count(item)
+            )
+            if _access_chain_is_unlimited(chain)
+            else _empty_related_snapshot()
+        )
+        projected = _with_projection(item, chain=chain, related=related)
+        return projected, self._issue_ref(item_id, projected)
 
     async def iter_items(self) -> AsyncIterator[SourceItemRef]:
         initial_identity = await self._client.validate_credentials()

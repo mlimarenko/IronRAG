@@ -276,19 +276,38 @@ async fn single_page_worker_runs_web_capture_through_authoritative_pipeline() ->
             .as_ref()
             .map(|mutation| mutation.id)
             .context("missing latest mutation after authoritative worker execution")?;
-        let job_handle = fixture
-            .state
-            .application_services
-            .ingest
-            .get_job_handle_by_mutation_id(&fixture.state, mutation_id)
-            .await
-            .context("failed to load authoritative ingest job handle")?
-            .context("missing authoritative ingest job handle after worker execution")?;
-        let attempt_id = job_handle
-            .latest_attempt
-            .as_ref()
-            .map(|attempt| attempt.id)
-            .context("missing authoritative ingest attempt after worker execution")?;
+        // The run settles when its page settles, which the base publication can
+        // do before the enrichment stages finish. The stage assertions below are
+        // about the pipeline, so wait for the authoritative attempt to reach a
+        // terminal state instead of racing the run's own settlement.
+        let deadline = time::Instant::now() + Duration::from_secs(20);
+        let attempt_id = loop {
+            let handle = fixture
+                .state
+                .application_services
+                .ingest
+                .get_job_handle_by_mutation_id(&fixture.state, mutation_id)
+                .await
+                .context("failed to reload authoritative ingest job handle")?
+                .context("missing authoritative ingest job handle after worker execution")?;
+            // Attempt states are the database vocabulary (`leased`, `running`,
+            // `succeeded`, `failed`, `abandoned`, `canceled`); `completed` is a
+            // queue state, not an attempt state.
+            if let Some(attempt) = handle.latest_attempt.as_ref()
+                && matches!(
+                    attempt.attempt_state.as_str(),
+                    "succeeded" | "failed" | "abandoned" | "canceled"
+                )
+            {
+                break attempt.id;
+            }
+            if time::Instant::now() >= deadline {
+                anyhow::bail!(
+                    "ingest attempt for mutation {mutation_id} did not reach a terminal state"
+                );
+            }
+            time::sleep(Duration::from_millis(100)).await;
+        };
         let stage_events = fixture
             .state
             .application_services
@@ -320,16 +339,20 @@ async fn single_page_worker_runs_web_capture_through_authoritative_pipeline() ->
             Some(true),
             "a positive deterministic graph contribution must publish as ready: {completed_graph_details}"
         );
+        // The document summary fetched before the attempt reached its terminal
+        // state is a stale snapshot: readiness is published by the finalization
+        // that runs after the graph stage. Read the same revision again once it
+        // is ready, and assert against that authoritative detail.
+        let ready_summary =
+            fixture.wait_for_document_ready(document_id, Duration::from_secs(15)).await?;
         assert_eq!(
-            terminal_summary
+            ready_summary
                 .readiness
                 .as_ref()
                 .map(|readiness| readiness.graph_state.as_str()),
             Some("ready"),
             "the terminal document readiness must agree with its completed graph stage: {completed_graph_details}"
         );
-        let ready_summary =
-            fixture.wait_for_document_ready(document_id, Duration::from_secs(15)).await?;
         let ready_readiness_summary = serde_json::to_value(
             ready_summary.readiness_summary.as_ref().context("missing ready readiness summary")?,
         )

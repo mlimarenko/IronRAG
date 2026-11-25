@@ -72,6 +72,7 @@ describe('DocumentInspectorSections', () => {
           attemptKind: 'initial',
           attemptNo: 1,
           jobId: 'job-1',
+          retryable: false,
           queueStartedAt: '2026-08-10T10:00:00Z',
           stageEvents: [
             {

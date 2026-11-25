@@ -2,6 +2,9 @@ use std::collections::HashMap;
 
 use crate::infra::knowledge_rows::KnowledgeDocumentRow;
 
+use super::super::semantic_verification::{
+    EvidenceBudget, SelectedEvidenceMeasurement, bounded_evidence_notice, retain_bounded_chunks,
+};
 use super::super::types::{
     StructuredQueryPlanningStage, StructuredQueryRerankStage, StructuredQueryRetrievalStage,
 };
@@ -174,6 +177,7 @@ struct FinalizedBundle {
     consolidation_winner_chunks: usize,
     consolidation_tangential_chunks: usize,
     topical_pruned_chunks: usize,
+    evidence_truncated: bool,
 }
 
 pub(super) async fn prepare_answer_query_inner(
@@ -197,12 +201,13 @@ pub(super) async fn prepare_answer_query_inner(
     let stage_1_elapsed_ms = stage_1_started.elapsed().as_millis();
     let mut finalized = finalize_retrieved_bundle(&request, &query_ir, rerank_stage).await?;
     let stage_2_started = std::time::Instant::now();
-    let answer_context = assemble_prepared_answer_context(
+    let (answer_context, evidence_selection) = assemble_prepared_answer_context(
         &request,
         &query_ir,
         &mut finalized.structured,
         &finalized.document_index,
         &finalized.plan_keywords,
+        finalized.evidence_truncated,
     )
     .await?;
     let stage_2_elapsed_ms = stage_2_started.elapsed().as_millis();
@@ -219,6 +224,7 @@ pub(super) async fn prepare_answer_query_inner(
     Ok(PreparedAnswerQueryResult {
         structured: finalized.structured,
         answer_context,
+        evidence_selection,
         query_ir,
         // Filled in by the `prepare_answer_query` wrapper after draining the
         // span sink scoped around this call. The sink is drained exactly once,
@@ -273,18 +279,20 @@ async fn compile_and_plan(request: &PrepareAnswerQueryRequest<'_>) -> anyhow::Re
             library_id = %library_id,
             "compiler emitted a resolved standalone retrieval query for an elliptic follow-up"
         );
-        super::super::replan_for_resolved_retrieval_query(ResolvedRetrievalReplanRequest {
-            state,
-            execution_context: provider_execution_context,
-            planning: &mut planning_stage,
-            resolved_query: &retrieval_question,
-            mode: request.mode,
-            top_k: request.top_k,
-            query_ir: &query_ir,
-        })
+        Box::pin(super::super::replan_for_resolved_retrieval_query(
+            ResolvedRetrievalReplanRequest {
+                state,
+                execution_context: provider_execution_context,
+                planning: &mut planning_stage,
+                resolved_query: &retrieval_question,
+                mode: request.mode,
+                top_k: request.top_k,
+                query_ir: &query_ir,
+            },
+        ))
         .await?;
     } else {
-        super::super::refresh_query_plan_for_compiled_ir(
+        Box::pin(super::super::refresh_query_plan_for_compiled_ir(
             state,
             provider_execution_context,
             CompiledIrPlanRefresh {
@@ -296,7 +304,7 @@ async fn compile_and_plan(request: &PrepareAnswerQueryRequest<'_>) -> anyhow::Re
                 rerank_enabled: state.retrieval_intelligence.rerank_enabled,
                 rerank_candidate_limit: state.retrieval_intelligence.rerank_candidate_limit,
             },
-        )
+        ))
         .await?;
     }
     Ok(CompiledPlan { query_ir, planning_stage, retrieval_question, plan_elapsed_ms })
@@ -371,7 +379,6 @@ async fn finalize_retrieved_bundle(
     mut rerank_stage: StructuredQueryRerankStage,
 ) -> anyhow::Result<FinalizedBundle> {
     let state = request.state;
-    let library_id = request.library_id;
     let question = request.question.as_str();
     let mut document_index = rerank_stage.retrieval.planning.document_index.clone();
     // The inventory must read the DOCUMENT, not the retrieved subset: a
@@ -398,43 +405,8 @@ async fn finalize_retrieved_bundle(
     )
     .await;
     let consolidation_elapsed_ms = consolidation_started.elapsed().as_millis();
-    let plan_keywords = rerank_stage.retrieval.planning.plan.keywords.clone();
-    log_canonical_head_filter(
-        library_id,
-        super::super::retain_current_document_head_chunks(
-            &mut rerank_stage.retrieval.bundle.chunks,
-            &document_index,
-        ),
-        "focused-document consolidation",
-    );
-    let source_context_started = std::time::Instant::now();
-    let source_context = super::super::augment_structured_source_context(
-        super::super::StructuredSourceContextAugmentRequest {
-            state,
-            library_id,
-            question,
-            query_ir: Some(query_ir),
-            document_index: &document_index,
-            plan_keywords: &plan_keywords,
-            graph_evidence_source_document_ids: &rerank_stage
-                .retrieval
-                .graph_evidence_source_document_ids,
-            chunks: &mut rerank_stage.retrieval.bundle.chunks,
-        },
-    )
-    .await?;
-    tracing::info!(
-        stage = "answer.source_context_done",
-        library_id = %library_id,
-        elapsed_ms = source_context_started.elapsed().as_millis(),
-        "augment_structured_source_context complete"
-    );
-    hydrate_runtime_document_index(
-        state,
-        &mut document_index,
-        &rerank_stage.retrieval.bundle.chunks,
-    )
-    .await?;
+    let plan_keywords =
+        augment_and_prune_bundle(request, query_ir, &mut rerank_stage, &mut document_index).await?;
     // Temporal hard-filter on the bundle AFTER source-context augmentation.
     // The companion paths (focused-match, source profile, neighbor expansion,
     // library source profile) bypass the retrieval temporal filter and pull
@@ -445,41 +417,32 @@ async fn finalize_retrieved_bundle(
     // occurred_at) were leaking into "messages in March 2026" answers via
     // the prepared-segment / source-context path. Single knowledge-store read
     // via `list_chunks_by_ids`; no per-chunk lookup.
-    apply_bundle_temporal_filter(
-        state,
-        library_id,
-        query_ir,
-        &mut rerank_stage.retrieval.bundle.chunks,
-    )
-    .await?;
-    let declaration_context_chunks =
-        super::super::structured_query_pipeline::take_focused_declaration_context_chunks(
-            &mut rerank_stage.retrieval.bundle.chunks,
-        );
-    log_structured_source_context(library_id, &source_context);
-    log_canonical_head_filter(
-        library_id,
-        super::super::retain_current_document_head_chunks(
-            &mut rerank_stage.retrieval.bundle.chunks,
-            &document_index,
-        ),
-        "structured source context",
-    );
-    let topical_prune = super::super::prune_non_topical_document_tail(
-        &mut rerank_stage.retrieval.bundle,
-        question,
-        Some(query_ir),
-        query_requests_latest_versions(query_ir),
-    );
-    log_topical_prune(library_id, &topical_prune);
+    let (declaration_context_chunks, topical_pruned_chunks) =
+        filter_and_prune_bundle(request, query_ir, &mut rerank_stage, &document_index).await?;
 
-    // Context assembly runs AFTER consolidation so the assembled
-    // `context_text` reflects the reshuffled bundle. The winner
-    // document_id is threaded in so `load_retrieved_document_briefs`
-    // can build the winner preview out of the anchor-window chunks
-    // already in the bundle (rather than re-fetching intro chunks
-    // that consolidation deliberately demoted).
     rerank_stage.retrieval.bundle.chunks.extend(declaration_context_chunks);
+    // One bounded evidence selection before the generator prompt is built. The
+    // same distinct identities and byte-bounded text are later re-measured by
+    // the semantic verifier; sources that do not fit are dropped here rather
+    // than producing an answer the verifier can never check.
+    let mut evidence_budget = EvidenceBudget::new();
+    let chunk_retention = retain_bounded_chunks(
+        &mut rerank_stage.retrieval.bundle.chunks,
+        &mut evidence_budget,
+        query_ir,
+        &document_index,
+    );
+    let evidence_truncated = chunk_retention.is_truncated();
+    if evidence_truncated || chunk_retention.duplicates > 0 {
+        tracing::warn!(
+            stage = "answer.evidence_budget",
+            source_entries = chunk_retention.measurement.source_entries,
+            evidence_utf8_bytes = chunk_retention.measurement.evidence_utf8_bytes,
+            dropped_over_budget = chunk_retention.over_budget,
+            dropped_duplicates = chunk_retention.duplicates,
+            "bounded generation evidence selection"
+        );
+    }
     let structured =
         super::super::finalize_structured_query(super::super::StructuredQueryAssemblyRequest {
             state,
@@ -499,8 +462,99 @@ async fn finalize_retrieved_bundle(
         consolidation_reason: consolidation.focus_reason.as_str(),
         consolidation_winner_chunks: consolidation.winner_chunk_count,
         consolidation_tangential_chunks: consolidation.tangential_chunk_count,
-        topical_pruned_chunks: topical_prune.removed_chunk_count,
+        topical_pruned_chunks,
+        evidence_truncated,
     })
+}
+
+/// Augments the consolidated bundle with structured source context and hydrates
+/// the document index it introduced. Returns the plan keywords the assembly
+/// reports.
+async fn augment_and_prune_bundle(
+    request: &PrepareAnswerQueryRequest<'_>,
+    query_ir: &QueryIR,
+    rerank_stage: &mut StructuredQueryRerankStage,
+    document_index: &mut std::collections::HashMap<Uuid, KnowledgeDocumentRow>,
+) -> anyhow::Result<Vec<String>> {
+    let state = request.state;
+    let library_id = request.library_id;
+    let question = request.question.as_str();
+    let plan_keywords = rerank_stage.retrieval.planning.plan.keywords.clone();
+    log_canonical_head_filter(
+        library_id,
+        super::super::retain_current_document_head_chunks(
+            &mut rerank_stage.retrieval.bundle.chunks,
+            document_index,
+        ),
+        "focused-document consolidation",
+    );
+    let source_context_started = std::time::Instant::now();
+    let source_context = super::super::augment_structured_source_context(
+        super::super::StructuredSourceContextAugmentRequest {
+            state,
+            library_id,
+            question,
+            query_ir: Some(query_ir),
+            document_index,
+            plan_keywords: &plan_keywords,
+            graph_evidence_source_document_ids: &rerank_stage
+                .retrieval
+                .graph_evidence_source_document_ids,
+            chunks: &mut rerank_stage.retrieval.bundle.chunks,
+        },
+    )
+    .await?;
+    tracing::info!(
+        stage = "answer.source_context_done",
+        library_id = %library_id,
+        elapsed_ms = source_context_started.elapsed().as_millis(),
+        "augment_structured_source_context complete"
+    );
+    hydrate_runtime_document_index(state, document_index, &rerank_stage.retrieval.bundle.chunks)
+        .await?;
+    log_structured_source_context(library_id, &source_context);
+    Ok(plan_keywords)
+}
+
+/// Applies the temporal hard-filter and the topical prune to the augmented
+/// bundle, returning the focused declaration chunks the assembly re-attaches
+/// and the pruned chunk count.
+async fn filter_and_prune_bundle(
+    request: &PrepareAnswerQueryRequest<'_>,
+    query_ir: &QueryIR,
+    rerank_stage: &mut StructuredQueryRerankStage,
+    document_index: &std::collections::HashMap<Uuid, KnowledgeDocumentRow>,
+) -> anyhow::Result<(Vec<RuntimeMatchedChunk>, usize)> {
+    let state = request.state;
+    let library_id = request.library_id;
+    let question = request.question.as_str();
+    apply_bundle_temporal_filter(
+        state,
+        library_id,
+        query_ir,
+        &mut rerank_stage.retrieval.bundle.chunks,
+    )
+    .await?;
+    let declaration_context_chunks =
+        super::super::structured_query_pipeline::take_focused_declaration_context_chunks(
+            &mut rerank_stage.retrieval.bundle.chunks,
+        );
+    log_canonical_head_filter(
+        library_id,
+        super::super::retain_current_document_head_chunks(
+            &mut rerank_stage.retrieval.bundle.chunks,
+            document_index,
+        ),
+        "structured source context",
+    );
+    let topical_prune = super::super::prune_non_topical_document_tail(
+        &mut rerank_stage.retrieval.bundle,
+        question,
+        Some(query_ir),
+        query_requests_latest_versions(query_ir),
+    );
+    log_topical_prune(library_id, &topical_prune);
+    Ok((declaration_context_chunks, topical_prune.removed_chunk_count))
 }
 
 /// Loads the dominant document's own chunk rows as inventory candidates when
@@ -528,7 +582,8 @@ async fn assemble_prepared_answer_context(
     structured: &mut super::super::RuntimeStructuredQueryResult,
     document_index: &HashMap<Uuid, KnowledgeDocumentRow>,
     plan_keywords: &[String],
-) -> anyhow::Result<String> {
+    evidence_truncated: bool,
+) -> anyhow::Result<(String, Option<SelectedEvidenceMeasurement>)> {
     let state = request.state;
     let library_id = request.library_id;
     // Stage 2: library summary is answer evidence; graph community
@@ -566,17 +621,53 @@ async fn assemble_prepared_answer_context(
         document_index,
         plan_keywords,
     };
-    let compare_probe =
-        augment_partial_compare_context(&probe_context, &mut answer_context, structured).await?;
+    // The budget continues from the chunks already selected before prompt
+    // assembly. Probe evidence may only use the remaining source/byte capacity,
+    // so the prompt and the verifier keep the same bounded identities.
+    let mut evidence_budget = EvidenceBudget::from_chunks(
+        structured
+            .context_chunks
+            .iter()
+            .chain(structured.ordered_source_units.iter())
+            .chain(structured.technical_literal_chunks.iter()),
+    );
+    let compare_probe = augment_partial_compare_context(
+        &probe_context,
+        &mut answer_context,
+        structured,
+        &mut evidence_budget,
+    )
+    .await?;
     if compare_probe.attempted {
         log_compare_context_probe(library_id, &compare_probe);
     }
-    let technical_probe =
-        augment_technical_focus_context(&probe_context, &mut answer_context, structured).await?;
+    let technical_probe = augment_technical_focus_context(
+        &probe_context,
+        &mut answer_context,
+        structured,
+        &mut evidence_budget,
+    )
+    .await?;
     if technical_probe.attempted {
         log_technical_focus_probe(library_id, &technical_probe);
     }
-    Ok(answer_context)
+    let probe_truncated =
+        compare_probe.skipped_over_budget > 0 || technical_probe.skipped_over_budget > 0;
+    let bounded_selection =
+        (evidence_truncated || probe_truncated).then(|| evidence_budget.measurement());
+    if let Some(measurement) = bounded_selection {
+        tracing::warn!(
+            stage = "answer.evidence_coverage",
+            truncated = true,
+            source_entries = measurement.source_entries,
+            evidence_utf8_bytes = measurement.evidence_utf8_bytes,
+            "generation evidence was bounded; coverage is partial"
+        );
+        let notice = bounded_evidence_notice(measurement);
+        answer_context.push_str("\n\n");
+        answer_context.push_str(&notice);
+    }
+    Ok((answer_context, bounded_selection))
 }
 
 /// Runs the NL->IR compiler for the current question + conversation history.

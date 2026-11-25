@@ -112,6 +112,38 @@ pub async fn claim_next_queued_ingest_job(
     Ok(claimed)
 }
 
+/// Lease exactly the named queued job.
+///
+/// The dispatcher's neighbour in this module claims an unspecified next job;
+/// this one takes the id the caller names and nothing else, so an operator can
+/// execute one admitted job without draining the queue. The guarded `where`
+/// keeps every other job untouched: the update matches only a still-`queued`
+/// job whose availability has arrived.
+pub async fn claim_queued_ingest_job_by_id(
+    postgres: &PgPool,
+    job_id: Uuid,
+    queue_lease_token: &str,
+    queue_lease_owner: &str,
+) -> Result<Option<IngestJobRow>, sqlx::Error> {
+    sqlx::query_as::<_, IngestJobRow>(sqlx::AssertSqlSafe(format!(
+        "update ingest_job
+         set queue_state = 'leased'::ingest_queue_state,
+             queue_leased_at = now(),
+             queue_lease_token = $2,
+             queue_lease_owner = $3
+         where id = $1
+           and queue_state = 'queued'
+           and available_at <= now()
+         returning
+            {INGEST_JOB_COLUMNS}",
+    )))
+    .bind(job_id)
+    .bind(queue_lease_token)
+    .bind(queue_lease_owner)
+    .fetch_optional(postgres)
+    .await
+}
+
 pub async fn list_active_ingest_queue(
     postgres: &PgPool,
     workspace_id: Option<Uuid>,

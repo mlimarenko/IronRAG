@@ -123,6 +123,11 @@ pub struct AssistantChunkReference {
     pub execution_id: Uuid,
     /// Referenced chunk identifier.
     pub chunk_id: Uuid,
+    /// Immutable document revision the chunk was extracted from, hydrated from
+    /// the chunk row at read time. Absent for historical references and for
+    /// chunks whose document no longer exists.
+    #[serde(default)]
+    pub revision_id: Option<Uuid>,
     /// Position assigned by evidence ranking.
     pub rank: i32,
     /// Relevance score used to rank the chunk.

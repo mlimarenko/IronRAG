@@ -29,8 +29,13 @@ use crate::{
         // — see the module-level comment in ingestion.rs. Imported back here
         // because the queue *mutation* handlers below (still `ops`-scoped
         // pending a future domain pass) return the refreshed queue by
-        // calling straight back into it.
-        ingestion::{IngestQueueQuery, IngestQueueResponse, list_ingest_queue},
+        // calling straight back into it. `map_job_handle` + `IngestJobResponse`
+        // are the per-job DTO owners: the exact-job execute handler answers
+        // with that job's own record, not the queue snapshot.
+        ingestion::{
+            IngestJobResponse, IngestQueueQuery, IngestQueueResponse, list_ingest_queue,
+            map_job_handle,
+        },
         router_support::ApiError,
     },
     shared::cancellation::{DetachedFinalizerGuard, spawn_detached_awaited},
@@ -154,6 +159,7 @@ pub fn router() -> Router<AppState> {
         .route("/ops/libraries/{library_id}/dashboard", get(get_library_dashboard))
         .route("/ops/ingest-queue/bulk", post(bulk_ingest_queue_action))
         .route("/ops/ingest-queue/jobs/{job_id}/move", post(move_ingest_queue_job))
+        .route("/ops/ingest-queue/jobs/{job_id}/execute", post(execute_ingest_queue_job))
         .route("/ops/ingest-queue/jobs/{job_id}/retry", post(retry_ingest_queue_job))
         .route("/ops/ingest-queue/jobs/{job_id}/pause", post(pause_ingest_queue_job))
         .route("/ops/ingest-queue/jobs/{job_id}/resume", post(resume_ingest_queue_job))
@@ -318,6 +324,38 @@ pub async fn move_ingest_queue_job(
         Query(IngestQueueQuery { workspace_id: None, library_id: None }),
     )
     .await
+}
+
+#[utoipa::path(
+    post,
+    path = "/v1/ops/ingest-queue/jobs/{jobId}/execute",
+    tag = "ops",
+    operation_id = "executeIngestQueueJob",
+    params(("jobId" = uuid::Uuid, Path, description = "Queued ingest job identifier")),
+    responses(
+        (status = 200, description = "Executed ingest job with its latest attempt and async operation", body = IngestJobResponse),
+        (status = 400, description = "Job is not queued"),
+        (status = 401, description = "Caller is not authenticated"),
+        (status = 403, description = "Caller cannot mutate the job's library"),
+        (status = 404, description = "Job not found"),
+        (status = 409, description = "Job has no admitted mutation origin or is already leased"),
+    ),
+)]
+#[tracing::instrument(level = "info", name = "http.execute_ingest_queue_job", skip_all, fields(job_id = %job_id))]
+pub async fn execute_ingest_queue_job(
+    auth: AuthContext,
+    State(state): State<AppState>,
+    Path(job_id): Path<Uuid>,
+) -> Result<Json<IngestJobResponse>, ApiError> {
+    let job = state.application_services.ingest.get_job(&state, job_id).await?;
+    authorize_library_permission(&auth, job.workspace_id, job.library_id, POLICY_LIBRARY_WRITE)?;
+    state.application_services.ingest.execute_job(&state, job_id, "ops-execute").await?;
+    // The answer is this job's own record after its run. Composing it from the
+    // global active queue would need `POLICY_USAGE_READ` — a different
+    // permission from the write that authorized this exact job — so the caller
+    // would be refused after the work had already succeeded.
+    let handle = state.application_services.ingest.get_job_handle(&state, job_id).await?;
+    Ok(Json(map_job_handle(&state, handle).await?))
 }
 
 #[utoipa::path(
@@ -1136,8 +1174,8 @@ fn map_graph_surface(
         edges: Vec::new(),
         readiness_summary: Some(GraphReadinessSummary {
             library_id: summary.library_id,
-            document_counts_by_readiness: summary
-                .document_counts_by_readiness
+            document_counts_by_status: summary
+                .document_counts_by_status
                 .iter()
                 .map(|(key, value)| (key.clone(), *value))
                 .collect(),

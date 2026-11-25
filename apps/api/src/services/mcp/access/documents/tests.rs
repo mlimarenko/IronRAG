@@ -1,15 +1,12 @@
 use super::*;
 use super::{
-    management::list_documents_matches_status_filter,
     read::{canonical_read_window, effective_read_start_offset},
     search::{chunk_search_query_variants, search_document_hit_order},
 };
 use crate::{
-    domains::content::{DocumentReadinessSummary, RuntimeDocumentActivityStatus},
     mcp_types::{McpDocumentHit, McpReadMode, McpReadabilityState},
     shared::versioning::dotted_version_key,
 };
-use chrono::Utc;
 use ironrag_contracts::documents::DocumentReadiness;
 use uuid::Uuid;
 
@@ -51,55 +48,6 @@ fn readability_state_treats_graph_ready_as_readable() {
         readability_state_from_kind(DocumentReadiness::Readable),
         McpReadabilityState::Readable
     );
-}
-
-#[test]
-fn list_documents_readable_filter_includes_graph_ready_and_sparse() {
-    let graph_ready = DocumentReadinessSummary {
-        document_id: Uuid::nil(),
-        active_revision_id: None,
-        readiness_kind: DocumentReadiness::GraphReady,
-        activity_status: RuntimeDocumentActivityStatus::Ready,
-        stalled_reason: None,
-        preparation_state: "ready".to_string(),
-        graph_coverage_kind: "graph_ready".to_string(),
-        typed_fact_coverage: None,
-        last_mutation_id: None,
-        last_job_stage: None,
-        updated_at: Utc::now(),
-    };
-    let graph_sparse = DocumentReadinessSummary {
-        document_id: Uuid::nil(),
-        active_revision_id: None,
-        readiness_kind: DocumentReadiness::GraphSparse,
-        activity_status: RuntimeDocumentActivityStatus::Ready,
-        stalled_reason: None,
-        preparation_state: "ready".to_string(),
-        graph_coverage_kind: "graph_sparse".to_string(),
-        typed_fact_coverage: None,
-        last_mutation_id: None,
-        last_job_stage: None,
-        updated_at: Utc::now(),
-    };
-    let readable = DocumentReadinessSummary {
-        document_id: Uuid::nil(),
-        active_revision_id: None,
-        readiness_kind: DocumentReadiness::Readable,
-        activity_status: RuntimeDocumentActivityStatus::Ready,
-        stalled_reason: None,
-        preparation_state: "ready".to_string(),
-        graph_coverage_kind: "none".to_string(),
-        typed_fact_coverage: None,
-        last_mutation_id: None,
-        last_job_stage: None,
-        updated_at: Utc::now(),
-    };
-
-    assert!(list_documents_matches_status_filter(Some(&graph_ready), Some("readable")));
-    assert!(list_documents_matches_status_filter(Some(&graph_sparse), Some("readable")));
-    assert!(list_documents_matches_status_filter(Some(&readable), Some("readable")));
-    assert!(!list_documents_matches_status_filter(Some(&graph_ready), Some("failed")));
-    assert!(!list_documents_matches_status_filter(None, Some("readable")));
 }
 
 #[test]

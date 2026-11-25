@@ -49,7 +49,9 @@ use crate::{
     },
     services::{
         ai_catalog_service::ResolvedRuntimeBinding,
-        ops::billing::ReserveExecutionProviderCallCommand,
+        ops::billing::{
+            ReserveExecutionProviderCallCommand, provider_reservation::ProviderCallReservation,
+        },
     },
 };
 
@@ -278,18 +280,16 @@ async fn call_chat_provider(
     provider_timeout: Duration,
 ) -> Result<GraphEntityTypeProviderCall, GraphEntityTypeFailure> {
     let request = build_entity_type_chat_request(binding, input);
-    let response = match tokio::time::timeout(
-        provider_timeout,
-        crate::observability::with_provider_call_id(
-            provider_call_id,
-            llm_gateway.generate(request),
-        ),
-    )
-    .await
+    let response = match tokio::time::timeout(provider_timeout, llm_gateway.generate(request)).await
     {
         Ok(Ok(response)) => response,
         Ok(Err(error)) => {
-            tracing::warn!(provider = %binding.provider_kind, ?error, "entity type chat provider failed");
+            tracing::warn!(
+                provider_call_id = %provider_call_id,
+                provider = %binding.provider_kind,
+                ?error,
+                "entity type chat provider failed"
+            );
             return Err(GraphEntityTypeFailure::ProviderFailure);
         }
         Err(_) => return Err(GraphEntityTypeFailure::TimedOut),
@@ -605,70 +605,10 @@ pub(crate) enum GraphEntityTypeStageOutcome {
     /// The provider call was attempted but failed; every entity keeps its
     /// extract-time type.
     Degraded(GraphEntityTypeFailure),
-    /// The durable billing reservation could not be made before the paid call,
-    /// so no call was issued and every entity keeps its extract-time type.
+    /// The canonical provider-call reservation could not be built before the
+    /// paid call, so no call was issued and every entity keeps its extract-time
+    /// type.
     ReservationFailed,
-}
-
-/// Reservation guard mirroring the semantic rerank's: if the future is dropped
-/// mid-call, a still-`started` reservation is finalized in the background so it
-/// cannot leak.
-struct EntityTypeReservationGuard {
-    state: AppState,
-    provider_call_id: Uuid,
-    terminal_state: &'static str,
-    armed: bool,
-}
-
-impl EntityTypeReservationGuard {
-    fn new(state: &AppState, provider_call_id: Uuid) -> Self {
-        Self { state: state.clone(), provider_call_id, terminal_state: "canceled", armed: true }
-    }
-
-    fn mark_failed(&mut self) {
-        self.terminal_state = "failed";
-    }
-
-    fn disarm(&mut self) {
-        self.armed = false;
-    }
-}
-
-impl Drop for EntityTypeReservationGuard {
-    fn drop(&mut self) {
-        if !self.armed {
-            return;
-        }
-        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
-            tracing::error!(
-                provider_call_id = %self.provider_call_id,
-                "entity type reservation dropped without an active cleanup runtime"
-            );
-            return;
-        };
-        let state = self.state.clone();
-        let provider_call_id = self.provider_call_id;
-        let terminal_state = self.terminal_state;
-        runtime.spawn(async move {
-            if let Err(error) = state
-                .application_services
-                .billing
-                .finish_reserved_provider_call_without_usage(
-                    &state,
-                    provider_call_id,
-                    terminal_state,
-                )
-                .await
-            {
-                tracing::error!(
-                    %provider_call_id,
-                    terminal_state,
-                    %error,
-                    "failed to finalize interrupted entity type billing reservation"
-                );
-            }
-        });
-    }
 }
 
 /// Reserves, performs and settles one classifier call, then applies the
@@ -709,7 +649,8 @@ pub(crate) async fn classify_graph_entity_candidates_if_bound(
     );
 }
 
-/// Builds the durable reservation command for one classifier provider call.
+/// Builds the attribution command of one classifier provider call: the
+/// per-send ledger row reuses the owner, purpose and scope named here.
 fn entity_type_reservation_command(
     binding: &ResolvedRuntimeBinding,
     extraction_record_id: Uuid,
@@ -729,90 +670,112 @@ fn entity_type_reservation_command(
     }
 }
 
-/// Reserves the durable billing call before a paid classifier request. A failed
-/// reservation issues no call and degrades the stage.
+/// Builds the canonical provider-call reservation before a paid classifier
+/// request. A reservation that cannot be built issues no call and degrades the
+/// stage.
 async fn reserve_entity_type_provider_call(
     state: &AppState,
     binding: &ResolvedRuntimeBinding,
     extraction_record_id: Uuid,
     runtime_execution_id: Uuid,
-    provider_call_id: Uuid,
-) -> std::result::Result<(), GraphEntityTypeStageOutcome> {
+) -> std::result::Result<ProviderCallReservation, GraphEntityTypeStageOutcome> {
     let command =
         entity_type_reservation_command(binding, extraction_record_id, runtime_execution_id);
-    if let Err(error) = state
-        .application_services
-        .billing
-        .reserve_execution_provider_call_with_id(state, provider_call_id, command)
-        .await
-    {
-        tracing::warn!(
-            %provider_call_id,
-            %error,
-            "entity type billing reservation failed; classification skipped"
-        );
-        return Err(GraphEntityTypeStageOutcome::ReservationFailed);
+    match ProviderCallReservation::reserve_command(state, command).await {
+        Ok(reservation) => Ok(reservation),
+        Err(error) => {
+            tracing::warn!(
+                %error,
+                "entity type billing reservation failed; classification skipped"
+            );
+            Err(GraphEntityTypeStageOutcome::ReservationFailed)
+        }
     }
-    Ok(())
 }
 
-/// Performs one paid classifier call under its reservation guard and settles its
-/// usage, in bill-then-validate order: a completed response is always settled
-/// before it is decoded. Returns the call and its provider runtime for the
-/// caller's decode step.
+/// Performs one paid classifier call inside the reservation's send scope and
+/// settles its usage, in bill-then-validate order: a completed response is
+/// always settled before it is decoded. Returns the call and its provider
+/// runtime for the caller's decode step.
 async fn perform_entity_type_provider_call(
     state: &AppState,
     binding: &ResolvedRuntimeBinding,
     candidates: &GraphExtractionCandidateSet,
-    provider_call_id: Uuid,
+    reservation: &mut ProviderCallReservation,
 ) -> std::result::Result<(GraphEntityTypeProviderCall, &'static str), GraphEntityTypeStageOutcome> {
-    let mut reservation_guard = EntityTypeReservationGuard::new(state, provider_call_id);
-    let transport = GraphEntityTypeTransport::from_settings(&state.settings);
-    let provider_timeout = transport.http_timeout;
-    let call = match call_entity_type_provider(
-        GraphEntityTypeProviderContext {
-            llm_gateway: &state.llm_gateway,
-            provider_budget: &state.provider_budget,
-            transport,
-            binding,
-            provider_timeout,
-        },
-        candidates,
-        provider_call_id,
-    )
-    .await
+    let call = match send_entity_type_provider_call(state, binding, candidates, &*reservation).await
     {
         Ok(call) => call,
         Err(failure) => {
-            if failure == GraphEntityTypeFailure::ProviderFailure {
-                reservation_guard.mark_failed();
-            }
-            log_entity_type_provider_failure(&binding.provider_kind, &failure);
-            return Err(GraphEntityTypeStageOutcome::Degraded(failure));
+            return Err(terminalize_entity_type_failure(reservation, binding, failure).await);
         }
     };
     let usage_json = call.usage_json().clone();
     let provider_runtime = call.provider_runtime();
-    reservation_guard.disarm();
-    if let Err(error) = state
-        .application_services
-        .billing
-        .complete_reserved_provider_call_deferred_rollup_with_retry(
-            state,
-            provider_call_id,
-            &usage_json,
-        )
+    settle_entity_type_usage(reservation, &usage_json).await;
+    Ok((call, provider_runtime))
+}
+
+/// Runs the classifier request inside the reservation's send scope.
+async fn send_entity_type_provider_call(
+    state: &AppState,
+    binding: &ResolvedRuntimeBinding,
+    candidates: &GraphExtractionCandidateSet,
+    reservation: &ProviderCallReservation,
+) -> std::result::Result<GraphEntityTypeProviderCall, GraphEntityTypeFailure> {
+    let transport = GraphEntityTypeTransport::from_settings(&state.settings);
+    let provider_timeout = transport.http_timeout;
+    reservation
+        .scoped(call_entity_type_provider(
+            GraphEntityTypeProviderContext {
+                llm_gateway: &state.llm_gateway,
+                provider_budget: &state.provider_budget,
+                transport,
+                binding,
+                provider_timeout,
+            },
+            candidates,
+            reservation.provider_call_id(),
+        ))
         .await
+}
+
+/// Terminalizes a failed classifier call and maps it to the stage outcome.
+async fn terminalize_entity_type_failure(
+    reservation: &mut ProviderCallReservation,
+    binding: &ResolvedRuntimeBinding,
+    failure: GraphEntityTypeFailure,
+) -> GraphEntityTypeStageOutcome {
+    // A pre-response provider error terminalizes the row as failed; a
+    // timeout or an undecodable response keeps the canceled state the
+    // reservation's drop writes.
+    if failure == GraphEntityTypeFailure::ProviderFailure
+        && let Err(error) = reservation.fail().await
     {
-        // Usage settlement is retried by the service; a still-unsettled call
+        tracing::error!(
+            provider_call_id = %reservation.provider_call_id(),
+            %error,
+            "entity type reservation terminalization failed; reconciliation scheduled"
+        );
+    }
+    log_entity_type_provider_failure(&binding.provider_kind, &failure);
+    GraphEntityTypeStageOutcome::Degraded(failure)
+}
+
+/// Settles the paid response's usage without discarding its classification.
+async fn settle_entity_type_usage(
+    reservation: &mut ProviderCallReservation,
+    usage_json: &serde_json::Value,
+) {
+    if let Err(error) = reservation.complete(usage_json).await {
+        // The reservation retries its own settlement; a still-unsettled call
         // must not discard an already-paid classification result.
         tracing::error!(
-            %provider_call_id,
+            provider_call_id = %reservation.provider_call_id(),
             %error,
             "entity type usage accounting failed after a paid provider response"
         );
     }
-    Ok((call, provider_runtime))
 }
 
 fn log_entity_type_provider_failure(provider_kind: &str, failure: &GraphEntityTypeFailure) {
@@ -836,20 +799,19 @@ async fn classify_graph_entity_candidates(
     if candidates.entities.is_empty() {
         return GraphEntityTypeStageOutcome::Skipped;
     }
-    let provider_call_id = Uuid::now_v7();
-    if let Err(outcome) = reserve_entity_type_provider_call(
+    let mut reservation = match reserve_entity_type_provider_call(
         state,
         binding,
         extraction_record_id,
         runtime_execution_id,
-        provider_call_id,
     )
     .await
     {
-        return outcome;
-    }
+        Ok(reservation) => reservation,
+        Err(outcome) => return outcome,
+    };
     let (call, provider_runtime) =
-        match perform_entity_type_provider_call(state, binding, candidates, provider_call_id).await
+        match perform_entity_type_provider_call(state, binding, candidates, &mut reservation).await
         {
             Ok(result) => result,
             Err(outcome) => return outcome,

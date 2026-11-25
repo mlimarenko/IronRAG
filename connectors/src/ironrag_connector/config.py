@@ -93,6 +93,17 @@ class BaseConnectorSettings(BaseSettings):
     (``operation_poll_budget_seconds``); this setting bounds the create call
     itself, not the polled operation.
     """
+    execute_ingest_job_timeout_seconds: float = Field(default=1800.0, ge=1.0)
+    """Budget for the exact-job execute POST (:meth:`execute_ingest_queue_job`).
+
+    ``POST /v1/ops/ingest-queue/jobs/{jobId}/execute`` runs that job's whole
+    ingest pipeline before it answers with the job record, so a real Full
+    ingest can hold the response for many minutes. The ordinary
+    ``request_timeout_seconds`` would abort the client side of a healthy run
+    and leave an interrupted attempt behind; this budget covers one real
+    ingest while still bounding a genuinely hung request. Every other call
+    keeps ``request_timeout_seconds``.
+    """
     operation_poll_interval_seconds: float = Field(default=1.0, ge=0.05)
     """Delay between polls in :meth:`IronRagClient.wait_for_operation`.
 

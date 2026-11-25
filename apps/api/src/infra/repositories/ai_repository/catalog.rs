@@ -315,10 +315,20 @@ pub struct UpdateProviderCatalog<'a> {
     pub capability_flags_json: Option<Value>,
 }
 
+#[derive(Debug, thiserror::Error)]
+pub enum ProviderCatalogUpdateError {
+    #[error("provider financial policy update refused")]
+    Refused,
+    #[error("stored provider financial policy is invalid")]
+    InvalidStoredState,
+    #[error("provider catalog persistence failed")]
+    Persistence(#[from] sqlx::Error),
+}
+
 pub async fn update_provider_catalog(
     postgres: &PgPool,
     provider: UpdateProviderCatalog<'_>,
-) -> Result<Option<AiProviderCatalogRow>, sqlx::Error> {
+) -> Result<Option<AiProviderCatalogRow>, ProviderCatalogUpdateError> {
     update_provider_catalog_with_scope(postgres, provider, None).await
 }
 
@@ -331,7 +341,7 @@ pub async fn update_provider_catalog_with_scope(
     postgres: &PgPool,
     mut provider: UpdateProviderCatalog<'_>,
     scope: Option<&super::pricing::RequiredFinancialScope>,
-) -> Result<Option<AiProviderCatalogRow>, sqlx::Error> {
+) -> Result<Option<AiProviderCatalogRow>, ProviderCatalogUpdateError> {
     let mut transaction = postgres.begin().await?;
     let existing: Option<ExistingProviderIdentity> = sqlx::query_as(
         "select capability_flags_json, provider_kind, api_style::text, lifecycle_state::text, default_base_url, display_name from ai_provider_catalog where id = $1 for update",
@@ -346,14 +356,27 @@ pub async fn update_provider_catalog_with_scope(
             || old_lifecycle != provider.lifecycle_state
             || old_base.as_deref() != provider.default_base_url)
     {
-        return Err(sqlx::Error::Protocol("protected provider identity cannot be changed".into()));
+        return Err(ProviderCatalogUpdateError::Refused);
     }
     if let Some(ref mut incoming) = provider.capability_flags_json {
         let old_financial = existing.get("financialAdmission");
         let desired_financial = incoming.get("financialAdmission");
         if let Some(scope) = scope {
             use crate::domains::provider_profiles::FinancialAdmission;
-            let invalid = || sqlx::Error::Protocol("financial admission lifecycle refused".into());
+            let invalid = || ProviderCatalogUpdateError::Refused;
+            let current: Option<FinancialAdmission> = old_financial
+                .cloned()
+                .map(serde_json::from_value)
+                .transpose()
+                .map_err(|_| ProviderCatalogUpdateError::InvalidStoredState)?;
+            if let Some(current) = &current
+                && (current.provider_id != provider.provider_id
+                    || current.validate().is_err()
+                    || current.immutable_fingerprint().ok().as_deref()
+                        != Some(&current.policy_fingerprint))
+            {
+                return Err(ProviderCatalogUpdateError::InvalidStoredState);
+            }
             if scope.provider_id != provider.provider_id
                 || old_kind != provider.provider_kind
                 || old_style != provider.api_style
@@ -382,28 +405,20 @@ pub async fn update_provider_catalog_with_scope(
             if old_profile != desired_profile {
                 return Err(invalid());
             }
-            let current = old_financial
-                .cloned()
-                .map(serde_json::from_value)
-                .transpose()
-                .map_err(|_| invalid())?;
             let stored = FinancialAdmission::transition(current, desired, chrono::Utc::now())
                 .map_err(|_| invalid())?;
             incoming.as_object_mut().ok_or_else(invalid)?.insert(
                 "financialAdmission".to_owned(),
-                serde_json::to_value(stored).map_err(|_| invalid())?,
+                serde_json::to_value(stored)
+                    .map_err(|_| ProviderCatalogUpdateError::InvalidStoredState)?,
             );
         } else if old_financial != desired_financial
             || (old_financial.is_some() && *incoming != existing)
         {
-            return Err(sqlx::Error::Protocol(
-                "financial admission cannot be changed by generic update".into(),
-            ));
+            return Err(ProviderCatalogUpdateError::Refused);
         }
     } else if scope.is_some() {
-        return Err(sqlx::Error::Protocol(
-            "financial admission lifecycle requires a profile".into(),
-        ));
+        return Err(ProviderCatalogUpdateError::Refused);
     }
     let result = sqlx::query_as::<_, AiProviderCatalogRow>(
         "update ai_provider_catalog
@@ -719,7 +734,7 @@ mod tests {
             .await
             .is_err()
         );
-        assert!(
+        assert!(matches!(
             update_provider_catalog(
                 &postgres,
                 UpdateProviderCatalog {
@@ -732,9 +747,9 @@ mod tests {
                     capability_flags_json: Some(json!({})),
                 },
             )
-            .await
-            .is_err()
-        );
+            .await,
+            Err(ProviderCatalogUpdateError::Persistence(_))
+        ));
         assert!(delete_provider_catalog(&postgres, id).await.is_err());
         assert!(
             create_model_catalog(

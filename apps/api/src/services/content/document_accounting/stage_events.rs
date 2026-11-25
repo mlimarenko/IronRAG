@@ -60,6 +60,7 @@ pub(super) fn merge_stages(
                     .get("chunksProcessed")
                     .and_then(serde_json::Value::as_i64)
                     .or(ex.chunks_processed);
+                ex.message = row.message.clone().or(ex.message.take());
             }
         } else {
             let started_at = row.started_at.unwrap_or(row.recorded_at);
@@ -100,6 +101,12 @@ pub(super) fn merge_stages(
                     .get("chunksProcessed")
                     .and_then(serde_json::Value::as_i64),
                 provider_call_count: None,
+                priced_provider_call_count: None,
+                unpriced_provider_call_count: None,
+                failed_provider_call_count: None,
+                unsettled_provider_call_count: None,
+                cost_coverage: None,
+                message: row.message.clone(),
                 details: stage_details_or_none(&row.details_json),
             });
         }

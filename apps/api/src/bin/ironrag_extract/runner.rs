@@ -18,6 +18,41 @@ pub(super) fn extract_native(
     Box::pin(extract_units(request))
 }
 
+/// The unit kind this request's format produces. `None` means the format is
+/// served by the general text extraction path.
+fn unit_kind_for(mime: &str) -> Option<&'static str> {
+    match mime {
+        "application/pdf" => Some("page"),
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document" => {
+            Some("document")
+        }
+        "application/vnd.openxmlformats-officedocument.presentationml.presentation" => {
+            Some("slide")
+        }
+        mime if mime.starts_with("image/") => Some("frame"),
+        _ => None,
+    }
+}
+
+/// The selected unit range this format admits under the request's unit limit.
+fn admit_unit_range(
+    request: &Request,
+    total: u32,
+    unit_kind: &str,
+    mime: &str,
+) -> anyhow::Result<(u32, u32)> {
+    anyhow::ensure!((1..=request.limits.units).contains(&total), "unit_count_limit");
+    let start = request.start.unwrap_or(1);
+    let end = request.end.unwrap_or(total);
+    anyhow::ensure!(start <= total && end <= total, "range_out_of_bounds");
+    let sliced = unit_kind == "page" || mime == "image/tiff";
+    anyhow::ensure!(
+        sliced || (start == 1 && end == total),
+        "selected_range_unsupported_for_format"
+    );
+    Ok((start, end))
+}
+
 async fn extract_units(request: Request) -> anyhow::Result<Extraction> {
     request.validate()?;
     let bytes = input::read(&request.path, request.limits.input_bytes as usize)?;
@@ -28,23 +63,12 @@ async fn extract_units(request: Request) -> anyhow::Result<Extraction> {
     let extension =
         request.path.extension().and_then(|e| e.to_str()).unwrap_or_default().to_ascii_lowercase();
     let mime = super::general::mime(&request, &extension)?;
-    let unit_kind = match mime {
-        "application/pdf" => "page",
-        "application/vnd.openxmlformats-officedocument.wordprocessingml.document" => "document",
-        "application/vnd.openxmlformats-officedocument.presentationml.presentation" => "slide",
-        mime if mime.starts_with("image/") => "frame",
-        _ => return Box::pin(super::general::extract(&request, &bytes, mime)).await,
+    let Some(unit_kind) = unit_kind_for(mime) else {
+        return Box::pin(super::general::extract(&request, &bytes, mime)).await;
     };
     let total = source_unit_count(&request, &bytes, mime, unit_kind)?;
-    anyhow::ensure!((1..=request.limits.units).contains(&total), "unit_count_limit");
-    let start = request.start.unwrap_or(1);
-    let end = request.end.unwrap_or(total);
-    anyhow::ensure!(start <= total && end <= total, "range_out_of_bounds");
+    let (start, end) = admit_unit_range(&request, total, unit_kind, mime)?;
     let sliced = unit_kind == "page" || mime == "image/tiff";
-    anyhow::ensure!(
-        sliced || (start == 1 && end == total),
-        "selected_range_unsupported_for_format"
-    );
     let mut output = Extraction {
         source_sha256: request.source_sha256.clone(),
         text_byte_limit: request.limits.text_bytes,
@@ -107,26 +131,14 @@ async fn extract_units(request: Request) -> anyhow::Result<Extraction> {
         let mut document =
             result.results.pop().ok_or_else(|| anyhow::anyhow!("native_engine_empty"))?;
         append_native_units(&mut document, &mut output, ordinal)?;
-        if unit_kind == "page"
-            && output.units.last().is_some_and(|unit| unit.content.trim().is_empty())
-        {
+        let page_is_empty = output.units.last().is_some_and(|unit| unit.content.trim().is_empty());
+        if unit_kind == "page" && page_is_empty {
             input::pdf_render_pixels(
                 pdf.as_ref().ok_or_else(|| anyhow::anyhow!("pdf_missing"))?,
                 ordinal,
                 96,
             )?;
-            if renderer.is_none() {
-                let session = xberg::pdf::PdfRenderSession::open(&bytes, None)?;
-                anyhow::ensure!(
-                    session.page_count() == total as usize,
-                    "render_page_count_mismatch"
-                );
-                renderer = Some(session);
-            }
-            let data = renderer
-                .as_ref()
-                .ok_or_else(|| anyhow::anyhow!("renderer_missing"))?
-                .render_page_to_png((ordinal - 1) as usize, Some(96))?;
+            let data = render_full_page_png(&bytes, &mut renderer, total, ordinal)?;
             // No placeholder content and no embedded inputs alongside the same full page.
             output
                 .units
@@ -134,21 +146,47 @@ async fn extract_units(request: Request) -> anyhow::Result<Extraction> {
                 .ok_or_else(|| anyhow::anyhow!("page_unit_missing"))?
                 .content
                 .clear();
-            append_visual(
-                data,
-                NativeVisual {
-                    kind: VisualInputKind::PdfPage,
-                    native_index: ordinal - 1,
-                    source_unit: ordinal,
-                    source_path: None,
-                    mime: "image/png".into(),
-                    display_extent_96_dpi: None,
-                },
-                &request,
-                &mut visual_bytes,
-                &mut output,
-            )?;
+            append_page_visual(&request, ordinal, data, &mut visual_bytes, &mut output)?;
             continue;
+        }
+        if page_needs_low_quality_reread(
+            unit_kind,
+            output.units.last().map(|unit| unit.content.as_str()).unwrap_or_default(),
+        ) {
+            // A nonempty native layer can still be structurally unusable. One
+            // bounded full-page render gives the parent a verifiable reading;
+            // a budget or render refusal keeps the native text and only warns.
+            let rendered = input::pdf_render_pixels(
+                pdf.as_ref().ok_or_else(|| anyhow::anyhow!("pdf_missing"))?,
+                ordinal,
+                96,
+            )
+            .and_then(|()| render_full_page_png(&bytes, &mut renderer, total, ordinal));
+            match rendered {
+                Ok(data)
+                    if full_page_visual_admissible(
+                        output.visual_inputs.len(),
+                        visual_bytes,
+                        data.len(),
+                        request.limits.output_bytes,
+                    ) =>
+                {
+                    append_page_visual(&request, ordinal, data, &mut visual_bytes, &mut output)?;
+                    // The whole page is the visual evidence for this unit; the
+                    // parent rejects page and picture inputs for one unit.
+                    continue;
+                }
+                Ok(_) => output.warnings.push(serde_json::json!({
+                    "warning": "low_confidence_native_text_reread_skipped",
+                    "reason": "visual_budget_exhausted",
+                    "source_unit": ordinal,
+                })),
+                Err(error) => output.warnings.push(serde_json::json!({
+                    "warning": "low_confidence_native_text_reread_skipped",
+                    "reason": bounded_reason(&error),
+                    "source_unit": ordinal,
+                })),
+            }
         }
         let mut office_package = if unit_kind == "document" {
             Some(zip::ZipArchive::new(Cursor::new(bytes.as_slice()))?)
@@ -203,6 +241,72 @@ async fn extract_units(request: Request) -> anyhow::Result<Extraction> {
         visual.ordinal = ordinal;
     }
     finalize(output, &request)
+}
+
+const VISUAL_COUNT_LIMIT: usize = 128;
+
+/// A page whose native text is nonempty but structurally unreliable still
+/// needs one readable full-page reading.
+fn page_needs_low_quality_reread(unit_kind: &str, content: &str) -> bool {
+    unit_kind == "page"
+        && !content.trim().is_empty()
+        && ironrag_backend::shared::extraction::text_quality::is_low_confidence_text(content)
+}
+
+/// Whether one more full-page visual fits the inventory and byte budgets.
+fn full_page_visual_admissible(
+    visual_count: usize,
+    visual_bytes: usize,
+    data_len: usize,
+    limit: usize,
+) -> bool {
+    visual_count < VISUAL_COUNT_LIMIT && visual_bytes.saturating_add(data_len) <= limit
+}
+
+/// Opens the pinned renderer lazily and renders one page at the admitted DPI.
+fn render_full_page_png(
+    bytes: &[u8],
+    renderer: &mut Option<xberg::pdf::PdfRenderSession>,
+    total: u32,
+    ordinal: u32,
+) -> anyhow::Result<Vec<u8>> {
+    if renderer.is_none() {
+        let session = xberg::pdf::PdfRenderSession::open(bytes, None)?;
+        anyhow::ensure!(session.page_count() == total as usize, "render_page_count_mismatch");
+        *renderer = Some(session);
+    }
+    Ok(renderer
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("renderer_missing"))?
+        .render_page_to_png((ordinal - 1) as usize, Some(96))?)
+}
+
+fn append_page_visual(
+    request: &Request,
+    ordinal: u32,
+    data: Vec<u8>,
+    visual_bytes: &mut usize,
+    output: &mut Extraction,
+) -> anyhow::Result<()> {
+    append_visual(
+        data,
+        NativeVisual {
+            kind: VisualInputKind::PdfPage,
+            native_index: ordinal - 1,
+            source_unit: ordinal,
+            source_path: None,
+            mime: "image/png".into(),
+            display_extent_96_dpi: None,
+        },
+        request,
+        visual_bytes,
+        output,
+    )
+}
+
+/// Keeps one soft-failure reason short enough for an extraction warning.
+fn bounded_reason(error: &anyhow::Error) -> String {
+    format!("{error:#}").chars().take(200).collect()
 }
 
 fn append_native_units(
@@ -559,6 +663,46 @@ mod office_member_tests {
             );
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod reread_tests {
+    use super::{VISUAL_COUNT_LIMIT, full_page_visual_admissible, page_needs_low_quality_reread};
+
+    const OCR_NOISE: &str = concat!(
+        "summary topic alpha beta gamma ",
+        "abCD4efGH hiJKlmNO pQrST uvWXyZab ",
+        "cdEFGh3Ij klMNOprs tuVWxyZq mnOPqRst"
+    );
+
+    #[test]
+    fn low_quality_nonempty_page_requests_one_full_page_reread() {
+        assert!(page_needs_low_quality_reread("page", OCR_NOISE));
+        assert!(!page_needs_low_quality_reread(
+            "page",
+            "The service stores project settings and renders a concise summary."
+        ));
+        assert!(!page_needs_low_quality_reread("page", "   "));
+        assert!(
+            !page_needs_low_quality_reread("slide", OCR_NOISE),
+            "only PDF pages get the extra full-page reading"
+        );
+        assert!(!page_needs_low_quality_reread("document", OCR_NOISE));
+    }
+
+    #[test]
+    fn reread_is_refused_when_the_visual_budget_is_exhausted() {
+        assert!(full_page_visual_admissible(0, 0, 1024, 2048));
+        assert!(
+            !full_page_visual_admissible(VISUAL_COUNT_LIMIT, 0, 1024, 2048),
+            "the inventory limit is a hard refusal"
+        );
+        assert!(
+            !full_page_visual_admissible(0, 1500, 600, 2048),
+            "the byte limit is a hard refusal"
+        );
+        assert!(full_page_visual_admissible(3, 1000, 1048, 2048));
     }
 }
 

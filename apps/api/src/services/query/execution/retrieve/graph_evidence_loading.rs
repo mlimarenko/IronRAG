@@ -10,7 +10,7 @@ use super::{
     GRAPH_EVIDENCE_CONTEXT_LINE_CAP, GraphEvidenceScope, HashMap, HashSet, KnowledgeDocumentRow,
     LexicalQueryOrigin, QUERY_IR_FOCUS_CHUNK_CAP, QUERY_IR_FOCUS_CHUNK_SCORE_BASE,
     QUERY_IR_FOCUS_CHUNK_SCORE_STEP, QueryGraphIndex, QueryIR, RuntimeChunkScoreKind,
-    RuntimeMatchedChunk, Utc, Uuid, apply_graph_evidence_texts_to_chunks, batch_hydrate_hits,
+    RuntimeMatchedChunk, SelectedGraphContextLine, Utc, Uuid, batch_hydrate_hits,
     build_graph_evidence_text_queries, current_document_revision_id,
     graph_evidence_chunk_hits_from_rows, graph_evidence_context_fetch_cap,
     graph_evidence_context_line, graph_evidence_context_line_focus_keywords,
@@ -21,7 +21,7 @@ use super::{
 #[derive(Debug, Clone)]
 pub(crate) struct RuntimeGraphEvidenceRetrieval {
     pub(crate) chunks: Vec<RuntimeMatchedChunk>,
-    pub(crate) context_lines: Vec<String>,
+    pub(crate) context_lines: Vec<SelectedGraphContextLine>,
     pub(crate) source_document_ids: Vec<Uuid>,
 }
 
@@ -293,8 +293,10 @@ pub(crate) async fn load_graph_evidence_chunks_for_bundle(
         &ranked_evidence.target_source_document_ids,
         &ranked_evidence.rows,
     );
-    let (hits, evidence_texts_by_chunk) =
-        graph_evidence_chunk_hits_from_rows(&ranked_evidence.rows);
+    // Graph annotations stay in `context_lines` as labeled claim context.
+    // Hydrated chunks keep their canonical source text so the generator and
+    // verifier share the same source truth for the selected chunk identity.
+    let hits = graph_evidence_chunk_hits_from_rows(&ranked_evidence.rows);
     if hits.is_empty() {
         return Ok(graph_evidence_without_hydratable_chunks(
             &ranked_evidence,
@@ -303,30 +305,32 @@ pub(crate) async fn load_graph_evidence_chunks_for_bundle(
         ));
     }
 
-    let mut chunks = timed_stage(
+    let chunks = timed_stage(
         "retrieve.graph_evidence_hydrate",
         batch_hydrate_hits(state, hits, document_index, plan_keywords, targeted_document_ids),
     )
     .await
     .context("failed to hydrate graph evidence chunks")?;
-    apply_graph_evidence_texts_to_chunks(
-        &mut chunks,
-        &evidence_texts_by_chunk,
-        plan_keywords,
-        &context_focus_keywords,
-    );
+    log_graph_evidence_chunks(&ranked_evidence, context_lines.len(), chunks.len());
+    Ok(graph_evidence_from_hydrated_chunks(chunks, context_lines, source_document_ids))
+}
+
+pub(super) fn graph_evidence_from_hydrated_chunks(
+    mut chunks: Vec<RuntimeMatchedChunk>,
+    context_lines: Vec<SelectedGraphContextLine>,
+    source_document_ids: Vec<Uuid>,
+) -> RuntimeGraphEvidenceRetrieval {
     for chunk in &mut chunks {
         chunk.score_kind = RuntimeChunkScoreKind::GraphEvidence;
     }
-    log_graph_evidence_chunks(&ranked_evidence, context_lines.len(), chunks.len());
-    Ok(RuntimeGraphEvidenceRetrieval { chunks, context_lines, source_document_ids })
+    RuntimeGraphEvidenceRetrieval { chunks, context_lines, source_document_ids }
 }
 
 /// Logs the ranked graph evidence that produced no hydratable chunk and hands
 /// back the empty-retrieval outcome for the caller to return.
 fn graph_evidence_without_hydratable_chunks(
     ranked_evidence: &RankedGraphEvidenceRows,
-    context_lines: Vec<String>,
+    context_lines: Vec<SelectedGraphContextLine>,
     source_document_ids: Vec<Uuid>,
 ) -> RuntimeGraphEvidenceRetrieval {
     tracing::info!(
@@ -450,7 +454,7 @@ pub(super) fn graph_evidence_context_lines_from_rows(
     graph_index: &QueryGraphIndex,
     source_labels_by_document_id: &HashMap<Uuid, String>,
     focus_keywords: &[String],
-) -> Vec<String> {
+) -> Vec<SelectedGraphContextLine> {
     let mut lines = Vec::with_capacity(rows.len());
     for row in rows.iter().take(GRAPH_EVIDENCE_CONTEXT_LINE_CAP) {
         let Some(line) = graph_evidence_context_line(
@@ -488,4 +492,3 @@ pub(super) struct GraphEvidenceSourceDocumentCandidate {
 }
 
 pub(super) type GraphEvidenceChunkHits = Vec<(Uuid, f32)>;
-pub(super) type GraphEvidenceTextsByChunk = HashMap<Uuid, Vec<String>>;

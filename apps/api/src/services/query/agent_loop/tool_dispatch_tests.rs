@@ -1,5 +1,12 @@
 use super::*;
 
+#[test]
+fn model_selected_grounded_retry_cannot_restart_the_sequence() {
+    assert!(super::tool_dispatch::grounded_call_blocked(GROUNDED_ANSWER_TOOL_NAME, false));
+    assert!(!super::tool_dispatch::grounded_call_blocked(GROUNDED_ANSWER_TOOL_NAME, true));
+    assert!(!super::tool_dispatch::grounded_call_blocked(READ_DOCUMENT_TOOL_NAME, false));
+}
+
 /// One grounded-answer tool call under the workspace-a scope every
 /// effective-payload test shares; only the id and raw query vary.
 fn grounded_tool_call(id: &str, query: &str) -> ChatToolCall {
@@ -224,7 +231,7 @@ fn replayed_outcome_is_flagged_as_replay() {
         message_content: "{}".to_string(),
         result_text: Some("cached".to_string()),
         result_json: None,
-        grounding_text: None,
+        source_texts: Vec::new(),
         document_reference: None,
         grounded_answer_body: None,
         grounded_answer_outcome: None,
@@ -315,7 +322,7 @@ fn completed_effective_tool_payload_tracking_is_turn_scoped() {
                 message_content: "{\"answer\":\"cached body\"}".to_string(),
                 result_text: Some("cached body".to_string()),
                 result_json: None,
-                grounding_text: None,
+                source_texts: Vec::new(),
                 document_reference: None,
                 grounded_answer_body: Some("cached body".to_string()),
                 grounded_answer_outcome: Some(AgentGroundedAnswerOutcome {

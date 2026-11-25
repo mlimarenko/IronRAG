@@ -6,7 +6,7 @@ use super::super::literal_coverage::{answer_generation_question, requires_no_evi
 use super::super::literal_revision::{
     LiteralRevisionAttempt, LiteralRevisionPath, revise_answer_literals_if_needed,
 };
-use super::super::output_boundary::enforce_hard_output_boundary;
+use super::super::output_boundary::{enforce_hard_output_boundary, preflight_graph_grounding};
 use super::super::preflight::{PreflightAnswerCandidate, persist_failed_answer_snapshot};
 use super::super::selected_answer::{SelectedAnswerContext, finish_selected_answer};
 use super::super::verification::verify_generated_answer;
@@ -35,6 +35,24 @@ async fn run_preflight_single_shot(
     let execution_context = request.execution_context;
     let library_id = execution_context.library_id;
     let execution_id = execution_context.query_execution_id;
+    // One bounded evidence selection, measured before the paid generation call.
+    // The assembly owner already trims to the budget; this keeps a typed guard
+    // so a provider is never called on evidence the verifier cannot bound.
+    let evidence_selection_started = std::time::Instant::now();
+    super::refuse_over_budget_evidence(
+        execution_id,
+        "answer.preflight_evidence_limits",
+        &preflight.primary_answer_chunks,
+        &preflight.authoritative_evidence,
+        &crate::services::query::assistant_grounding::AssistantGroundingEvidence::default(),
+    )?;
+    let evidence_selection_elapsed_ms = evidence_selection_started.elapsed().as_millis() as u64;
+    tracing::info!(
+        stage = "answer.preflight_evidence_selected",
+        %execution_id,
+        selection_elapsed_ms = evidence_selection_elapsed_ms,
+        "bounded evidence selection verified before generation"
+    );
     let generation_question =
         answer_generation_question(request.effective_question, request.user_question);
     let has_conversation_history =
@@ -67,7 +85,9 @@ async fn run_preflight_single_shot(
     )
     .await;
     match result {
-        Ok(single) => finish_preflight_single_shot(answer, single, started, provider_calls).await,
+        Ok(single) => {
+            Box::pin(finish_preflight_single_shot(answer, single, started, provider_calls)).await
+        }
         Err(error) => {
             log_preflight_single_shot_error(execution_id, &error);
             Ok(PreflightSingleShot::Ran)
@@ -109,8 +129,7 @@ async fn finish_preflight_single_shot(
             intent_profile: prepared.structured.intent_profile.clone(),
             primary_answer_chunks: preflight.primary_answer_chunks.clone(),
             authoritative_evidence: preflight.authoritative_evidence.clone(),
-            assistant_grounding:
-                crate::services::query::assistant_grounding::AssistantGroundingEvidence::default(),
+            assistant_grounding: preflight_graph_grounding(prepared, &preflight.prompt_context),
             answer: preflight_initial_answer,
             usage_json: single.usage_json.clone(),
             prompt_context: preflight.prompt_context.clone(),
@@ -125,7 +144,6 @@ async fn finish_preflight_single_shot(
             revision_question: generation_question,
             verification_question: request.effective_question,
             conversation_history: request.conversation_history_messages,
-            prepared,
             path: LiteralRevisionPath::AnswerPreflight,
         },
         &mut verification_stage,
@@ -155,7 +173,14 @@ async fn finish_preflight_single_shot(
                 state,
                 execution: execution_context,
                 question: request.effective_question,
+                conversation_history: request.conversation_history_messages,
                 snapshot: answer.snapshot_context,
+                retrieval_degradations: &prepared.structured.diagnostics.retrieval_degradations,
+                bounded_selection: answer
+                    .preflight
+                    .evidence_selection_bounded
+                    .then_some(answer.preflight.evidence_selection_measurement),
+                candidate_relationships: &prepared.structured.graph_relation_references,
             },
             verification_stage,
             provider_calls,
@@ -220,7 +245,7 @@ pub(super) async fn finalize_preflight_answer(
 ) -> anyhow::Result<RuntimeAnswerQueryResult> {
     let state = answer.request.state;
     let execution_id = answer.request.execution_context.query_execution_id;
-    match run_preflight_single_shot(answer, provider_calls).await? {
+    match Box::pin(run_preflight_single_shot(answer, provider_calls)).await? {
         PreflightSingleShot::Accepted(result) => return Ok(*result),
         PreflightSingleShot::Candidate(candidate) => {
             carry.candidate = Some(*candidate);
@@ -251,7 +276,14 @@ pub(super) async fn finalize_preflight_answer(
             state,
             execution: answer.request.execution_context,
             question: answer.request.effective_question,
+            conversation_history: answer.request.conversation_history_messages,
             snapshot: answer.snapshot_context,
+            retrieval_degradations: &answer.prepared.structured.diagnostics.retrieval_degradations,
+            bounded_selection: answer
+                .preflight
+                .evidence_selection_bounded
+                .then_some(answer.preflight.evidence_selection_measurement),
+            candidate_relationships: &answer.prepared.structured.graph_relation_references,
         },
         candidate.verification_stage,
         provider_calls,

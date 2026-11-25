@@ -570,6 +570,36 @@ impl PgDocumentStore {
         .context("failed to list knowledge chunks by ids")
     }
 
+    pub(super) async fn list_chunk_reference_metadata_by_ids_impl(
+        &self,
+        chunk_ids: &[Uuid],
+    ) -> anyhow::Result<Vec<crate::infra::knowledge_rows::KnowledgeChunkReferenceMetadataRow>> {
+        if chunk_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        sqlx::query_as::<_, crate::infra::knowledge_rows::KnowledgeChunkReferenceMetadataRow>(
+            sqlx::AssertSqlSafe(
+                "SELECT chunk_id, document_id, revision_id, section_path, heading_trail
+                 FROM knowledge_chunk
+                 WHERE chunk_id = ANY($1)
+                   AND EXISTS (
+                       SELECT 1
+                       FROM knowledge_structured_revision r
+                       WHERE r.revision_id = knowledge_chunk.revision_id
+                         AND r.workspace_id = knowledge_chunk.workspace_id
+                         AND r.library_id = knowledge_chunk.library_id
+                         AND r.document_id = knowledge_chunk.document_id
+                         AND r.preparation_state = 'prepared'
+                   )
+                 ORDER BY chunk_id ASC",
+            ),
+        )
+        .bind(chunk_ids)
+        .fetch_all(&self.pool)
+        .await
+        .context("failed to list knowledge chunk reference metadata")
+    }
+
     pub(super) async fn search_code_pattern_chunks_by_terms_impl(
         &self,
         library_id: Uuid,

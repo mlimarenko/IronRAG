@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from collections import Counter
 
+import pytest
+
 import ironrag_connector.sources.youtrack.field_contract as field_contract
 import ironrag_connector.sources.youtrack.youtrack as youtrack_client
 from ironrag_connector.sources.youtrack.field_contract import (
@@ -143,3 +145,19 @@ def test_sensitive_and_derived_fields_stay_out_of_rest_projections() -> None:
         "issue_link_target.tags.sharing",
     } <= explicitly_excluded
     assert all(group.reason for group in EXCLUDED_FIELD_GROUPS)
+
+
+@pytest.mark.parametrize(
+    ("projection", "unbalanced"),
+    [
+        ("a(b", "unclosed nested group"),
+        ("a)b", "closing paren at the top level"),
+        ("a,,b", "empty field name"),
+        ("a()", "empty nested group"),
+    ],
+)
+def test_malformed_projection_is_rejected(projection: str, unbalanced: str) -> None:
+    """The wire grammar is parsed strictly; a silent drop would change scope."""
+
+    with pytest.raises(ValueError, match="malformed YouTrack field projection"):
+        field_contract._projection_leaves(projection)

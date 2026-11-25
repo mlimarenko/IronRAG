@@ -321,5 +321,4 @@ pub(super) const CONTENT_ANCHOR_CONTEXT_RESERVATION_LIMIT: usize = 4;
 pub(super) const CONTENT_ANCHOR_CHUNK_SCORE_BASE: f32 = 1.75;
 pub(super) const CONTENT_ANCHOR_CHUNK_SCORE_STEP: f32 = 0.001;
 pub(super) const CONTENT_ANCHOR_EVIDENCE_SCORE_STEP: f32 = 0.000_001;
-pub(super) const GRAPH_EVIDENCE_TEXTS_PER_CHUNK: usize = 4;
 pub(super) const GRAPH_EVIDENCE_CONTEXT_LINE_CAP: usize = 24;

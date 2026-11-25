@@ -17,8 +17,8 @@ use ironrag_backend::{
     services::{
         content::service::{
             AdmitMutationCommand, AppendInlineMutationCommand, CreateDocumentCommand,
-            PromoteHeadCommand, ReplaceInlineMutationCommand, RevisionAdmission,
-            UpdateMutationCommand, UploadInlineDocumentCommand,
+            ListDocumentsPageCommand, PromoteHeadCommand, ReplaceInlineMutationCommand,
+            RevisionAdmission, UpdateMutationCommand, UploadInlineDocumentCommand,
         },
         knowledge::service::PromoteKnowledgeDocumentCommand,
         maintenance::knowledge_projection_metadata::{
@@ -26,6 +26,7 @@ use ironrag_backend::{
         },
     },
 };
+use ironrag_contracts::documents::DocumentStatus;
 
 #[cfg(feature = "test-support")]
 use ironrag_backend::services::ingest::web::CreateWebIngestRunCommand;
@@ -1512,6 +1513,7 @@ async fn authoritative_content_lifecycle_promotes_head_and_separates_readable_fr
                         language_code:Some("en".to_owned()),source_uri:None,document_hint:None,
                     },storage_key:Some("memory://active.txt".to_owned()),
                 }),parent_async_operation_id:None,priority:10,
+                enrichment_scope: None,
             },None,
         ).await.context("failed to admit canonical append mutation")?.into_bundle();
         let active_revision=admission.revision.context("append revision missing")?;
@@ -1927,6 +1929,7 @@ async fn authoritative_content_lifecycle_edit_mutation_persists_source_for_repro
             language_code: None,
             source_uri: None,
             document_hint: None,
+            enrichment_scope: None,
         };
         let edit_admission = fixture
             .state
@@ -2061,6 +2064,7 @@ async fn authoritative_content_lifecycle_edit_mutation_persists_source_for_repro
                         storage_key: Some(storage_key),
                     }),
                     parent_async_operation_id: None,
+                    enrichment_scope: None,
                 },
             )
             .await
@@ -2087,6 +2091,7 @@ async fn authoritative_content_lifecycle_concurrent_identical_uploads_admit_one_
         let content = &fixture.state.application_services.content;
         let file_bytes = b"Concurrent duplicate upload fixture.".to_vec();
         let first_command = UploadInlineDocumentCommand {
+                enrichment_scope: None,
             workspace_id: fixture.workspace_id,
             library_id: fixture.library_id,
             external_key: Some(format!("concurrent-upload-a-{}", Uuid::now_v7())),
@@ -2102,6 +2107,7 @@ async fn authoritative_content_lifecycle_concurrent_identical_uploads_admit_one_
             parent_external_key: None,
         };
         let second_command = UploadInlineDocumentCommand {
+                enrichment_scope: None,
             external_key: Some(format!("concurrent-upload-b-{}", Uuid::now_v7())),
             source_identity: Some("concurrent-upload-b".to_string()),
             file_name: "concurrent-b.txt".to_string(),
@@ -2198,6 +2204,7 @@ async fn authoritative_content_lifecycle_inline_upload_admits_background_ingest_
             .upload_inline_document(
                 &fixture.state,
                 UploadInlineDocumentCommand {
+                enrichment_scope: None,
                     workspace_id: fixture.workspace_id,
                     library_id: fixture.library_id,
                     external_key: Some(format!("inline-upload-{}", Uuid::now_v7())),
@@ -2299,6 +2306,152 @@ async fn authoritative_content_lifecycle_inline_upload_admits_background_ingest_
             Some("queued")
         );
 
+        Ok(())
+    }
+    .await;
+
+    fixture.cleanup().await?;
+    result
+}
+
+/// IRG-360: `totalCount` counts the documents the same request can return, so a
+/// status pill narrows it exactly as it narrows the rows. A status-free facet
+/// read keeps the whole-library status counts the page renders as pill badges.
+#[tokio::test]
+#[ignore = "requires local postgres with required extensions"]
+async fn document_list_total_count_follows_the_status_pill() -> Result<()> {
+    use ironrag_backend::infra::repositories::content_document_list_repository::DocumentListSortColumn;
+
+    let fixture = ContentLifecycleFixture::create().await?;
+    let result = async {
+        let content = &fixture.state.application_services.content;
+        // Two imported pointer revisions, a shell with no content at all, and a
+        // queued admission. The imported pointers are published metadata, not
+        // text-readable content, so the canonical current-revision view
+        // classifies both as empty; only the queued admission is not empty.
+        irg57_seed_document(&fixture).await?;
+        irg57_seed_document(&fixture).await?;
+        content
+            .create_document(
+                &fixture.state,
+                CreateDocumentCommand {
+                    workspace_id: fixture.workspace_id,
+                    library_id: fixture.library_id,
+                    external_key: Some(format!("no-content-{}", Uuid::now_v7())),
+                    file_name: Some("shell.txt".to_string()),
+                    created_by_principal_id: None,
+                    parent_external_key: None,
+                },
+            )
+            .await
+            .context("failed to create the contentless document")?;
+        content
+            .upload_inline_document(
+                &fixture.state,
+                UploadInlineDocumentCommand {
+                    enrichment_scope: None,
+                    workspace_id: fixture.workspace_id,
+                    library_id: fixture.library_id,
+                    external_key: Some(format!("queued-{}", Uuid::now_v7())),
+                    idempotency_key: None,
+                    requested_by_principal_id: None,
+                    request_surface: "rest".to_string(),
+                    source_identity: Some("irg360-list-total".to_string()),
+                    file_name: "queued.txt".to_string(),
+                    title: Some("Queued".to_string()),
+                    document_hint: None,
+                    mime_type: Some("text/plain".to_string()),
+                    file_bytes: b"admitted but not published".to_vec(),
+                    parent_external_key: None,
+                },
+            )
+            .await
+            .context("failed to admit the queued document")?;
+
+        let command = |statuses: &[DocumentStatus], limit: u32, include_status_counts: bool| {
+            ListDocumentsPageCommand {
+                library_id: fixture.library_id,
+                include_deleted: false,
+                cursor: None,
+                limit,
+                search: None,
+                normalized_search: None,
+                search_statuses: Vec::new(),
+                filters: Default::default(),
+                search_ranges: Default::default(),
+                snapshot_at: Utc::now(),
+                sort: DocumentListSortColumn::CreatedAt,
+                sort_desc: true,
+                status_filter: statuses.to_vec(),
+                id_filter: None,
+                include_status_counts,
+            }
+        };
+
+        // The second request the documents page makes for its pill badges: no
+        // status pill, one row, and the counts of the whole library.
+        let facets = content.list_documents_page(&fixture.state, command(&[], 1, true)).await?;
+        assert_eq!(facets.items.len(), 1, "the facet request reads one row");
+        assert_eq!(
+            facets.total_count,
+            Some(4),
+            "without a status pill the total is the whole library"
+        );
+        let all = facets.status_counts.context("a facet request must report status counts")?;
+        assert_eq!(all.total, Some(4));
+        assert_eq!(
+            (all.ready, all.queued, all.empty),
+            (Some(0), Some(1), Some(3)),
+            "every bucket keeps its whole-library count"
+        );
+
+        // One selected status: the total counts exactly the rows it returns, and
+        // the same selection narrows the bucket counts.
+        let empty = content
+            .list_documents_page(&fixture.state, command(&[DocumentStatus::Empty], 50, true))
+            .await?;
+        assert_eq!(empty.items.len(), 3);
+        assert!(empty.items.iter().all(|item| item.status == DocumentStatus::Empty));
+        assert_eq!(
+            empty.total_count,
+            Some(3),
+            "totalCount must count the status-filtered rows, not the unfiltered library"
+        );
+        let empty_counts = empty.status_counts.context("a filtered request keeps its buckets")?;
+        assert_eq!(empty_counts.total, Some(3));
+        assert_eq!(
+            (empty_counts.ready, empty_counts.queued, empty_counts.empty),
+            (Some(0), Some(0), Some(3))
+        );
+
+        // Several selected statuses narrow the same way, and `includeTotal=false`
+        // still omits the buckets without touching the total.
+        let narrowed = content
+            .list_documents_page(
+                &fixture.state,
+                command(&[DocumentStatus::Ready, DocumentStatus::Empty], 50, false),
+            )
+            .await?;
+        assert_eq!(narrowed.items.len(), 3, "the multi-status pill returns its own rows");
+        assert!(
+            narrowed
+                .items
+                .iter()
+                .all(|item| matches!(item.status, DocumentStatus::Ready | DocumentStatus::Empty))
+        );
+        assert_eq!(narrowed.total_count, Some(3), "a multi-status pill narrows the total");
+        assert!(narrowed.status_counts.is_none(), "statusCounts stay gated on includeTotal");
+
+        // A filter that matches nothing reports its own zero, not the library.
+        let ready = content
+            .list_documents_page(&fixture.state, command(&[DocumentStatus::Ready], 50, false))
+            .await?;
+        assert!(ready.items.is_empty());
+        assert_eq!(
+            ready.total_count,
+            Some(0),
+            "an empty filtered page must not advertise the unfiltered library"
+        );
         Ok(())
     }
     .await;
@@ -2460,6 +2613,7 @@ async fn authoritative_content_lifecycle_tracks_append_replace_delete_and_mutati
             mime_type: Some("text/plain".to_string()),
             file_bytes: b"Replacement content that must stay pending until ingest finishes."
                 .to_vec(),
+            enrichment_scope: None,
         };
         let replace_admission = fixture
             .state
@@ -2649,6 +2803,7 @@ async fn authoritative_content_lifecycle_tracks_append_replace_delete_and_mutati
                     source_identity: None,
                     revision: None,
                     parent_async_operation_id: None,
+                    enrichment_scope: None,
                 },
             )
             .await
@@ -2808,9 +2963,14 @@ async fn authoritative_content_lifecycle_tracks_append_replace_delete_and_mutati
             .get_library_summary(&fixture.state, fixture.library_id)
             .await
             .context("failed to refresh knowledge summary after delete")?;
+        assert_eq!(
+            knowledge_summary.document_counts_by_status.len(),
+            DocumentStatus::ALL.len(),
+            "empty library must expose every canonical document status bucket"
+        );
         assert!(
-            knowledge_summary.document_counts_by_readiness.is_empty(),
-            "deleted documents must not contribute to knowledge summary readiness counts"
+            knowledge_summary.document_counts_by_status.values().all(|count| *count == 0),
+            "deleted documents must not contribute to any canonical status count"
         );
         let query_reference_count_after_delete = sqlx::query_scalar::<_, i64>(
             "select count(*)::bigint from query_chunk_reference where chunk_id = $1",
@@ -2878,6 +3038,7 @@ async fn authoritative_content_lifecycle_tracks_append_replace_delete_and_mutati
                     source_identity: None,
                     revision: None,
                     parent_async_operation_id: None,
+                    enrichment_scope: None,
                 },
             )
             .await;
@@ -3058,6 +3219,7 @@ async fn authoritative_content_delete_succeeds_when_post_commit_cleanup_fails() 
                     source_identity: None,
                     revision: None,
                     parent_async_operation_id: None,
+                    enrichment_scope: None,
                 },
             )
             .await
@@ -3462,6 +3624,7 @@ async fn authoritative_content_delete_drops_orphan_runtime_graph_state() -> Resu
                     source_identity: None,
                     revision: None,
                     parent_async_operation_id: None,
+                    enrichment_scope: None,
                 },
             )
             .await

@@ -18,7 +18,6 @@ fn verbatim_verification_rejects_partial_words_and_changed_word_boundaries() {
                 intent_profile: &QueryIntentProfile::default(),
                 evidence: &empty_authoritative_evidence(),
                 chunks: &[runtime_chunk(source)],
-                prompt_context: answer,
                 assistant_grounding: &AssistantGroundingEvidence::default(),
             });
 
@@ -57,7 +56,6 @@ fn verbatim_verification_preserves_exact_quotes_and_display_normalization() {
                 intent_profile: &QueryIntentProfile::default(),
                 evidence: &empty_authoritative_evidence(),
                 chunks: &[runtime_chunk(source)],
-                prompt_context: "",
                 assistant_grounding: &AssistantGroundingEvidence::default(),
             });
 
@@ -91,7 +89,6 @@ fn verify_answer_accepts_semantic_web_and_knowledge_graph_targets() {
             score: Some(1.0),
             source_text: "Semantic web makes Internet data machine-readable through RDF and OWL. Knowledge graph stores interlinked descriptions of entities and concepts.".to_string(),
         }],
-        prompt_context: "",
         assistant_grounding: &AssistantGroundingEvidence::default(),
     });
 
@@ -107,7 +104,6 @@ fn verify_answer_does_not_verify_unchecked_prose_from_unrelated_evidence() {
         intent_profile: &QueryIntentProfile::default(),
         evidence: &empty_authoritative_evidence(),
         chunks: &[runtime_chunk("The selected record documents a different component.")],
-        prompt_context: "The selected record documents a different component.",
         assistant_grounding: &AssistantGroundingEvidence::default(),
     });
 
@@ -128,7 +124,6 @@ fn verify_answer_only_partially_supports_literal_when_surrounding_prose_is_unche
         intent_profile: &QueryIntentProfile::default(),
         evidence: &empty_authoritative_evidence(),
         chunks: &[runtime_chunk("The documented endpoint is /status.")],
-        prompt_context: "The documented endpoint is /status.",
         assistant_grounding: &AssistantGroundingEvidence::default(),
     });
 
@@ -149,7 +144,6 @@ fn verify_answer_rejects_nonempty_answer_without_authoritative_evidence() {
         intent_profile: &QueryIntentProfile::default(),
         evidence: &empty_authoritative_evidence(),
         chunks: &[],
-        prompt_context: "",
         assistant_grounding: &AssistantGroundingEvidence::default(),
     });
 

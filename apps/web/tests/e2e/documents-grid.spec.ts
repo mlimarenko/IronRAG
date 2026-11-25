@@ -11,6 +11,69 @@ const documents = {
   revisions: [],
 }
 
+for (const [locale, theme, pausedLabel, pendingLabel] of [
+  ['en', 'light', 'Paused', 'Awaiting content'],
+  ['ru', 'dark', 'На паузе', 'Ожидает содержимое'],
+] as const) {
+  for (const width of [1440, 390]) {
+    test(`paused and pending rows remain keyboard-operable in ${locale} at ${width}px`, async ({
+      page,
+    }, testInfo) => {
+      const issues = watchBrowserIssues(page, { readOnly: true })
+      await page.setViewportSize({ width, height: 844 })
+      await page.addInitScript(
+        ({ locale, theme }) => {
+          localStorage.setItem('ironrag.v1.locale', locale)
+          localStorage.setItem('ironrag.v1.theme', JSON.stringify(theme))
+        },
+        { locale, theme },
+      )
+      await openMockedApp(page, '/documents', {
+        authenticated: true,
+        telemetryConsent: 'denied',
+        documents: {
+          ...documents,
+          items: [
+            {
+              ...items[0]!,
+              status: 'paused',
+              readiness: 'processing',
+            },
+            {
+              ...items[1]!,
+              status: 'pending_materialization',
+              readiness: 'processing',
+              visibilityIntentId: '019f8aad-86a5-7183-bb73-000000000101',
+            },
+          ],
+        },
+      })
+
+      const table = page.getByRole('table')
+      await expect(table.locator('tbody tr[data-row-id]')).toHaveCount(2)
+      await expect(table.getByText(pausedLabel, { exact: true })).toBeVisible()
+      await expect(table.getByText(pendingLabel, { exact: true })).toBeVisible()
+      const checkbox = table.locator('tbody').getByRole('checkbox').first()
+      await checkbox.focus()
+      await expect(checkbox).toBeFocused()
+      await page.keyboard.press('Space')
+      await expect(checkbox).toBeChecked()
+      await expect(page.locator('.bulk-bar')).toBeVisible()
+      expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(width)
+      await page.screenshot({
+        path: testInfo.outputPath(`operational-statuses-${locale}-${width}.png`),
+      })
+      await table.getByText(pendingLabel, { exact: true }).scrollIntoViewIfNeeded()
+      await expect(table.getByText(pausedLabel, { exact: true })).toBeInViewport()
+      await expect(table.getByText(pendingLabel, { exact: true })).toBeInViewport()
+      await page.screenshot({
+        path: testInfo.outputPath(`operational-status-badges-${locale}-${width}.png`),
+      })
+      await issues.assertClean()
+    })
+  }
+}
+
 async function openDocumentGrid(page: Page, width: number, path: string) {
   const issues = watchBrowserIssues(page, { readOnly: true })
   const requests: URL[] = []

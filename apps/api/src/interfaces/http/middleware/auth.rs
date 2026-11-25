@@ -40,6 +40,39 @@ impl RequestAuth {
             RequestAuthState::Invalid(error) => Err(error.to_api_error()),
         }
     }
+
+    /// The natively authenticated financial caller of this request.
+    ///
+    /// A cookie session names its own `iam_session` row; everything else — a
+    /// direct API token, an anonymous or failed resolution — names nothing, so a
+    /// fenced grant refuses it instead of treating a shared credential as
+    /// custody of a physical client.
+    fn dispatch_caller(&self) -> crate::shared::provider_http::DispatchCaller {
+        match &self.state {
+            RequestAuthState::Authenticated(auth) => dispatch_caller_for(auth),
+            RequestAuthState::Anonymous | RequestAuthState::Invalid(_) => {
+                crate::shared::provider_http::DispatchCaller::Unattributed
+            }
+        }
+    }
+}
+
+/// The financial caller one already-resolved authentication proves.
+///
+/// This is the single owner of the rule: a cookie session names its own
+/// `iam_session` row; a direct API token, a failed resolution or an anonymous
+/// request names nothing and is refused under a fenced grant. Callers that
+/// detach work into a spawned task re-scope with this value instead of
+/// rebuilding the decision from headers or policy.
+pub(crate) fn dispatch_caller_for(
+    auth: &AuthContext,
+) -> crate::shared::provider_http::DispatchCaller {
+    use crate::shared::provider_http::DispatchCaller;
+    if auth.token_kind.is_session() {
+        DispatchCaller::IamSession(auth.token_id)
+    } else {
+        DispatchCaller::Unattributed
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -92,6 +125,11 @@ async fn attach_request_auth(
         Ok(None) => RequestAuth::anonymous(),
         Err(error) => RequestAuth::invalid(AuthResolutionError::from(error)),
     };
+    let caller = request_auth.dispatch_caller();
     request.extensions_mut().insert(request_auth);
-    next.run(request).await
+    // The financial caller fence reads this scope at each provider attestation.
+    // Only a browser session carries a per-login identity here; a direct API
+    // token is deliberately left unattributed, and an MCP session re-scopes the
+    // value to its own validated session digest inside the MCP transport.
+    crate::shared::provider_http::with_dispatch_caller(caller, next.run(request)).await
 }

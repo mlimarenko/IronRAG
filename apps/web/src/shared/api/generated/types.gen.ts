@@ -494,6 +494,12 @@ export type AssistantChunkReference = {
      */
     rank: number;
     /**
+     * Immutable document revision the chunk was extracted from, hydrated from
+     * the chunk row at read time. Absent for historical references and for
+     * chunks whose document no longer exists.
+     */
+    revisionId?: string | null;
+    /**
      * Relevance score used to rank the chunk.
      */
     score: number;
@@ -1210,12 +1216,14 @@ export type AuditActorPrincipalResponse = {
 
 export type AuditAssistantCallResponse = {
     conversationId?: string | null;
+    costCoverage?: null | CostCoverageStatus;
     currencyCode?: string | null;
     models: Array<AuditAssistantModelResponse>;
     providerCallCount: number;
     queryExecutionId: string;
     runtimeExecutionId?: string | null;
     totalCost?: string | null;
+    unpricedProviderCallCount: number;
 };
 
 export type AuditAssistantModelResponse = {
@@ -1950,6 +1958,7 @@ export type CreateCatalogWorkspaceRequest = {
  */
 export type CreateDocumentMultipartRequest = {
     document_hint?: string | null;
+    enrichment_scope?: null | EnrichmentScope;
     external_key?: string | null;
     file: Blob | File;
     idempotency_key?: string | null;
@@ -1962,6 +1971,7 @@ export type CreateDocumentRequest = {
     checksum?: string | null;
     contentSourceKind?: string | null;
     documentHint?: string | null;
+    enrichmentScope?: null | EnrichmentScope;
     externalKey?: string | null;
     /**
      * Explicit source filename, required when admitting replacement metadata.
@@ -2027,6 +2037,7 @@ export type CreateProviderCatalogRequest = {
  */
 export type CreateRevisionMultipartRequest = {
     document_hint?: string | null;
+    enrichment_scope?: null | EnrichmentScope;
     file: Blob | File;
     idempotency_key?: string | null;
     language_code?: string | null;
@@ -2048,6 +2059,7 @@ export type CreateRevisionRequest = {
      */
     baseRevisionId?: string | null;
     documentHint?: string | null;
+    enrichmentScope?: null | EnrichmentScope;
     fileName?: string | null;
     idempotencyKey?: string | null;
     languageCode?: string | null;
@@ -2243,15 +2255,57 @@ export type DeploymentReadinessSnapshot = {
 export type DocumentAttempt = {
     attemptKind: string;
     attemptNo: number;
+    costCoverage?: null | CostCoverageStatus;
     currencyCode?: string | null;
+    /**
+     * Stage the worker reported when the attempt ended or was updated.
+     */
+    currentStage?: string | null;
+    /**
+     * Reservations terminated as `failed` or `canceled`: no settled usage, and
+     * no proof the provider billed nothing.
+     */
+    failedProviderCallCount?: number | null;
+    /**
+     * Durable typed failure class written by the ingest worker, e.g.
+     * `provider` or `worker_aborted`. `None` while the attempt has not failed.
+     */
+    failureClass?: string | null;
+    /**
+     * Stable machine-readable failure code for this attempt.
+     */
+    failureCode?: string | null;
+    /**
+     * Worker-produced failure message. Carries no provider response body.
+     */
+    failureMessage?: string | null;
     finishedAt?: string | null;
     jobId: string;
+    /**
+     * Calls whose call state is `completed`; a settled observation, not proof
+     * that a price was observed.
+     */
+    providerCallCount?: number | null;
     queueStartedAt: string;
+    /**
+     * Whether the bounded retry contract allows another attempt.
+     */
+    retryable: boolean;
     stageEvents: Array<DocumentStageEvent>;
     startedAt?: string | null;
     status: string;
+    /**
+     * Cost attributed to this attempt's own provider calls; `None` when none of
+     * them carries a catalog price.
+     */
     totalCost?: string | null;
     totalElapsedMs?: number | null;
+    /**
+     * Calls whose liability no charge proves, including reservations that never
+     * completed.
+     */
+    unpricedProviderCallCount?: number | null;
+    unsettledProviderCallCount?: number | null;
 };
 
 export type DocumentColumnFilters = {
@@ -2278,11 +2332,24 @@ export type DocumentCostPage = {
 };
 
 export type DocumentCostSummary = {
-    costCoverage: CostCoverageStatus;
-    currencyCode: string;
+    costCoverage?: null | CostCoverageStatus;
+    currencyCode?: string | null;
     documentId: string;
+    /**
+     * Calls whose call state is `completed`: a settled observation, not proof
+     * that a price was observed.
+     */
     providerCallCount: number;
-    totalCost: string;
+    /**
+     * Cost measured by this document's ledger charges. `None` when the document
+     * has no derived cost row or when no call in it carries a price;
+     * `cost_coverage` distinguishes the two.
+     */
+    totalCost?: string | null;
+    /**
+     * Calls whose liability no charge proves, including reservations that never
+     * completed.
+     */
     unpricedProviderCallCount: number;
 };
 
@@ -2346,8 +2413,32 @@ export type DocumentIntRange = {
 
 export type DocumentLifecycleDetail = {
     attempts: Array<DocumentAttempt>;
+    costCoverage?: null | CostCoverageStatus;
     currencyCode?: string | null;
+    /**
+     * Reservations terminated as `failed` or `canceled`. The state proves no
+     * settled usage, not that the provider billed nothing.
+     */
+    failedProviderCallCount?: number | null;
+    /**
+     * Calls whose call state is `completed`. Usage and price may still be
+     * absent; see `unpricedProviderCallCount`.
+     */
+    providerCallCount?: number | null;
+    /**
+     * Cost measured by the provider-call ledger. `None` when no call in this
+     * document carries a catalog price — never a substituted zero.
+     */
     totalCost?: string | null;
+    /**
+     * Calls whose liability no charge proves: completed calls without a price
+     * plus every reservation that never completed.
+     */
+    unpricedProviderCallCount?: number | null;
+    /**
+     * Reservations still `started` when this document was read.
+     */
+    unsettledProviderCallCount?: number | null;
 };
 
 export type DocumentListPageResponse = {
@@ -2387,8 +2478,15 @@ export type DocumentListStatusCounts = {
     canceled: number;
     empty: number;
     failed: number;
+    paused: number;
+    pendingMaterialization: number;
     processing: number;
     queued: number;
+    /**
+     * Documents in the same filtered set with a current readable revision,
+     * whatever bucket they landed in. Content presence, not a status.
+     */
+    readable: number;
     ready: number;
     total: number;
 };
@@ -2424,12 +2522,26 @@ export type DocumentStageEvent = {
      */
     chunksProcessed?: number | null;
     completionTokens?: number | null;
+    costCoverage?: null | CostCoverageStatus;
     currencyCode?: string | null;
     details?: unknown;
     elapsedMs?: number | null;
+    /**
+     * Cost measured for this stage by the provider-call ledger.
+     */
     estimatedCost?: string | null;
+    /**
+     * Reservations terminated as `failed` or `canceled`: no settled usage, and
+     * no proof the provider billed nothing.
+     */
+    failedProviderCallCount?: number | null;
     finishedAt?: string | null;
+    /**
+     * Worker stage message (no provider response body).
+     */
+    message?: string | null;
     modelName?: string | null;
+    pricedProviderCallCount?: number | null;
     promptTokens?: number | null;
     providerCallCount?: number | null;
     providerKind?: string | null;
@@ -2450,12 +2562,14 @@ export type DocumentStageEvent = {
     startedAt: string;
     status: string;
     totalTokens?: number | null;
+    unpricedProviderCallCount?: number | null;
+    unsettledProviderCallCount?: number | null;
 };
 
 /**
  * Operational lifecycle of a document ingestion attempt.
  */
-export type DocumentStatus = 'queued' | 'processing' | 'ready' | 'failed' | 'canceled' | 'empty';
+export type DocumentStatus = 'queued' | 'processing' | 'ready' | 'failed' | 'canceled' | 'empty' | 'paused' | 'pending_materialization';
 
 /**
  * List-view metadata and current processing state for one document.
@@ -2530,6 +2644,16 @@ export type DocumentSummary = {
      */
     workspaceId?: string | null;
 };
+
+/**
+ * Which enrichment the admitted mutation asked for.
+ *
+ * `Full` is the behaviour every existing request has: base publication,
+ * embedding, document summary and graph extraction. `TextAndEmbedding` is an
+ * explicit bounded plan: base publication, embedding and execution-profile
+ * validation only, with no summary, graph or provider-backed enrichment.
+ */
+export type EnrichmentScope = 'full' | 'text_and_embedding';
 
 export type FacetValue = string | number | null;
 
@@ -2658,9 +2782,9 @@ export type GraphNodeType = 'entity' | 'person' | 'organization' | 'location' | 
  */
 export type GraphReadinessSummary = {
     /**
-     * Document totals grouped by readiness state.
+     * Document totals grouped by canonical document status.
      */
-    documentCountsByReadiness: Array<[
+    documentCountsByStatus: Array<[
         string,
         number
     ]>;
@@ -3155,7 +3279,7 @@ export type KnowledgeLibraryGenerationListResponse = {
 };
 
 export type KnowledgeLibrarySummaryResponse = {
-    documentCountsByReadiness: {
+    documentCountsByStatus: {
         [key: string]: number;
     };
     /**
@@ -3437,6 +3561,11 @@ export type LibraryCostSummary = {
     currencyCode?: string | null;
     documentCount?: number | null;
     providerCallCount?: number | null;
+    /**
+     * Charged cost of the library. `None` when no execution in it has a
+     * derived cost row, or when every dispatchable call is unpriced:
+     * `cost_coverage` distinguishes unmeasured from unknown.
+     */
     totalCost?: string | null;
     unpricedProviderCallCount?: number | null;
 };
@@ -3449,10 +3578,26 @@ export type LibraryCostSummary = {
  * `/knowledge/libraries/{id}/summary`) MUST read from this shape.
  *
  * Invariants enforced by the shared aggregator:
- * * `total == ready + processing + queued + failed + canceled + empty`
- * * `graph_ready + graph_sparse == ready` (graph readiness is a
- * split of the ready bucket; it does not overlap with processing
- * / queued / failed / canceled).
+ *
+ * * Every document has exactly one operational bucket. The total equals
+ * `ready + processing + queued + paused + failed + canceled + pending_materialization + empty`.
+ * * `graph_ready + graph_sparse <= ready`. Both graph numbers describe the
+ * current revision's channel state: `graph_ready` is a readable-and-ready
+ * document with a complete graph (`graph_state = 'ready'`) whose active
+ * projection carries a node with evidence from that exact revision, and
+ * `graph_sparse` is a graph-capable document without such full coverage —
+ * a `graph_degraded` graph (with or without a node) or a complete graph the
+ * projection does not cover. The two never overlap. A ready document whose
+ * current revision has no graph capability yet — vectors still pending or
+ * failed, graph not extracted — is neither number; it is not a gap and must
+ * never be produced by complementary arithmetic. The document-list `graph
+ * gap` selector is the broader `ready - graph_ready` deficit, which does
+ * include those still-enriching documents.
+ * * `ready <= readable <= total`. `readable` is a separate fact — readable
+ * text exists in the current revision — and is not an operational status,
+ * a graph-coverage number, or the configured `ingestionReadiness.ready`
+ * binding/config flag. Optional enrichment may still be pending or
+ * degraded behind it.
  *
  * `in_flight` is intentionally NOT a field on this struct — it is a
  * derived value `processing + queued`. Adding it would invite the
@@ -3464,8 +3609,9 @@ export type LibraryDocumentMetrics = {
      */
     canceled: number;
     /**
-     * Documents with no content and no ingest work pending — admitted
-     * with no revision, no readable revision, and no active mutation.
+     * Documents with no content, no work pending and no pending
+     * publication commitment — admitted with no revision, no readable
+     * revision, and no active mutation.
      */
     empty: number;
     /**
@@ -3473,13 +3619,32 @@ export type LibraryDocumentMetrics = {
      */
     failed: number;
     /**
-     * Ready documents with complete graph materialization.
+     * Ready documents with full graph readiness (`vector_state = 'ready'` and
+     * `graph_state = 'ready'`) whose active projection carries a document node
+     * with evidence from the exact current readable revision. A
+     * `graph_degraded` revision never counts here, even with a node.
      */
     graphReady: number;
     /**
-     * Ready documents with sparse graph materialization.
+     * Ready documents whose graph capability is partial or whose complete
+     * graph the projection does not cover — disjoint from `graph_ready`. A
+     * `graph_degraded` revision is sparse even with a projection node; never
+     * `ready - graph_ready`, which additionally names documents still waiting
+     * for capability.
      */
     graphSparse: number;
+    /**
+     * Documents whose newest work is held by an operator pause — not
+     * waiting for a worker and not running. Distinct from `queued`.
+     */
+    paused: number;
+    /**
+     * Documents with an accepted publication commitment (visibility
+     * intent) and no current readable revision yet. Connector phase is
+     * owned by the connector journal, so this bucket never claims a
+     * running ingest.
+     */
+    pendingMaterialization: number;
     /**
      * Documents with an active worker attempt.
      */
@@ -3489,7 +3654,15 @@ export type LibraryDocumentMetrics = {
      */
     queued: number;
     /**
-     * Successfully ingested documents.
+     * Documents with a current readable revision, whatever their
+     * operational bucket. Presence of readable content is observed
+     * independently of status, graph coverage and binding readiness, so a
+     * failed or held re-ingest never hides material a reader can still use.
+     */
+    readable: number;
+    /**
+     * Documents whose current readable revision is published and whose
+     * latest work carries no blocking failure: the ingestable population.
      */
     ready: number;
     /**
@@ -3658,6 +3831,13 @@ export type McpCapabilitySnapshot = {
 export type MeResponse = {
     effectiveGrants: Array<GrantResponse>;
     principal: PrincipalResponse;
+    /**
+     * The authenticated browser session row this request proved, present only
+     * for cookie-session callers. It is the value the financial caller fence
+     * admits as `IamSession`, so a client can register itself without reading
+     * or echoing its cookie. An API-token caller has no session and omits it.
+     */
+    sessionId?: string | null;
     user?: null | UserResponse;
     workspaceMemberships: Array<WorkspaceMembershipResponse>;
 };
@@ -4595,7 +4775,7 @@ export type SemanticClaimSupport = 'supported' | 'contradicted' | 'insufficient_
 export type SemanticCompleteness = 'complete' | 'missing_essential_caveats' | 'undetermined';
 
 /**
- * A verifier-proposed quote validated against an authorized source entry.
+ * A verifier citation resolved to exact bytes in an authorized source entry.
  */
 export type SemanticEvidenceLink = {
     /**
@@ -4607,7 +4787,7 @@ export type SemanticEvidenceLink = {
      */
     sourceId: string;
     /**
-     * Server-derived half-open UTF-8 byte range of a unique exact quote within
+     * Server-derived half-open UTF-8 byte range of the exact quote within
      * the selected text. Provider-supplied spans are not accepted.
      */
     span: SemanticByteSpan;
@@ -4641,6 +4821,29 @@ export type SemanticMissingCaveat = {
  * Why no semantic verifier invocation was attempted.
  */
 export type SemanticNotRunReason = 'non_factual_response' | 'disabled' | 'binding_unavailable' | 'no_evidence' | 'empty_answer' | 'input_limit_exceeded' | 'unsupported_structured_transport';
+
+/**
+ * Exact preparation bound that refused the verifier input.
+ */
+export type SemanticPreparationBound = 'answer_utf8_bytes' | 'question_utf8_bytes' | 'answer_units' | 'source_entries' | 'evidence_utf8_bytes';
+
+/**
+ * Measured value and configured limit for the refused preparation bound.
+ */
+export type SemanticPreparationLimit = {
+    /**
+     * Measured value of the refused input.
+     */
+    actual: number;
+    /**
+     * The bound that refused preparation.
+     */
+    bound: SemanticPreparationBound;
+    /**
+     * Configured limit for that bound.
+     */
+    limit: number;
+};
 
 /**
  * Candidate-answer classification, not the operational status of the verifier.
@@ -4778,6 +4981,7 @@ export type SemanticVerificationReport = {
      * Semantic or operational result.
      */
     outcome: SemanticVerificationOutcome;
+    preparationLimit?: null | SemanticPreparationLimit;
     /**
      * Version of the preparation and validation protocol.
      */
@@ -5693,6 +5897,10 @@ export type WorkspaceCostSummary = {
     documentCount?: number | null;
     libraryCount?: number | null;
     providerCallCount?: number | null;
+    /**
+     * Charged cost of the workspace. `None` under the same rule as
+     * [`LibraryCostSummary::total_cost`].
+     */
     totalCost?: string | null;
     unpricedProviderCallCount?: number | null;
 };
@@ -6881,6 +7089,10 @@ export type GetBillingExecutionCostErrors = {
      * Caller is not authorized for the execution's library
      */
     403: unknown;
+    /**
+     * No measured provider-call evidence for the execution
+     */
+    404: unknown;
 };
 
 export type GetBillingExecutionCostResponses = {
@@ -10562,6 +10774,50 @@ export type CancelIngestQueueJobResponses = {
 };
 
 export type CancelIngestQueueJobResponse = CancelIngestQueueJobResponses[keyof CancelIngestQueueJobResponses];
+
+export type ExecuteIngestQueueJobData = {
+    body?: never;
+    path: {
+        /**
+         * Queued ingest job identifier
+         */
+        jobId: string;
+    };
+    query?: never;
+    url: '/v1/ops/ingest-queue/jobs/{jobId}/execute';
+};
+
+export type ExecuteIngestQueueJobErrors = {
+    /**
+     * Job is not queued
+     */
+    400: unknown;
+    /**
+     * Caller is not authenticated
+     */
+    401: unknown;
+    /**
+     * Caller cannot mutate the job's library
+     */
+    403: unknown;
+    /**
+     * Job not found
+     */
+    404: unknown;
+    /**
+     * Job has no admitted mutation origin or is already leased
+     */
+    409: unknown;
+};
+
+export type ExecuteIngestQueueJobResponses = {
+    /**
+     * Executed ingest job with its latest attempt and async operation
+     */
+    200: IngestJobResponse;
+};
+
+export type ExecuteIngestQueueJobResponse = ExecuteIngestQueueJobResponses[keyof ExecuteIngestQueueJobResponses];
 
 export type MoveIngestQueueJobData = {
     body: MoveIngestQueueJobRequest;

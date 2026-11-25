@@ -14,12 +14,11 @@ use crate::{
 };
 
 use super::super::{
-    retrieve::excerpt_for,
-    types::{QueryGraphIndex, RuntimeMatchedEntity},
+    chunk_support::ContextExcerpt,
+    types::{QueryGraphIndex, RuntimeMatchedEntity, SelectedGraphContextLine},
 };
 
 const ENTITY_MATCH_CONTEXT_LINE_LIMIT: usize = 8;
-const ENTITY_SUMMARY_CONTEXT_CHARS: usize = 320;
 pub(super) const TARGET_ENTITY_CONTEXT_LINE_LIMIT: usize = 64;
 const TARGET_ENTITY_INVENTORY_CONTEXT_LINE_LIMIT: usize = 192;
 const TARGET_ENTITY_SUMMARY_CONTEXT_CHARS: usize = 180;
@@ -27,7 +26,7 @@ const TARGET_ENTITY_SUMMARY_CONTEXT_CHARS: usize = 180;
 pub(crate) fn target_entity_context_lines(
     query_ir: &QueryIR,
     graph_index: &QueryGraphIndex,
-) -> Vec<String> {
+) -> Vec<SelectedGraphContextLine> {
     if query_ir.target_entities.is_empty() {
         return Vec::new();
     }
@@ -110,17 +109,22 @@ fn graph_node_matches_target_label(
         })
 }
 
-fn graph_node_target_context_line(node: &RuntimeGraphQueryNodeRow) -> String {
+fn graph_node_target_context_line(node: &RuntimeGraphQueryNodeRow) -> SelectedGraphContextLine {
     let tail = format!("{} ({})", node.label, node.node_type);
     if let Some(summary) = node.summary.as_deref().map(str::trim).filter(|value| !value.is_empty())
     {
-        return format!(
-            "[graph-node] target_match=explicit evidence: {} | entity_hint: {}",
-            excerpt_for(summary, TARGET_ENTITY_SUMMARY_CONTEXT_CHARS),
-            tail
+        let evidence = ContextExcerpt::new(summary, TARGET_ENTITY_SUMMARY_CONTEXT_CHARS);
+        return SelectedGraphContextLine::matched_entity(
+            format!(
+                "[graph-node] target_match=explicit evidence: {evidence} | entity_hint: {tail}"
+            ),
+            Some(evidence.source.to_owned()),
         );
     }
-    format!("[graph-node] target_match=explicit entity_hint: {tail}")
+    SelectedGraphContextLine::matched_entity(
+        format!("[graph-node] target_match=explicit entity_hint: {tail}"),
+        None,
+    )
 }
 
 struct EntityMatchTarget {
@@ -214,12 +218,9 @@ fn entity_match_kind(
 }
 
 pub(super) fn graph_node_context_line(entity: &RuntimeMatchedEntity) -> String {
-    if let Some(summary) =
-        entity.summary.as_deref().map(str::trim).filter(|value| !value.is_empty())
-    {
+    if let Some(excerpt) = entity.context_excerpt() {
         return format!(
-            "[graph-node] evidence: {} | entity_hint: {}",
-            excerpt_for(summary, ENTITY_SUMMARY_CONTEXT_CHARS),
+            "[graph-node] evidence: {excerpt} | entity_hint: {}",
             graph_node_context_tail(entity)
         );
     }

@@ -102,5 +102,5 @@ fn paid_response_ledger_survives_a_later_loop_deadline() {
         agent_loop_metadata(2, Duration::from_secs(1), AgentStopReason::Deadline, 0),
     );
 
-    assert_eq!(failure.provider_calls, vec![provider_call]);
+    assert_eq!(failure.provider_calls.as_ref(), vec![provider_call]);
 }

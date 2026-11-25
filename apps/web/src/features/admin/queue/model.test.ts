@@ -1,19 +1,36 @@
-import { describe, expect, it } from 'vitest'
+import { fireEvent, render } from '@testing-library/react'
+import { createElement, type ReactElement } from 'react'
+import { describe, expect, it, vi } from 'vitest'
 
-import type { IngestQueueResponse } from '@/shared/api/generated'
+import type {
+  IngestAttempt,
+  IngestAttemptResponse,
+  IngestJob,
+  IngestJobResponse,
+  IngestQueueResponse,
+  IngestStageEvent,
+  IngestStageTimelineResponse,
+} from '@/shared/api/generated'
+import i18n from '@/shared/i18n'
 
 import {
+  mapAttempt,
+  mapAttempts,
+  mapJob,
   mapQueue,
+  mapStageEvents,
   parseQueueFilters,
   parseQueueSort,
   queueBucketFor,
   queueBucketKeys,
   queueFiltersFromUrl,
+  queueGridColumns,
   QueueResponseError,
   queueParamsWithState,
   queueScreenPhase,
   resolveQueueRoute,
   serializeQueueFilters,
+  type QueueItem,
 } from './model'
 
 const validQueueItem = {
@@ -212,6 +229,18 @@ describe('mapQueue', () => {
     )
   })
 
+  it.each([[null], ['item'], [42]])(
+    'rejects an item that is not an object with its position: %s',
+    (item) => {
+      const response = {
+        items: [item],
+        summary: validQueueSummary,
+      } as unknown as IngestQueueResponse
+
+      expect(() => mapQueue(response)).toThrow('Ingest queue item 0 must be an object')
+    },
+  )
+
   it('rejects a response that repeats a jobId before the renderer keys rows by it', () => {
     const response: IngestQueueResponse = {
       items: [validQueueItem, { ...validQueueItem, documentName: 'other.pdf' }],
@@ -341,6 +370,7 @@ describe('queue grid URL encoding', () => {
     const encoded = serializeQueueFilters(filters)
     expect(encoded).not.toBeNull()
     expect(parseQueueFilters(encoded)).toEqual(filters)
+    expect(serializeQueueFilters({ library_name: [] })).toBeNull()
     expect(parseQueueFilters('not json')).toEqual({})
     expect(
       parseQueueFilters(JSON.stringify({ nope: ['string:x'], library_name: ['garbage'] })),
@@ -359,5 +389,175 @@ describe('queue grid URL encoding', () => {
     expect(parseQueueSort('unknown:asc')).toBeNull()
     expect(parseQueueSort('queue_position:sideways')).toBeNull()
     expect(parseQueueSort(null)).toBeNull()
+  })
+
+  it('drops a filters document that is not a JSON object', () => {
+    for (const raw of ['[]', '42', 'null', '"text"', '{"queue_state":[]}']) {
+      expect(parseQueueFilters(raw)).toEqual({})
+    }
+  })
+})
+
+describe('queue row inspection mapping', () => {
+  const job: IngestJob = {
+    available_at: '2026-08-09T10:00:00Z',
+    id: 'job-1',
+    job_kind: 'document_ingest',
+    library_id: 'library-1',
+    priority: 0,
+    queue_state: 'running',
+    queued_at: '2026-08-09T09:00:00Z',
+    workspace_id: 'workspace-1',
+  }
+  const readiness = { graphReady: false, textReady: false, vectorReady: false }
+  const attempt: IngestAttempt = {
+    attempt_number: 1,
+    attempt_state: 'running',
+    id: 'attempt-1',
+    job_id: 'job-1',
+    progress_percent: 40,
+    retryable: true,
+    started_at: '2026-08-09T09:30:00Z',
+  }
+
+  it('passes the queue inspector payloads through without rewriting them', () => {
+    const jobResponse: IngestJobResponse = { job, readiness }
+    const attemptResponse: IngestAttemptResponse = { attempt, job, readiness }
+    const attempts = { items: [attempt] }
+
+    expect(mapJob(jobResponse)).toBe(jobResponse)
+    expect(mapAttempt(attemptResponse)).toBe(attemptResponse)
+    expect(mapAttempts(attempts)).toBe(attempts.items)
+  })
+
+  it('orders the stage timeline by its own ordinal, not by arrival', () => {
+    const stage = (id: string, ordinal: number): IngestStageEvent => ({
+      attempt_id: 'attempt-1',
+      details_json: null,
+      id,
+      ordinal,
+      recorded_at: '2026-08-09T09:30:00Z',
+      stage_name: id,
+      stage_state: 'completed',
+    })
+    const timeline: IngestStageTimelineResponse = {
+      attempt,
+      job,
+      readiness,
+      stages: [stage('index', 3), stage('extract', 1), stage('embed', 2)],
+    }
+
+    expect(mapStageEvents(timeline).map((event) => event.stage_name)).toEqual([
+      'extract',
+      'embed',
+      'index',
+    ])
+  })
+})
+
+describe('queue grid columns', () => {
+  const row = (overrides: Partial<QueueItem> = {}): QueueItem => ({
+    ...validQueueItem,
+    ...overrides,
+  })
+  const columns = (onOpen = () => {}) => queueGridColumns({ onOpen, t: i18n.t })
+  const column = (id: string) => columns().find((candidate) => candidate.id === id)!
+  const markup = (id: string, item: QueueItem) =>
+    render(column(id).cell!(item) as ReactElement).container.textContent
+
+  it('shows a dash and an empty display text for a row without a queue position or attempt', () => {
+    expect(column('queue_position').value(row())).toBeNull()
+    expect(column('queue_position').displayText?.(row())).toBe('')
+    expect(markup('queue_position', row())).toBe('—')
+    expect(column('queue_position').value(row({ queuePosition: 3 }))).toBe(3)
+    expect(column('queue_position').displayText?.(row({ queuePosition: 3 }))).toBe('3')
+    expect(markup('queue_position', row({ queuePosition: 3 }))).toBe('3')
+
+    expect(column('attempt_number').value(row())).toBeNull()
+    expect(column('attempt_number').displayText?.(row())).toBe('')
+    expect(markup('attempt_number', row())).toBe('—')
+    expect(column('attempt_number').value(row({ attemptNumber: 2 }))).toBe(2)
+    expect(column('attempt_number').displayText?.(row({ attemptNumber: 2 }))).toBe('2')
+  })
+
+  it('opens the inspector from the document name without also selecting the row', () => {
+    const onOpen = vi.fn()
+    const parentClick = vi.fn()
+    const item = row()
+    const documentColumn = queueGridColumns({ onOpen, t: i18n.t }).find(
+      (candidate) => candidate.id === 'document_name',
+    )!
+    const { container } = render(
+      createElement('div', { onClick: parentClick }, documentColumn.cell!(item) as ReactElement),
+    )
+
+    fireEvent.click(container.querySelector('button')!)
+
+    expect(onOpen).toHaveBeenCalledWith(item)
+    expect(parentClick).not.toHaveBeenCalled()
+    expect(container.textContent).toContain('handbook.pdf')
+    expect(container.textContent).toContain('Document ingest')
+    expect(documentColumn.value(item)).toBe('handbook.pdf')
+    expect(documentColumn.searchText?.(item)).toBe('handbook.pdf Document ingest')
+  })
+
+  it('shows the library and its workspace together', () => {
+    const item = row()
+    expect(column('library_name').value(item)).toBe('Handbook')
+    expect(markup('library_name', item)).toBe('HandbookPlatform')
+    expect(column('library_name').searchText?.(item)).toBe('Handbook Platform')
+  })
+
+  it('sorts and labels the stage by its humanized label', () => {
+    expect(column('current_stage').value(row())).toBeNull()
+    expect(column('current_stage').displayText?.(row())).toBe('')
+    expect(column('current_stage').sortValue?.(row())).toBe('')
+    expect(markup('current_stage', row())).toBe('—')
+
+    const staged = row({ currentStage: 'embed_chunk' })
+    expect(column('current_stage').value(staged)).toBe('embed_chunk')
+    expect(column('current_stage').displayText?.(staged)).toBe('Embedding chunks')
+    expect(column('current_stage').sortValue?.(staged)).toBe('Embedding chunks')
+    expect(markup('current_stage', staged)).toBe('Embedding chunks')
+  })
+
+  it('shows the queue state label, the stale-lease badge and the failure reason', () => {
+    expect(column('queue_state').value(row())).toBe('leased')
+    expect(column('queue_state').displayText?.(row())).toBe('Running')
+    expect(markup('queue_state', row())).toBe('RunningStale lease')
+    expect(markup('queue_state', row({ hasStaleQueueLease: false }))).toBe('Running')
+
+    // A stale heartbeat is already explained by the stale-lease badge.
+    expect(markup('queue_state', row({ failureCode: 'stale_heartbeat' }))).toBe(
+      'RunningStale lease',
+    )
+
+    const failed = row({
+      failureCode: 'ocr_failed',
+      hasStaleQueueLease: false,
+      queueState: 'failed',
+    })
+    expect(markup('queue_state', failed)).toBe('FailedProcessing failed: Ocr failed.')
+    expect(column('queue_state').searchText?.(failed)).toBe(
+      'Failed failed Processing failed: Ocr failed.',
+    )
+    // A row without a failure reason is searchable by its label and raw state only.
+    expect(column('queue_state').searchText?.(row({ hasStaleQueueLease: false }))).toBe(
+      'Running leased',
+    )
+  })
+
+  it('renders the progress bar only for a known percentage', () => {
+    expect(column('progress_percent').value(row())).toBeNull()
+    expect(column('progress_percent').displayText?.(row())).toBe('')
+    expect(markup('progress_percent', row())).toBe('—')
+
+    const running = row({ progressPercent: 55 })
+    expect(column('progress_percent').value(running)).toBe(55)
+    expect(column('progress_percent').displayText?.(running)).toBe('55%')
+    const { container } = render(column('progress_percent').cell!(running) as ReactElement)
+    expect(container.textContent).toBe('55%')
+    expect(container.querySelector('progress')?.getAttribute('aria-valuenow')).toBe('55')
+    expect(container.querySelector('progress')?.getAttribute('aria-label')).toBe('Progress')
   })
 })

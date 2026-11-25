@@ -59,12 +59,14 @@ class LocalComparisonTests(unittest.TestCase):
     def test_duplicate_or_noncontiguous_candidates_are_rejected(self):
         rows = self.data["queries"][0]["candidates"]
         rows[1]["id"] = "b"
+        duplicated = self.save()
         with self.assertRaisesRegex(ValueError, "duplicate"):
-            load_inputs(self.path, self.save())
+            load_inputs(self.path, duplicated)
         rows[1]["id"] = "a"
         rows[1]["index"] = 4
+        noncontiguous = self.save()
         with self.assertRaisesRegex(ValueError, "contiguous"):
-            load_inputs(self.path, self.save())
+            load_inputs(self.path, noncontiguous)
 
     def test_nonfinite_or_partial_scores_fail_instead_of_becoming_a_ranking(self):
         candidates = self.data["queries"][0]["candidates"]
@@ -87,14 +89,9 @@ class LocalComparisonTests(unittest.TestCase):
 
         model = FailingModel()
         preserve_forward_failure(model)
-        try:
+        with self.assertRaises(ModelForwardFailure) as raised:
             model.forward(input_ids=[1])
-        except RuntimeError:
-            self.fail("dependency RuntimeError backoff could swallow the first cause")
-        except ModelForwardFailure as error:
-            self.assertIs(error.__cause__, original_error)
-        else:
-            self.fail("failed forward was not propagated")
+        self.assertIs(raised.exception.__cause__, original_error)
 
     def test_successful_forward_keeps_its_original_result_and_arguments(self):
         class Model:

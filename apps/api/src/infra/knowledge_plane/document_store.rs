@@ -5,9 +5,10 @@ use chrono::{DateTime, Utc};
 use uuid::Uuid;
 
 use crate::infra::knowledge_rows::{
-    KnowledgeChunkRow, KnowledgeChunkSupportReferenceRow, KnowledgeDocumentRow,
-    KnowledgeRevisionRow, KnowledgeStructuredBlockRow, KnowledgeStructuredRevisionRow,
-    KnowledgeTechnicalFactRow, LibraryGenerationSignals, StructuredRevisionCounts,
+    KnowledgeChunkReferenceMetadataRow, KnowledgeChunkRow, KnowledgeChunkSupportReferenceRow,
+    KnowledgeDocumentRow, KnowledgeRevisionRow, KnowledgeStructuredBlockRow,
+    KnowledgeStructuredRevisionRow, KnowledgeTechnicalFactRow, LibraryGenerationSignals,
+    StructuredRevisionCounts,
 };
 
 use super::write_authority::{
@@ -250,6 +251,13 @@ pub trait DocumentStore: Send + Sync {
         &self,
         chunk_ids: &[Uuid],
     ) -> anyhow::Result<Vec<KnowledgeChunkRow>>;
+    /// Text-free identity for the same membership set: selection needs the
+    /// document and revision before any chunk body is read. Never returns
+    /// `content_text`.
+    async fn list_chunk_reference_metadata_by_ids(
+        &self,
+        chunk_ids: &[Uuid],
+    ) -> anyhow::Result<Vec<KnowledgeChunkReferenceMetadataRow>>;
     /// Searches only the bounded candidate set selected by primary retrieval.
     /// An empty candidate set MUST return no rows and MUST NOT fall back to a
     /// library-wide scan.

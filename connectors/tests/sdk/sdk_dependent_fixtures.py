@@ -11,7 +11,7 @@ from dataclasses import dataclass, replace
 from typing import NotRequired, TypedDict
 from uuid import UUID
 
-from ironrag_connector.ironrag import DocumentResource, RevisionProvenance
+from ironrag_connector.ironrag import DocumentResource, RevisionFile, RevisionProvenance
 from ironrag_connector.routing import ResolvedLibraryTarget, Router, RoutingConfig
 from ironrag_connector.source import (
     SourceDeleteEnforcement,
@@ -37,9 +37,7 @@ class RevisionRequest(TypedDict):
     idempotency_key: str
     markdown: NotRequired[str | None]
     appended_text: NotRequired[str | None]
-    file_bytes: NotRequired[bytes | None]
-    file_name: NotRequired[str | None]
-    mime_type: NotRequired[str | None]
+    file: NotRequired[RevisionFile | None]
     visibility_intent_id: NotRequired[UUID | str | None]
     title: NotRequired[str | None]
     document_hint: NotRequired[str | None]
@@ -54,15 +52,16 @@ def revision_request_identity(
     intent = request.get("visibility_intent_id")
     base_revision = request.get("base_revision_id")
     provenance = request.get("provenance", RevisionProvenance())
+    file = request.get("file")
     return (
         "revision",
         str(document_id),
         request["mode"],
         request.get("markdown"),
         request.get("appended_text"),
-        request.get("file_bytes"),
-        request.get("file_name"),
-        request.get("mime_type"),
+        file.name if file is not None else None,
+        file.mime_type if file is not None else None,
+        file.data if file is not None else None,
         request.get("title"),
         request.get("document_hint"),
         provenance.language_code,

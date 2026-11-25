@@ -97,13 +97,13 @@ pub enum SemanticClaimSupport {
     NoFactualClaims,
 }
 
-/// A verifier-proposed quote validated against an authorized source entry.
+/// A verifier citation resolved to exact bytes in an authorized source entry.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SemanticEvidenceLink {
     /// Opaque identifier of a selected source, not a document UUID.
     pub source_id: String,
-    /// Server-derived half-open UTF-8 byte range of a unique exact quote within
+    /// Server-derived half-open UTF-8 byte range of the exact quote within
     /// the selected text. Provider-supplied spans are not accepted.
     pub span: SemanticByteSpan,
     /// Exact text at the quoted range.
@@ -196,6 +196,54 @@ pub enum SemanticNotRunReason {
     UnsupportedStructuredTransport,
 }
 
+/// Exact preparation bound that refused the verifier input.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum SemanticPreparationBound {
+    /// The checked answer exceeded its UTF-8 byte limit.
+    AnswerUtf8Bytes,
+    /// The question exceeded its UTF-8 byte limit.
+    QuestionUtf8Bytes,
+    /// The answer exceeded the exhaustive unit limit.
+    AnswerUnits,
+    /// The selected source entry count exceeded its limit.
+    SourceEntries,
+    /// The selected evidence exceeded its aggregate UTF-8 byte limit.
+    EvidenceUtf8Bytes,
+}
+
+impl SemanticPreparationBound {
+    /// Stable wire/diagnostic name for this bound.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::AnswerUtf8Bytes => "answer_utf8_bytes",
+            Self::QuestionUtf8Bytes => "question_utf8_bytes",
+            Self::AnswerUnits => "answer_units",
+            Self::SourceEntries => "source_entries",
+            Self::EvidenceUtf8Bytes => "evidence_utf8_bytes",
+        }
+    }
+}
+
+impl std::fmt::Display for SemanticPreparationBound {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+/// Measured value and configured limit for the refused preparation bound.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SemanticPreparationLimit {
+    /// The bound that refused preparation.
+    pub bound: SemanticPreparationBound,
+    /// Measured value of the refused input.
+    pub actual: u64,
+    /// Configured limit for that bound.
+    pub limit: u64,
+}
+
 /// Operational failures never imply semantic support.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
@@ -258,6 +306,10 @@ pub struct SemanticVerificationReport {
     pub elapsed_ms: u64,
     /// Server-owned provider-call identity, if a call was made.
     pub provider_call_id: Option<Uuid>,
+    /// Present exactly when a preparation bound refused the input. Absent for a
+    /// completed, failed or ordinary not-run report.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preparation_limit: Option<SemanticPreparationLimit>,
     /// Semantic or operational result.
     pub outcome: SemanticVerificationOutcome,
 }
@@ -316,6 +368,7 @@ mod tests {
             sources: vec![],
             elapsed_ms: 7,
             provider_call_id: None,
+            preparation_limit: None,
             outcome: SemanticVerificationOutcome::Completed { assessment },
         };
         assert_eq!(
@@ -329,6 +382,47 @@ mod tests {
         assert!(
             serde_json::from_value::<SemanticVerificationReport>(without_question_identity)
                 .is_err()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn semantic_contract_preparation_limit_round_trips_and_defaults_absent()
+    -> Result<(), serde_json::Error> {
+        let mut report = SemanticVerificationReport {
+            protocol_version: SEMANTIC_VERIFICATION_PROTOCOL_VERSION,
+            question_sha256: "c".repeat(64),
+            checked_answer_sha256: "a".repeat(64),
+            visible_answer_sha256: None,
+            evidence_manifest_sha256: "b".repeat(64),
+            answer_units: vec![],
+            sources: vec![],
+            elapsed_ms: 3,
+            provider_call_id: None,
+            preparation_limit: Some(SemanticPreparationLimit {
+                bound: SemanticPreparationBound::EvidenceUtf8Bytes,
+                actual: 22_001,
+                limit: 22_000,
+            }),
+            outcome: SemanticVerificationOutcome::NotRun {
+                reason: SemanticNotRunReason::InputLimitExceeded,
+            },
+        };
+        let encoded = serde_json::to_value(&report)?;
+        assert_eq!(encoded["preparationLimit"]["bound"], "evidence_utf8_bytes");
+        assert_eq!(serde_json::from_value::<SemanticVerificationReport>(encoded)?, report);
+
+        // A stored report written before this field existed is still readable:
+        // `default` must turn the absent field back into `None`.
+        report.preparation_limit = None;
+        let mut stored = serde_json::to_value(&report)?;
+        assert!(stored.get("preparationLimit").is_none());
+        let restored = serde_json::from_value::<SemanticVerificationReport>(stored.clone())?;
+        assert_eq!(restored.preparation_limit, None);
+        stored["preparationLimit"] = serde_json::Value::Null;
+        assert_eq!(
+            serde_json::from_value::<SemanticVerificationReport>(stored)?.preparation_limit,
+            None
         );
         Ok(())
     }

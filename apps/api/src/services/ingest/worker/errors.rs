@@ -23,6 +23,7 @@ use crate::{
 #[derive(Debug)]
 pub(super) struct ContentExtractionError {
     pub(super) failure_code: String,
+    pub(super) provider_call_id: Option<Uuid>,
     /// The one classification of this failure. The worker requeues exactly the
     /// `RetryExhausted` outcome; retryability and content-ness are read from
     /// here, never from `failure_code` text (which no longer separates a
@@ -266,16 +267,36 @@ pub(super) fn classify_content_ingest_failure(
             operational_defer: Some(operational_defer_to_chrono(PROVIDER_QUOTA_COOLDOWN)),
         };
     }
-    if error
-        .downcast_ref::<ProviderFailure>()
-        .is_some_and(|failure| failure.kind() == ProviderFailureKind::RequestRejected)
-    {
-        return ContentIngestFailureClassification {
-            failure_class: "provider",
-            failure_code: "provider_request_rejected".to_string(),
-            failure_disposition: OpsFailureDisposition::OperationalTerminal,
-            operational_defer: None,
-        };
+    if let Some(failure) = error.downcast_ref::<ProviderFailure>() {
+        match failure.kind() {
+            ProviderFailureKind::QuotaExhausted | ProviderFailureKind::AllowanceExhausted => {
+                return ContentIngestFailureClassification {
+                    failure_class: ContentProviderQuotaError::FAILURE_CLASS,
+                    failure_code: "provider_allowance_exhausted".to_string(),
+                    failure_disposition: OpsFailureDisposition::RetryExhausted,
+                    operational_defer: Some(operational_defer_to_chrono(PROVIDER_QUOTA_COOLDOWN)),
+                };
+            }
+            ProviderFailureKind::RequestRejected => {
+                return ContentIngestFailureClassification {
+                    failure_class: "provider",
+                    failure_code: "provider_request_rejected".to_string(),
+                    failure_disposition: OpsFailureDisposition::OperationalTerminal,
+                    operational_defer: None,
+                };
+            }
+            ProviderFailureKind::AdmissionRefused => {
+                // A local dispatch refusal is not a provider outage and must not
+                // be retried as one.
+                return ContentIngestFailureClassification {
+                    failure_class: "provider",
+                    failure_code: "provider_admission_refused".to_string(),
+                    failure_disposition: OpsFailureDisposition::OperationalTerminal,
+                    operational_defer: None,
+                };
+            }
+            ProviderFailureKind::Unavailable => {}
+        }
     }
     ContentIngestFailureClassification {
         failure_class: "worker_error",
@@ -407,6 +428,7 @@ pub(super) fn map_stage_error(
 impl ContentExtractionError {
     pub(super) fn missing_stored_source(job_id: Uuid, revision_id: Uuid) -> Self {
         Self {
+            provider_call_id: None,
             failure_code: "missing_stored_source".to_string(),
             failure_disposition: OpsFailureDisposition::OperationalTerminal,
             message: format!(
@@ -417,6 +439,7 @@ impl ContentExtractionError {
 
     pub(super) fn stored_source_read(storage_ref: &str, error: impl std::fmt::Display) -> Self {
         Self {
+            provider_call_id: None,
             failure_code: "stored_source_unavailable".to_string(),
             failure_disposition: OpsFailureDisposition::OperationalTerminal,
             message: format!("failed to read stored source {storage_ref}: {error}"),
@@ -433,6 +456,7 @@ impl ContentExtractionError {
     /// example `upload_extraction_failed`) may now carry two dispositions.
     pub(super) fn from_upload_rejection(rejection: &UploadAdmissionError) -> Self {
         Self {
+            provider_call_id: rejection.provider_call_id,
             failure_code: rejection.error_kind().to_string(),
             failure_disposition: OpsFailureDisposition::from_extraction_failure_class(
                 rejection.extraction_failure_class(),
@@ -443,6 +467,7 @@ impl ContentExtractionError {
 
     pub(super) fn extraction_failed(failure_code: &str, message: impl std::fmt::Display) -> Self {
         Self {
+            provider_call_id: None,
             failure_code: failure_code.to_string(),
             failure_disposition: OpsFailureDisposition::RetryExhausted,
             message: message.to_string(),
@@ -456,6 +481,7 @@ impl ContentExtractionError {
         message: impl std::fmt::Display,
     ) -> Self {
         Self {
+            provider_call_id: None,
             failure_code: failure_code.to_string(),
             failure_disposition: OpsFailureDisposition::OperationalTerminal,
             message: message.to_string(),

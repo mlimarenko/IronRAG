@@ -198,32 +198,45 @@ impl SystemOneClient {
         // budget permit it held before the typed timeout error is returned. The
         // client performs no database mutation, so no non-idempotent operation
         // can be cancelled halfway.
-        let (bytes, guard) = match tokio::time::timeout(self.execution_deadline, async {
-            let target =
-                self.transport.prepare(&self.endpoint, self.allow_private_network).await.map_err(
-                    |error| {
+        let (bytes, guard, mut permit) =
+            match tokio::time::timeout(self.execution_deadline, async {
+                let target = self
+                    .transport
+                    .prepare(&self.endpoint, self.allow_private_network)
+                    .await
+                    .map_err(|error| {
                         ProviderCallError::target_preparation(SYSTEM_ONE_TARGET_CONTEXT, &error)
-                    },
-                )?;
-            with_retry(|| self.attempt(&target, &body, diagnostic_label), self.retry_policy).await
-        })
-        .await
-        {
-            Ok(result) => result?,
-            Err(_) => {
-                return Err(SystemOneError::Provider {
-                    source: ProviderCallError::timeout(
-                        "systemone decision exceeded its execution deadline",
-                    ),
+                    })?;
+                with_retry(|| self.attempt(&target, &body, diagnostic_label), self.retry_policy)
+                    .await
+            })
+            .await
+            {
+                Ok(result) => result?,
+                Err(_) => {
+                    return Err(SystemOneError::Provider {
+                        source: ProviderCallError::timeout(
+                            "systemone decision exceeded its execution deadline",
+                        ),
+                    });
+                }
+            };
+
+        let decoded: SystemOneDecisionResponse = match serde_json::from_slice(&bytes) {
+            Ok(decoded) => decoded,
+            Err(error) => {
+                // A 2xx body that does not decode was still a paid request; its
+                // row stays accepted without usage and is reported unresolved.
+                permit.complete_send();
+                return Err(SystemOneError::Response {
+                    source: SystemOneResponseError::from(error),
+                    usage: None,
                 });
             }
         };
-
-        let decoded: SystemOneDecisionResponse =
-            serde_json::from_slice(&bytes).map_err(|error| SystemOneError::Response {
-                source: SystemOneResponseError::from(error),
-                usage: None,
-            })?;
+        // A decodable 200 is accepted before validation: usage settles in the
+        // caller even when the decision itself is rejected.
+        permit.complete_send();
         if let Err(source) = validate_response(request, &decoded) {
             return Err(SystemOneError::Response { source, usage: Some(decoded.usage) });
         }
@@ -236,7 +249,10 @@ impl SystemOneClient {
         target: &crate::shared::provider_http::PreparedProviderTarget,
         body: &[u8],
         diagnostic_label: &str,
-    ) -> Result<(Vec<u8>, ProviderBudgetGuard), ProviderCallError> {
+    ) -> Result<
+        (Vec<u8>, ProviderBudgetGuard, crate::shared::provider_http::ProviderDispatchPermit),
+        ProviderCallError,
+    > {
         let guard = self.begin_attempt().await?;
         let request = target
             .request(Method::POST, &self.endpoint)
@@ -248,10 +264,12 @@ impl SystemOneClient {
             .header(CONTENT_TYPE, "application/json")
             .bearer_auth(self.api_key.as_str())
             .body(body.to_vec());
-        let response = self.send(request, diagnostic_label).await?;
+        let send = self.send(request, diagnostic_label).await?;
+        let (response, mut permit) = send.into_parts();
         if !response.status().is_success() {
             let status = response.status();
             let headers = response.headers().clone();
+            permit.fail_send();
             return Err(provider_status_error_from_read(
                 diagnostic_label,
                 status,
@@ -268,14 +286,15 @@ impl SystemOneClient {
             .map_err(|error| {
                 ProviderCallError::response_policy("systemone response body", error)
             })?;
-        Ok((bytes, guard))
+        permit.complete_send();
+        Ok((bytes, guard, permit))
     }
 
     async fn send(
         &self,
         request: reqwest::RequestBuilder,
         diagnostic_label: &str,
-    ) -> Result<reqwest::Response, ProviderCallError> {
+    ) -> Result<crate::shared::provider_http::ProviderSendResponse, ProviderCallError> {
         send_provider_http_request(
             request,
             &self.dispatch,

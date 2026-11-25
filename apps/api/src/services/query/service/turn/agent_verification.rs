@@ -33,19 +33,10 @@ pub(super) fn no_agent_tool_evidence_warnings() -> serde_json::Value {
     .unwrap_or_else(|_| serde_json::json!([]))
 }
 
-pub(super) fn literal_inventory_revision_context(
-    assistant_grounding: &AssistantGroundingEvidence,
-) -> String {
-    let mut sections = assistant_grounding.verification_corpus.clone();
-    sections.extend(assistant_grounding.document_references.iter().map(|reference| {
-        format!("Document reference: {}\n{}", reference.document_title, reference.excerpt)
-    }));
-    sections.join("\n\n")
-}
-
 pub(super) fn literal_inventory_coverage_revision_targets(
     answer: &str,
     history: &[ExternalConversationTurn],
+    manifest: &AgentEvidenceManifest,
     assistant_grounding: &AssistantGroundingEvidence,
 ) -> Vec<String> {
     const MIN_HISTORY_LITERALS: usize = 4;
@@ -69,6 +60,7 @@ pub(super) fn literal_inventory_coverage_revision_targets(
         .filter(|literal| !text_contains_literal(answer, literal))
         .filter(|literal| {
             assistant_grounding_contains_literal_with_present_inventory(
+                manifest,
                 assistant_grounding,
                 literal,
                 &present,
@@ -182,22 +174,15 @@ fn extract_backtick_literals(text: &str) -> Vec<String> {
 }
 
 fn assistant_grounding_contains_literal_with_present_inventory(
+    manifest: &AgentEvidenceManifest,
     assistant_grounding: &AssistantGroundingEvidence,
     literal: &str,
     present_literals: &[String],
     required_present_count: usize,
 ) -> bool {
-    assistant_grounding.verification_corpus.iter().any(|fragment| {
+    manifest.source_texts(assistant_grounding).any(|fragment| {
         grounding_fragment_supports_inventory_literal(
             fragment,
-            literal,
-            present_literals,
-            required_present_count,
-        )
-    }) || assistant_grounding.document_references.iter().any(|reference| {
-        let fragment = format!("{}\n{}", reference.document_title, reference.excerpt);
-        grounding_fragment_supports_inventory_literal(
-            &fragment,
             literal,
             present_literals,
             required_present_count,
@@ -254,9 +239,11 @@ pub(super) fn context_reference_set_has_grounding(
 
 pub(super) fn agent_has_verifiable_tool_evidence(
     child_query_execution_ids: &[Uuid],
+    manifest: &AgentEvidenceManifest,
     assistant_grounding: &AssistantGroundingEvidence,
 ) -> bool {
-    !child_query_execution_ids.is_empty() || assistant_grounding.has_verifier_grade_evidence()
+    !child_query_execution_ids.is_empty()
+        || manifest.source_texts(assistant_grounding).next().is_some()
 }
 
 pub(super) fn agent_answer_requires_parent_tool_evidence_verification(

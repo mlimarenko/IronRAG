@@ -1,14 +1,16 @@
 use super::{
     HashSet, LiteralKind, QueryAct, QueryIR, QueryTargetKind, RuntimeMatchedChunk,
-    is_version_token_continuation,
+    SelectedGraphContextLine, is_version_token_continuation,
 };
 
 pub(crate) fn build_exact_version_change_summary_answer(
     query_ir: &QueryIR,
     context_chunks: &[RuntimeMatchedChunk],
-    graph_evidence_context_lines: &[String],
+    graph_evidence_context_lines: &[SelectedGraphContextLine],
 ) -> Option<String> {
+    // The shortcut selects one source; it cannot answer a question spanning several.
     if query_ir.source_slice.is_some()
+        || query_ir.is_multi_document()
         || !matches!(
             query_ir.act,
             QueryAct::Describe | QueryAct::Enumerate | QueryAct::RetrieveValue
@@ -47,12 +49,12 @@ struct ExactVersionChangeCandidate {
 
 fn exact_version_change_candidate_from_graph_lines(
     version_literals: &[&str],
-    graph_evidence_context_lines: &[String],
+    graph_evidence_context_lines: &[SelectedGraphContextLine],
 ) -> Option<ExactVersionChangeCandidate> {
     graph_evidence_context_lines
         .iter()
         .filter_map(|line| {
-            let (_header, body) = line.split_once('\n')?;
+            let body = line.passage_evidence_text()?;
             if !contains_any_exact_version_literal(body, version_literals) {
                 return None;
             }

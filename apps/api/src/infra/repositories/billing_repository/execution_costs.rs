@@ -49,8 +49,9 @@ pub async fn upsert_execution_cost<'e>(
     .await
 }
 
-/// Reads the durable generation cursor, tracked provider-call count, and
-/// derived execution cost in one Postgres statement snapshot.
+/// Reads the durable generation cursor, the count of provider calls that
+/// actually completed, and the derived execution cost in one Postgres statement
+/// snapshot.
 pub async fn get_execution_cost_read_snapshot<'e>(
     executor: impl Executor<'e, Database = Postgres>,
     owning_execution_kind: &str,
@@ -64,7 +65,7 @@ pub async fn get_execution_cost_read_snapshot<'e>(
                 false
             ) as rollup_dirty,
             rollup_state.terminal_error_code,
-            provider_calls.grounded_answer_provider_call_count,
+            provider_calls.settled_provider_call_count,
             execution_cost.id,
             execution_cost.owning_execution_kind::text as owning_execution_kind,
             execution_cost.owning_execution_id,
@@ -84,10 +85,11 @@ pub async fn get_execution_cost_read_snapshot<'e>(
            on execution_cost.owning_execution_kind = $1::billing_owning_execution_kind
           and execution_cost.owning_execution_id = $2
          cross join lateral (
-            select count(*)::bigint as grounded_answer_provider_call_count
+            select count(*)::bigint as settled_provider_call_count
             from billing_provider_call provider_call
             where provider_call.owning_execution_kind = $1::billing_owning_execution_kind
               and provider_call.owning_execution_id = $2
+              and provider_call.call_state = 'completed'::billing_call_state
          ) provider_calls
          where anchor.present",
     )
@@ -129,7 +131,7 @@ pub async fn get_execution_cost_read_snapshot<'e>(
         rollup_state_present: row.rollup_state_present,
         rollup_dirty: row.rollup_dirty,
         terminal_error_code: row.terminal_error_code,
-        grounded_answer_provider_call_count: row.grounded_answer_provider_call_count,
+        settled_provider_call_count: row.settled_provider_call_count,
         execution_cost,
     })
 }

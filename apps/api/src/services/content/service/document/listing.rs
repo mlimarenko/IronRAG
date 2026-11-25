@@ -285,16 +285,14 @@ impl ContentService {
             ContentDocumentListPageData::Rows(page)
         };
 
-        let (knowledge_documents_by_id, revisions_by_id) = match &data {
-            ContentDocumentListPageData::Rows(page) => {
-                load_document_list_knowledge(state, &page.rows).await?
-            }
-            ContentDocumentListPageData::Pending => (HashMap::new(), HashMap::new()),
-        };
-
         let (items, next_cursor, has_more) = match data {
             ContentDocumentListPageData::Pending => (Vec::new(), None, false),
             ContentDocumentListPageData::Rows(page) => {
+                // Strict source revalidation: the page and the canonical current
+                // revision must still agree before any row is presented. This is
+                // a revalidation of the identity the row already carries, not a
+                // second publication read model — a moved source fails the page
+                // instead of serving a mixed snapshot.
                 let current_after =
                     repositories::content_fingerprint_repository::list_current_revision_ids(
                         &state.persistence.postgres,
@@ -318,15 +316,7 @@ impl ContentService {
                 let items: Vec<ContentDocumentListEntry> = page
                     .rows
                     .iter()
-                    .map(|row| {
-                        build_document_list_entry(
-                            row,
-                            knowledge_documents_by_id.get(&row.id),
-                            row.readable_revision_id
-                                .or(row.active_revision_id)
-                                .and_then(|id| revisions_by_id.get(&id)),
-                        )
-                    })
+                    .map(build_document_list_entry)
                     .collect::<Result<Vec<_>, ApiError>>()?;
                 let next_cursor =
                     next_document_list_cursor(&page.rows, &items, sort, page.has_more);
@@ -340,12 +330,13 @@ impl ContentService {
             has_more,
             billing_rollup_freshness,
             scope_pending,
-            total_count: if scope_pending { None } else { Some(scope_health.row_count) },
+            total_count: if scope_pending { None } else { scope_health.total },
             status_counts: if include_status_counts && !scope_pending {
                 Some(scope_health.status_counts())
             } else {
                 None
             },
+            scope_fingerprint: scope_health.scope_fingerprint,
         })
     }
 
@@ -529,8 +520,8 @@ impl ContentService {
         // drift after a crashed ingest, and reading pointers from there leaks
         // orphan revision ids into `admit_mutation`, which then writes them into
         // `content_mutation_item.base_revision_id` and trips the FK. All
-        // callers downstream of this helper (including retry /
-        // resolve_reprocess_revision) stay safe as long as we read PG.
+        // callers downstream of this helper (including retry) stay safe as
+        // long as we read PG.
         let row = content_document_head_repository::get_document_head(
             &state.persistence.postgres,
             document_id,

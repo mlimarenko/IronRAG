@@ -147,7 +147,7 @@ pub(super) fn grounded_answer_ledger_outcome(mut result_json: Value) -> ToolExec
             .and_then(Value::as_str)
             .map(ToOwned::to_owned),
         result_json: Some(result_json),
-        grounding_text: None,
+        source_texts: Vec::new(),
         document_reference: None,
         grounded_answer_body: None,
         grounded_answer_outcome: None,
@@ -185,7 +185,7 @@ pub(super) fn ready_grounded_answer_passthrough_outcome(
             "structuredContent": structured_content,
             "isError": false
         })),
-        grounding_text: Some("verifier-grade evidence".to_string()),
+        source_texts: vec!["verifier-grade evidence".to_string()],
         document_reference: None,
         grounded_answer_body: Some(answer_body.to_string()),
         grounded_answer_outcome: Some(AgentGroundedAnswerOutcome {
@@ -213,7 +213,7 @@ pub(super) fn synthetic_success_outcome() -> ToolExecutionOutcome {
         message_content: "{}".to_string(),
         result_text: Some("ok".to_string()),
         result_json: None,
-        grounding_text: None,
+        source_texts: Vec::new(),
         document_reference: None,
         grounded_answer_body: None,
         grounded_answer_outcome: None,

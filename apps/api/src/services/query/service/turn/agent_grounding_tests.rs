@@ -1,7 +1,52 @@
 use super::test_prelude::*;
 
-use super::agent_grounding::is_system_statement_passthrough;
-use crate::services::query::execution::AnswerKind;
+use super::agent_grounding::{
+    admitted_manifest_chunks, composed_verification_evidence, is_system_statement_passthrough,
+};
+use crate::services::query::assistant_grounding::{
+    AdmittedAgentSource, AgentEvidenceManifest, AssistantGroundingEvidence,
+};
+use crate::services::query::execution::{
+    AnswerKind, AnswerVerificationRequest, AuthoritativeAnswerEvidence, RuntimeAnswerVerification,
+    RuntimeChunkScoreKind, RuntimeMatchedChunk, enrich_query_assembly_diagnostics,
+    enrich_query_candidate_summary, verify_answer_against_authoritative_evidence,
+};
+use crate::services::query::planner::QueryIntentProfile;
+
+#[test]
+fn admitted_manifest_chunks_preserve_every_source_identity() {
+    let manifest = AgentEvidenceManifest {
+        sources: vec![
+            AdmittedAgentSource {
+                chunk_id: Uuid::from_u128(1),
+                document_id: Uuid::from_u128(2),
+                document_revision_id: Uuid::from_u128(3),
+                text: "alpha canonical text".to_string(),
+            },
+            AdmittedAgentSource {
+                chunk_id: Uuid::from_u128(4),
+                document_id: Uuid::from_u128(5),
+                document_revision_id: Uuid::from_u128(6),
+                text: "beta canonical text".to_string(),
+            },
+        ],
+        selection_bounded: false,
+    };
+
+    let chunks = admitted_manifest_chunks(&manifest);
+
+    assert_eq!(chunks.len(), manifest.sources.len());
+    assert_eq!(
+        chunks.iter().map(|chunk| chunk.chunk_id).collect::<Vec<_>>(),
+        vec![Uuid::from_u128(1), Uuid::from_u128(4)]
+    );
+    assert_eq!(chunks[0].source_text, "alpha canonical text");
+    assert_eq!(chunks[1].source_text, "beta canonical text");
+    assert_eq!(
+        (chunks[0].document_id, chunks[0].revision_id),
+        (Uuid::from_u128(2), Uuid::from_u128(3))
+    );
+}
 
 #[test]
 fn system_statement_passthrough_requires_a_child_system_statement_kind() {
@@ -23,7 +68,11 @@ fn system_statement_passthrough_requires_a_child_system_statement_kind() {
 fn ui_agent_no_tool_answer_has_no_verifiable_tool_evidence() {
     let grounding = AssistantGroundingEvidence::default();
 
-    assert!(!agent_has_verifiable_tool_evidence(&[], &grounding));
+    assert!(!agent_has_verifiable_tool_evidence(
+        &[],
+        &AgentEvidenceManifest::default(),
+        &grounding
+    ));
 }
 
 #[test]
@@ -45,7 +94,11 @@ fn ui_agent_child_execution_is_verifiable_tool_evidence() {
     let grounding = AssistantGroundingEvidence::default();
     let child_query_execution_ids = [Uuid::nil()];
 
-    assert!(agent_has_verifiable_tool_evidence(&child_query_execution_ids, &grounding));
+    assert!(agent_has_verifiable_tool_evidence(
+        &child_query_execution_ids,
+        &AgentEvidenceManifest::default(),
+        &grounding
+    ));
 }
 
 #[test]
@@ -188,51 +241,51 @@ fn composed_answer_is_parent_finalized_and_outcome_mismatches_fail_closed() {
 #[test]
 fn ui_agent_verification_corpus_is_verifiable_tool_evidence() {
     let grounding = AssistantGroundingEvidence {
+        verification_corpus: vec!["The supported claim.".to_string()],
+        document_references: Vec::new(),
+    };
+
+    assert!(agent_has_verifiable_tool_evidence(&[], &AgentEvidenceManifest::default(), &grounding));
+}
+
+#[test]
+fn ui_agent_tool_result_envelope_is_not_verifier_grade_evidence() {
+    let grounding = AssistantGroundingEvidence {
         verification_corpus: vec![
             "[MCP tool result: read_document]\ncontent:\nThe supported claim.".to_string(),
         ],
         document_references: Vec::new(),
     };
 
-    assert!(agent_has_verifiable_tool_evidence(&[], &grounding));
+    assert!(!agent_has_verifiable_tool_evidence(
+        &[],
+        &AgentEvidenceManifest::default(),
+        &grounding
+    ));
 }
 
 #[test]
-fn ui_agent_title_only_search_result_is_not_verifier_grade_evidence() {
+fn ui_agent_can_verify_from_manifest_without_a_direct_tool_excerpt() {
     let grounding = AssistantGroundingEvidence {
-        verification_corpus: vec![
-            "[MCP tool result: search_documents]\nstructuredContent:\n{\"hits\":[{\"documentTitle\":\"Alpha Guide\"}]}".to_string(),
-        ],
+        verification_corpus: Vec::new(),
         document_references: Vec::new(),
     };
-
-    assert!(!agent_has_verifiable_tool_evidence(&[], &grounding));
-}
-
-#[test]
-fn ui_agent_reference_only_search_result_is_not_verifier_grade_evidence() {
-    let grounding = AssistantGroundingEvidence {
-        verification_corpus: vec![
-            "[MCP tool result: search_documents]\nstructuredContent:\n{\"hits\":[{\"documentTitle\":\"Alpha Guide\",\"chunkReferences\":[{\"chunkId\":\"019f0000-0000-7000-8000-000000000001\"}]}]}"
-                .to_string(),
-        ],
-        document_references: Vec::new(),
+    let manifest = AgentEvidenceManifest {
+        sources: vec![AdmittedAgentSource {
+            chunk_id: Uuid::from_u128(1),
+            document_id: Uuid::from_u128(2),
+            document_revision_id: Uuid::from_u128(3),
+            text: "The supported source statement.".to_string(),
+        }],
+        selection_bounded: false,
     };
 
-    assert!(!agent_has_verifiable_tool_evidence(&[], &grounding));
-}
-
-#[test]
-fn ui_agent_search_result_with_excerpt_is_verifier_grade_evidence() {
-    let grounding = AssistantGroundingEvidence {
-        verification_corpus: vec![
-            "[MCP tool result: search_documents]\nstructuredContent:\n{\"hits\":[{\"documentTitle\":\"Alpha Guide\",\"excerpt\":\"The supported source statement.\"}]}"
-                .to_string(),
-        ],
-        document_references: Vec::new(),
-    };
-
-    assert!(agent_has_verifiable_tool_evidence(&[], &grounding));
+    assert!(agent_has_verifiable_tool_evidence(&[], &manifest, &grounding));
+    assert!(!agent_has_verifiable_tool_evidence(
+        &[],
+        &AgentEvidenceManifest::default(),
+        &grounding
+    ));
 }
 
 #[test]
@@ -244,4 +297,212 @@ fn ui_agent_deadline_budget_covers_runtime_turns() {
         ASSISTANT_AGENT_LOOP_DEADLINE_MS / iteration_cap as u64
             >= ASSISTANT_AGENT_LOOP_MIN_ITERATION_BUDGET_MS
     );
+}
+
+fn composed_evidence_with_unadmitted_bundle_reference() -> AuthoritativeAnswerEvidence {
+    let now = chrono::Utc::now();
+    AuthoritativeAnswerEvidence {
+        bundle: None,
+        chunk_rows: vec![crate::infra::knowledge_rows::KnowledgeChunkRow {
+            chunk_id: Uuid::from_u128(20),
+            workspace_id: Uuid::from_u128(1),
+            library_id: Uuid::from_u128(2),
+            document_id: Uuid::from_u128(3),
+            revision_id: Uuid::from_u128(4),
+            chunk_index: 0,
+            chunk_kind: Some("text".to_string()),
+            content_text: "The bundle-only selector is bundleOnly=12345.".to_string(),
+            normalized_text: "The bundle-only selector is bundleOnly=12345.".to_string(),
+            span_start: None,
+            span_end: None,
+            token_count: None,
+            support_block_ids: Vec::new(),
+            section_path: Vec::new(),
+            heading_trail: Vec::new(),
+            literal_digest: None,
+            chunk_state: "ready".to_string(),
+            text_generation: Some(1),
+            vector_generation: Some(1),
+            quality_score: Some(1.0),
+            window_text: None,
+            occurred_at: None,
+            occurred_until: None,
+        }],
+        structured_blocks: Vec::new(),
+        technical_facts: vec![crate::infra::knowledge_rows::KnowledgeTechnicalFactRow {
+            fact_id: Uuid::from_u128(30),
+            workspace_id: Uuid::from_u128(1),
+            library_id: Uuid::from_u128(2),
+            document_id: Uuid::from_u128(3),
+            revision_id: Uuid::from_u128(4),
+            fact_kind: "config_assignment".to_string(),
+            normalized_value_text: "factOnly=67890".to_string(),
+            normalized_value_exact: "factOnly=67890".to_string(),
+            normalized_value_json: serde_json::json!("factOnly=67890"),
+            display_value: "factOnly=67890".to_string(),
+            qualifiers_json: serde_json::json!([]),
+            support_block_ids: Vec::new(),
+            support_chunk_ids: Vec::new(),
+            confidence: Some(1.0),
+            extraction_kind: "test".to_string(),
+            conflict_group_id: None,
+            created_at: now,
+            updated_at: now,
+        }],
+    }
+}
+
+#[test]
+fn composed_verifier_ignores_unadmitted_bundle_chunk_and_fact() {
+    let admitted_chunk = RuntimeMatchedChunk {
+        chunk_id: Uuid::from_u128(10),
+        document_id: Uuid::from_u128(11),
+        revision_id: Uuid::from_u128(12),
+        chunk_index: 0,
+        chunk_kind: None,
+        document_label: "admitted".to_string(),
+        excerpt: String::new(),
+        score_kind: RuntimeChunkScoreKind::Relevance,
+        score: None,
+        source_text: "alpha-admitted".to_string(),
+    };
+    let full_evidence = composed_evidence_with_unadmitted_bundle_reference();
+    let composed_evidence = composed_verification_evidence(full_evidence.clone());
+
+    let intent_profile = QueryIntentProfile::default();
+    let verify = |evidence: &AuthoritativeAnswerEvidence, answer: &str| {
+        verify_answer_against_authoritative_evidence(AnswerVerificationRequest {
+            question: "Which selector is used?",
+            answer,
+            intent_profile: &intent_profile,
+            evidence,
+            chunks: std::slice::from_ref(&admitted_chunk),
+            assistant_grounding: &AssistantGroundingEvidence::default(),
+        })
+    };
+
+    // Distinct bundle-chunk and technical-fact literals prove each leak
+    // independently, while the admitted chunk remains the positive control.
+    for (answer, leaked_literal) in [
+        ("Use `bundleOnly=12345`.", "bundleOnly=12345"),
+        ("Use `factOnly=67890`.", "factOnly=67890"),
+    ] {
+        let with_bundle = verify(&full_evidence, answer);
+        assert!(
+            with_bundle
+                .unsupported_literals
+                .iter()
+                .all(|literal| !literal.contains(leaked_literal)),
+            "control: {leaked_literal} is supported before clearing"
+        );
+        let composed = verify(&composed_evidence, answer);
+        assert!(
+            composed.unsupported_literals.iter().any(|literal| literal.contains(leaked_literal)),
+            "composed verification must not validate {leaked_literal} from an unadmitted bundle source"
+        );
+    }
+
+    let admitted_answer = verify(&composed_evidence, "Use `alpha-admitted`.");
+    assert!(
+        admitted_answer
+            .unsupported_literals
+            .iter()
+            .all(|literal| !literal.contains("alpha-admitted")),
+        "the admitted chunk remains supported"
+    );
+}
+
+#[test]
+fn chunk_reference_count_counts_admitted_composed_chunks() {
+    let manifest = AgentEvidenceManifest {
+        sources: vec![
+            AdmittedAgentSource {
+                chunk_id: Uuid::from_u128(101),
+                document_id: Uuid::from_u128(102),
+                document_revision_id: Uuid::from_u128(103),
+                text: "alpha admitted text".to_string(),
+            },
+            AdmittedAgentSource {
+                chunk_id: Uuid::from_u128(104),
+                document_id: Uuid::from_u128(105),
+                document_revision_id: Uuid::from_u128(106),
+                text: "beta admitted text".to_string(),
+            },
+        ],
+        selection_bounded: false,
+    };
+    let composed_evidence =
+        composed_verification_evidence(composed_evidence_with_unadmitted_bundle_reference());
+    assert!(
+        composed_evidence.chunk_rows.is_empty(),
+        "composed evidence must not carry bundle chunk rows"
+    );
+    let primary_answer_chunks = admitted_manifest_chunks(&manifest);
+    let unique_admitted = primary_answer_chunks
+        .iter()
+        .map(|chunk| chunk.chunk_id)
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(unique_admitted.len(), primary_answer_chunks.len());
+
+    let grounding = AssistantGroundingEvidence::default();
+    let candidate_summary = enrich_query_candidate_summary(
+        serde_json::json!({}),
+        &composed_evidence,
+        &primary_answer_chunks,
+        &grounding,
+    );
+    let diagnostics = enrich_query_assembly_diagnostics(
+        serde_json::json!({}),
+        &RuntimeAnswerVerification {
+            semantic_verification: None,
+            state: QueryVerificationState::NotRun,
+            warnings: Vec::new(),
+            unsupported_literals: Vec::new(),
+        },
+        QueryAnswerDisposition::FactualReady,
+        &candidate_summary,
+        &grounding,
+    )
+    .expect("typed verification diagnostics should serialize");
+
+    assert_eq!(
+        diagnostics["structuredEvidence"]["chunkReferenceCount"],
+        serde_json::json!(unique_admitted.len())
+    );
+    assert_ne!(diagnostics["structuredEvidence"]["chunkReferenceCount"], serde_json::json!(0));
+}
+
+#[test]
+fn replay_load_error_preserves_omission_warning_from_actual_measurement() {
+    let context = super::preparation::prior_replay_context(
+        Uuid::from_u128(1),
+        Err(crate::interfaces::http::router_support::ApiError::forbidden("replay unavailable")),
+    );
+    assert!(context.messages.is_empty());
+    assert!(context.manifest.sources.is_empty());
+    assert!(context.manifest.selection_bounded);
+
+    let measurement =
+        crate::services::query::execution::semantic_verification::EvidenceBudget::from_agent_sources(
+            &context.manifest.sources,
+        )
+        .measurement();
+    assert_eq!(measurement.source_entries, 0);
+    assert_eq!(measurement.evidence_utf8_bytes, 0);
+    let warning = context
+        .manifest
+        .selection_bounded
+        .then(|| {
+            crate::services::query::execution::semantic_verification::bounded_selection_warning(
+                measurement,
+            )
+        })
+        .expect("a replay load error must retain the omission warning");
+    assert_eq!(warning.code, "evidence_selection_bounded");
+
+    let normal =
+        super::preparation::prior_replay_context(Uuid::from_u128(1), Ok(Default::default()));
+    assert!(!normal.manifest.selection_bounded);
+    assert!(normal.manifest.sources.is_empty());
+    assert!(normal.messages.is_empty());
 }

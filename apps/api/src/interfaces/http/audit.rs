@@ -10,9 +10,12 @@ use uuid::Uuid;
 
 use crate::{
     app::state::AppState,
-    domains::audit::{
-        AuditAssistantCallSummary, AuditAssistantModel, AuditEventInternalView,
-        AuditEventRedactedView, AuditEventSubject,
+    domains::{
+        audit::{
+            AuditAssistantCallSummary, AuditAssistantModel, AuditEventInternalView,
+            AuditEventRedactedView, AuditEventSubject, QUERY_EXECUTION_AUDIT_ACTION,
+        },
+        billing::CostCoverageStatus,
     },
     infra::repositories::{audit_repository, iam_repository},
     interfaces::http::{
@@ -344,6 +347,8 @@ pub struct AuditAssistantCallResponse {
     pub total_cost: Option<Decimal>,
     pub currency_code: Option<String>,
     pub provider_call_count: i64,
+    pub unpriced_provider_call_count: i64,
+    pub cost_coverage: Option<CostCoverageStatus>,
 }
 
 #[derive(Debug, Serialize, utoipa::ToSchema)]
@@ -919,7 +924,7 @@ async fn attach_assistant_call_summaries(
 ) -> Result<(), ApiError> {
     let query_execution_ids = items
         .iter()
-        .filter(|event| event.action_kind == "query.execution.run")
+        .filter(|event| event.action_kind == QUERY_EXECUTION_AUDIT_ACTION)
         .filter_map(query_execution_id_from_event)
         .collect::<Vec<_>>();
     if query_execution_ids.is_empty() {
@@ -932,7 +937,8 @@ async fn attach_assistant_call_summaries(
         .list_assistant_call_summaries(state, &query_execution_ids)
         .await?;
 
-    for event in items.iter_mut().filter(|event| event.action_kind == "query.execution.run") {
+    for event in items.iter_mut().filter(|event| event.action_kind == QUERY_EXECUTION_AUDIT_ACTION)
+    {
         let Some(query_execution_id) = query_execution_id_from_event(event) else {
             continue;
         };
@@ -1056,6 +1062,8 @@ fn map_assistant_call(summary: &AuditAssistantCallSummary) -> AuditAssistantCall
         total_cost: summary.total_cost,
         currency_code: summary.currency_code.clone(),
         provider_call_count: summary.provider_call_count,
+        unpriced_provider_call_count: summary.unpriced_provider_call_count,
+        cost_coverage: summary.cost_coverage,
     }
 }
 

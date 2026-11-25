@@ -9,6 +9,7 @@ pub mod outbound_http;
 pub mod provider_base_url;
 pub mod provider_failure;
 pub mod provider_http;
+pub mod provider_send;
 pub mod secret_encryption;
 pub mod slugs;
 pub mod structural_declarations;

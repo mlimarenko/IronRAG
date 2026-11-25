@@ -169,6 +169,7 @@ pub(super) fn prepared_for_single_shot(query_ir: QueryIR) -> super::PreparedAnsw
                     warning: None,
                 },
                 grouped_references: Vec::new(),
+                retrieval_degradations: Vec::new(),
                 context_text: None,
                 warning: None,
                 warning_kind: None,
@@ -188,6 +189,7 @@ pub(super) fn prepared_for_single_shot(query_ir: QueryIR) -> super::PreparedAnsw
             graph_relation_references: Vec::new(),
         },
         answer_context: "context-fragment-a".to_string(),
+        evidence_selection: None,
         query_ir,
         retrieval_spans: Vec::new(),
     }

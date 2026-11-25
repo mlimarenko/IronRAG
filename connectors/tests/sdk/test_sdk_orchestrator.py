@@ -29,6 +29,7 @@ from ironrag_connector.ironrag import (
     DocumentResource,
     IronRagClient,
     IronRagConflictError,
+    IronRagContentUnsupportedProblemError,
     IronRagDuplicateContentError,
     IronRagError,
     IronRagMutationTimeoutError,
@@ -41,6 +42,7 @@ from ironrag_connector.ironrag import (
     OperationStatusValue,
     ProblemDetails,
     ReplacementIdentity,
+    RevisionFile,
     RevisionProvenance,
     VisibilityIntentReceipt,
     VisibilityIntentRequest,
@@ -269,6 +271,7 @@ class FakeIronRag:
         title: str | None = None,
         document_hint: str | None = None,
         parent_external_key: str | None = None,
+        enrichment_scope: str | None = None,
     ) -> DocumentResource:
         self.creates.append(
             {
@@ -278,6 +281,7 @@ class FakeIronRag:
                 "mime_type": mime_type,
                 "document_hint": document_hint,
                 "parent_external_key": parent_external_key,
+                "enrichment_scope": enrichment_scope,
             }
         )
         if self.duplicate_for_key == external_key:
@@ -300,6 +304,8 @@ class FakeIronRag:
             document_id=doc.id,
             result_revision_id=self._new_op_id(),
             mutation_item_id=self._new_op_id(),
+            mutation_id=self._new_op_id(),
+            job_id=self._new_op_id(),
             result_checksum="sha256:" + hashlib.sha256(file_bytes or b"").hexdigest(),
         )
         self._operations[operation_id] = _ready_operation(operation_id)
@@ -320,7 +326,8 @@ class FakeIronRag:
         doc_id_str = str(document_id)
         body = revision_request_identity(document_id, request)
         idempotency_key = request["idempotency_key"]
-        file_bytes = request.get("file_bytes")
+        upload = request.get("file")
+        file_bytes = upload.data if upload is not None else None
         visibility_intent_id = request.get("visibility_intent_id")
         if (
             idempotency_key in self._payload_bodies
@@ -365,6 +372,8 @@ class FakeIronRag:
             document_id=UUID(doc_id_str),
             visibility_intent_id=visibility_intent_id,
             mutation_item_id=self._new_op_id(),
+            mutation_id=self._new_op_id(),
+            job_id=self._new_op_id(),
             result_revision_id=self._new_op_id(),
             result_checksum="sha256:" + hashlib.sha256(file_bytes or b"").hexdigest(),
             request_fingerprint="opaque-server-payload-fingerprint",
@@ -491,6 +500,7 @@ class PayloadTrackingIronRag(FakeIronRag):
         title: str | None = None,
         document_hint: str | None = None,
         parent_external_key: str | None = None,
+        enrichment_scope: str | None = None,
     ) -> DocumentResource:
         document = await super().create_document(
             library_id,
@@ -514,7 +524,10 @@ class PayloadTrackingIronRag(FakeIronRag):
             key for key, document in self.documents.items() if str(document.id) == str(document_id)
         )
         handle = await super().create_revision(document_id, **request)
-        self.payloads[document_key] = request.get("file_bytes") or b""
+        upload = request.get("file")
+        self.payloads[document_key] = (
+            upload.data if upload is not None and upload.data is not None else b""
+        )
         return handle
 
     async def delete_document(
@@ -755,6 +768,357 @@ async def test_create_new_item(tmp_path: Path) -> None:
     row = state.get("page", "1")
     assert row is not None
     assert row.change_token == "t1"
+
+
+@pytest.mark.asyncio
+async def test_required_create_returns_deferred_admission_and_reuses_it(
+    tmp_path: Path,
+) -> None:
+    from ironrag_connector.cli import _outcome_json
+    from ironrag_connector.ironrag import IronRagMutationTimeoutError
+
+    class PendingPublicationIronRag(FakeIronRag):
+        async def wait_for_operation(self, operation_id: UUID) -> object:
+            raise IronRagMutationTimeoutError("publication is not terminal")
+
+    ref = _required_page_ref("create-pending")
+    adapter = FixedFetchResultAdapter(
+        _materialized_page(ref, b"bounded", enforcement=SourceMaterializationEnforcement.REQUIRED)
+    )
+    state = _state(tmp_path)
+    ironrag = PendingPublicationIronRag()
+    outcome = await _orchestrator(adapter, ironrag, state).push_ref(ref)
+    assert outcome.action == "skipped_new"
+    assert outcome.deferred is True
+    assert outcome.admission is not None
+    ids = (outcome.admission.mutation_id, outcome.admission.job_id)
+    assert all(ids), "real admission identifiers must survive"
+    assert len(ironrag.creates) == 1
+    payload = _outcome_json(outcome)
+    assert payload["admission"]["mutationId"] == str(ids[0])
+    assert payload["admission"]["jobId"] == str(ids[1])
+    state.close()
+
+    reopened = _state(tmp_path)
+    retry = await _orchestrator(adapter, ironrag, reopened).push_ref(ref)
+    assert retry.deferred is True
+    assert retry.admission is not None
+    assert retry.admission.mutation_id == ids[0]
+    assert retry.admission.job_id == ids[1]
+    assert len(ironrag.creates) == 1, "retry must reuse the queued admission"
+    assert len(ironrag.revisions) == 0, "retry must not submit a revision"
+    reopened.close()
+
+
+async def _deferred_required_create(tmp_path: Path, ironrag: FakeIronRag, scope: str | None = None):
+    ref = _required_page_ref("create-completion")
+    adapter = FixedFetchResultAdapter(
+        _materialized_page(ref, b"bounded", enforcement=SourceMaterializationEnforcement.REQUIRED)
+    )
+    state = _state(tmp_path)
+    outcome = await _orchestrator(adapter, ironrag, state).push_ref(ref, enrichment_scope=scope)
+    return ref, adapter, state, outcome
+
+
+def _pending_attempts(state, document_id: str):
+    return [
+        attempt
+        for attempt in state.materialization_attempts_for_document(document_id)
+        if attempt.phase == "payload_submitting"
+    ]
+
+
+@pytest.mark.asyncio
+async def test_required_create_pending_admission_completes_on_retry(tmp_path: Path) -> None:
+    from ironrag_connector.ironrag import IronRagMutationTimeoutError
+
+    class TransitionalIronRag(FakeIronRag):
+        armed = False
+
+        async def wait_for_operation(self, operation_id: UUID) -> object:
+            if not self.armed:
+                raise IronRagMutationTimeoutError("publication is not terminal")
+            return _ready_operation(operation_id)
+
+    ironrag = TransitionalIronRag()
+    ref, adapter, state, outcome = await _deferred_required_create(tmp_path, ironrag)
+    assert outcome.deferred is True
+    assert outcome.admission is not None
+    ids = (outcome.admission.mutation_id, outcome.admission.job_id)
+    document_id = outcome.ironrag_document_id
+    assert _pending_attempts(state, document_id)
+    state.close()
+
+    ironrag.armed = True
+    reopened = _state(tmp_path)
+    settled = await _orchestrator(adapter, ironrag, reopened).push_ref(ref)
+    assert settled.action == "created"
+    assert settled.deferred is False
+    assert settled.admission is not None
+    assert settled.admission.mutation_id == ids[0]
+    assert settled.admission.job_id == ids[1]
+    assert len(ironrag.creates) == 1
+    assert len(ironrag.revisions) == 0
+    assert not _pending_attempts(reopened, document_id)
+    assert reopened.get(ref.kind, ref.item_id) is not None
+    reopened.close()
+
+
+@pytest.mark.asyncio
+async def test_required_create_pending_admission_terminal_failure_is_typed(
+    tmp_path: Path,
+) -> None:
+    from ironrag_connector.ironrag import IronRagMutationTimeoutError
+
+    class FailingIronRag(FakeIronRag):
+        armed = False
+
+        async def wait_for_operation(self, operation_id: UUID) -> object:
+            if not self.armed:
+                raise IronRagMutationTimeoutError("publication is not terminal")
+            failed = _ready_operation(operation_id).model_copy(
+                update={"status": OperationStatusValue.FAILED}
+            )
+            raise IronRagOperationFailedError(failed)
+
+    ironrag = FailingIronRag()
+    ref, adapter, state, outcome = await _deferred_required_create(tmp_path, ironrag)
+    document_id = outcome.ironrag_document_id
+    ironrag.armed = True
+    orchestrator = _orchestrator(adapter, ironrag, state)
+    with pytest.raises(IronRagOperationFailedError):
+        await orchestrator.push_ref(ref)
+    assert not _pending_attempts(state, document_id)
+    assert len(ironrag.creates) == 1
+
+
+@pytest.mark.asyncio
+async def test_required_create_pending_admission_foreign_operation_is_refused(
+    tmp_path: Path,
+) -> None:
+    from ironrag_connector.ironrag import IronRagMutationTimeoutError
+
+    class ForeignOperationIronRag(FakeIronRag):
+        armed = False
+
+        async def wait_for_operation(self, operation_id: UUID) -> object:
+            if not self.armed:
+                raise IronRagMutationTimeoutError("publication is not terminal")
+            return _ready_operation(UUID(int=operation_id.int + 1))
+
+    ironrag = ForeignOperationIronRag()
+    ref, adapter, state, _outcome = await _deferred_required_create(tmp_path, ironrag)
+    ironrag.armed = True
+    orchestrator = _orchestrator(adapter, ironrag, state)
+    with pytest.raises(IronRagError, match="mismatched operation"):
+        await orchestrator.push_ref(ref)
+    assert len(ironrag.creates) == 1
+
+
+@pytest.mark.asyncio
+async def test_required_create_pending_admission_plan_change_is_refused(
+    tmp_path: Path,
+) -> None:
+    from ironrag_connector.ironrag import IronRagMutationTimeoutError
+
+    class PendingIronRag(FakeIronRag):
+        async def wait_for_operation(self, operation_id: UUID) -> object:
+            raise IronRagMutationTimeoutError("publication is not terminal")
+
+    ironrag = PendingIronRag()
+    ref, adapter, state, outcome = await _deferred_required_create(
+        tmp_path, ironrag, scope="text_and_embedding"
+    )
+    assert outcome.deferred is True
+    orchestrator = _orchestrator(adapter, ironrag, state)
+    with pytest.raises(IronRagError, match="different enrichment plan"):
+        await orchestrator.push_ref(ref, enrichment_scope="full")
+    assert len(ironrag.creates) == 1
+
+
+@pytest.mark.asyncio
+async def test_required_create_head_not_ready_defers_with_ids_then_completes(
+    tmp_path: Path,
+) -> None:
+    class HeadLagIronRag(FakeIronRag):
+        hide_head = True
+
+        async def get_document(self, document_id: UUID) -> DocumentResource | None:
+            document = await super().get_document(document_id)
+            if document is not None and self.hide_head:
+                return document.model_copy(update={"readable_revision_id": None})
+            return document
+
+    ironrag = HeadLagIronRag()
+    ref = _required_page_ref("create-head-lag")
+    adapter = FixedFetchResultAdapter(
+        _materialized_page(ref, b"bounded", enforcement=SourceMaterializationEnforcement.REQUIRED)
+    )
+    state = _state(tmp_path)
+    outcome = await _orchestrator(adapter, ironrag, state).push_ref(ref)
+    assert outcome.deferred is True
+    assert outcome.admission is not None
+    ids = (outcome.admission.mutation_id, outcome.admission.job_id)
+    document_id = outcome.ironrag_document_id
+    ironrag.hide_head = False
+    settled = await _orchestrator(adapter, ironrag, state).push_ref(ref)
+    assert settled.action == "created"
+    assert settled.admission is not None
+    assert settled.admission.mutation_id == ids[0]
+    assert settled.admission.job_id == ids[1]
+    assert len(ironrag.creates) == 1
+    assert len(ironrag.revisions) == 0
+    assert not _pending_attempts(state, document_id)
+
+
+@pytest.mark.asyncio
+async def test_retry_commit_refuses_changed_source_observation(tmp_path: Path) -> None:
+
+    class PendingIronRag(FakeIronRag):
+        async def wait_for_operation(self, operation_id: UUID) -> object:
+            return _ready_operation(operation_id)
+
+    class CasBreakingOrchestrator(Orchestrator):
+        async def _required_copy_closure(self, item, route, document_id, historical):
+            closed = await super()._required_copy_closure(item, route, document_id, historical)
+            if closed and self._cas_break:
+                self._cas_break = False
+                self._state.observe_materialization(
+                    adapter=self._adapter.name,
+                    kind=item.ref.kind,
+                    item_id=item.ref.item_id,
+                    external_key=item.ref.external_key,
+                    library_id=str(route.library_id),
+                    target_document_id=document_id,
+                    materialization_token="changed-observation",
+                    replacement=ReplacementIdentity(
+                        checksum=item.payload_checksum,
+                        byte_size=len(item.payload),
+                        mime_type=item.mime_type,
+                        file_name=item.file_name,
+                    ),
+                )
+            return closed
+
+    ironrag = PendingIronRag()
+    ref = _required_page_ref("create-cas")
+    adapter = FixedFetchResultAdapter(
+        _materialized_page(ref, b"bounded", enforcement=SourceMaterializationEnforcement.REQUIRED)
+    )
+    state = _state(tmp_path)
+    orchestrator = CasBreakingOrchestrator(
+        adapter=adapter,
+        ironrag=ironrag,  # type: ignore[arg-type]
+        router=_router(),
+        state=state,
+        policies=_policies(),
+    )
+    orchestrator._cas_break = True
+    with pytest.raises(ValueError, match="observation"):
+        await orchestrator.push_ref(ref)
+    assert len(ironrag.creates) == 1
+
+
+@pytest.mark.asyncio
+async def test_required_create_failed_error_with_foreign_or_nonfailed_status_does_not_finalize(
+    tmp_path: Path,
+) -> None:
+    from ironrag_connector.ironrag import IronRagMutationTimeoutError
+
+    class WrongStatusIronRag(FakeIronRag):
+        armed = False
+
+        async def wait_for_operation(self, operation_id: UUID) -> object:
+            if not self.armed:
+                raise IronRagMutationTimeoutError("publication is not terminal")
+            ready = _ready_operation(operation_id)
+            raise IronRagOperationFailedError(ready)
+
+    ironrag = WrongStatusIronRag()
+    ref, adapter, state, outcome = await _deferred_required_create(tmp_path, ironrag)
+    document_id = outcome.ironrag_document_id
+    ironrag.armed = True
+    orchestrator = _orchestrator(adapter, ironrag, state)
+    with pytest.raises(IronRagOperationFailedError):
+        await orchestrator.push_ref(ref)
+    assert _pending_attempts(state, document_id), "non-FAILED receipt must not finalize"
+
+
+@pytest.mark.asyncio
+async def test_required_create_route_move_completes_with_retired_historical_copy(
+    tmp_path: Path,
+) -> None:
+    from ironrag_connector.ironrag import IronRagMutationTimeoutError
+
+    class RouteMoveIronRag(FakeIronRag):
+        armed = False
+
+        async def wait_for_operation(self, operation_id: UUID) -> object:
+            if not self.armed:
+                raise IronRagMutationTimeoutError("publication is not terminal")
+            return _ready_operation(operation_id)
+
+    lib_alt = UUID("00000000-0000-0000-0000-0000000000a2")
+    ref = _required_page_ref("route-move-copy")
+    historical_id = _doc_id(900)
+    adapter = FixedFetchResultAdapter(
+        _materialized_page(ref, b"bounded", enforcement=SourceMaterializationEnforcement.REQUIRED)
+    )
+    state = _state(tmp_path)
+    ironrag = RouteMoveIronRag()
+    state.record_document_location(
+        kind=ref.kind,
+        item_id=ref.item_id,
+        external_key=ref.external_key,
+        ironrag_document_id=str(historical_id),
+        ironrag_library_id=str(lib_alt),
+    )
+    ironrag.documents[(lib_alt, ref.external_key)] = _document(
+        historical_id, lib_alt, ref.external_key
+    )
+    outcome = await _orchestrator(adapter, ironrag, state).push_ref(ref)
+    assert outcome.deferred is True
+    assert outcome.admission is not None
+    ids = (outcome.admission.mutation_id, outcome.admission.job_id)
+    document_id = outcome.ironrag_document_id
+    assert state.get(ref.kind, ref.item_id) is None, "no READY acceptance on admission"
+    assert _pending_attempts(state, document_id)
+    assert str(historical_id) == str(ironrag.documents[(lib_alt, ref.external_key)].id)
+    state.close()
+
+    ironrag.armed = True
+    reopened = _state(tmp_path)
+    settled = await _orchestrator(adapter, ironrag, reopened).push_ref(ref)
+    assert settled.action == "created"
+    assert settled.admission is not None
+    assert settled.admission.mutation_id == ids[0]
+    assert settled.admission.job_id == ids[1]
+    assert len(ironrag.creates) == 1
+    assert len(ironrag.revisions) == 0
+    assert not _pending_attempts(reopened, document_id)
+    row = reopened.get(ref.kind, ref.item_id)
+    assert row is not None
+    assert row.change_token == ref.change_token
+    historical = ironrag.documents[(lib_alt, ref.external_key)]
+    assert str(historical.id) == str(historical_id)
+    assert historical.readable_revision_id is None
+    assert historical.visibility_intent_id is not None
+    reopened.close()
+
+
+@pytest.mark.asyncio
+async def test_create_new_item_forwards_bounded_scope(tmp_path: Path) -> None:
+    ref = _required_page_ref("new-bounded")
+    adapter = FixedFetchResultAdapter(
+        _materialized_page(ref, b"bounded", enforcement=SourceMaterializationEnforcement.REQUIRED)
+    )
+    state = _state(tmp_path)
+    ironrag = FakeIronRag()
+    orchestrator = _orchestrator(adapter, ironrag, state)
+    settled = await orchestrator.push_ref(ref, enrichment_scope="text_and_embedding")
+    assert ironrag.creates[-1]["enrichment_scope"] == "text_and_embedding"
+    assert settled.action == "created"
+    assert not _pending_attempts(state, settled.ironrag_document_id)
 
 
 @pytest.mark.asyncio
@@ -1612,7 +1976,7 @@ async def test_revision_idempotency_key_is_durable_complete_body_scoped(tmp_path
     await orchestrator.push_item(_item(b"<p>render B (different)</p>"), route, PushPolicy())
     second_key = ironrag.revisions[1]["idempotency_key"]
 
-    assert "vSAME" not in first_key, "key must not embed change_token"
+    assert first_key.find("vSAME") == -1, "key must not embed change_token"
     assert state.materialization_attempts_for_document(str(DOC_PRE))[0].payload_key == first_key
     assert first_key != second_key, "different payload must yield a different key"
 
@@ -3109,7 +3473,9 @@ async def test_required_materialization_replaces_stale_bytes_despite_skip_policy
 
     created = await orchestrator.push_ref(old_ref)
     original_document_id = created.ironrag_document_id
-    assert b"stale sensitive comment marker" in ironrag.payloads[(LIB, old_ref.external_key)]
+    assert (
+        ironrag.payloads[(LIB, old_ref.external_key)].find(b"stale sensitive comment marker") != -1
+    )
 
     orchestrator.reset_sweep_cache()
     adapter.result = _materialized_page(
@@ -3121,7 +3487,9 @@ async def test_required_materialization_replaces_stale_bytes_despite_skip_policy
 
     assert sanitized.action == "replaced"
     assert sanitized.ironrag_document_id == original_document_id
-    assert b"stale sensitive comment marker" not in ironrag.payloads[(LIB, old_ref.external_key)]
+    assert (
+        ironrag.payloads[(LIB, old_ref.external_key)].find(b"stale sensitive comment marker") == -1
+    )
     row = state.get("page", "1")
     assert row is not None
     assert row.change_token == sanitized_ref.change_token
@@ -3956,8 +4324,9 @@ async def test_visibility_contract_submits_server_normalized_replacement_metadat
     assert request.replacement.mime_type == " TEXT/MARKDOWN "
     receipt = ironrag.visibility_intents[request.idempotency_key]
     assert ironrag.payload_metadata["visibility_intent_id"] == receipt.visibility_intent_id
-    assert ironrag.payload_metadata["file_name"] == "1.md"
-    assert ironrag.payload_metadata["mime_type"] == "text/markdown"
+    payload_file = ironrag.payload_metadata["file"]
+    assert payload_file.name == "1.md"
+    assert payload_file.mime_type == "text/markdown"
     assert ironrag.payload_metadata["title"] == "Page"
     assert ironrag.payload_metadata["document_hint"] == "Hint"
     assert ironrag.payload_metadata["provenance"].language_code is None
@@ -4230,6 +4599,69 @@ async def test_visibility_contract_lost_receipt_reopens_exact_episode(
     assert len(ironrag.visibility_intents) == 1
     if lost_phase == "payload":
         assert ironrag.revisions[0]["idempotency_key"] == ironrag.revisions[1]["idempotency_key"]
+    reopened.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("resume", ["unchanged", "changed", "foreign"])
+async def test_visibility_contract_restart_from_accepted_intent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, resume: str
+) -> None:
+    ref = _required_page_ref("v2")
+    state = _state(tmp_path)
+    ironrag = FakeIronRag()
+    _seed_existing_page(state, ironrag, ref, change_token="v1")
+    adapter = FixedFetchResultAdapter(
+        _materialized_page(ref, b"safe", enforcement=SourceMaterializationEnforcement.REQUIRED)
+    )
+    orchestrator = _orchestrator(adapter, ironrag, state)
+
+    async def interrupted(*args: Any, **kwargs: Any) -> str | None:
+        raise IronRagError("interrupted after intent acceptance")
+
+    monkeypatch.setattr(orchestrator, "_reconcile_required_copy", interrupted)
+    with pytest.raises(IronRagError, match="interrupted"):
+        await orchestrator.push_ref(ref)
+    before = state.materialization_attempts_for_document(str(DOC_PRE))[0]
+    assert before.phase == "intent_accepted"
+    assert before.receipt is not None
+    assert before.payload_receipt is None
+    assert before.payload_identity is None
+    state.close()
+
+    reopened = _state(tmp_path)
+    if resume == "changed":
+        ref = _required_page_ref("v3")
+        adapter.result = _materialized_page(
+            ref, b"changed", enforcement=SourceMaterializationEnforcement.REQUIRED
+        )
+    elif resume == "foreign":
+        head = ironrag.documents[(LIB, ref.external_key)]
+        ironrag.documents[(LIB, ref.external_key)] = head.model_copy(
+            update={"visibility_intent_id": _doc_id(9999)}
+        )
+    result = await _orchestrator(adapter, ironrag, reopened).push_ref(ref)
+    attempts = reopened.materialization_attempts_for_document(str(DOC_PRE))
+    if resume == "foreign":
+        assert result.deferred
+        assert attempts[0].phase == "intent_superseded"
+        assert not ironrag.revisions
+    elif resume == "changed":
+        assert result.action == "replaced"
+        assert len(attempts) == 2
+        newer = next(attempt for attempt in attempts if attempt.episode_id != before.episode_id)
+        assert newer.payload_key != before.payload_key
+        assert newer.receipt is not None
+        assert newer.receipt.visibility_intent_id != before.receipt.visibility_intent_id
+        assert newer.payload_identity != before.payload_identity
+    else:
+        assert result.action == "replaced"
+        assert len(attempts) == 1
+        assert attempts[0].episode_id == before.episode_id
+        assert attempts[0].receipt == before.receipt
+        assert attempts[0].payload_key == before.payload_key
+        assert len(ironrag._payload_handles) == 1
+        assert len(ironrag.visibility_intents) == 1
     reopened.close()
 
 
@@ -5078,6 +5510,8 @@ async def _parse_native_payload_handle(
         resultChecksum=handle.result_checksum,
         requestFingerprint=handle.request_fingerprint,
     )
+    body.setdefault("mutation", {})["id"] = str(handle.mutation_id)
+    body["jobId"] = None if handle.job_id is None else str(handle.job_id)
     body["items"][0].update(
         id=str(handle.mutation_item_id),
         document_id=str(handle.document_id),
@@ -5101,9 +5535,26 @@ async def _parse_native_payload_handle(
     "field,value",
     [
         ("title", "changed"),
-        ("mime_type", "text/plain"),
-        ("file_name", "changed.txt"),
-        ("file_bytes", b"changed"),
+        (
+            "file",
+            RevisionFile(
+                name="changed.txt",
+                mime_type="application/octet-stream",
+                data=b"original",
+            ),
+        ),
+        (
+            "file",
+            RevisionFile(name="original.bin", mime_type="text/plain", data=b"original"),
+        ),
+        (
+            "file",
+            RevisionFile(
+                name="original.bin",
+                mime_type="application/octet-stream",
+                data=b"changed",
+            ),
+        ),
         ("document_hint", "hint"),
         ("provenance", RevisionProvenance(language_code="ru")),
         ("provenance", RevisionProvenance(source_uri="https://source.invalid/page")),
@@ -5119,7 +5570,11 @@ async def test_fake_revision_rejects_changed_complete_body(field: str, value: An
     server.documents[(LIB, "test")] = _document(DOC_PRE, LIB, "test")
     body: dict[str, Any] = {
         "mode": "replace",
-        "file_bytes": b"original",
+        "file": RevisionFile(
+            name="original.bin",
+            mime_type="application/octet-stream",
+            data=b"original",
+        ),
         "idempotency_key": "fixed",
     }
     handle = await server.create_revision(DOC_PRE, **body)
@@ -5471,8 +5926,9 @@ async def test_failed_policy_primary_receipt_settles_only_real_dependents(
     seed_document(state, server.documents, ref, change_token="t1", document_id=DOC_PRE)
     before = state.get("page", "1")
 
+    orchestrator = _orchestrator(adapter, server, state)
     with pytest.raises(OrchestrationFailedError) as caught:
-        await _orchestrator(adapter, server, state).push_ref(ref)
+        await orchestrator.push_ref(ref)
 
     receipt = caught.value
     assert receipt.primary_error is server.failures[receipt.status.id]
@@ -5512,8 +5968,9 @@ async def test_failed_primary_preserves_completed_dependents_without_inventing_c
     else:
         server.revision_conflicts.add(str(DOC_IMAGE_PRE))
 
+    orchestrator = _orchestrator(adapter, server, state)
     with pytest.raises(OrchestrationFailedError) as caught:
-        await _orchestrator(adapter, server, state).push_ref(ref)
+        await orchestrator.push_ref(ref)
 
     receipt = caught.value
     assert receipt.dependent_outcomes[0].action == "created"
@@ -5551,8 +6008,9 @@ async def test_unvalidated_primary_failure_does_not_settle_dependents(
     ref = await first_ref(adapter)
     seed_document(state, server.documents, ref, change_token="t1", document_id=DOC_PRE)
 
+    orchestrator = _orchestrator(adapter, server, state)
     with pytest.raises(IronRagError) as caught:
-        await _orchestrator(adapter, server, state).push_ref(ref)
+        await orchestrator.push_ref(ref)
 
     assert not isinstance(caught.value, OrchestrationFailedError)
     assert state.parent_census("page", "1") is None
@@ -6084,3 +6542,730 @@ async def test_materialized_dependents_token_must_match_enumerated_ref(tmp_path:
         await orchestrator.push_ref(ref)
 
     assert ironrag.creates == []
+
+
+# ---------------------------------------------------------------------------
+# Public-boundary refusals, duplicate races and terminal outcomes.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_push_ref_rejects_an_unknown_enrichment_scope_before_any_side_effect(
+    tmp_path: Path,
+) -> None:
+    """An admission plan outside the bounded set is a caller error, not a default."""
+    adapter = EchoAdapter({"1": EchoPage(item_id="1", title="One", body="hello", updated_at="t1")})
+    state = _state(tmp_path)
+    ironrag = FakeIronRag()
+    orchestrator = _orchestrator(adapter, ironrag, state)
+
+    ref = _page_ref("t1")
+    with pytest.raises(ValueError, match="unsupported enrichment scope"):
+        await orchestrator.push_ref(ref, enrichment_scope="embeddings-only")
+
+    assert ironrag.creates == []
+    assert ironrag.revisions == []
+    assert state.get("page", "1") is None
+
+
+@pytest.mark.asyncio
+async def test_policy_materialization_rejects_an_explicit_enrichment_scope(
+    tmp_path: Path,
+) -> None:
+    """Only the REQUIRED multipart admission can honour an explicit plan."""
+    adapter = EchoAdapter({"1": EchoPage(item_id="1", title="One", body="hello", updated_at="t1")})
+    state = _state(tmp_path)
+    ironrag = FakeIronRag()
+    orchestrator = _orchestrator(adapter, ironrag, state)
+
+    ref = _page_ref("t1")
+    with pytest.raises(ValueError, match="POLICY source path"):
+        await orchestrator.push_ref(ref, enrichment_scope="text_and_embedding")
+
+    assert ironrag.creates == []
+    assert state.get("page", "1") is None
+
+
+@pytest.mark.asyncio
+async def test_push_item_applies_the_required_admission_to_a_required_ref(
+    tmp_path: Path,
+) -> None:
+    """The forced-push entry must not downgrade a REQUIRED ref to the POLICY path."""
+    ref = _required_page_ref("v2")
+    state = _state(tmp_path)
+    ironrag = FakeIronRag()
+    _seed_existing_page(state, ironrag, ref, change_token="v1")
+    item = SourceItem(
+        ref=ref,
+        payload=b"safe v2",
+        mime_type="text/markdown",
+        file_name="1.md",
+    )
+    orchestrator = _orchestrator(EchoAdapter({}), ironrag, state)
+
+    outcome = await orchestrator.push_item(item, _router().resolve(ref), PushPolicy())
+
+    assert outcome.action == "replaced"
+    assert outcome.ironrag_document_id == str(DOC_PRE)
+    assert len(ironrag.revisions) == 1
+    assert ironrag.revisions[0]["visibility_intent_id"] is not None
+    row = state.get(ref.kind, ref.item_id)
+    assert row is not None
+    assert row.change_token == "v2"
+
+
+@pytest.mark.asyncio
+async def test_a_repeated_push_in_one_sweep_does_not_rewrite_the_same_target(
+    tmp_path: Path,
+) -> None:
+    """Two pushes of one external key in one sweep converge on the first write."""
+    ref = _page_ref("t1")
+    item = SourceItem(
+        ref=ref,
+        payload=b"hello",
+        mime_type="text/markdown",
+        file_name="1.md",
+    )
+    state = _state(tmp_path)
+    ironrag = FakeIronRag()
+    orchestrator = _orchestrator(EchoAdapter({}), ironrag, state)
+    route = _router().resolve(ref)
+
+    first = await orchestrator.push_item(item, route, PushPolicy())
+    second = await orchestrator.push_item(item, route, PushPolicy())
+
+    assert first.action == "created"
+    assert second.action == "noop_unchanged"
+    assert second.detail == "already pushed this external_key earlier in the same sweep"
+    assert second.ironrag_document_id == first.ironrag_document_id
+    assert len(ironrag.creates) == 1
+    assert ironrag.revisions == []
+
+
+@pytest.mark.asyncio
+async def test_required_create_duplicate_conflict_defers_without_adopting_the_bytes(
+    tmp_path: Path,
+) -> None:
+    """A conflicting checksum-identical document is never adopted as source-owned."""
+    ref = _required_page_ref("create-duplicate")
+    state = _state(tmp_path)
+    ironrag = FakeIronRag()
+    ironrag.duplicate_for_key = ref.external_key
+    adapter = FixedFetchResultAdapter(
+        _materialized_page(ref, b"bounded", enforcement=SourceMaterializationEnforcement.REQUIRED)
+    )
+    orchestrator = _orchestrator(adapter, ironrag, state)
+
+    outcome = await orchestrator.push_ref(ref)
+
+    assert outcome.action == "skipped_duplicate_content"
+    assert outcome.deferred is True
+    assert outcome.ironrag_document_id is None
+    assert len(ironrag.creates) == 1
+    assert state.locations_for(ref.kind, ref.item_id) == []
+    assert state.get(ref.kind, ref.item_id) is None
+
+
+@pytest.mark.asyncio
+async def test_required_create_duplicate_conflict_records_only_the_exact_key_copy(
+    tmp_path: Path,
+) -> None:
+    """A concurrent exact-key owner is recorded; the conflicting id still is not."""
+    ref = _required_page_ref("create-duplicate-race")
+    exact_id = _doc_id(902)
+    state = _state(tmp_path)
+
+    class ConcurrentOwnerIronRag(FakeIronRag):
+        async def create_document(self, library_id: UUID, **kwargs: Any) -> DocumentResource:
+            self.documents[(library_id, kwargs["external_key"])] = _document(
+                exact_id, library_id, kwargs["external_key"]
+            )
+            return await super().create_document(library_id, **kwargs)
+
+    ironrag = ConcurrentOwnerIronRag()
+    ironrag.duplicate_for_key = ref.external_key
+    adapter = FixedFetchResultAdapter(
+        _materialized_page(ref, b"bounded", enforcement=SourceMaterializationEnforcement.REQUIRED)
+    )
+    orchestrator = _orchestrator(adapter, ironrag, state)
+
+    outcome = await orchestrator.push_ref(ref)
+
+    assert outcome.action == "skipped_duplicate_content"
+    assert outcome.deferred is True
+    assert outcome.ironrag_document_id is None
+    location = state.get_location(ref.kind, ref.item_id, str(LIB))
+    assert location is not None
+    assert location.ironrag_document_id == str(exact_id)
+
+
+@pytest.mark.asyncio
+async def test_required_create_rejects_an_incomplete_server_admission(tmp_path: Path) -> None:
+    """Absent mutation evidence cannot prove a publication, even with a document id."""
+    ref = _required_page_ref("create-incomplete-admission")
+    state = _state(tmp_path)
+
+    class IncompleteAdmissionIronRag(FakeIronRag):
+        async def create_document(self, library_id: UUID, **kwargs: Any) -> DocumentResource:
+            document = await super().create_document(library_id, **kwargs)
+            assert document.admission is not None
+            return document.model_copy(
+                update={
+                    "admission": document.admission.model_copy(update={"mutation_item_id": None})
+                }
+            )
+
+    adapter = FixedFetchResultAdapter(
+        _materialized_page(ref, b"bounded", enforcement=SourceMaterializationEnforcement.REQUIRED)
+    )
+    orchestrator = _orchestrator(adapter, IncompleteAdmissionIronRag(), state)
+
+    with pytest.raises(IronRagError, match="no complete payload admission"):
+        await orchestrator.push_ref(ref)
+
+    assert state.get_location(ref.kind, ref.item_id, str(LIB)) is not None
+    assert state.get(ref.kind, ref.item_id) is None
+
+
+@pytest.mark.asyncio
+async def test_required_create_defers_when_a_foreign_copy_appears_during_creation(
+    tmp_path: Path,
+) -> None:
+    """A copy admitted nowhere cannot be closed over, so creation defers."""
+    ref = _required_page_ref("create-closure-race")
+    foreign_id = _doc_id(903)
+    state = _state(tmp_path)
+
+    class ForeignCopyDuringCreateIronRag(FakeIronRag):
+        async def create_document(self, library_id: UUID, **kwargs: Any) -> DocumentResource:
+            document = await super().create_document(library_id, **kwargs)
+            self.documents[(LIB2, kwargs["external_key"])] = _document(
+                foreign_id, LIB2, kwargs["external_key"]
+            )
+            return document
+
+    adapter = FixedFetchResultAdapter(
+        _materialized_page(ref, b"bounded", enforcement=SourceMaterializationEnforcement.REQUIRED)
+    )
+    orchestrator = _orchestrator(
+        adapter,
+        ForeignCopyDuringCreateIronRag(),
+        state,
+        router=_router_with_configured_secondary(LIB, LIB2),
+    )
+
+    outcome = await orchestrator.push_ref(ref)
+
+    assert outcome.action == "skipped_new"
+    assert outcome.deferred is True
+    assert outcome.detail == "target membership changed during creation; reconcile next sweep"
+    assert state.get(ref.kind, ref.item_id) is None
+    foreign = state.get_location(ref.kind, ref.item_id, str(LIB2))
+    assert foreign is not None
+    assert foreign.ironrag_document_id == str(foreign_id)
+
+
+@pytest.mark.asyncio
+async def test_canceled_create_admission_is_finalized_and_surfaces(tmp_path: Path) -> None:
+    """A canceled publication is not retried under its dead key nor reported as success."""
+    ref = _required_page_ref("create-canceled")
+
+    class CanceledCreateIronRag(FakeIronRag):
+        async def create_document(self, library_id: UUID, **kwargs: Any) -> DocumentResource:
+            document = await super().create_document(library_id, **kwargs)
+            assert document.admission is not None
+            operation_id = document.admission.operation_id
+            self._operations[operation_id] = _ready_operation(operation_id).model_copy(
+                update={"status": OperationStatusValue.CANCELED}
+            )
+            return document
+
+    state = _state(tmp_path)
+    ironrag = CanceledCreateIronRag()
+    adapter = FixedFetchResultAdapter(
+        _materialized_page(ref, b"bounded", enforcement=SourceMaterializationEnforcement.REQUIRED)
+    )
+    orchestrator = _orchestrator(adapter, ironrag, state)
+
+    with pytest.raises(IronRagError, match="ended without publication"):
+        await orchestrator.push_ref(ref)
+
+    created = ironrag.documents[(LIB, ref.external_key)]
+    assert _pending_attempts(state, str(created.id)) == []
+    assert state.get(ref.kind, ref.item_id) is None
+
+
+@pytest.mark.asyncio
+async def test_created_admission_defers_while_the_operation_is_not_terminal(
+    tmp_path: Path,
+) -> None:
+    """An accepted-but-running publication keeps its admission for the next sweep."""
+    ref = _required_page_ref("create-not-terminal")
+
+    class RunningCreateIronRag(FakeIronRag):
+        async def create_document(self, library_id: UUID, **kwargs: Any) -> DocumentResource:
+            document = await super().create_document(library_id, **kwargs)
+            assert document.admission is not None
+            operation_id = document.admission.operation_id
+            self._operations[operation_id] = _ready_operation(operation_id).model_copy(
+                update={"status": OperationStatusValue.PROCESSING}
+            )
+            return document
+
+    state = _state(tmp_path)
+    ironrag = RunningCreateIronRag()
+    adapter = FixedFetchResultAdapter(
+        _materialized_page(ref, b"bounded", enforcement=SourceMaterializationEnforcement.REQUIRED)
+    )
+    orchestrator = _orchestrator(adapter, ironrag, state)
+
+    outcome = await orchestrator.push_ref(ref)
+
+    assert outcome.action == "skipped_new"
+    assert outcome.deferred is True
+    assert outcome.admission is not None
+    created = ironrag.documents[(LIB, ref.external_key)]
+    assert outcome.ironrag_document_id == str(created.id)
+    assert _pending_attempts(state, str(created.id))
+    assert state.get(ref.kind, ref.item_id) is None
+
+
+@pytest.mark.asyncio
+async def test_required_create_pending_admission_defers_until_the_public_head_is_current(
+    tmp_path: Path,
+) -> None:
+    """A reused admission still waits for the head its own receipt published."""
+    ref = _required_page_ref("create-pending-head")
+
+    class LaggingHeadIronRag(FakeIronRag):
+        lag = True
+
+        async def get_document(self, document_id: UUID) -> DocumentResource | None:
+            document = await super().get_document(document_id)
+            if document is not None and self.lag:
+                return document.model_copy(update={"readable_revision_id": None})
+            return document
+
+    state = _state(tmp_path)
+    ironrag = LaggingHeadIronRag()
+    adapter = FixedFetchResultAdapter(
+        _materialized_page(ref, b"bounded", enforcement=SourceMaterializationEnforcement.REQUIRED)
+    )
+    orchestrator = _orchestrator(adapter, ironrag, state)
+
+    first = await orchestrator.push_ref(ref)
+    second = await orchestrator.push_ref(ref)
+
+    assert first.deferred is True
+    assert second.action == "skipped_new"
+    assert second.deferred is True
+    assert second.detail == "create admission is not READY at the current public head"
+    assert second.admission is not None
+    assert first.admission is not None
+    assert second.admission.job_id == first.admission.job_id
+    assert len(ironrag.creates) == 1
+    assert len(ironrag.revisions) == 0
+
+
+@pytest.mark.asyncio
+async def test_required_revision_refuses_a_readable_historical_copy(tmp_path: Path) -> None:
+    """An accepted retirement intent that still serves reads is not closure."""
+    ref = _required_page_ref("v2-readable-history")
+    historical_id = _doc_id(904)
+    state = _state(tmp_path)
+
+    class ReadableHistoricalCopyIronRag(FakeIronRag):
+        async def create_visibility_intent(
+            self, document_id: UUID | str, *, request: VisibilityIntentRequest
+        ) -> VisibilityIntentReceipt:
+            receipt = await super().create_visibility_intent(document_id, request=request)
+            for key, document in self.documents.items():
+                if document.id == historical_id:
+                    self.documents[key] = document.model_copy(
+                        update={"readable_revision_id": _doc_id(77)}
+                    )
+            return receipt
+
+    ironrag = ReadableHistoricalCopyIronRag()
+    for library_id, document_id in ((LIB, DOC_PRE), (LIB2, historical_id)):
+        state.upsert(
+            kind=ref.kind,
+            item_id=ref.item_id,
+            change_token="v1",
+            external_key=ref.external_key,
+            ironrag_document_id=str(document_id),
+            ironrag_library_id=str(library_id),
+        )
+        ironrag.documents[(library_id, ref.external_key)] = _document(
+            document_id, library_id, ref.external_key
+        )
+    adapter = FixedFetchResultAdapter(
+        _materialized_page(ref, b"safe v2", enforcement=SourceMaterializationEnforcement.REQUIRED)
+    )
+    orchestrator = _orchestrator(adapter, ironrag, state)
+
+    with pytest.raises(IronRagError, match="readable despite its retirement intent"):
+        await orchestrator.push_ref(ref)
+
+    assert ironrag.revisions == []
+    assert ironrag.documents[(LIB2, ref.external_key)].readable_revision_id is not None
+
+
+@pytest.mark.asyncio
+async def test_canceled_revision_rolls_the_payload_key_for_the_next_sweep(
+    tmp_path: Path,
+) -> None:
+    """A withdrawn submission must not be replayed under its old durable key."""
+    ref = _page_ref("v2")
+    state = _state(tmp_path)
+
+    class CanceledRevisionIronRag(FakeIronRag):
+        cancel = True
+
+        async def create_revision(
+            self, document_id: UUID | str, **request: Unpack[RevisionRequest]
+        ) -> OperationHandle:
+            handle = await super().create_revision(document_id, **request)
+            if self.cancel:
+                self._operations[handle.operation_id] = _ready_operation(
+                    handle.operation_id
+                ).model_copy(update={"status": OperationStatusValue.CANCELED})
+            return handle
+
+    ironrag = CanceledRevisionIronRag()
+    _seed_existing_page(state, ironrag, ref, change_token="v1")
+    adapter = EchoAdapter(
+        {"1": EchoPage(item_id="1", title="One", body="hello v2", updated_at="v2")}
+    )
+    orchestrator = _orchestrator(adapter, ironrag, state)
+
+    deferred = await orchestrator.push_ref(ref)
+
+    assert deferred.action == "skipped_changed"
+    assert deferred.deferred is True
+    assert "canceled" in deferred.detail
+    attempts = state.materialization_attempts_for_document(str(DOC_PRE))
+    assert [attempt.phase for attempt in attempts] == ["payload_terminal"]
+    first_key = ironrag.revisions[0]["idempotency_key"]
+
+    ironrag.cancel = False
+    orchestrator.reset_sweep_cache()
+    replaced = await orchestrator.push_ref(ref)
+
+    assert replaced.action == "replaced"
+    assert len(ironrag.revisions) == 2
+    assert ironrag.revisions[1]["idempotency_key"] != first_key
+    row = state.get(ref.kind, ref.item_id)
+    assert row is not None
+    assert row.change_token == "v2"
+
+
+@pytest.mark.asyncio
+async def test_superseded_revision_defers_without_rotating_the_payload_key(
+    tmp_path: Path,
+) -> None:
+    """A foreign winner is retained and retried; the accepted key is not rolled."""
+    ref = _page_ref("v2")
+    state = _state(tmp_path)
+
+    class SupersededRevisionIronRag(FakeIronRag):
+        async def create_revision(
+            self, document_id: UUID | str, **request: Unpack[RevisionRequest]
+        ) -> OperationHandle:
+            handle = await super().create_revision(document_id, **request)
+            self._operations[handle.operation_id] = _ready_operation(
+                handle.operation_id
+            ).model_copy(update={"status": OperationStatusValue.SUPERSEDED})
+            return handle
+
+    ironrag = SupersededRevisionIronRag()
+    _seed_existing_page(state, ironrag, ref, change_token="v1")
+    adapter = EchoAdapter(
+        {"1": EchoPage(item_id="1", title="One", body="hello v2", updated_at="v2")}
+    )
+    orchestrator = _orchestrator(adapter, ironrag, state)
+
+    deferred = await orchestrator.push_ref(ref)
+
+    assert deferred.action == "skipped_changed"
+    assert deferred.deferred is True
+    assert "superseded" in deferred.detail
+    attempts = state.materialization_attempts_for_document(str(DOC_PRE))
+    assert [attempt.phase for attempt in attempts] == ["payload_submitting"]
+    assert ironrag.deletes == []
+    row = state.get(ref.kind, ref.item_id)
+    assert row is not None
+    assert row.change_token == "v1"
+
+
+@pytest.mark.asyncio
+async def test_unroutable_dependent_lands_with_its_parent(tmp_path: Path) -> None:
+    """A dependent without its own rule follows the parent route, not the reaper."""
+    ref_facts = {"destination": "primary"}
+    dependent_facts = {"destination": "attachments"}
+    library_ref = _library_ref(LIB)
+
+    class SplitRoutingAdapter(DependentPageAdapter):
+        async def iter_items(self) -> AsyncIterator[SourceItemRef]:
+            async for ref in super().iter_items():
+                yield replace(ref, routing_facts=ref_facts)
+
+        def materialize(self, spec: DependentSpec) -> SourceItem:
+            item = super().materialize(spec)
+            return replace(item, ref=replace(item.ref, routing_facts=dependent_facts))
+
+    adapter = SplitRoutingAdapter(
+        {"1": echo_page("1", "t1")},
+        {"1": (DependentSpec("image", "img-1", "i1"),)},
+    )
+    router = Router(
+        RoutingConfig.model_validate(
+            {
+                "rules": [
+                    {
+                        "description": "primary destination",
+                        "match": {"destination": "primary"},
+                        "target": {"library": library_ref},
+                    }
+                ]
+            }
+        ),
+        resolved_targets={
+            library_ref: ResolvedLibraryTarget(
+                library_ref=library_ref, workspace_id=WS, library_id=LIB
+            )
+        },
+    )
+    state = _state(tmp_path)
+    ironrag = FakeIronRag()
+    orchestrator = _orchestrator(adapter, ironrag, state, router=router)
+
+    ref = await first_ref(adapter)
+    out = await orchestrator.push_ref(ref)
+
+    assert out.action == "created"
+    assert out.library_id == LIB
+    assert (LIB, "echo:image:img-1") in ironrag.documents
+    assert [(d.ref.item_id, d.action, d.library_id) for d in out.dependent_outcomes] == [
+        ("img-1", "created", LIB)
+    ]
+    assert state.has_claims("image", "img-1", str(LIB)) is True
+
+
+@pytest.mark.asyncio
+async def test_unsupported_dependent_content_is_skipped_without_aborting_the_parent(
+    tmp_path: Path,
+) -> None:
+    """A server-proven content rejection settles the page, never blocks its census."""
+    ref = _page_ref("t1")
+    state = _state(tmp_path)
+
+    class UnsupportedImageIronRag(FakeIronRag):
+        async def create_document(self, library_id: UUID, **kwargs: Any) -> DocumentResource:
+            if kwargs["external_key"] == "echo:image:img-1":
+                raise IronRagContentUnsupportedProblemError(
+                    ProblemDetails(
+                        type="urn:ironrag:error:content_unsupported",
+                        title="Content Unsupported",
+                        status=400,
+                        detail="synthetic unsupported image",
+                        code="content_unsupported",
+                        failureDisposition="content_unsupported",
+                    )
+                )
+            return await super().create_document(library_id, **kwargs)
+
+    adapter = _dependent_adapter("t1", DependentSpec("image", "img-1", "i1"))
+    ironrag = UnsupportedImageIronRag()
+    orchestrator = _orchestrator(adapter, ironrag, state)
+
+    out = await orchestrator.push_ref(ref)
+
+    assert out.action == "created"
+    assert out.deferred is False
+    assert [(d.ref.item_id, d.action) for d in out.dependent_outcomes] == [
+        ("img-1", "skipped_unsupported")
+    ]
+    assert "not materialized" in out.dependent_outcomes[0].detail
+    assert (LIB, "echo:image:img-1") not in ironrag.documents
+    assert state.has_claims("image", "img-1", str(LIB)) is True
+    census = state.parent_census("page", "1")
+    assert census is not None
+    assert census.change_token == "t1"
+
+
+@pytest.mark.asyncio
+async def test_reap_orphan_defers_when_the_evidence_names_another_external_key(
+    tmp_path: Path,
+) -> None:
+    """Persisted evidence for a different key can never authorise this deletion."""
+    adapter = PageWithImageAdapter({})
+    state = _state(tmp_path)
+    ironrag = FakeIronRag()
+    ironrag.documents[(LIB, "echo:image:1")] = _document(DOC_PRE, LIB, "echo:image:1")
+    state.upsert(
+        kind="image",
+        item_id="1",
+        change_token="i1",
+        external_key="echo:image:9",
+        ironrag_document_id=str(DOC_PRE),
+        ironrag_library_id=str(LIB),
+    )
+    stale_cursor = state.get("image", "1")
+    orchestrator = _orchestrator(adapter, ironrag, state)
+    ref = SourceItemRef(item_id="1", kind="image", external_key="echo:image:1")
+
+    out = await orchestrator.reap_orphan(
+        ref,
+        LIB,
+        str(DOC_PRE),
+        PushPolicy(),
+        enforcement=SourceDeleteEnforcement.POLICY,
+        expected_cursor=stale_cursor,
+        expected_location=None,
+    )
+
+    assert out.action == "fetch_deferred"
+    assert out.deferred is True
+    assert out.detail == "persisted reap evidence disagrees with canonical external key"
+    assert ironrag.deletes == []
+    assert (LIB, "echo:image:1") in ironrag.documents
+
+
+@pytest.mark.asyncio
+async def test_reap_orphan_defers_when_the_registry_changed_after_the_scan(
+    tmp_path: Path,
+) -> None:
+    """A target re-registered since the scan is left for the next sweep."""
+    ref = SourceItemRef(item_id="1", kind="image", external_key="echo:image:1")
+    state = _state(tmp_path)
+    ironrag = FakeIronRag()
+    ironrag.documents[(LIB, ref.external_key)] = _document(DOC_PRE, LIB, ref.external_key)
+    state.record_document_location(
+        kind=ref.kind,
+        item_id=ref.item_id,
+        external_key=ref.external_key,
+        ironrag_document_id=str(DOC_PRE),
+        ironrag_library_id=str(LIB),
+    )
+    scanned_location = state.get_location(ref.kind, ref.item_id, str(LIB))
+    state.record_document_location(
+        kind=ref.kind,
+        item_id=ref.item_id,
+        external_key=ref.external_key,
+        ironrag_document_id=str(DOC_OLD),
+        ironrag_library_id=str(LIB),
+    )
+    orchestrator = _orchestrator(PageWithImageAdapter({}), ironrag, state)
+
+    out = await orchestrator.reap_orphan(
+        ref,
+        LIB,
+        str(DOC_PRE),
+        PushPolicy(),
+        enforcement=SourceDeleteEnforcement.POLICY,
+        expected_cursor=None,
+        expected_location=scanned_location,
+    )
+
+    assert out.action == "fetch_deferred"
+    assert out.detail == "state changed after orphan list; retry next sweep"
+    assert ironrag.deletes == []
+    current = state.get_location(ref.kind, ref.item_id, str(LIB))
+    assert current is not None
+    assert current.ironrag_document_id == str(DOC_OLD)
+
+
+@pytest.mark.asyncio
+async def test_reap_orphan_converges_when_the_target_vanished_before_deletion(
+    tmp_path: Path,
+) -> None:
+    """An already-absent target is a completed reap, not an error."""
+    ref = SourceItemRef(item_id="1", kind="image", external_key="echo:image:1")
+    state = _state(tmp_path)
+    ironrag = FakeIronRag()
+    state.record_document_location(
+        kind=ref.kind,
+        item_id=ref.item_id,
+        external_key=ref.external_key,
+        ironrag_document_id=str(DOC_PRE),
+        ironrag_library_id=str(LIB),
+    )
+    location = state.get_location(ref.kind, ref.item_id, str(LIB))
+    orchestrator = _orchestrator(PageWithImageAdapter({}), ironrag, state)
+
+    out = await orchestrator.reap_orphan(
+        ref,
+        LIB,
+        str(DOC_PRE),
+        PushPolicy(),
+        enforcement=SourceDeleteEnforcement.POLICY,
+        expected_cursor=None,
+        expected_location=location,
+    )
+
+    assert out.action == "deleted"
+    assert ironrag.deletes == []
+    assert state.get_location(ref.kind, ref.item_id, str(LIB)) is None
+    assert state.get(ref.kind, ref.item_id) is None
+
+
+@pytest.mark.asyncio
+async def test_confirm_orphan_absent_defers_on_noncanonical_evidence(tmp_path: Path) -> None:
+    """A zero-result scan only clears the canonical key it proved absent."""
+    ref = _page_ref("absent")
+    state = _state(tmp_path)
+    state.upsert(
+        kind=ref.kind,
+        item_id=ref.item_id,
+        change_token="v1",
+        external_key="echo:page:9",
+        ironrag_document_id=str(DOC_PRE),
+        ironrag_library_id=str(LIB),
+    )
+    mismatched_cursor = state.get(ref.kind, ref.item_id)
+    orchestrator = _orchestrator(EchoAdapter({}), FakeIronRag(), state)
+
+    out = await orchestrator.confirm_orphan_absent(
+        ref,
+        LIB,
+        PushPolicy(),
+        enforcement=SourceDeleteEnforcement.POLICY,
+        expected_cursor=mismatched_cursor,
+        expected_location=None,
+    )
+
+    assert out.action == "fetch_deferred"
+    assert out.detail == "persisted absence evidence disagrees with canonical external key"
+    assert state.get(ref.kind, ref.item_id) is not None
+
+
+@pytest.mark.asyncio
+async def test_delete_event_keeps_working_while_the_routing_snapshot_is_unresolved(
+    tmp_path: Path,
+) -> None:
+    """A webhook delete stays authoritative before the catalog is resolved."""
+    ref = _page_ref("t1")
+    state = _state(tmp_path)
+    ironrag = FakeIronRag()
+    ironrag.documents[(LIB, ref.external_key)] = _document(DOC_PRE, LIB, ref.external_key)
+    state.upsert(
+        kind=ref.kind,
+        item_id=ref.item_id,
+        change_token="t1",
+        external_key=ref.external_key,
+        ironrag_document_id=str(DOC_PRE),
+        ironrag_library_id=str(LIB),
+    )
+    unresolved_router = Router(
+        RoutingConfig.model_validate({"default": {"library": _library_ref(LIB)}})
+    )
+    orchestrator = _orchestrator(EchoAdapter({}), ironrag, state, router=unresolved_router)
+
+    out = await orchestrator.delete_by_ref(ref)
+
+    assert out.action == "deleted"
+    assert out.library_id is None
+    assert ironrag.deletes == [str(DOC_PRE)]
+    assert state.get(ref.kind, ref.item_id) is None
+    assert state.locations_for(ref.kind, ref.item_id) == []

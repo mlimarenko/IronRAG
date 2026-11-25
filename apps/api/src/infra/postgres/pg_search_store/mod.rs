@@ -31,41 +31,49 @@ use crate::infra::{
 
 // Entity/relation text and vectors aggregate evidence. Both lanes require
 // positive current support and reject any retained non-current contribution.
+// Every retained contribution must also be ready for the requested channel:
+// an aggregate can contain text from a pending source even when another source
+// has completed enrichment.
 macro_rules! current_knowledge_graph_target {
-    ($support:literal, $target:literal, $library:literal) => {
-        concat!(
-            "exists (select 1 from ",
-            $support,
-            " support
+    ($support:literal, $target:literal, $library:literal, $readiness:expr) => {
+        format!(
+            "exists (select 1 from {support} support
              join knowledge_evidence evidence on evidence.evidence_id = support.from_id
              join content_current_revision current_revision
                on current_revision.document_id = evidence.document_id
               and current_revision.revision_id = evidence.revision_id
               and current_revision.library_id = evidence.library_id
-             where support.to_id = ",
-            $target,
-            " and evidence.library_id = ",
-            $library,
-            ")
-             and not exists (select 1 from ",
-            $support,
-            " support
+             where support.to_id = {target} and evidence.library_id = {library} and ({readiness}))
+             and not exists (select 1 from {support} support
              left join knowledge_evidence evidence on evidence.evidence_id = support.from_id
              left join content_current_revision current_revision
                on current_revision.document_id = evidence.document_id
               and current_revision.revision_id = evidence.revision_id
-              and current_revision.library_id = ",
-            $library,
-            "
-             where support.to_id = ",
-            $target,
-            " and current_revision.revision_id is null)"
+              and current_revision.library_id = {library}
+             where support.to_id = {target}
+               and (current_revision.revision_id is null or not ({readiness})))",
+            support = $support,
+            target = $target,
+            library = $library,
+            readiness = $readiness,
         )
     };
 }
 
+/// Graph text lanes and late graph membership keep the projection eligibility
+/// that readable view membership used to impose: a revision whose graph is
+/// still processing, or terminally failed, contributes no graph target.
+pub(super) const GRAPH_LANE_READINESS: &str =
+    "current_revision.graph_state in ('ready', 'graph_degraded')";
+
+/// Entity vectors are produced by the graph projection, so their lane requires
+/// both a fully published vector channel and an eligible graph projection from
+/// the canonical current revision.
+pub(super) const ENTITY_VECTOR_LANE_READINESS: &str = "current_revision.vector_state = 'ready' and current_revision.vector_ready_at is not null and current_revision.graph_state in ('ready', 'graph_degraded')";
+
 /// Late membership check for normalized graph search hits already hydrated in
-/// memory. This uses the same support predicate as lexical and vector lanes.
+/// memory. This applies the same current graph-evidence support predicate as
+/// the lexical graph lanes, including their graph-projection eligibility.
 pub(crate) async fn knowledge_graph_targets_are_current(
     pool: &PgPool,
     library_id: Uuid,
@@ -75,12 +83,14 @@ pub(crate) async fn knowledge_graph_targets_are_current(
     let entity_visibility = current_knowledge_graph_target!(
         "knowledge_evidence_entity_support",
         "e.entity_id",
-        "e.library_id"
+        "e.library_id",
+        GRAPH_LANE_READINESS
     );
     let relation_visibility = current_knowledge_graph_target!(
         "knowledge_evidence_relation_support",
         "r.relation_id",
-        "r.library_id"
+        "r.library_id",
+        GRAPH_LANE_READINESS
     );
     sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
         "select not exists (

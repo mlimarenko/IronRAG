@@ -3,10 +3,18 @@ use super::*;
 #[derive(Debug, Clone, FromRow)]
 pub struct DocumentCostRow {
     pub document_id: Uuid,
-    pub total_cost: Decimal,
-    pub currency_code: String,
+    /// Sum of this document's ledger charges. `None` when the document has no
+    /// derived cost row at all.
+    pub total_cost: Option<Decimal>,
+    pub currency_code: Option<String>,
+    /// Provider calls whose call state is `completed`.
     pub provider_call_count: i64,
+    /// Calls whose liability no charge proves, including reservations that never
+    /// completed.
     pub unpriced_provider_call_count: i64,
+    /// `false` for a document no execution has produced a cost row for. Such a
+    /// document is unmeasured, not free.
+    pub derived_cost_present: bool,
 }
 
 #[derive(Debug, Clone, FromRow)]
@@ -18,6 +26,7 @@ struct DocumentCostReadSnapshotRow {
     currency_code: Option<String>,
     provider_call_count: Option<i64>,
     unpriced_provider_call_count: Option<i64>,
+    cost_row_count: Option<i64>,
 }
 
 #[derive(Debug, Clone, FromRow)]
@@ -97,12 +106,13 @@ pub async fn get_document_costs_read_snapshot<'e>(
          ), document_costs as (
             select
                 document.id as document_id,
-                coalesce(sum(execution_cost.total_cost), 0) as total_cost,
-                coalesce(execution_cost.currency_code, 'USD') as currency_code,
+                sum(execution_cost.total_cost) as total_cost,
+                execution_cost.currency_code as currency_code,
                 coalesce(sum(execution_cost.provider_call_count), 0)::bigint
                     as provider_call_count,
                 coalesce(sum(execution_cost.unpriced_provider_call_count), 0)::bigint
                     as unpriced_provider_call_count,
+                count(execution_cost.id)::bigint as cost_row_count,
                 document.created_at
             from rollup_health health
             join content_document document
@@ -123,7 +133,8 @@ pub async fn get_document_costs_read_snapshot<'e>(
             costs.total_cost,
             costs.currency_code,
             costs.provider_call_count,
-            costs.unpriced_provider_call_count
+            costs.unpriced_provider_call_count,
+            costs.cost_row_count
          from rollup_health health
          left join document_costs costs on true
          order by
@@ -145,8 +156,11 @@ pub async fn get_document_costs_read_snapshot<'e>(
             };
             costs.push(DocumentCostRow {
                 document_id,
-                total_cost: required_snapshot_field(row.total_cost, "total_cost")?,
-                currency_code: required_snapshot_field(row.currency_code.clone(), "currency_code")?,
+                // The aggregate already distinguishes absence: a document with no
+                // derived cost row keeps `NULL` instead of a fabricated zero or
+                // currency, and `derived_cost_present` names that state.
+                total_cost: row.total_cost,
+                currency_code: row.currency_code.clone(),
                 provider_call_count: required_snapshot_field(
                     row.provider_call_count,
                     "provider_call_count",
@@ -155,6 +169,10 @@ pub async fn get_document_costs_read_snapshot<'e>(
                     row.unpriced_provider_call_count,
                     "unpriced_provider_call_count",
                 )?,
+                derived_cost_present: required_snapshot_field(
+                    row.cost_row_count,
+                    "cost_row_count",
+                )? > 0,
             });
         }
     }

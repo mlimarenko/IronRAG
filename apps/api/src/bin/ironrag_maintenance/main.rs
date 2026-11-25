@@ -56,7 +56,8 @@ use ironrag_backend::{
         ops_failure_disposition_schema, orphan_knowledge_documents,
         provider_source_generation_fence_schema, rebuild as maintenance_rebuild,
         repair as maintenance_repair, retention as maintenance_retention, service_identity_schema,
-        user_preference_schema, vector_orphan_reconcile, vision_recognition_schema,
+        text_publication_schema, user_preference_schema, vector_orphan_reconcile,
+        vision_recognition_schema,
         webhook_outbox_ops::{
             self, MAX_WEBHOOK_LIFECYCLE_OUTBOX_AUDIT_LIMIT,
             MAX_WEBHOOK_LIFECYCLE_OUTBOX_RESOLUTION_REASON_CODE_BYTES,
@@ -402,6 +403,13 @@ enum RepairCommand {
 
 #[derive(Subcommand)]
 enum MigrateCommand {
+    /// Publish text-readable revisions independently of enrichment. Dry-run unless --apply is given.
+    TextPublicationSchema {
+        #[arg(long)]
+        apply: bool,
+        #[arg(long)]
+        json: bool,
+    },
     /// Add the durable account-scoped telemetry preference table. Dry-run unless --apply is given.
     UserPreferenceSchema {
         #[arg(long)]

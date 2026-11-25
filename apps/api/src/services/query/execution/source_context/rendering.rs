@@ -75,13 +75,8 @@ pub(super) fn source_context_companion_visible_text(row: &KnowledgeChunkRow) -> 
 
     let mut parts = Vec::new();
     let mut seen = HashSet::new();
-    for value in [
-        row.window_text.as_deref(),
-        Some(row.content_text.as_str()),
-        Some(row.normalized_text.as_str()),
-    ]
-    .into_iter()
-    .flatten()
+    for value in
+        [Some(row.content_text.as_str()), Some(row.normalized_text.as_str())].into_iter().flatten()
     {
         let repaired = repair_technical_layout_noise(value);
         let trimmed = repaired.trim();

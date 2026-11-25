@@ -159,7 +159,7 @@ function summaryPayload(meta) {
     graphReadyDocumentCount: 1,
     graphSparseDocumentCount: 0,
     typedFactDocumentCount: 0,
-    documentCountsByReadiness: {},
+    documentCountsByStatus: {},
     latestGeneration: null,
     updatedAt: new Date().toISOString(),
   }

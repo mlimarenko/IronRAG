@@ -18,6 +18,11 @@ MAX_CAPTURE_BYTES = 16 * 1024 * 1024
 MAX_JSON_DEPTH = 64
 SURFACE = "mcp_grounded_answer"
 INVOCATION_POLICY = "explicit_full_history_transient_conversation_no_repair"
+TRANSPORT_CREDENTIAL_FIELDS = frozenset({
+    "headers", "authorization", "credentials", "accesstoken", "apikey",
+    "cookie", "cookies", "setcookie", "password", "secret", "clientsecret",
+    "refreshtoken", "bearertoken", "token",
+})
 
 
 def unique_json_object(pairs: list[tuple[str, Any]]) -> dict:
@@ -35,24 +40,27 @@ def object_fields(value: Any, allowed: set[str], required: set[str]) -> dict:
     return value
 
 
+def normalized_field_name(key: str) -> str:
+    """Case- and separator-insensitive field name, so header variants cannot slip through."""
+    return key.casefold().replace("_", "").replace("-", "")
+
+
+def bounded_visit(node: Any, depth: int) -> None:
+    if depth > MAX_JSON_DEPTH:
+        raise ValueError("native evidence nesting exceeds bound")
+    if isinstance(node, dict):
+        for key, child in node.items():
+            if not isinstance(key, str) or normalized_field_name(key) in TRANSPORT_CREDENTIAL_FIELDS:
+                raise ValueError("transport credentials are not native evidence")
+            bounded_visit(child, depth + 1)
+    elif isinstance(node, list):
+        for child in node:
+            bounded_visit(child, depth + 1)
+
+
 def bounded_capture(value: Any) -> None:
     """Bound in-memory callers too, and refuse transport secrets, not just CLI input."""
-    def visit(node: Any, depth: int) -> None:
-        if depth > MAX_JSON_DEPTH:
-            raise ValueError("native evidence nesting exceeds bound")
-        if isinstance(node, dict):
-            for key, child in node.items():
-                if not isinstance(key, str) or key.casefold().replace("_", "").replace("-", "") in {
-                    "headers", "authorization", "credentials", "accesstoken", "apikey",
-                    "cookie", "cookies", "setcookie", "password", "secret", "clientsecret",
-                    "refreshtoken", "bearertoken", "token",
-                }:
-                    raise ValueError("transport credentials are not native evidence")
-                visit(child, depth + 1)
-        elif isinstance(node, list):
-            for child in node:
-                visit(child, depth + 1)
-    visit(value, 0)
+    bounded_visit(value, 0)
     if len(json.dumps(value, ensure_ascii=False, allow_nan=False).encode()) > MAX_CAPTURE_BYTES:
         raise ValueError("native evidence exceeds byte bound")
 
@@ -83,13 +91,8 @@ def captured_timing(value: Any) -> dict:
     }
 
 
-def native_detail(
-    request: Any,
-    response: Any,
-    case: benchmark.BenchmarkCase,
-    capture: dict,
-    history: list[dict],
-) -> dict:
+def native_call(request: Any, case: benchmark.BenchmarkCase, capture: dict) -> tuple[Any, dict]:
+    """Validate the JSON-RPC tools/call envelope and return its ID and arguments."""
     request = object_fields(
         request, {"jsonrpc", "id", "method", "params"}, {"jsonrpc", "id", "method", "params"}
     )
@@ -104,6 +107,13 @@ def native_detail(
     args = object_fields(params["arguments"], {
         "library", "query", "conversationTurns", "topK", "includeDebug", "responseProfile",
     }, {"library", "query", "responseProfile"})
+    validate_native_arguments(args, case, capture)
+    return identifier, args
+
+
+def validate_native_arguments(
+    args: dict, case: benchmark.BenchmarkCase, capture: dict
+) -> None:
     if args["responseProfile"] != "full":
         raise ValueError("native replay requires explicit full profile without maxReferences")
     if args["query"] != case.question or not 0 < len(case.question) <= 4000 or case.question != case.question.strip():
@@ -114,7 +124,9 @@ def native_detail(
         raise ValueError("invalid includeDebug")
     if "topK" in args and (type(args["topK"]) is not int or not 1 <= args["topK"] <= 32):
         raise ValueError("invalid topK")
-    prior = args.get("conversationTurns", [])
+
+
+def validate_native_history(prior: Any, history: list[dict]) -> None:
     if not isinstance(prior, list) or len(prior) > 20 or prior != history:
         raise ValueError("native history must exactly preserve observed chronological turns")
     for turn in prior:
@@ -122,6 +134,10 @@ def native_detail(
         content = turn["content"]
         if not isinstance(content, str) or not 0 < len(content) <= 1200 or content != content.strip():
             raise ValueError("native history content exceeds bounds or would be rewritten")
+
+
+def native_result(response: Any, identifier: Any) -> dict:
+    """Correlate the JSON-RPC response and return its successful result object."""
     response = object_fields(response, {"jsonrpc", "id", "result", "error"}, {"jsonrpc", "id"})
     if response["jsonrpc"] != "2.0" or type(response["id"]) is not type(identifier) or response["id"] != identifier:
         raise ValueError("JSON-RPC response correlation mismatch")
@@ -130,6 +146,13 @@ def native_detail(
     result = object_fields(response["result"], {"content", "structuredContent", "isError", "_meta"}, {"content", "structuredContent"})
     if result.get("isError", False) is not False:
         raise ValueError("MCP terminal tool error")
+    return result
+
+
+def native_structured_content(
+    result: dict, case: benchmark.BenchmarkCase, capture: dict
+) -> tuple[dict, dict, dict]:
+    """Return structured content, its execution detail and the canonical turn payload."""
     structured = result["structuredContent"]
     if not isinstance(structured, dict) or structured.get("responseProfile") != "full":
         raise ValueError("compact evidence cannot supply a complete execution")
@@ -142,6 +165,10 @@ def native_detail(
     )
     if structured.get("answerBody") != canonical["answerText"]:
         raise ValueError("native answer disagrees with execution detail")
+    return structured, detail, canonical
+
+
+def native_tool_text(result: dict, structured: dict, canonical: dict) -> None:
     content = result["content"]
     if (not isinstance(content, list) or len(content) != 1 or not isinstance(content[0], dict)
         or set(content[0]) != {"type", "text"} or content[0]["type"] != "text"
@@ -155,6 +182,10 @@ def native_detail(
     text_payload = json.loads(content[0]["text"][len(prefix):], object_pairs_hook=unique_json_object)
     if text_payload != {key: value for key, value in structured.items() if key != "queryLanguage"}:
         raise ValueError("native text payload disagrees with structured content")
+
+
+def native_completion_evidence(structured: dict, detail: dict, canonical: dict) -> None:
+    """Terminal completion, readiness and identity shortcuts of one native execution."""
     if structured.get("clarification") != {
         "required": detail["clarification"]["required"],
         "question": detail["clarification"].get("question"),
@@ -189,11 +220,28 @@ def native_detail(
     }.items():
         if shortcut in structured and structured[shortcut] != detail["execution"][field]:
             raise ValueError("native identity shortcut disagrees with detail")
+
+
+def native_detail(
+    request: Any,
+    response: Any,
+    case: benchmark.BenchmarkCase,
+    capture: dict,
+    history: list[dict],
+) -> dict:
+    identifier, args = native_call(request, case, capture)
+    validate_native_history(args.get("conversationTurns", []), history)
+    result = native_result(response, identifier)
+    structured, detail, canonical = native_structured_content(result, case, capture)
+    native_tool_text(result, structured, canonical)
+    native_completion_evidence(structured, detail, canonical)
     return detail
 
 
-def replay_native_case(capture: Any, *, suite_id: str, case: benchmark.BenchmarkCase) -> dict:
-    """Use trusted suite policy; never infer a complete execution from compact text."""
+def validate_native_capture(
+    capture: Any, *, suite_id: str, case: benchmark.BenchmarkCase
+) -> dict:
+    """Check the captured envelope against the trusted suite and case identity."""
     bounded_capture(capture)
     capture = object_fields(capture, {
         "schemaVersion", "suiteId", "caseId", "caseDefinitionSha256", "workspaceId",
@@ -210,72 +258,82 @@ def replay_native_case(capture: Any, *, suite_id: str, case: benchmark.Benchmark
     if (not isinstance(capture["library"], str) or not 0 < len(capture["library"]) <= 256
         or capture["library"] != capture["library"].strip()):
         raise ValueError("native library reference is invalid")
-    benchmark.validate_preceding_turns(
-        case.preceding_turns, root=Path(__file__).resolve().parent, final_id=case.case_id
+    return capture
+
+
+def validate_auxiliary_search(search: Any, capture: dict, policy: benchmark.BenchmarkCase) -> None:
+    object_fields(
+        search,
+        {"workspaceId", "libraryId", "queryText", "responsePayload"},
+        {"workspaceId", "libraryId", "queryText", "responsePayload"},
     )
-    policies = [benchmark.preceding_turn_case(case, turn) for turn in case.preceding_turns]
-    policies.append(replace(case, preceding_turns=[]))
-    turns = capture["turns"]
-    if not isinstance(turns, list) or not 0 < len(turns) <= 11 or len(turns) != len(policies):
-        raise ValueError("native evidence requires every actual turn within history bounds")
-    history: list[dict] = []
-    evaluated = []
-    execution_ids: set[str] = set()
-    for turn, policy in zip(turns, policies, strict=True):
-        object_fields(
-            turn, {"request", "response", "observation"}, {"request", "response", "observation"}
-        )
-        detail = native_detail(turn["request"], turn["response"], policy, capture, history)
-        execution_id = detail["execution"]["id"]
-        if execution_id in execution_ids:
-            raise ValueError("duplicate native execution ID")
-        execution_ids.add(execution_id)
-        observation = object_fields(
-            turn["observation"], {"timing", "cost", "search"}, {"timing", "cost", "search"}
-        )
-        timing = captured_timing(observation["timing"])
-        search = observation["search"]
-        if search is not None:
-            object_fields(
-                search,
-                {"workspaceId", "libraryId", "queryText", "responsePayload"},
-                {"workspaceId", "libraryId", "queryText", "responsePayload"},
-            )
-            if (search["workspaceId"] != capture["workspaceId"] or search["libraryId"] != capture["libraryId"]
-                or search["queryText"] != policy.search_query or not isinstance(search["responsePayload"], dict)
-                or not isinstance(search["responsePayload"].get("documentHits"), list)):
-                raise ValueError("auxiliary search scope mismatch or missing response")
-        elif timing["searchLatencyMs"] is not None:
-            raise ValueError("search timing without auxiliary search evidence")
-        cost = observation["cost"]
-        if cost is not None:
-            try:
-                components = benchmark.validate_cost_observation(cost, execution_id)
-            except (KeyError, TypeError, AttributeError, ValueError) as error:
-                raise ValueError("invalid captured native cost evidence") from error
-            # MCP strips sourceUri/sourceAccess from prepared-segment references.
-            # A preserved HTTP cost component can therefore differ in reference
-            # metadata, but must identify exactly this execution and both turns.
-            cost_detail = components[execution_id]["executionDetail"]
-            if any(cost_detail[key] != detail[key] for key in (
-                "execution", "requestTurn", "responseTurn"
-            )):
-                raise ValueError("cost root turn disagrees with native execution")
-        result = benchmark.evaluate_execution_detail(
-            policy, detail, search_payload=None if search is None else search["responsePayload"],
-        )
-        result.update({
-            "surface": SURFACE, "invocationPolicy": INVOCATION_POLICY,
-            "queryConversationId": detail["execution"]["conversationId"],
-            "timing": timing, "answerLatencyMs": timing["answerLatencyMs"],
-            "searchLatencyMs": timing["searchLatencyMs"],
-            "auxiliarySearchStatus": "unavailable" if search is None else "observed",
-            "executionCost": {"status": "unavailable" if cost is None else "measured", "evidence": cost,
-                              "error": "not_captured" if cost is None else None},
-        })
-        evaluated.append(result)
-        history.extend([{"role": "user", "content": policy.question},
-                        {"role": "assistant", "content": result["answer"]}])
+    if (search["workspaceId"] != capture["workspaceId"] or search["libraryId"] != capture["libraryId"]
+        or search["queryText"] != policy.search_query or not isinstance(search["responsePayload"], dict)
+        or not isinstance(search["responsePayload"].get("documentHits"), list)):
+        raise ValueError("auxiliary search scope mismatch or missing response")
+
+
+def validate_captured_cost(cost: Any, detail: dict, execution_id: str) -> None:
+    try:
+        components = benchmark.validate_cost_observation(cost, execution_id)
+    except (KeyError, TypeError, AttributeError, ValueError) as error:
+        raise ValueError("invalid captured native cost evidence") from error
+    # MCP strips sourceUri/sourceAccess from prepared-segment references.
+    # A preserved HTTP cost component can therefore differ in reference
+    # metadata, but must identify exactly this execution and both turns.
+    cost_detail = components[execution_id]["executionDetail"]
+    if any(cost_detail[key] != detail[key] for key in (
+        "execution", "requestTurn", "responseTurn"
+    )):
+        raise ValueError("cost root turn disagrees with native execution")
+
+
+def native_turn_result(
+    turn: Any,
+    policy: benchmark.BenchmarkCase,
+    capture: dict,
+    history: list[dict],
+    execution_ids: set[str],
+) -> dict:
+    """Score one preserved exchange together with its observation."""
+    object_fields(
+        turn, {"request", "response", "observation"}, {"request", "response", "observation"}
+    )
+    detail = native_detail(turn["request"], turn["response"], policy, capture, history)
+    execution_id = detail["execution"]["id"]
+    if execution_id in execution_ids:
+        raise ValueError("duplicate native execution ID")
+    execution_ids.add(execution_id)
+    observation = object_fields(
+        turn["observation"], {"timing", "cost", "search"}, {"timing", "cost", "search"}
+    )
+    timing = captured_timing(observation["timing"])
+    search = observation["search"]
+    if search is not None:
+        validate_auxiliary_search(search, capture, policy)
+    elif timing["searchLatencyMs"] is not None:
+        raise ValueError("search timing without auxiliary search evidence")
+    cost = observation["cost"]
+    if cost is not None:
+        validate_captured_cost(cost, detail, execution_id)
+    result = benchmark.evaluate_execution_detail(
+        policy, detail, search_payload=None if search is None else search["responsePayload"],
+    )
+    result.update({
+        "surface": SURFACE, "invocationPolicy": INVOCATION_POLICY,
+        "queryConversationId": detail["execution"]["conversationId"],
+        "timing": timing, "answerLatencyMs": timing["answerLatencyMs"],
+        "searchLatencyMs": timing["searchLatencyMs"],
+        "auxiliarySearchStatus": "unavailable" if search is None else "observed",
+        "executionCost": {"status": "unavailable" if cost is None else "measured", "evidence": cost,
+                          "error": "not_captured" if cost is None else None},
+    })
+    return result
+
+
+def final_native_case(
+    evaluated: list[dict], case: benchmark.BenchmarkCase, suite_id: str, capture: dict
+) -> dict:
     final = dict(evaluated[-1])
     final.update(benchmark.case_metadata(case))
     final["casePolicy"] = asdict(case)
@@ -294,6 +352,28 @@ def replay_native_case(capture: Any, *, suite_id: str, case: benchmark.Benchmark
         [final], validated_history_complete=True
     )
     return final
+
+
+def replay_native_case(capture: Any, *, suite_id: str, case: benchmark.BenchmarkCase) -> dict:
+    """Use trusted suite policy; never infer a complete execution from compact text."""
+    capture = validate_native_capture(capture, suite_id=suite_id, case=case)
+    benchmark.validate_preceding_turns(
+        case.preceding_turns, root=Path(__file__).resolve().parent, final_id=case.case_id
+    )
+    policies = [benchmark.preceding_turn_case(case, turn) for turn in case.preceding_turns]
+    policies.append(replace(case, preceding_turns=[]))
+    turns = capture["turns"]
+    if not isinstance(turns, list) or not 0 < len(turns) <= 11 or len(turns) != len(policies):
+        raise ValueError("native evidence requires every actual turn within history bounds")
+    history: list[dict] = []
+    evaluated = []
+    execution_ids: set[str] = set()
+    for turn, policy in zip(turns, policies, strict=True):
+        result = native_turn_result(turn, policy, capture, history, execution_ids)
+        evaluated.append(result)
+        history.extend([{"role": "user", "content": policy.question},
+                        {"role": "assistant", "content": result["answer"]}])
+    return final_native_case(evaluated, case, suite_id, capture)
 
 
 def main() -> int:

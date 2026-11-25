@@ -519,3 +519,121 @@ async fn lifecycle_outbox_lease_renewal_uses_db_clock_and_token_fencing() -> Res
     postgres.close().await;
     test_result
 }
+
+#[tokio::test]
+#[ignore = "requires local postgres service"]
+async fn retried_revision_ready_transition_reuses_the_persisted_event() -> Result<()> {
+    let postgres = connect_postgres().await?;
+    let workspace_id = Uuid::now_v7();
+    let library_id = Uuid::now_v7();
+    let subscription_id = Uuid::now_v7();
+    let revision_id = Uuid::now_v7();
+    let document_id = Uuid::now_v7();
+    let suffix = Uuid::now_v7().simple().to_string();
+    let event_id = format!("revision.ready:{revision_id}");
+    let payload_json = serde_json::json!({
+        "document_id": document_id,
+        "revision_id": revision_id,
+        "library_id": library_id,
+    });
+    // An interrupted attempt already reported the revision as ready; the retry
+    // that finishes the same revision reports a later transition time.
+    let first_occurred_at = Utc::now();
+    let retried_occurred_at = first_occurred_at + chrono::TimeDelta::minutes(12);
+
+    let test_result = async {
+        sqlx::query(
+            "insert into catalog_workspace (id, slug, display_name)
+             values ($1, $2, 'Webhook outbox retry test')",
+        )
+        .bind(workspace_id)
+        .bind(format!("outbox-retry-{suffix}"))
+        .execute(&postgres)
+        .await?;
+        sqlx::query(
+            "insert into catalog_library (id, workspace_id, slug, display_name)
+             values ($1, $2, $3, 'Webhook outbox retry test library')",
+        )
+        .bind(library_id)
+        .bind(workspace_id)
+        .bind(format!("outbox-retry-library-{suffix}"))
+        .execute(&postgres)
+        .await?;
+        sqlx::query(
+            "insert into webhook_subscription (
+                id, workspace_id, library_id, display_name, target_url, secret, event_types
+             ) values ($1, $2, $3, 'Retry test', 'https://example.com/retry', 'sealed', $4)",
+        )
+        .bind(subscription_id)
+        .bind(workspace_id)
+        .bind(library_id)
+        .bind(vec!["revision.ready".to_string()])
+        .execute(&postgres)
+        .await?;
+
+        let mut event = WebhookEvent {
+            event_type: "revision.ready".to_string(),
+            event_id: event_id.clone(),
+            occurred_at: first_occurred_at,
+            workspace_id,
+            library_id,
+            payload_json: payload_json.clone(),
+        };
+        let first = enqueue_webhook_lifecycle_event_with_executor(&postgres, &event).await?;
+
+        event.occurred_at = retried_occurred_at;
+        let retried = enqueue_webhook_lifecycle_event_with_executor(&postgres, &event)
+            .await
+            .context("a retried transition must reuse its outbox event")?;
+
+        assert_eq!(retried.id, first.id, "the retry must not create a second event");
+        assert_eq!(
+            retried.occurred_at, first.occurred_at,
+            "the persisted transition time must survive the retry",
+        );
+        assert_eq!(retried.payload_json, payload_json, "the retry must not rewrite the payload");
+        let stored_rows = sqlx::query_scalar::<_, i64>(
+            "select count(*)::bigint from webhook_lifecycle_outbox where event_id = $1",
+        )
+        .bind(&event_id)
+        .fetch_one(&postgres)
+        .await?;
+        assert_eq!(stored_rows, 1, "one transition keeps exactly one outbox event");
+        let snapshotted_recipients = sqlx::query_scalar::<_, i64>(
+            "select count(*)::bigint
+             from webhook_lifecycle_outbox_recipient
+             where outbox_id = $1",
+        )
+        .bind(first.id)
+        .fetch_one(&postgres)
+        .await?;
+        assert_eq!(snapshotted_recipients, 1, "the retry must not re-fan the recipient snapshot");
+
+        event.payload_json = serde_json::json!({ "revision_id": Uuid::now_v7() });
+        assert!(
+            enqueue_webhook_lifecycle_event_with_executor(&postgres, &event).await.is_err(),
+            "one deterministic identity must never carry different event data",
+        );
+        Ok::<(), anyhow::Error>(())
+    }
+    .await;
+
+    let _ = sqlx::query("delete from webhook_lifecycle_outbox where event_id = $1")
+        .bind(&event_id)
+        .execute(&postgres)
+        .await;
+    let _ = sqlx::query("delete from webhook_subscription where id = $1")
+        .bind(subscription_id)
+        .execute(&postgres)
+        .await;
+    let _ = sqlx::query("delete from catalog_library where id = $1")
+        .bind(library_id)
+        .execute(&postgres)
+        .await;
+    let _ = sqlx::query("delete from catalog_workspace where id = $1")
+        .bind(workspace_id)
+        .execute(&postgres)
+        .await;
+    postgres.close().await;
+    test_result
+}

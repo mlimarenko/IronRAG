@@ -401,6 +401,7 @@ async fn request(
         }),
         parent_async_operation_id: None,
         priority: 100,
+        enrichment_scope: None,
     })
 }
 
@@ -493,6 +494,128 @@ async fn auth(fixture: &ContentLifecycleFixture) -> Result<AuthContext> {
         fixture.workspace_id,
         &permissions,
     ))
+}
+
+#[tokio::test]
+#[ignore = "requires isolated postgres and redis services"]
+async fn source_download_preserves_byte_identity_and_refuses_missing_originals() -> Result<()> {
+    let fixture = ContentLifecycleFixture::create().await?;
+    let result = Box::pin(async {
+        let auth = auth(&fixture).await?;
+        for (key, source_kind, mime, missing_key, expect_text) in [
+            ("pdf-blob", "upload", "application/pdf", false, false),
+            ("pdf-missing", "upload", "application/pdf", true, false),
+            ("pdf-null", "upload", "application/pdf", false, false),
+            ("upload-text-missing", "upload", "text/plain", true, false),
+            ("edit-text-missing", "edit", "text/plain", true, true),
+            ("storage-error", "upload", "application/pdf", false, false),
+        ] {
+            let bytes = b"%PDF-test-original";
+            let expected_text = if expect_text { "edited inline text" } else { "normalized text" };
+            let mut admission = request(&fixture, key, bytes).await?;
+            if let ContentAdmissionTarget::New { file_name, .. } = &mut admission.target {
+                *file_name = Some("original.pdf".to_owned());
+            }
+            let revision = admission.revision.as_mut().context("revision")?;
+            revision.replacement.file_name = "original.pdf".to_owned();
+            revision.replacement.mime_type = mime.to_owned();
+            if missing_key {
+                revision.storage_key = Some(format!("missing/{key}"));
+            } else if key == "pdf-null" {
+                revision.storage_key = None;
+                revision.replacement.checksum =
+                    format!("sha256:{}", hex::encode(Sha256::digest(b"never stored")));
+            } else if key == "storage-error" {
+                revision.storage_key = Some(".".to_owned());
+            }
+            if source_kind == "edit" {
+                // Changing an upload's kind after admission would leave its
+                // immutable knowledge identity as upload, not a native edit.
+                let base = admission_repository::admit_content_with_failpoint(
+                    &fixture.state.persistence.postgres,
+                    &request(&fixture, "edit-base", b"original base text").await?,
+                    None,
+                )
+                .await?
+                .into_bundle();
+                let base_revision_id = publish(&fixture, &base, "original base text").await?;
+                let inline_text = expected_text.as_bytes();
+                admission.target = ContentAdmissionTarget::Existing { document_id: base.document.id };
+                admission.operation_kind = "edit".to_owned();
+                let revision = admission.revision.as_mut().context("edit revision")?;
+                revision.content_source_kind = "edit".to_owned();
+                revision.base_revision_id = Some(base_revision_id);
+                revision.replacement.checksum =
+                    format!("sha256:{}", hex::encode(Sha256::digest(inline_text)));
+                revision.replacement.byte_size = i64::try_from(inline_text.len())?;
+                revision.replacement.file_name = "original.txt".to_owned();
+                revision.replacement.source_uri = Some("edit://original.txt".to_owned());
+            }
+            let bundle = admission_repository::admit_content_with_failpoint(
+                &fixture.state.persistence.postgres,
+                &admission,
+                None,
+            )
+            .await?
+            .into_bundle();
+            let revision_id = publish(&fixture, &bundle, expected_text).await?;
+            let response = Box::pin(download_document_source(
+                auth.clone(),
+                State(fixture.state.clone()),
+                Path(bundle.document.id),
+                Query(SourceDownloadQuery { revision_id: Some(revision_id), representation: None }),
+            ))
+            .await;
+            if key == "pdf-blob" {
+                let response = response.with_context(|| {
+                    format!(
+                        "case {key}: stored original must download (document {}, revision {revision_id})",
+                        bundle.document.id
+                    )
+                })?;
+                assert_eq!(response.headers()["content-type"], "application/pdf");
+                assert!(
+                    response.headers()["content-disposition"].to_str()?.contains("original.pdf")
+                );
+                assert_eq!(axum::body::to_bytes(response.into_body(), 1024).await?.as_ref(), bytes);
+            } else if expect_text {
+                let response = response.with_context(|| {
+                    format!(
+                        "case {key}: native inline text must download (document {}, revision {revision_id})",
+                        bundle.document.id
+                    )
+                })?;
+                assert_eq!(response.headers()["content-type"], "text/plain; charset=utf-8");
+                assert!(
+                    response.headers()["content-disposition"].to_str()?.contains("original.txt")
+                );
+                assert_eq!(
+                    axum::body::to_bytes(response.into_body(), 1024).await?.as_ref(),
+                    expected_text.as_bytes()
+                );
+            } else if key == "storage-error" {
+                assert_eq!(
+                    response
+                        .expect_err("storage error must not become a fallback")
+                        .into_response()
+                        .status(),
+                    StatusCode::INTERNAL_SERVER_ERROR
+                );
+            } else {
+                assert_eq!(
+                    response
+                        .expect_err("missing original must be refused")
+                        .into_response()
+                        .status(),
+                    StatusCode::NOT_FOUND
+                );
+            }
+        }
+        Ok(())
+    })
+    .await;
+    fixture.cleanup().await?;
+    result
 }
 
 async fn mcp_read(

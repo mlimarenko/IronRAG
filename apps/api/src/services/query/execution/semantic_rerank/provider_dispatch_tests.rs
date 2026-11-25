@@ -45,6 +45,37 @@ use super::{
 const TEST_TIMEOUT: Duration = Duration::from_secs(2);
 const TEST_OUTCOME_TIMEOUT: Duration = Duration::from_millis(400);
 
+#[test]
+fn both_provider_error_routes_preserve_refusals_and_capacity() {
+    use crate::integrations::provider_budget::ProviderBudgetError;
+    use crate::integrations::retry::ProviderCallError;
+    use crate::integrations::typesafe::SystemOneError;
+    use crate::shared::provider_http::ProviderDispatchRefusal;
+
+    for (refusal, expected) in [
+        (ProviderDispatchRefusal::Authority, "dispatch_authority"),
+        (ProviderDispatchRefusal::Exhausted, "dispatch_exhausted"),
+    ] {
+        let error = || ProviderCallError::admission(ProviderBudgetError::Dispatch(refusal.clone()));
+        for failure in [
+            super::map_provider_error(error()),
+            super::map_systemone_error(SystemOneError::Provider { source: error() }),
+        ] {
+            let SemanticRerankFailure::TerminalProvider(failure) = failure else {
+                panic!("refusal must be terminal");
+            };
+            assert!(failure.is_refusal());
+            assert_eq!(failure.refusal_code(), Some(expected));
+        }
+    }
+    assert_eq!(
+        super::map_provider_error(ProviderCallError::admission(
+            ProviderBudgetError::AcquireTimeout { timeout_ms: 1 }
+        )),
+        SemanticRerankFailure::ProviderFailure
+    );
+}
+
 /// The five-level rubric the decision-binding fixtures declare, mirroring the
 /// seeded provider profile: ordered relevance levels of one `Score` question.
 const TEST_SCORE_LEVELS: [&str; 5] = [
@@ -161,12 +192,19 @@ fn test_transport() -> RerankProviderTransport {
 #[derive(Default)]
 struct RecordingGateway {
     chats: Mutex<usize>,
+    refusal: Mutex<Option<crate::shared::provider_http::ProviderDispatchRefusal>>,
 }
 
 #[async_trait]
 impl LlmGateway for RecordingGateway {
     async fn generate(&self, mut request: ChatRequest) -> anyhow::Result<ChatResponse> {
         *self.chats.lock().expect("chat counter") += 1;
+        if let Some(refusal) = self.refusal.lock().expect("refusal").clone() {
+            return Err(crate::integrations::retry::ProviderCallError::admission(
+                crate::integrations::provider_budget::ProviderBudgetError::Dispatch(refusal),
+            )
+            .into());
+        }
         Ok(ChatResponse {
             completion_status: crate::integrations::llm::ChatCompletionStatus::Complete,
             provider_kind: std::mem::take(&mut request.provider_kind),
@@ -189,6 +227,56 @@ impl LlmGateway for RecordingGateway {
 
     async fn vision_extract(&self, _request: VisionRequest) -> anyhow::Result<VisionResponse> {
         Err(anyhow::anyhow!("vision_extract is not used by the rerank dispatch"))
+    }
+}
+
+struct RefusingAdmission(crate::shared::provider_http::ProviderDispatchRefusal);
+
+#[async_trait]
+impl crate::shared::provider_http::ProviderDispatchAdmission for RefusingAdmission {
+    async fn admit(
+        &self,
+        _context: &crate::shared::provider_http::ProviderDispatchContext,
+        _evidence: &crate::shared::provider_http::DispatchRequestEvidence<'_>,
+    ) -> Result<
+        crate::shared::provider_http::ProviderDispatchPermit,
+        crate::shared::provider_http::ProviderDispatchRefusal,
+    > {
+        Err(self.0.clone())
+    }
+}
+
+#[tokio::test]
+async fn actual_chat_and_decision_routes_propagate_dispatch_refusals() {
+    use crate::shared::provider_http::ProviderDispatchRefusal;
+    for (refusal, expected) in [
+        (ProviderDispatchRefusal::Authority, "dispatch_authority"),
+        (ProviderDispatchRefusal::Exhausted, "dispatch_exhausted"),
+    ] {
+        let gateway = Arc::new(RecordingGateway::default());
+        *gateway.refusal.lock().expect("refusal") = Some(refusal.clone());
+        let as_trait: Arc<dyn LlmGateway> = gateway.clone();
+        let mut decision = decision_binding("http://127.0.0.1:9");
+        decision.admission = Arc::new(RefusingAdmission(refusal));
+        let chat = chat_binding();
+        let prepared = prepared(&[("a", "first"), ("b", "second")]);
+        for binding in [&chat, &decision] {
+            let result = call_rerank_provider(RerankProviderCallRequest {
+                llm_gateway: &as_trait,
+                provider_budget: &budget(),
+                transport: test_transport(),
+                binding,
+                prepared: &prepared,
+                provider_call_id: Uuid::now_v7(),
+                provider_timeout: TEST_TIMEOUT,
+            })
+            .await;
+            let Err(SemanticRerankFailure::TerminalProvider(failure)) = result else {
+                panic!("dispatch refusal must be terminal");
+            };
+            assert_eq!(failure.refusal_code(), Some(expected));
+        }
+        assert_eq!(*gateway.chats.lock().expect("chat counter"), 1, "decision must not use chat");
     }
 }
 

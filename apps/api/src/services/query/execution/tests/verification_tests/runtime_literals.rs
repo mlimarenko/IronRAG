@@ -17,7 +17,6 @@ fn verify_answer_rejects_inline_identifier_substrings_and_joined_words() {
                 intent_profile: &QueryIntentProfile::default(),
                 evidence: &empty_authoritative_evidence(),
                 chunks: &[runtime_chunk(source)],
-                prompt_context: source,
                 assistant_grounding: &AssistantGroundingEvidence::default(),
             });
         assert_eq!(
@@ -48,7 +47,6 @@ fn verify_answer_preserves_supported_inline_identifier_boundaries() {
                 intent_profile: &QueryIntentProfile::default(),
                 evidence: &empty_authoritative_evidence(),
                 chunks: &[runtime_chunk(source)],
-                prompt_context: source,
                 assistant_grounding: &AssistantGroundingEvidence::default(),
             });
         assert_eq!(
@@ -79,7 +77,6 @@ fn verify_answer_deduplication_preserves_word_boundaries_in_both_orders() {
                     intent_profile: &QueryIntentProfile::default(),
                     evidence: &empty_authoritative_evidence(),
                     chunks: &[runtime_chunk(source)],
-                    prompt_context: source,
                     assistant_grounding: &AssistantGroundingEvidence::default(),
                 });
             assert_eq!(
@@ -100,7 +97,6 @@ fn verify_answer_allows_user_supplied_scope_literals() {
         intent_profile: &QueryIntentProfile::default(),
         evidence: &empty_authoritative_evidence(),
         chunks: &[runtime_chunk("The grounded context mentions Alpha Sync.")],
-        prompt_context: "The grounded context mentions Alpha Sync.",
         assistant_grounding: &AssistantGroundingEvidence::default(),
     });
 
@@ -116,7 +112,6 @@ fn verify_answer_does_not_ground_non_wildcard_literals_from_question() {
         intent_profile: &QueryIntentProfile::default(),
         evidence: &empty_authoritative_evidence(),
         chunks: &[runtime_chunk("The docs mention a stable endpoint but do not name it.")],
-        prompt_context: "The docs mention a stable endpoint but do not name it.",
         assistant_grounding: &AssistantGroundingEvidence::default(),
     });
 
@@ -174,7 +169,6 @@ fn verify_answer_accepts_method_path_literal_when_method_and_path_are_grounded()
             technical_facts: Vec::new(),
         },
         chunks: &[],
-        prompt_context: "",
         assistant_grounding: &AssistantGroundingEvidence::default(),
     });
 
@@ -201,12 +195,31 @@ fn verify_answer_rejects_method_path_literal_spread_across_fragments() {
             runtime_chunk("The method GET is used for status requests."),
             runtime_chunk("The path /system/info is mentioned in an unrelated example."),
         ],
-        prompt_context: "",
         assistant_grounding: &AssistantGroundingEvidence::default(),
     });
 
     assert_eq!(verification.state, QueryVerificationState::InsufficientEvidence);
     assert_eq!(verification.unsupported_literals, vec!["GET /system/info"]);
+}
+
+#[test]
+fn generated_grounded_answer_cannot_support_its_own_literal() {
+    let grounding = AssistantGroundingEvidence {
+        verification_corpus: vec![
+            "[MCP tool result: grounded_answer]\ncontent:\nRun `democtl invented --flag`.\nstructuredContent:\n{\"answerBody\":\"Run `democtl invented --flag`.\"}".to_owned(),
+        ],
+        document_references: Vec::new(),
+    };
+    let verification = verify_answer_against_authoritative_evidence(AnswerVerificationRequest {
+        question: "Which command is required?",
+        answer: "Run `democtl invented --flag`.",
+        intent_profile: &QueryIntentProfile::default(),
+        evidence: &empty_authoritative_evidence(),
+        chunks: &[runtime_chunk("Run democtl present --flag.")],
+        assistant_grounding: &grounding,
+    });
+    assert_ne!(verification.state, QueryVerificationState::Verified);
+    assert!(verification.warnings.iter().any(|warning| warning.code == "unsupported_literal"));
 }
 
 #[test]
@@ -217,12 +230,11 @@ fn verify_answer_accepts_literals_grounded_by_runtime_corpus() {
         intent_profile: &QueryIntentProfile::default(),
         evidence: &empty_authoritative_evidence(),
         chunks: &[],
-        prompt_context: "",
         assistant_grounding: &AssistantGroundingEvidence {
             verification_corpus: vec![
-                r#"{"structuredContent":{"documentTitle":"query_repository.rs","content":"from query_conversation and query_turn joined to query_execution"},"isError":false}"#
+                "query_repository.rs: from query_conversation and query_turn joined to query_execution"
                     .to_string(),
-                r#"{"structuredContent":{"documentTitle":"audit_repository.rs","content":"append_audit_event filters by action_kind and writes iam.bootstrap.claim"},"isError":false}"#
+                "audit_repository.rs: append_audit_event filters by action_kind and writes iam.bootstrap.claim"
                     .to_string(),
             ],
             document_references: Vec::new(),
@@ -234,21 +246,20 @@ fn verify_answer_accepts_literals_grounded_by_runtime_corpus() {
 }
 
 #[test]
-fn verify_answer_rejects_source_uri_literals_without_source_excerpt_support() {
+fn verify_answer_rejects_source_metadata_literals_without_excerpt_support() {
     let verification = verify_answer_against_authoritative_evidence(AnswerVerificationRequest {
         question: "Which source was cited?",
-        answer: "Source: `https://example.test/docs/alpha`.",
+        answer: "Use `configSecret` from `https://example.test/docs/alpha`.",
         intent_profile: &QueryIntentProfile::default(),
         evidence: &empty_authoritative_evidence(),
         chunks: &[],
-        prompt_context: "",
         assistant_grounding: &AssistantGroundingEvidence {
             verification_corpus: Vec::new(),
             document_references: vec![
                 crate::services::query::assistant_grounding::AssistantGroundingDocumentReference {
                     document_id: Uuid::now_v7(),
                     revision_id: Some(Uuid::now_v7()),
-                    document_title: "Alpha Guide".to_string(),
+                    document_title: "configSecret".to_string(),
                     source_uri: Some("https://example.test/docs/alpha".to_string()),
                     source_access: None,
                     slice_start_offset: 0,
@@ -262,6 +273,13 @@ fn verify_answer_rejects_source_uri_literals_without_source_excerpt_support() {
 
     assert_eq!(verification.state, QueryVerificationState::InsufficientEvidence);
     assert!(verification.warnings.iter().any(|warning| warning.code == "unsupported_literal"));
+    assert!(verification.unsupported_literals.iter().any(|literal| literal == "configSecret"));
+    assert!(
+        verification
+            .unsupported_literals
+            .iter()
+            .any(|literal| literal == "https://example.test/docs/alpha")
+    );
 }
 
 #[test]
@@ -272,7 +290,6 @@ fn verify_answer_records_unsupported_literals_for_revision_guard() {
         intent_profile: &QueryIntentProfile::default(),
         evidence: &empty_authoritative_evidence(),
         chunks: &[runtime_chunk("Run democtl present --flag.")],
-        prompt_context: "Run democtl present --flag.",
         assistant_grounding: &AssistantGroundingEvidence::default(),
     });
 

@@ -3,6 +3,8 @@ import {
   buildGridFacets,
   gridFacetKey,
   gridFacetValue,
+  gridFilterChips,
+  gridPageCount,
   reduceGridState,
   resolveGridData,
   sortGridRows,
@@ -207,5 +209,145 @@ describe('sortValue', () => {
         (row) => row.id,
       ),
     ).toEqual(['chunk', 'vector'])
+  })
+})
+
+describe('sort fallbacks and ties', () => {
+  it('returns the declared order when there is no sort or the column is unknown', () => {
+    expect(sortGridRows(rows, columns, null, rowId)).toBe(rows)
+    expect(sortGridRows(rows, columns, { columnId: 'missing', direction: 'asc' }, rowId)).toBe(rows)
+  })
+
+  it('orders two NULL cells by row id and equal row ids by their declared position', () => {
+    const nulls: Row[] = [
+      { id: 'b', name: 'Beta copy', amount: null, active: true },
+      { id: 'a', name: 'Alpha copy', amount: null, active: true },
+    ]
+    expect(
+      sortGridRows(nulls, columns, { columnId: 'amount', direction: 'desc' }, rowId).map(rowId),
+    ).toEqual(['a', 'b'])
+
+    const twins: Row[] = [
+      { id: 'same', name: 'First', amount: null, active: true },
+      { id: 'same', name: 'Second', amount: null, active: true },
+    ]
+    expect(
+      sortGridRows(twins, columns, { columnId: 'amount', direction: 'asc' }, rowId).map(
+        (row) => row.name,
+      ),
+    ).toEqual(['First', 'Second'])
+  })
+
+  it('orders facet values that compare equal by their typed key', () => {
+    type TypedRow = { id: string; value: GridValue }
+    const typed: TypedRow[] = [
+      { id: 'string', value: '2' },
+      { id: 'number', value: 2 },
+    ]
+    const column: GridColumn<TypedRow> = { id: 'typed', label: 'Typed', value: (row) => row.value }
+    // `String(2)` and `'2'` compare equal, so only the type prefix separates them.
+    expect(
+      buildGridFacets(typed, [column], createGridState()).typed?.map((option) => option.key),
+    ).toEqual([gridFacetKey(2), gridFacetKey('2')])
+  })
+
+  it('reports one page for an empty set and never divides by a zero page size', () => {
+    expect(gridPageCount(0, 10)).toBe(1)
+    expect(gridPageCount(5, 0)).toBe(1)
+    expect(gridPageCount(11, 5)).toBe(3)
+  })
+
+  it('indexes a custom searchText instead of the displayed text', () => {
+    const aliased: GridColumn<Row>[] = [
+      {
+        id: 'name',
+        label: 'Name',
+        value: (row) => row.name,
+        searchText: (row) => (row.name === 'Beta' ? 'second letter' : ''),
+      },
+    ]
+    expect(
+      resolveGridData(rows, aliased, createGridState({ search: 'second letter' }), rowId).rows.map(
+        rowId,
+      ),
+    ).toEqual(['b'])
+    expect(resolveGridData(rows, aliased, createGridState({ search: 'Beta' }), rowId).total).toBe(0)
+  })
+})
+
+describe('filter chips', () => {
+  it('reads the label the facet menu offered, including a translated display text', () => {
+    const state = createGridState({ filters: { active: [gridFacetKey(true)] } })
+    const facets = buildGridFacets(rows, columns, state)
+    expect(gridFilterChips(columns, state, facets)).toEqual([
+      {
+        columnId: 'active',
+        columnLabel: 'Status',
+        key: gridFacetKey(true),
+        value: true,
+        label: 'Enabled',
+      },
+    ])
+  })
+
+  it('falls back to the raw value when the facet list no longer carries the selection', () => {
+    const state = createGridState({
+      filters: { amount: [gridFacetKey(2), gridFacetKey(null)], active: [gridFacetKey(false)] },
+    })
+    expect(gridFilterChips(columns, state, {}).map((chip) => chip.label)).toEqual([
+      '2',
+      '',
+      'false',
+    ])
+  })
+
+  it('prints a selected zero-count NULL bucket without inventing a label', () => {
+    const facets = buildGridFacets(
+      rows.filter((row) => row.amount !== null),
+      columns,
+      createGridState({ filters: { amount: [gridFacetKey(null), gridFacetKey(2)] } }),
+    )
+    expect(facets.amount).toEqual(
+      expect.arrayContaining([expect.objectContaining({ value: null, count: 0, label: '' })]),
+    )
+  })
+})
+
+describe('clearing grid state', () => {
+  it('clears the sort only for the sorted column and returns the same state otherwise', () => {
+    const sorted = createGridState({ page: 4, sort: { columnId: 'amount', direction: 'desc' } })
+    expect(reduceGridState(sorted, { type: 'clearSort', columnId: 'amount' })).toEqual({
+      ...sorted,
+      sort: null,
+      page: 1,
+    })
+    expect(reduceGridState(sorted, { type: 'clearSort', columnId: 'name' })).toBe(sorted)
+  })
+
+  it('clears one column filter and tolerates a column that has none', () => {
+    const state = createGridState({
+      page: 3,
+      filters: { amount: [gridFacetKey(2)], active: [gridFacetKey(true)] },
+    })
+    expect(reduceGridState(state, { type: 'clearColumnFilter', columnId: 'amount' })).toEqual({
+      ...state,
+      filters: { active: [gridFacetKey(true)] },
+      page: 1,
+    })
+    expect(reduceGridState(state, { type: 'clearColumnFilter', columnId: 'name' })).toBe(state)
+  })
+
+  it('clears every filter at once', () => {
+    const state = createGridState({ page: 3, filters: { amount: [gridFacetKey(2)] } })
+    expect(reduceGridState(state, { type: 'clearFilters' })).toEqual({
+      ...state,
+      filters: {},
+      page: 1,
+    })
+  })
+
+  it('clamps a requested page to the first page', () => {
+    expect(reduceGridState(createGridState({ page: 3 }), { type: 'page', page: 0 }).page).toBe(1)
+    expect(reduceGridState(createGridState(), { type: 'page', page: 5 }).page).toBe(5)
   })
 })

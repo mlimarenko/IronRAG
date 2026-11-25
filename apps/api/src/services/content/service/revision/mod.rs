@@ -58,7 +58,6 @@ use crate::{
             PrepareStructuredRevisionCommand, StructuredPreparationService,
         },
         ingest::technical_facts::ExtractTechnicalFactsCommand,
-        ops::billing::CaptureGraphExtractionBillingCommand,
         query::vector_dimensions::invalidate_library_embedding_profile_inventory,
     },
     shared::extraction::file_extract::{
@@ -95,6 +94,7 @@ mod preparation;
 mod source;
 mod source_guard;
 
+pub use extraction::{NativeRecognitionTarget, RuntimeExtractionUpload};
 pub(crate) use preparation::preparation_fence_text;
 pub(crate) use source::InlineFileSourceInput;
 pub(crate) use source_guard::PersistedRevisionSourceGuard;

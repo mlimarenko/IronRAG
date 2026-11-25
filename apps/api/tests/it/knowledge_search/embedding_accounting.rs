@@ -2,6 +2,7 @@ use super::*;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use ironrag_backend::{
+    domains::billing::CostCoverageStatus,
     infra::repositories::billing_repository,
     integrations::llm::{
         ChatRequest, ChatResponse, EmbeddingBatchRequest, EmbeddingBatchResponse, VisionRequest,
@@ -23,10 +24,80 @@ enum Outcome {
     Blocked,
 }
 
+/// One mock admission the real transport would perform for a mocked gateway.
+struct MockSendAdmission<'a> {
+    workspace_id: Uuid,
+    library_id: Uuid,
+    owning_execution_kind: &'a str,
+    owning_execution_id: Uuid,
+    call_kind: &'a str,
+    binding_id: Uuid,
+    provider_catalog_id: Uuid,
+    model_catalog_id: Uuid,
+    model_name: &'a str,
+}
+
+/// Simulates the admission the real transport performs, so a mocked gateway can
+/// participate in the same send scope a product send would use.
+async fn admit_mock_send(pool: &PgPool, send: MockSendAdmission<'_>) -> Result<Uuid> {
+    let MockSendAdmission {
+        workspace_id,
+        library_id,
+        owning_execution_kind,
+        owning_execution_id,
+        call_kind,
+        binding_id,
+        provider_catalog_id,
+        model_catalog_id,
+        model_name,
+    } = send;
+    // Mirror the admission claim: the first send of a scope reuses the
+    // reservation's logical id, a later send in the same scope owns a new row.
+    let provider_call_id = if ironrag_backend::shared::provider_send::current_send_id().is_some() {
+        Uuid::now_v7()
+    } else {
+        ironrag_backend::shared::provider_send::current_send_scope()
+            .map(|scope| scope.logical_id())
+            .unwrap_or_else(Uuid::now_v7)
+    };
+    let attribution = ironrag_backend::shared::provider_send::ProviderSendAttribution {
+        workspace_id,
+        library_id,
+        owning_execution_kind: owning_execution_kind.to_string(),
+        owning_execution_id,
+        call_kind: call_kind.to_string(),
+        binding_id: Some(binding_id),
+        provider_catalog_id,
+        model_catalog_id,
+        runtime_execution_id: None,
+        runtime_task_kind: None,
+    };
+    let body = serde_json::json!({"model": model_name});
+    ironrag_backend::infra::repositories::billing_repository::admit_provider_send(
+        pool,
+        ironrag_backend::infra::repositories::billing_repository::ProviderSendRequest {
+            required_scope: None,
+            caller: &ironrag_backend::shared::provider_http::DispatchCaller::Unattributed,
+            model: model_name,
+            endpoint: "https://provider.example/v1/embeddings",
+            body: &body,
+            attribution: &attribution,
+            provider_call_id,
+        },
+    )
+    .await
+    .map_err(|error| anyhow::anyhow!("mock admission failed: {error:?}"))?;
+    ironrag_backend::shared::provider_send::publish_test_send_row(provider_call_id);
+    Ok(provider_call_id)
+}
+
 struct RecordingEmbeddingGateway {
     pool: PgPool,
     workspace_id: Uuid,
     library_id: Uuid,
+    binding_id: Uuid,
+    provider_catalog_id: Uuid,
+    model_catalog_id: Uuid,
     outcome: Outcome,
     attempts: AtomicUsize,
     dispatches: AtomicUsize,
@@ -50,6 +121,28 @@ impl LlmGateway for RecordingEmbeddingGateway {
 
     async fn embed(&self, request: EmbeddingRequest) -> Result<EmbeddingResponse> {
         self.attempts.fetch_add(1, Ordering::SeqCst);
+        let search_id: Uuid = sqlx::query_scalar(
+            "select id from billing_knowledge_search where workspace_id=$1 and library_id=$2 order by id desc limit 1",
+        )
+        .bind(self.workspace_id)
+        .bind(self.library_id)
+        .fetch_one(&self.pool)
+        .await?;
+        admit_mock_send(
+            &self.pool,
+            MockSendAdmission {
+                workspace_id: self.workspace_id,
+                library_id: self.library_id,
+                owning_execution_kind: "knowledge_search",
+                owning_execution_id: search_id,
+                call_kind: "knowledge_search_embedding",
+                binding_id: self.binding_id,
+                provider_catalog_id: self.provider_catalog_id,
+                model_catalog_id: self.model_catalog_id,
+                model_name: &request.model_name,
+            },
+        )
+        .await?;
         // Observe admission independently at the real HTTP provider I/O boundary.
         let reserved: i64 = sqlx::query_scalar(
             "select count(*) from billing_provider_call c
@@ -166,6 +259,9 @@ async fn configure_accounting(
         pool: fixture.state.persistence.postgres.clone(),
         workspace_id: fixture.workspace_id,
         library_id: fixture.library_id,
+        binding_id: binding.binding_id,
+        provider_catalog_id: binding.provider_catalog_id,
+        model_catalog_id: binding.model_catalog_id,
         outcome,
         attempts: AtomicUsize::new(0),
         dispatches: AtomicUsize::new(0),
@@ -181,6 +277,18 @@ async fn assert_receipt(
     call_state: &str,
     input_tokens: Option<i64>,
 ) -> Result<()> {
+    let (call_id, owner_id) = assert_single_receipt_owner(fixture, call_state).await?;
+    let unpriced =
+        assert_receipt_usage(fixture, call_id, owner_id, call_state, input_tokens).await?;
+    assert_receipt_cost_rollup(fixture, owner_id, call_state, unpriced, input_tokens).await
+}
+
+/// The durable call row a settled knowledge search must own: exactly one provider
+/// call and one knowledge-search owner, in the expected state.
+async fn assert_single_receipt_owner(
+    fixture: &KnowledgeSearchHttpFixture,
+    call_state: &str,
+) -> Result<(Uuid, Uuid)> {
     let pool = &fixture.state.persistence.postgres;
     let calls: i64 =
         sqlx::query_scalar("select count(*) from billing_provider_call").fetch_one(pool).await?;
@@ -195,6 +303,18 @@ async fn assert_receipt(
     .fetch_one(pool)
     .await?;
     assert_eq!(actual_state, call_state);
+    Ok((call_id, owner_id))
+}
+
+/// The priced usage rows of that call, returning the unpriced-call count.
+async fn assert_receipt_usage(
+    fixture: &KnowledgeSearchHttpFixture,
+    call_id: Uuid,
+    owner_id: Uuid,
+    call_state: &str,
+    input_tokens: Option<i64>,
+) -> Result<i64> {
+    let pool = &fixture.state.persistence.postgres;
     let usage: Vec<(String, Decimal, Decimal)> = sqlx::query_as(
         "select u.usage_kind::text, u.quantity, c.total_price from billing_usage u
          join billing_charge c on c.usage_id=u.id where u.provider_call_id=$1",
@@ -219,6 +339,17 @@ async fn assert_receipt(
     )
     .await?;
     assert_eq!(unpriced, i64::from(input_tokens.is_none() || call_state != "completed"));
+    Ok(unpriced)
+}
+
+/// The derived cost rollup must count only a settled observation.
+async fn assert_receipt_cost_rollup(
+    fixture: &KnowledgeSearchHttpFixture,
+    owner_id: Uuid,
+    call_state: &str,
+    unpriced: i64,
+    input_tokens: Option<i64>,
+) -> Result<()> {
     let cost = fixture
         .state
         .application_services
@@ -226,8 +357,24 @@ async fn assert_receipt(
         .roll_up_execution_cost(&fixture.state, "knowledge_search", owner_id)
         .await?
         .context("knowledge search cost")?;
-    assert_eq!(cost.provider_call_count, 1);
+    // The derived rollup counts settled observations, and only the `completed`
+    // state is one. A `failed` or `canceled` reservation keeps its durable ledger
+    // row and its unknown liability in `unpriced_provider_call_count`; it must be
+    // neither counted as a settled call nor removed from the count.
+    let settled = i64::from(call_state == "completed");
+    assert_eq!(
+        i64::from(cost.provider_call_count),
+        settled,
+        "a {call_state} attempt is not a settled provider call",
+    );
     assert_eq!(i64::from(cost.unpriced_provider_call_count), unpriced);
+    if settled == 0 {
+        assert_eq!(
+            cost.cost_coverage,
+            CostCoverageStatus::Unknown,
+            "an unsettled attempt is unknown liability, never a measured zero",
+        );
+    }
     assert_eq!(
         cost.total_cost,
         input_tokens
@@ -307,6 +454,276 @@ async fn knowledge_search_embedding_dimension_rejection_retains_paid_usage() -> 
 #[ignore = "requires local postgres and redis services"]
 async fn knowledge_search_embedding_profile_rejection_retains_paid_usage() -> Result<()> {
     check_http_outcome(Outcome::ChangedProfile, StatusCode::CONFLICT, Some(17)).await
+}
+
+struct IngestBatchGateway {
+    pool: PgPool,
+    workspace_id: Uuid,
+    library_id: Uuid,
+    attempt_id: Uuid,
+    binding_id: Uuid,
+    provider_catalog_id: Uuid,
+    model_catalog_id: Uuid,
+    calls: std::sync::Mutex<Vec<Uuid>>,
+    fail_second: bool,
+    dimensions: usize,
+}
+
+#[async_trait]
+impl LlmGateway for IngestBatchGateway {
+    async fn generate(&self, _: ChatRequest) -> Result<ChatResponse> {
+        anyhow::bail!("unexpected chat call")
+    }
+
+    async fn embed(&self, _: EmbeddingRequest) -> Result<EmbeddingResponse> {
+        anyhow::bail!("unexpected single embedding")
+    }
+
+    async fn vision_extract(&self, _: VisionRequest) -> Result<VisionResponse> {
+        anyhow::bail!("unexpected vision call")
+    }
+
+    async fn embed_many(&self, request: EmbeddingBatchRequest) -> Result<EmbeddingBatchResponse> {
+        admit_mock_send(
+            &self.pool,
+            MockSendAdmission {
+                workspace_id: self.workspace_id,
+                library_id: self.library_id,
+                owning_execution_kind: "ingest_attempt",
+                owning_execution_id: self.attempt_id,
+                call_kind: "embed_chunk",
+                binding_id: self.binding_id,
+                provider_catalog_id: self.provider_catalog_id,
+                model_catalog_id: self.model_catalog_id,
+                model_name: &request.model_name,
+            },
+        )
+        .await?;
+        let id = Uuid::parse_str(
+            &ironrag_backend::observability::current_provider_call_id()
+                .context("batch must carry its reserved provider-call ID")?,
+        )?;
+        let started: bool = sqlx::query_scalar(
+            "select exists(select 1 from billing_provider_call
+             where id=$1 and workspace_id=$2 and library_id=$3
+             and owning_execution_kind='ingest_attempt' and owning_execution_id=$4
+             and call_kind='embed_chunk' and call_state='started')",
+        )
+        .bind(id)
+        .bind(self.workspace_id)
+        .bind(self.library_id)
+        .bind(self.attempt_id)
+        .fetch_one(&self.pool)
+        .await?;
+        assert!(started, "the exact batch reservation must precede provider dispatch");
+        let previous = self.calls.lock().unwrap().last().copied();
+        if let Some(previous) = previous {
+            let completed: bool = sqlx::query_scalar(
+                "select exists(select 1 from billing_provider_call
+                 where id=$1 and call_state='completed')",
+            )
+            .bind(previous)
+            .fetch_one(&self.pool)
+            .await?;
+            assert!(completed, "the dimension-learning batch must settle before the next batch");
+            let tokens: i64 = sqlx::query_scalar(
+                "select quantity::bigint from billing_usage
+                 where provider_call_id=$1 and usage_kind='prompt_tokens'",
+            )
+            .bind(previous)
+            .fetch_one(&self.pool)
+            .await?;
+            assert_eq!(tokens, 17);
+        }
+        let ordinal = {
+            let mut calls = self.calls.lock().unwrap();
+            calls.push(id);
+            calls.len()
+        };
+        if self.fail_second && ordinal == 2 {
+            return Err(ironrag_backend::integrations::retry::ProviderCallError::protocol(
+                "synthetic batch failure",
+            )
+            .into());
+        }
+        let tokens = if ordinal == 1 { 17 } else { 29 };
+        Ok(EmbeddingBatchResponse {
+            provider_kind: request.provider_kind.clone(),
+            model_name: request.model_name.clone(),
+            dimensions: self.dimensions,
+            embeddings: vec![vec![0.5; self.dimensions]; request.inputs.len()],
+            usage_json: json!({"prompt_tokens": tokens, "total_tokens": tokens}),
+        })
+    }
+}
+
+async fn prepare_ingest_batch_fixture(
+    fixture: &mut KnowledgeSearchHttpFixture,
+    fail_second: bool,
+) -> Result<(SearchSeedIds, Uuid, i64, Arc<IngestBatchGateway>)> {
+    let ids = SearchSeedIds::new();
+    seed_search_document_chunk(
+        &fixture.state,
+        fixture.workspace_id,
+        fixture.library_id,
+        &ids,
+        Utc::now(),
+    )
+    .await?;
+    let template = fixture
+        .state
+        .document_store
+        .list_chunks_by_revision(ids.revision_id)
+        .await?
+        .into_iter()
+        .next()
+        .context("seed chunk")?;
+    for index in 1..17 {
+        let mut chunk = template.clone();
+        chunk.chunk_id = Uuid::now_v7();
+        chunk.chunk_index = index;
+        chunk.content_text = format!("batch evidence {index}");
+        chunk.normalized_text = chunk.content_text.clone();
+        fixture.state.document_store.upsert_chunk(&chunk).await?;
+    }
+    let job_id = Uuid::now_v7();
+    let attempt_id = Uuid::now_v7();
+    sqlx::query(
+        "insert into ingest_job
+         (id, workspace_id, library_id, knowledge_revision_id, job_kind, queue_state,
+          queue_leased_at, queue_lease_token, queue_lease_owner)
+         values ($1,$2,$3,$4,'content_mutation','leased',now(),$5,'batch-test')",
+    )
+    .bind(job_id)
+    .bind(fixture.workspace_id)
+    .bind(fixture.library_id)
+    .bind(ids.revision_id)
+    .bind(format!("batch-lease-{job_id}"))
+    .execute(&fixture.state.persistence.postgres)
+    .await?;
+    sqlx::query(
+        "insert into ingest_attempt (id,job_id,attempt_number,attempt_state,lease_token,heartbeat_at)
+         values ($1,$2,1,'leased',$3,now())",
+    ).bind(attempt_id).bind(job_id).bind(format!("batch-attempt-{attempt_id}"))
+    .execute(&fixture.state.persistence.postgres).await?;
+    let source_version = repositories::get_library_source_truth_version(
+        &fixture.state.persistence.postgres,
+        fixture.library_id,
+    )
+    .await?;
+    fixture.state.settings.ingestion_embedding_parallelism = 1;
+    let binding = fixture
+        .state
+        .application_services
+        .ai_catalog
+        .resolve_active_runtime_binding(
+            &fixture.state,
+            fixture.library_id,
+            AiBindingPurpose::EmbedChunk,
+        )
+        .await?
+        .context("fixture embedding binding")?;
+    let dimensions = usize::try_from(
+        binding.effective_embedding_dimensions.context("fixture embedding dimension")?.get(),
+    )?;
+    let gateway = Arc::new(IngestBatchGateway {
+        pool: fixture.state.persistence.postgres.clone(),
+        workspace_id: fixture.workspace_id,
+        library_id: fixture.library_id,
+        attempt_id,
+        binding_id: binding.binding_id,
+        provider_catalog_id: binding.provider_catalog_id,
+        model_catalog_id: binding.model_catalog_id,
+        calls: std::sync::Mutex::new(Vec::new()),
+        fail_second,
+        dimensions,
+    });
+    fixture.state.llm_gateway = gateway.clone();
+    Ok((ids, attempt_id, source_version, gateway))
+}
+
+async fn run_ingest_batch_case(fail_second: bool, refuse_reservation: bool) -> Result<()> {
+    use ironrag_backend::services::query::search::EmbedRevisionChunksInput;
+    use tokio_util::sync::CancellationToken;
+
+    let mut fixture = Box::pin(KnowledgeSearchHttpFixture::create_with_sources(false)).await?;
+    let result = async {
+        let (ids, attempt_id, source_version, gateway) =
+            prepare_ingest_batch_fixture(&mut fixture, fail_second).await?;
+        let submitted_attempt = if refuse_reservation { Uuid::now_v7() } else { attempt_id };
+        let cancellation = CancellationToken::new();
+        let result = fixture.state.application_services.search.embed_chunks_for_revision(
+            EmbedRevisionChunksInput {
+                state: &fixture.state,
+                library_id: fixture.library_id,
+                revision_id: ids.revision_id,
+                attempt_id: submitted_attempt,
+                vector_write_source_truth_version: source_version,
+                cancellation_token: &cancellation,
+            },
+        ).await;
+        let calls = gateway.calls.lock().unwrap().clone();
+        if refuse_reservation {
+            let error = result.expect_err("an unknown attempt must not reserve");
+            assert_eq!(error.kind(), "QueryServiceError::NotFound");
+            assert!(error.to_string().contains("ingest_attempt"));
+            assert!(calls.is_empty(), "reservation refusal must precede every dispatch");
+            let rows: i64 = sqlx::query_scalar(
+                "select count(*) from billing_provider_call where owning_execution_id=$1",
+            )
+            .bind(submitted_attempt)
+            .fetch_one(&fixture.state.persistence.postgres)
+            .await?;
+            assert_eq!(rows, 0);
+            return Ok(());
+        }
+        assert_eq!(calls.len(), 2, "dimension learning and remainder require distinct calls");
+        assert_ne!(calls[0], calls[1]);
+        let rows: Vec<(Uuid, String)> = sqlx::query_as(
+            "select id, call_state::text from billing_provider_call
+             where owning_execution_kind='ingest_attempt' and owning_execution_id=$1",
+        ).bind(attempt_id).fetch_all(&fixture.state.persistence.postgres).await?;
+        assert!(rows.contains(&(calls[0], "completed".to_string())));
+        let tokens: i64 = sqlx::query_scalar(
+            "select quantity::bigint from billing_usage where provider_call_id=$1 and usage_kind='prompt_tokens'",
+        ).bind(calls[0]).fetch_one(&fixture.state.persistence.postgres).await?;
+        assert_eq!(tokens, 17);
+        if fail_second {
+            let error = result.expect_err("the second batch fails");
+            assert_eq!(error.provider_call_id(), Some(calls[1]));
+            assert!(error.provider_failure().is_some());
+            assert!(rows.contains(&(calls[1], "failed".to_string())));
+        } else {
+            let outcome = result.expect("both batches complete before success");
+            assert_eq!(outcome.chunks_embedded, 17);
+            assert!(rows.contains(&(calls[1], "completed".to_string())));
+            let tokens: i64 = sqlx::query_scalar(
+                "select quantity::bigint from billing_usage where provider_call_id=$1 and usage_kind='prompt_tokens'",
+            ).bind(calls[1]).fetch_one(&fixture.state.persistence.postgres).await?;
+            assert_eq!(tokens, 29);
+        }
+        Ok(())
+    }.await;
+    fixture.cleanup().await?;
+    result
+}
+
+#[tokio::test]
+#[ignore = "requires local postgres with vector extensions and redis"]
+async fn ingest_batch_accounting_reserves_and_settles_each_real_batch() -> Result<()> {
+    Box::pin(run_ingest_batch_case(false, false)).await
+}
+
+#[tokio::test]
+#[ignore = "requires local postgres with vector extensions and redis"]
+async fn ingest_batch_accounting_preserves_prior_receipt_and_failed_identity() -> Result<()> {
+    Box::pin(run_ingest_batch_case(true, false)).await
+}
+
+#[tokio::test]
+#[ignore = "requires local postgres with vector extensions and redis"]
+async fn ingest_batch_accounting_reservation_refusal_never_dispatches() -> Result<()> {
+    Box::pin(run_ingest_batch_case(false, true)).await
 }
 
 #[tokio::test]

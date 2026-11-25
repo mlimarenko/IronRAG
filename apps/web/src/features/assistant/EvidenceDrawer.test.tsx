@@ -2,7 +2,7 @@ import { render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import i18n from 'i18next'
 import { MemoryRouter, useLocation } from 'react-router-dom'
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import type { AssistantEvidenceView } from './model/assistantAdapter'
 import { EvidenceDrawer } from './EvidenceDrawer'
@@ -46,13 +46,17 @@ function CurrentLocation() {
   )
 }
 
-function renderDrawer(evidence: AssistantEvidenceView) {
-  return render(
+function drawerTree(evidence: AssistantEvidenceView) {
+  return (
     <MemoryRouter>
       <EvidenceDrawer evidence={evidence} open onOpenChange={vi.fn()} />
       <CurrentLocation />
-    </MemoryRouter>,
+    </MemoryRouter>
   )
+}
+
+function renderDrawer(evidence: AssistantEvidenceView) {
+  return render(drawerTree(evidence))
 }
 
 function semanticReport(): SemanticVerificationReport {
@@ -114,6 +118,8 @@ function semanticReport(): SemanticVerificationReport {
 }
 
 describe('EvidenceDrawer', () => {
+  afterEach(() => vi.restoreAllMocks())
+
   beforeEach(async () => {
     await i18n.changeLanguage('ru')
     i18n.addResource(
@@ -271,6 +277,89 @@ describe('EvidenceDrawer', () => {
       ),
     ).toBeInTheDocument()
     expect(screen.getByLabelText('Точный проверенный текст')).toHaveTextContent('Available to all.')
+  })
+
+  it('keeps exact evidence readable without adding non-interactive tab stops', async () => {
+    const report = semanticReport()
+    if (report.outcome.status !== 'completed') throw new Error('Expected completed fixture')
+    report.outcome.assessment.missingCaveats.push({
+      description: 'A second essential caveat.',
+      evidence: report.outcome.assessment.missingCaveats[0]!.evidence,
+    })
+
+    const { baseElement } = renderDrawer({ ...emptyEvidence, semanticVerification: report })
+    expect(await screen.findByText('Пропущены существенные оговорки')).toBeInTheDocument()
+
+    const exactTexts = Array.from(baseElement.querySelectorAll('.semantic-exact-text'))
+    expect(exactTexts).toHaveLength(6)
+    for (const element of exactTexts) {
+      expect(element.hasAttribute('tabindex')).toBe(false)
+    }
+    expect(screen.getAllByLabelText('Точная цитата источника').length).toBeGreaterThan(0)
+    expect(screen.getByLabelText('Точный проверенный текст')).toBeInTheDocument()
+  })
+
+  it('keeps repeated caveat descriptions bound to their own evidence across a reorder', async () => {
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const report = semanticReport()
+    if (report.outcome.status !== 'completed') throw new Error('Expected completed fixture')
+    report.sources.push({
+      sourceId: 'source-2',
+      documentId: 'document-2',
+      documentRevisionId: 'revision-2',
+      locator: { kind: 'chunk', chunk_id: 'chunk-2' },
+      scope: 'selected_excerpt',
+      textSha256: 'e'.repeat(64),
+      text: 'Billing is disabled for trial accounts.',
+    })
+    const administratorCaveat = report.outcome.assessment.missingCaveats[0]!
+    const billingQuote = 'Billing is disabled for trial accounts.'
+    const billingCaveat = {
+      description: administratorCaveat.description,
+      evidence: [{ sourceId: 'source-2', span: { start: 0, end: 39 }, quote: billingQuote }],
+    }
+    report.outcome.assessment.missingCaveats = [administratorCaveat, billingCaveat]
+
+    const { baseElement, rerender } = renderDrawer({
+      ...emptyEvidence,
+      semanticVerification: report,
+    })
+    expect(await screen.findAllByText(administratorCaveat.description)).toHaveLength(2)
+
+    const caveats = () => Array.from(baseElement.querySelectorAll('.semantic-caveats article'))
+    expect(caveats()).toHaveLength(2)
+    expect(caveats()[0]).toHaveTextContent('Only administrators can enable it.')
+    expect(caveats()[1]).toHaveTextContent(billingQuote)
+    const billingArticle = caveats()[1]!
+
+    report.outcome.assessment.missingCaveats = [billingCaveat, administratorCaveat]
+    rerender(drawerTree({ ...emptyEvidence, semanticVerification: report }))
+
+    expect(caveats()[0]).toBe(billingArticle)
+    expect(caveats()[0]).toHaveTextContent(billingQuote)
+    expect(caveats()[0]).not.toHaveTextContent('Only administrators can enable it.')
+    expect(caveats()[1]).toHaveTextContent('Only administrators can enable it.')
+
+    expect(consoleError.mock.calls.flat().join(' ')).not.toContain('same key')
+  })
+
+  it('renders fully identical caveats as separate entries', async () => {
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const report = semanticReport()
+    if (report.outcome.status !== 'completed') throw new Error('Expected completed fixture')
+    const caveat = report.outcome.assessment.missingCaveats[0]!
+    report.outcome.assessment.missingCaveats = [caveat, structuredClone(caveat)]
+
+    const { baseElement } = renderDrawer({ ...emptyEvidence, semanticVerification: report })
+
+    expect(await screen.findAllByText(caveat.description)).toHaveLength(2)
+    const articles = Array.from(baseElement.querySelectorAll('.semantic-caveats article'))
+    expect(articles).toHaveLength(2)
+    for (const article of articles) {
+      expect(article).toHaveTextContent('Only administrators can enable it.')
+    }
+
+    expect(consoleError.mock.calls.flat().join(' ')).not.toContain('same key')
   })
 
   it('localizes the assessment in English and does not fabricate a link for an unresolved source', async () => {

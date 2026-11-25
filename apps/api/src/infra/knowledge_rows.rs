@@ -118,6 +118,17 @@ pub struct KnowledgeChunkSupportReferenceRow {
     pub support_block_ids: Vec<Uuid>,
 }
 
+/// Text-free identity of one chunk used to select bounded references before
+/// reading any chunk bodies.
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct KnowledgeChunkReferenceMetadataRow {
+    pub chunk_id: Uuid,
+    pub document_id: Uuid,
+    pub revision_id: Uuid,
+    pub section_path: Vec<String>,
+    pub heading_trail: Vec<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct KnowledgeChunkRow {
     pub chunk_id: Uuid,

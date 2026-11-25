@@ -89,6 +89,10 @@ pub(super) fn apply_agent_tool_argument_defaults_with_context(
     apply_agent_tool_library_defaults(tool_name, object, context.library_ref);
     let bounded_top_k = context.grounded_top_k.max(1);
     if tool_name == GROUNDED_ANSWER_TOOL_NAME {
+        object.insert(
+            "sequenceAttempt".to_string(),
+            serde_json::json!(u8::from(runtime_repair.is_some())),
+        );
         apply_grounded_answer_argument_defaults(
             object,
             context.user_question,

@@ -31,6 +31,7 @@ pub mod repair;
 pub mod retention;
 pub mod scheduler;
 pub mod service_identity_schema;
+pub mod text_publication_schema;
 pub mod user_preference_schema;
 pub mod vector_lifecycle_inventory;
 pub mod vector_lifecycle_metrics;

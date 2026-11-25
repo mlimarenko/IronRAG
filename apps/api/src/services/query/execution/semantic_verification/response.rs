@@ -1,18 +1,18 @@
 use std::collections::HashSet;
 
 use ironrag_contracts::assistant::semantic_verification::{
-    SEMANTIC_VERIFICATION_PROTOCOL_VERSION, SemanticAssessment, SemanticByteSpan,
-    SemanticClaimSupport, SemanticCompleteness, SemanticEvidenceLink, SemanticEvidenceScope,
-    SemanticFailureCode, SemanticMissingCaveat, SemanticResponseClassification,
-    SemanticUnitVerdict, SemanticVerificationOutcome, SemanticVerificationReport,
+    SEMANTIC_VERIFICATION_PROTOCOL_VERSION, SemanticAssessment, SemanticClaimSupport,
+    SemanticCompleteness, SemanticEvidenceLink, SemanticEvidenceScope, SemanticFailureCode,
+    SemanticMissingCaveat, SemanticResponseClassification, SemanticUnitVerdict,
+    SemanticVerificationOutcome, SemanticVerificationReport,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
 use uuid::Uuid;
 
 use super::{
-    MAX_ANSWER_UNITS, MAX_CAVEAT_UTF8_BYTES, MAX_EVIDENCE_UTF8_BYTES, MAX_LINKS_PER_UNIT,
-    MAX_MISSING_CAVEATS, MAX_OUTPUT_TOKENS, MAX_OUTPUT_UTF8_BYTES, PreparedSemanticVerification,
+    MAX_CAVEAT_UTF8_BYTES, MAX_EVIDENCE_UTF8_BYTES, MAX_LINKS_PER_UNIT, MAX_MISSING_CAVEATS,
+    MAX_OUTPUT_TOKENS, MAX_OUTPUT_UTF8_BYTES, PreparedSemanticVerification,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -42,12 +42,12 @@ pub(crate) enum SemanticValidationError {
     IdentityMismatch,
     #[error("unit coverage is missing, duplicated or unknown")]
     InvalidUnitCoverage,
-    #[error("a quote refers to an unknown source")]
-    UnknownSource,
-    #[error("a quote is empty or does not occur exactly in the selected source")]
-    InvalidQuote,
-    #[error("a quote occurs more than once in the selected source")]
-    AmbiguousQuote,
+    #[error("an evidence passage refers to an unknown handle")]
+    UnknownPassage,
+    #[error("an evidence link does not match exact source bytes")]
+    InvalidEvidenceLink,
+    #[error("the same evidence span is repeated within one assessment")]
+    DuplicateEvidence,
     #[error("a support or completeness assessment lacks required source links")]
     MissingEvidence,
     #[error("supported document absence requires proven complete-document scope")]
@@ -99,40 +99,40 @@ struct ProviderMissingCaveat {
     evidence: Vec<ProviderEvidenceLink>,
 }
 
-/// Only an opaque reference and literal text cross the provider boundary.
-/// Authoritative identities and byte positions are resolved by the server.
+/// Only an opaque passage handle crosses the provider boundary. Authoritative
+/// identities, exact quotes and byte positions are resolved by the server.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct ProviderEvidenceLink {
-    source_id: String,
-    quote: String,
+    passage_id: String,
 }
 
 /// Strict schema for the existing structured gateway. Parsing also enforces
 /// semantic cross-field invariants and provenance that JSON Schema cannot prove.
-pub(crate) fn response_json_schema() -> Value {
+pub(crate) fn response_json_schema(prepared: &PreparedSemanticVerification) -> Value {
+    let unit_ids: Vec<_> = prepared.units().iter().map(|unit| &unit.unit_id).collect();
+    let passage_ids: Vec<_> = prepared.passages().iter().map(|passage| &passage.handle).collect();
     let link = json!({
         "type":"object", "additionalProperties":false,
         "properties":{
-            "sourceId":{"type":"string","minLength":1,"maxLength":66},
-            "quote":{"type":"string","minLength":1,"maxLength":MAX_EVIDENCE_UTF8_BYTES}
-        }, "required":["sourceId","quote"]
+            "passageId":{"type":"string","enum":passage_ids}
+        }, "required":["passageId"]
     });
-    let links = json!({"type":"array","maxItems":MAX_LINKS_PER_UNIT,"items":link});
+    let links = |minimum: usize| json!({"type":"array","minItems":minimum,"maxItems":MAX_LINKS_PER_UNIT,"items":link});
     json!({
         "type":"object", "additionalProperties":false,
         "properties":{
             "protocolVersion":{"type":"integer","enum":[SEMANTIC_VERIFICATION_PROTOCOL_VERSION]},
-            "questionSha256":{"type":"string","pattern":"^[0-9a-f]{64}$"},
-            "checkedAnswerSha256":{"type":"string","pattern":"^[0-9a-f]{64}$"},
-            "evidenceManifestSha256":{"type":"string","pattern":"^[0-9a-f]{64}$"},
-            "units":{"type":"array","minItems":1,"maxItems":MAX_ANSWER_UNITS,"items":{
+            "questionSha256":{"type":"string","enum":[prepared.question_sha256()]},
+            "checkedAnswerSha256":{"type":"string","enum":[prepared.answer_sha256()]},
+            "evidenceManifestSha256":{"type":"string","enum":[prepared.manifest_sha256()]},
+            "units":{"type":"array","minItems":prepared.units().len(),"maxItems":prepared.units().len(),"items":{
                 "type":"object","additionalProperties":false,
                 "properties":{
-                    "unitId":{"type":"string","minLength":1,"maxLength":66},
+                    "unitId":{"type":"string","enum":unit_ids},
                     "support":{"type":"string","enum":["supported","contradicted","insufficient_evidence","mixed","no_factual_claims"]},
                     "assertsDocumentAbsence":{"type":"boolean"},
-                    "evidence":links
+                    "evidence":links(0)
                 },"required":["unitId","support","assertsDocumentAbsence","evidence"]
             }},
             "completeness":{"type":"string","enum":["complete","missing_essential_caveats","undetermined"]},
@@ -140,7 +140,7 @@ pub(crate) fn response_json_schema() -> Value {
                 "type":"object","additionalProperties":false,
                 "properties":{
                     "description":{"type":"string","minLength":1,"maxLength":MAX_CAVEAT_UTF8_BYTES},
-                    "evidence":links
+                    "evidence":links(1)
                 },"required":["description","evidence"]
             }},
             "responseClassification":{"type":"string","enum":["factual_answer","correct_source_bounded_abstention","false_refusal","unresolved_refusal"]}
@@ -176,8 +176,40 @@ impl PreparedSemanticVerification {
             return Err(SemanticValidationError::IdentityMismatch);
         }
         let mut assessment = self.resolve_assessment(parsed)?;
+        // Return server order even when the model reordered its exhaustive list.
+        assessment.units.sort_by_key(|verdict| {
+            self.units.iter().position(|unit| unit.unit_id == verdict.unit_id)
+        });
+        self.validate_assessment(&mut assessment)?;
+        Ok(self.report(
+            SemanticVerificationOutcome::Completed { assessment },
+            elapsed_ms,
+            provider_call_id,
+        ))
+    }
+
+    /// One owner for every resolved assessment, whether it came from this
+    /// provider's handles or from an already server-resolved recorded report.
+    /// Links are checked against immutable source bytes; handles are never
+    /// required to match newly generated passage boundaries.
+    pub(crate) fn validate_assessment(
+        &self,
+        assessment: &mut SemanticAssessment,
+    ) -> Result<(), SemanticValidationError> {
+        if assessment.units.len() != self.units.len()
+            || assessment
+                .units
+                .iter()
+                .zip(&self.units)
+                .any(|(verdict, unit)| verdict.unit_id != unit.unit_id)
+        {
+            return Err(SemanticValidationError::InvalidUnitCoverage);
+        }
+        if assessment.claim_support != aggregate_support(&assessment.units) {
+            return Err(SemanticValidationError::IncoherentAssessment);
+        }
         self.validate_units(&assessment.units)?;
-        Self::validate_completeness(&assessment)?;
+        self.validate_completeness(assessment)?;
         if matches!(
             assessment.response_classification,
             SemanticResponseClassification::FalseRefusal
@@ -189,16 +221,8 @@ impl PreparedSemanticVerification {
             // an operational provenance failure.
             assessment.completeness = SemanticCompleteness::Undetermined;
         }
-        validate_classification(&assessment, assessment.claim_support)?;
-        // Return server order even when the model reordered its exhaustive list.
-        assessment.units.sort_by_key(|verdict| {
-            self.units.iter().position(|unit| unit.unit_id == verdict.unit_id)
-        });
-        Ok(self.report(
-            SemanticVerificationOutcome::Completed { assessment },
-            elapsed_ms,
-            provider_call_id,
-        ))
+        let claim_support = assessment.claim_support;
+        validate_classification(assessment, claim_support)
     }
 
     fn resolve_assessment(
@@ -262,6 +286,7 @@ impl PreparedSemanticVerification {
         &self,
         verdict: &SemanticUnitVerdict,
     ) -> Result<(), SemanticValidationError> {
+        self.validate_links(&verdict.evidence)?;
         match verdict.support {
             SemanticClaimSupport::Supported
             | SemanticClaimSupport::Contradicted
@@ -296,7 +321,10 @@ impl PreparedSemanticVerification {
         Ok(())
     }
 
-    fn validate_completeness(parsed: &SemanticAssessment) -> Result<(), SemanticValidationError> {
+    fn validate_completeness(
+        &self,
+        parsed: &SemanticAssessment,
+    ) -> Result<(), SemanticValidationError> {
         if (parsed.completeness == SemanticCompleteness::MissingEssentialCaveats)
             == parsed.missing_caveats.is_empty()
         {
@@ -312,6 +340,37 @@ impl PreparedSemanticVerification {
             if caveat.evidence.is_empty() {
                 return Err(SemanticValidationError::MissingEvidence);
             }
+            self.validate_links(&caveat.evidence)?;
+        }
+        Ok(())
+    }
+
+    /// Validate an already resolved link list against immutable source bytes.
+    /// This is the only evidence-exactness owner: provider handles resolve into
+    /// these links, and recorded reports arrive in this shape unchanged.
+    fn validate_links(
+        &self,
+        links: &[SemanticEvidenceLink],
+    ) -> Result<(), SemanticValidationError> {
+        if links.len() > MAX_LINKS_PER_UNIT {
+            return Err(SemanticValidationError::AssessmentTooLarge);
+        }
+        let mut seen = HashSet::new();
+        for link in links {
+            let source = self
+                .sources
+                .iter()
+                .find(|source| source.source_id == link.source_id)
+                .ok_or(SemanticValidationError::InvalidEvidenceLink)?;
+            let exact = link.span.start < link.span.end
+                && link.quote.len() <= MAX_EVIDENCE_UTF8_BYTES
+                && source.text.get(link.span.start..link.span.end) == Some(link.quote.as_str());
+            if !exact {
+                return Err(SemanticValidationError::InvalidEvidenceLink);
+            }
+            if !seen.insert((link.source_id.as_str(), link.span.start, link.span.end)) {
+                return Err(SemanticValidationError::DuplicateEvidence);
+            }
         }
         Ok(())
     }
@@ -323,37 +382,31 @@ impl PreparedSemanticVerification {
         if links.len() > MAX_LINKS_PER_UNIT {
             return Err(SemanticValidationError::AssessmentTooLarge);
         }
-        let mut seen = HashSet::new();
         let mut resolved = Vec::with_capacity(links.len());
         for link in links {
+            let passage = self
+                .passages
+                .iter()
+                .find(|passage| passage.handle == link.passage_id)
+                .ok_or(SemanticValidationError::UnknownPassage)?;
             let source = self
                 .sources
                 .iter()
-                .find(|source| source.source_id == link.source_id)
-                .ok_or(SemanticValidationError::UnknownSource)?;
-            let span = unique_quote_span(&source.text, &link.quote)?;
-            if !seen.insert((&link.source_id, span.start, span.end)) {
-                return Err(SemanticValidationError::InvalidQuote);
-            }
+                .find(|source| source.source_id == passage.source_id)
+                .ok_or(SemanticValidationError::UnknownPassage)?;
+            let quote = source
+                .text
+                .get(passage.span.start..passage.span.end)
+                .ok_or(SemanticValidationError::UnknownPassage)?;
             resolved.push(SemanticEvidenceLink {
-                source_id: link.source_id.clone(),
-                quote: link.quote.clone(),
-                span,
+                source_id: passage.source_id.clone(),
+                quote: quote.to_owned(),
+                span: passage.span.clone(),
             });
         }
+        self.validate_links(&resolved)?;
         Ok(resolved)
     }
-}
-
-fn unique_quote_span(text: &str, quote: &str) -> Result<SemanticByteSpan, SemanticValidationError> {
-    let first = quote.chars().next().ok_or(SemanticValidationError::InvalidQuote)?;
-    let start = text.find(quote).ok_or(SemanticValidationError::InvalidQuote)?;
-    // Advance by one character, not by the entire quote, so overlapping
-    // occurrences also fail closed without slicing through a UTF-8 character.
-    if text[start + first.len_utf8()..].contains(quote) {
-        return Err(SemanticValidationError::AmbiguousQuote);
-    }
-    Ok(SemanticByteSpan { start, end: start + quote.len() })
 }
 
 fn validate_classification(

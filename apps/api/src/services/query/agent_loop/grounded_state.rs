@@ -7,7 +7,10 @@ pub(super) struct ToolExecutionOutcome {
     pub(super) message_content: String,
     pub(super) result_text: Option<String>,
     pub(super) result_json: Option<Value>,
-    pub(super) grounding_text: Option<String>,
+    /// Typed source texts admitted from the direct tool result. Rendered
+    /// transcript text, a search query or a generated answer body is never
+    /// included.
+    pub(super) source_texts: Vec<String>,
     /// Server-produced document identity/slice retained before debug compaction.
     pub(super) document_reference:
         Option<Box<super::super::assistant_grounding::AssistantGroundingDocumentReference>>,

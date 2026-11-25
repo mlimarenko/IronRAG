@@ -25,6 +25,46 @@ use super::{
 struct EntityRetrievalLanes {
     vector_hits: Vec<RuntimeMatchedEntity>,
     lexical_hits: Vec<RuntimeMatchedEntity>,
+    vector_unavailable: bool,
+}
+
+pub(crate) struct GraphBundleOutcome {
+    pub(crate) bundle: RetrievalBundle,
+    pub(crate) vector_unavailable: bool,
+}
+
+fn resolve_entity_vector_lane<T>(result: anyhow::Result<Vec<T>>) -> anyhow::Result<(Vec<T>, bool)> {
+    match result {
+        Ok(hits) => Ok((hits, false)),
+        Err(error)
+            if error
+                .downcast_ref::<super::super::vector_retrieval::EntityVectorStoreUnavailable>()
+                .is_some() =>
+        {
+            Ok((Vec::new(), true))
+        }
+        Err(error) => Err(error),
+    }
+}
+
+#[cfg(test)]
+mod vector_lane_failure_tests {
+    use super::*;
+    use crate::services::query::error::QueryServiceError;
+
+    #[test]
+    fn optional_entity_ann_outage_is_typed_but_identity_failure_is_fatal() {
+        let (hits, degraded) = resolve_entity_vector_lane::<u8>(Err(
+            super::super::super::vector_retrieval::EntityVectorStoreUnavailable.into(),
+        ))
+        .expect("operational ANN outage permits graph lexical retrieval");
+        assert!(hits.is_empty());
+        assert!(degraded);
+        let result = resolve_entity_vector_lane::<u8>(Err(anyhow::Error::new(
+            QueryServiceError::StateConflict { message: "stale identity".into() },
+        )));
+        assert!(result.is_err());
+    }
 }
 
 /// Read-only inputs shared by every graph bundle retrieval entry point.
@@ -56,7 +96,7 @@ struct EntityLaneRequest<'a> {
 async fn retrieve_entity_hit_lanes_with_relevance(
     request: EntityLaneRequest<'_>,
 ) -> anyhow::Result<EntityRetrievalLanes> {
-    let vector_hits = retrieve_entity_vector_hits(
+    let vector_result = retrieve_entity_vector_hits(
         request.state,
         request.library_id,
         request.limit,
@@ -64,7 +104,8 @@ async fn retrieve_entity_hit_lanes_with_relevance(
         request.vector_search_context,
         request.graph_index,
     )
-    .await?;
+    .await;
+    let (vector_hits, vector_unavailable) = resolve_entity_vector_lane(vector_result)?;
 
     let lexical_hits = query_relevant_entity_hits_with_relevance(
         request.relevance_profile,
@@ -72,12 +113,12 @@ async fn retrieve_entity_hit_lanes_with_relevance(
         request.graph_index,
         request.limit,
     );
-    Ok(EntityRetrievalLanes { vector_hits, lexical_hits })
+    Ok(EntityRetrievalLanes { vector_hits, lexical_hits, vector_unavailable })
 }
 
 pub(crate) async fn retrieve_relationship_hits(
     request: GraphRetrievalRequest<'_>,
-) -> anyhow::Result<Vec<RuntimeMatchedRelationship>> {
+) -> anyhow::Result<(Vec<RuntimeMatchedRelationship>, bool)> {
     let entity_seed_limit = request.limit.saturating_mul(2).max(8);
     let relevance_profile = graph_relevance_profile(request.plan, request.query_ir);
     let lanes = retrieve_entity_hit_lanes_with_relevance(EntityLaneRequest {
@@ -100,12 +141,12 @@ pub(crate) async fn retrieve_relationship_hits(
         entity_seed_limit.saturating_mul(2),
     );
     let lexical_hits = lexical_relationship_hits(&relevance_profile, request.graph_index);
-    Ok(merge_relationships(topology_hits, lexical_hits, request.limit))
+    Ok((merge_relationships(topology_hits, lexical_hits, request.limit), lanes.vector_unavailable))
 }
 
 pub(crate) async fn retrieve_local_bundle(
     request: GraphRetrievalRequest<'_>,
-) -> anyhow::Result<RetrievalBundle> {
+) -> anyhow::Result<GraphBundleOutcome> {
     let relevance_profile = graph_relevance_profile(request.plan, request.query_ir);
     let lanes = retrieve_entity_hit_lanes_with_relevance(EntityLaneRequest {
         state: request.state,
@@ -126,28 +167,37 @@ pub(crate) async fn retrieve_local_bundle(
         &relevance_profile,
         request.limit,
     );
-    Ok(RetrievalBundle { entities: entity_hits, relationships, chunks: Vec::new() })
+    Ok(GraphBundleOutcome {
+        bundle: RetrievalBundle { entities: entity_hits, relationships, chunks: Vec::new() },
+        vector_unavailable: lanes.vector_unavailable,
+    })
 }
 
 pub(crate) async fn retrieve_global_bundle(
     request: GraphRetrievalRequest<'_>,
-) -> anyhow::Result<RetrievalBundle> {
+) -> anyhow::Result<GraphBundleOutcome> {
     let limit = request.limit;
     let graph_index = request.graph_index;
-    let relationships = retrieve_relationship_hits(request).await?;
+    let (relationships, vector_unavailable) = retrieve_relationship_hits(request).await?;
     let entities = entities_from_relationships(&relationships, graph_index, limit);
-    Ok(RetrievalBundle { entities, relationships, chunks: Vec::new() })
+    Ok(GraphBundleOutcome {
+        bundle: RetrievalBundle { entities, relationships, chunks: Vec::new() },
+        vector_unavailable,
+    })
 }
 
 pub(crate) async fn retrieve_mixed_graph_bundle(
     request: GraphRetrievalRequest<'_>,
-) -> anyhow::Result<RetrievalBundle> {
+) -> anyhow::Result<GraphBundleOutcome> {
     let started = std::time::Instant::now();
     if request.limit == 0 {
-        return Ok(RetrievalBundle {
-            entities: Vec::new(),
-            relationships: Vec::new(),
-            chunks: Vec::new(),
+        return Ok(GraphBundleOutcome {
+            bundle: RetrievalBundle {
+                entities: Vec::new(),
+                relationships: Vec::new(),
+                chunks: Vec::new(),
+            },
+            vector_unavailable: false,
         });
     }
 
@@ -204,7 +254,10 @@ pub(crate) async fn retrieve_mixed_graph_bundle(
         "mixed graph retrieval completed"
     );
 
-    Ok(RetrievalBundle { entities, relationships, chunks: Vec::new() })
+    Ok(GraphBundleOutcome {
+        bundle: RetrievalBundle { entities, relationships, chunks: Vec::new() },
+        vector_unavailable: lanes.vector_unavailable,
+    })
 }
 
 pub(crate) fn map_edge_hit(

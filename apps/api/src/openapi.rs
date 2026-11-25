@@ -197,6 +197,7 @@ const OPERATION_ID_USAGES: &[(&str, &str)] = &[
         crate::interfaces::http::ops::get_library_state,
         crate::interfaces::http::ops::bulk_ingest_queue_action,
         crate::interfaces::http::ops::move_ingest_queue_job,
+        crate::interfaces::http::ops::execute_ingest_queue_job,
         crate::interfaces::http::ops::retry_ingest_queue_job,
         crate::interfaces::http::ops::pause_ingest_queue_job,
         crate::interfaces::http::ops::resume_ingest_queue_job,

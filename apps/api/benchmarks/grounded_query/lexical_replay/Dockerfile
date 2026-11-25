@@ -3,7 +3,18 @@ LABEL experiment="IRG-285" scope="local-synthetic-only"
 ADD --checksum=sha256:3aa15d28b87e336a3dd22fce1bb2e4d0e2958560b92adfdf5cb4d466288da95f https://github.com/paradedb/paradedb/releases/download/v0.26.2/postgresql-18-pg-search_0.26.2-1PARADEDB-trixie_amd64.deb /opt/irg-285-packages/pg-search.deb
 RUN apt-get update \
     && apt-get download postgresql-18-pgvector=0.8.7-1.pgdg13+1 \
-    && echo 'd9923b9ea81375604d88bfcfa167d58bfaf3de5689372c9e4504244f1671f596  postgresql-18-pgvector_0.8.7-1.pgdg13+1_amd64.deb' | sha256sum -c - \
+    && printf '%s  %s\n' \
+        'd9923b9ea81375604d88bfcfa167d58bfaf3de5689372c9e4504244f1671f596' \
+        'postgresql-18-pgvector_0.8.7-1.pgdg13+1_amd64.deb' \
+        | sha256sum -c - \
     && mv postgresql-18-pgvector_0.8.7-1.pgdg13+1_amd64.deb /opt/irg-285-packages/ \
     && apt-get install -y --no-install-recommends /opt/irg-285-packages/*.deb \
     && dpkg-query -W postgresql-18 postgresql-18-pgvector postgresql-18-pg-search
+
+# Root is only upstream's step-down convenience: docker-entrypoint.sh chowns
+# $PGDATA and re-execs through gosu when it starts as root, and it chowns only
+# when the uid is 0. The upstream image pre-creates /var/lib/postgresql as
+# postgres-owned (uid 999, mode 1777), so a fresh volume mounted there inherits
+# that owner and initdb works directly as postgres. A bind mount must be owned
+# by uid 999 for the same reason.
+USER postgres

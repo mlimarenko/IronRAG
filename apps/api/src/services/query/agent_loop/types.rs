@@ -9,11 +9,7 @@ pub(super) const TOOL_MODEL_DEFAULT_CONTENT_CHAR_LIMIT: usize = 3_000;
 pub(super) const TOOL_MODEL_GROUNDED_ANSWER_CONTENT_CHAR_LIMIT: usize = 12_000;
 pub(super) const TOOL_MODEL_READ_DOCUMENT_CONTENT_CHAR_LIMIT: usize = 5_000;
 pub(super) const TOOL_MODEL_STRUCTURED_JSON_CHAR_LIMIT: usize = 8_000;
-pub(super) const TOOL_VERIFICATION_CONTENT_CHAR_LIMIT: usize = 8_000;
-pub(super) const TOOL_VERIFICATION_STRUCTURED_JSON_CHAR_LIMIT: usize = 16_000;
 pub(super) const TOOL_MODEL_GROUNDED_REFERENCE_LIMIT: usize = 8;
-pub(super) const TOOL_MODEL_FINALIZABLE_GROUNDED_REFERENCE_LIMIT: usize = 0;
-pub(super) const TOOL_VERIFICATION_GROUNDED_REFERENCE_LIMIT: usize = 8;
 pub(super) const TOOL_DEBUG_RESULT_JSON_CHAR_LIMIT: usize = 96_000;
 pub(super) const TOOL_GROUNDING_FRAGMENT_CHAR_LIMIT: usize = 20_000;
 pub(super) const TOOL_GROUNDING_TOTAL_CHAR_LIMIT: usize = 80_000;
@@ -82,6 +78,11 @@ pub(crate) struct AgentTurnResult {
     /// One immutable attribution record per actual provider response.
     pub provider_calls: Vec<QueryProviderCall>,
     pub assistant_grounding: AssistantGroundingEvidence,
+    /// Typed, already admitted canonical sources for this agent turn.
+    pub evidence_manifest: AgentEvidenceManifest,
+    pub(crate) evidence_selection_bounded: Option<
+        crate::services::query::execution::semantic_verification::SelectedEvidenceMeasurement,
+    >,
     /// Collected from actual MCP tool results, not assistant-authored JSON.
     /// Parent semantic reuse additionally checks the completed durable runtime,
     /// execution scope and persisted checked-input identities.
@@ -101,7 +102,7 @@ pub(crate) struct AgentTurnResult {
 pub(crate) struct AgentTurnFailure {
     pub error: QueryServiceError,
     /// Provider responses completed before the loop failed.
-    pub provider_calls: Vec<QueryProviderCall>,
+    pub provider_calls: Box<[QueryProviderCall]>,
     pub debug_iterations: Vec<LlmIterationDebug>,
     /// Boxed so the `Err` side of every `Result<_, AgentTurnFailure>` stays small
     /// under `clippy::result_large_err`: the metadata would otherwise push the
@@ -113,7 +114,7 @@ impl AgentTurnFailure {
     pub(super) fn empty(error: impl Into<QueryServiceError>) -> Self {
         Self {
             error: error.into(),
-            provider_calls: Vec::new(),
+            provider_calls: Box::default(),
             debug_iterations: Vec::new(),
             agent_loop: None,
         }
@@ -127,7 +128,7 @@ impl AgentTurnFailure {
     ) -> Self {
         Self {
             error: error.into(),
-            provider_calls,
+            provider_calls: provider_calls.into(),
             debug_iterations,
             agent_loop: Some(Box::new(agent_loop)),
         }
@@ -158,6 +159,7 @@ pub(crate) struct McpToolAgentTurnInput<'a> {
     pub contextual_follow_up: bool,
     pub conversation_history: &'a [ChatMessage],
     pub follow_up_context_messages: &'a [ChatMessage],
+    pub prior_evidence_manifest: &'a AgentEvidenceManifest,
     pub grounded_answer_tool_history: &'a [ExternalConversationTurn],
     pub request_id: &'a str,
     pub grounded_answer_top_k: usize,

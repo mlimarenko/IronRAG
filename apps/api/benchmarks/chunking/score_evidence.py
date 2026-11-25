@@ -52,6 +52,21 @@ def fact_available(fact: dict, regions: list[tuple[int, int]]) -> bool:
     )
 
 
+def require_span(span: dict, case: dict) -> None:
+    if not 0 <= span["start"] < span["end"] <= len(case["normalizedText"]):
+        raise ValueError("evidence span outside canonical source")
+    if case["normalizedText"][span["start"] : span["end"]] != span["text"]:
+        raise ValueError("evidence oracle literal span mismatch")
+
+
+def require_fact_alternatives(fact: dict, case: dict) -> None:
+    if not fact["alternatives"] or any(not alt for alt in fact["alternatives"]):
+        raise ValueError("empty fact evidence alternatives")
+    for alternative in fact["alternatives"]:
+        for span in alternative:
+            require_span(span, case)
+
+
 def validate_oracle(oracle: dict, export: dict) -> dict:
     if oracle["protocol"] != "irg256-normalized-evidence-oracle/1":
         raise ValueError("wrong normalized evidence oracle protocol")
@@ -64,22 +79,7 @@ def validate_oracle(oracle: dict, export: dict) -> dict:
         if query["normalizedSha256"] != case["normalizedSha256"]:
             raise ValueError("evidence oracle normalized identity mismatch")
         for fact in query["facts"]:
-            if not fact["alternatives"] or any(not alt for alt in fact["alternatives"]):
-                raise ValueError("empty fact evidence alternatives")
-            for alternative in fact["alternatives"]:
-                for span in alternative:
-                    if (
-                        not 0
-                        <= span["start"]
-                        < span["end"]
-                        <= len(case["normalizedText"])
-                    ):
-                        raise ValueError("evidence span outside canonical source")
-                    if (
-                        case["normalizedText"][span["start"] : span["end"]]
-                        != span["text"]
-                    ):
-                        raise ValueError("evidence oracle literal span mismatch")
+            require_fact_alternatives(fact, case)
         queries[query["queryId"]] = query
     return queries
 
@@ -149,6 +149,50 @@ def score_call(call: dict, cases: dict, query: dict) -> dict:
     }
 
 
+def require_measured_calls(query: dict, events: list[dict]) -> list[dict]:
+    calls = [
+        event
+        for event in events
+        if event.get("event") == "call"
+        and event["queryId"] == query["queryId"]
+        and event["phase"] == "measured"
+    ]
+    if not calls:
+        raise ValueError("native replay lacks a frozen query")
+    if any(call["query"] != query["question"] for call in calls):
+        raise ValueError("native query was rewritten")
+    return calls
+
+
+def require_three_observations(calls: list[dict]) -> None:
+    groups = {}
+    for call in calls:
+        groups.setdefault((call["treatmentId"], call["profileId"]), []).append(
+            call["callIndex"]
+        )
+    if any(sorted(indices) != [1, 2, 3] for indices in groups.values()):
+        raise ValueError("native arm lacks exactly three first measured observations")
+
+
+def query_rows(query: dict, events: list[dict], cases: dict) -> list[dict]:
+    calls = require_measured_calls(query, events)
+    require_three_observations(calls)
+    rows = []
+    for call in calls:
+        if not call["targetInTreatmentScope"]:
+            continue
+        row = score_call(call, cases, query)
+        row.update(
+            {
+                "treatmentId": call["treatmentId"],
+                "profileId": call["profileId"],
+                "callIndex": call["callIndex"],
+            }
+        )
+        rows.append(row)
+    return rows
+
+
 def run(args: argparse.Namespace) -> None:
     export = checked_json(args.treatments, args.treatments_sha256, 64 * 1024 * 1024)
     oracle = checked_json(args.oracle, args.oracle_sha256)
@@ -173,39 +217,8 @@ def run(args: argparse.Namespace) -> None:
         raise ValueError("native replay used a different treatment export")
     cases = {case["caseId"]: case for case in export["cases"]}
     rows = []
-    for query_id, query in queries.items():
-        calls = [
-            event
-            for event in events
-            if event.get("event") == "call"
-            and event["queryId"] == query_id
-            and event["phase"] == "measured"
-        ]
-        if not calls:
-            raise ValueError("native replay lacks a frozen query")
-        if any(call["query"] != query["question"] for call in calls):
-            raise ValueError("native query was rewritten")
-        groups = {}
-        for call in calls:
-            groups.setdefault((call["treatmentId"], call["profileId"]), []).append(
-                call["callIndex"]
-            )
-        if any(sorted(indices) != [1, 2, 3] for indices in groups.values()):
-            raise ValueError(
-                "native arm lacks exactly three first measured observations"
-            )
-        for call in calls:
-            if not call["targetInTreatmentScope"]:
-                continue
-            row = score_call(call, cases, query)
-            row.update(
-                {
-                    "treatmentId": call["treatmentId"],
-                    "profileId": call["profileId"],
-                    "callIndex": call["callIndex"],
-                }
-            )
-            rows.append(row)
+    for query in queries.values():
+        rows.extend(query_rows(query, events, cases))
     write_new(
         args.output,
         {

@@ -133,6 +133,9 @@ pub(super) struct RerankProviderCallRequest<'a> {
     pub(super) transport: RerankProviderTransport,
     pub(super) binding: &'a ResolvedRuntimeBinding,
     pub(super) prepared: &'a PreparedSemanticRerankRequest,
+    /// Label of the logical call. The ambient send scope of that call is
+    /// installed by its owner around this dispatch, so admission names the row
+    /// of each physical send and this id is only the correlation label.
     pub(super) provider_call_id: Uuid,
     pub(super) provider_timeout: Duration,
 }
@@ -166,23 +169,20 @@ async fn call_chat_provider(
     provider_timeout: Duration,
 ) -> Result<RerankProviderCall, SemanticRerankFailure> {
     let request = build_semantic_chat_request(binding, prepared);
-    let response = match tokio::time::timeout(
-        provider_timeout,
-        crate::observability::with_provider_call_id(
-            provider_call_id,
-            llm_gateway.generate(request),
-        ),
-    )
-    .await
+    let response = match tokio::time::timeout(provider_timeout, llm_gateway.generate(request)).await
     {
         Ok(Ok(response)) => response,
         Ok(Err(error)) => {
             tracing::warn!(
                 provider = %binding.provider_kind,
+                provider_call_id = %provider_call_id,
                 ?error,
                 "semantic rerank chat provider failed"
             );
-            return Err(SemanticRerankFailure::ProviderFailure);
+            return Err(match error.downcast::<ProviderCallError>() {
+                Ok(error) => map_provider_error(error),
+                Err(_) => SemanticRerankFailure::ProviderFailure,
+            });
         }
         Err(_) => return Err(SemanticRerankFailure::TimedOut),
     };
@@ -269,14 +269,25 @@ fn systemone_usage_json(usage: SystemOneUsage) -> serde_json::Value {
 /// Maps a typed SystemOne failure onto the rerank failure vocabulary.
 fn map_systemone_error(error: SystemOneError) -> SemanticRerankFailure {
     match error {
-        SystemOneError::Provider { source } => match source {
-            ProviderCallError::Timeout { .. } => SemanticRerankFailure::TimedOut,
-            _ => SemanticRerankFailure::ProviderFailure,
-        },
+        SystemOneError::Provider { source } => map_provider_error(source),
         SystemOneError::Response { .. } | SystemOneError::Request(_) => {
             SemanticRerankFailure::InvalidResponse
         }
         SystemOneError::Config(_) => SemanticRerankFailure::ProviderFailure,
+    }
+}
+
+fn map_provider_error(error: ProviderCallError) -> SemanticRerankFailure {
+    if matches!(error, ProviderCallError::Timeout { .. }) {
+        return SemanticRerankFailure::TimedOut;
+    }
+    let failure = crate::shared::provider_failure::ProviderFailure::from(error);
+    if failure.is_refusal()
+        || failure.kind() == crate::shared::provider_failure::ProviderFailureKind::QuotaExhausted
+    {
+        SemanticRerankFailure::TerminalProvider(failure)
+    } else {
+        SemanticRerankFailure::ProviderFailure
     }
 }
 

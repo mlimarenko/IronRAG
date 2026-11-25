@@ -63,6 +63,8 @@ export type DocumentsStatusBucket =
   | 'graphready'
   | 'processing'
   | 'queued'
+  | 'paused'
+  | 'pending_materialization'
   | 'failed'
   | 'canceled'
   | 'empty'
@@ -77,13 +79,25 @@ export type DocumentsListFilter = {
 
 const BUCKET_TO_BACKEND: Record<Exclude<DocumentsStatusBucket, 'all'>, DocumentsListFilter> = {
   ready: { status: ['ready'] },
-  notready: { status: ['processing', 'queued', 'failed', 'canceled', 'empty'] },
+  notready: {
+    status: [
+      'processing',
+      'queued',
+      'paused',
+      'pending_materialization',
+      'failed',
+      'canceled',
+      'empty',
+    ],
+  },
   inflight: { status: ['processing', 'queued'] },
   vectorgap: { indexing: 'vector_gap' },
   graphgap: { indexing: 'graph_gap' },
   graphready: { indexing: 'graph_ready' },
   processing: { status: ['processing'] },
   queued: { status: ['queued'] },
+  paused: { status: ['paused'] },
+  pending_materialization: { status: ['pending_materialization'] },
   failed: { status: ['failed'] },
   canceled: { status: ['canceled'] },
   empty: { status: ['empty'] },
@@ -259,6 +273,8 @@ function parseStatusBucket(value: string | null): DocumentsStatusBucket {
     value === 'graphready' ||
     value === 'processing' ||
     value === 'queued' ||
+    value === 'paused' ||
+    value === 'pending_materialization' ||
     value === 'failed' ||
     value === 'canceled' ||
     value === 'empty'

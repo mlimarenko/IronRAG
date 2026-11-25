@@ -53,6 +53,7 @@ pub(super) async fn finalize_deterministic_document_statement(
             structured_blocks: Vec::new(),
             technical_facts: Vec::new(),
         },
+        primary_answer_chunks: &[],
         assistant_grounding: &AssistantGroundingEvidence::default(),
         answer_kind: Some(super::super::answer_kind::AnswerKind::MissingExplicitDocument),
     })

@@ -129,23 +129,7 @@ async fn render_document_source(
     }
 
     if descriptor.access.is_none() {
-        if let Some(rendered_source) = state
-            .application_services
-            .content
-            .render_revision_text_source(state, revision.id)
-            .await?
-        {
-            let disposition = format!("attachment; filename=\"{}\"", descriptor.file_name);
-            return Ok((
-                [
-                    (header::CONTENT_TYPE, revision.mime_type.clone()),
-                    (header::CONTENT_DISPOSITION, disposition),
-                ],
-                Body::from(rendered_source),
-            )
-                .into_response());
-        }
-        return Err(ApiError::BadRequest("document has no downloadable source".to_string()));
+        return render_native_text_or_unavailable(state, revision, descriptor).await;
     }
 
     let storage_key =
@@ -157,22 +141,7 @@ async fn render_document_source(
     let disposition = format!("attachment; filename=\"{}\"", descriptor.file_name);
 
     let Some(storage_key) = storage_key else {
-        if let Some(rendered_source) = state
-            .application_services
-            .content
-            .render_revision_text_source(state, revision.id)
-            .await?
-        {
-            return Ok((
-                [
-                    (header::CONTENT_TYPE, revision.mime_type.clone()),
-                    (header::CONTENT_DISPOSITION, disposition),
-                ],
-                Body::from(rendered_source),
-            )
-                .into_response());
-        }
-        return Err(ApiError::BadRequest("document has no stored source to download".to_string()));
+        return render_native_text_or_unavailable(state, revision, descriptor).await;
     };
 
     if let Some(href) = state
@@ -193,32 +162,49 @@ async fn render_document_source(
             Body::from(bytes),
         )
             .into_response()),
-        // The blob the database still points to can go missing independently
-        // of the revision (for example an infrastructure-level storage
-        // incident) without that ever being an error in the ingest or storage
-        // write path itself. Reconstructing from the stored normalized text
-        // keeps the endpoint useful instead of 500ing on a fact the caller
-        // cannot act on; only genuinely unrecoverable revisions fail closed.
         Err(crate::services::content::error::ContentServiceError::NotFound { .. }) => {
-            if let Some(rendered_source) = state
-                .application_services
-                .content
-                .render_revision_text_source(state, revision.id)
-                .await?
-            {
-                return Ok((
-                    [
-                        (header::CONTENT_TYPE, revision.mime_type.clone()),
-                        (header::CONTENT_DISPOSITION, disposition),
-                    ],
-                    Body::from(rendered_source),
-                )
-                    .into_response());
-            }
-            Err(ApiError::resource_not_found("document source", revision.id))
+            render_native_text_or_unavailable(state, revision, descriptor).await
         }
         Err(error) => Err(ApiError::from(error)),
     }
+}
+
+async fn render_native_text_or_unavailable(
+    state: &AppState,
+    revision: &ContentRevision,
+    descriptor: &crate::services::content::source_access::ContentSourceDescriptor,
+) -> Result<Response, ApiError> {
+    let mime = revision.mime_type.split(';').next().unwrap_or_default().trim().to_ascii_lowercase();
+    if matches!(revision.content_source_kind.trim(), "edit" | "append")
+        && mime.starts_with("text/")
+        && let Some(text) = state
+            .application_services
+            .content
+            .render_revision_text_source(state, revision.id)
+            .await?
+    {
+        let markdown = matches!(mime.as_str(), "text/markdown" | "text/x-markdown");
+        let extension = if markdown { "md" } else { "txt" };
+        let content_type =
+            if markdown { "text/markdown; charset=utf-8" } else { "text/plain; charset=utf-8" };
+        let filename = text_file_name(&descriptor.file_name, extension);
+        let disposition = format!("attachment; filename=\"{filename}\"");
+        return Ok((
+            [
+                (header::CONTENT_TYPE, content_type),
+                (header::CONTENT_DISPOSITION, disposition.as_str()),
+            ],
+            Body::from(text),
+        )
+            .into_response());
+    }
+    Err(ApiError::resource_not_found("document source", revision.id))
+}
+
+fn text_file_name(file_name: &str, extension: &str) -> String {
+    let stem = file_name.rsplit_once('.').map_or(file_name, |(stem, _)| stem).trim();
+    let stem = if stem.is_empty() { "document" } else { stem };
+    format!("{stem}.{extension}")
 }
 
 async fn resolve_source_download_revision(
@@ -273,7 +259,8 @@ async fn download_editor_markdown_source(
         return Err(ApiError::BadRequest("document has no rendered editor source".to_string()));
     };
 
-    let disposition = format!("inline; filename=\"{}\"", descriptor.file_name);
+    let disposition =
+        format!("inline; filename=\"{}\"", text_file_name(&descriptor.file_name, "md"));
     Ok((
         [
             (header::CONTENT_TYPE, "text/markdown; charset=utf-8"),

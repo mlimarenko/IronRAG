@@ -20,6 +20,25 @@ except ImportError:  # Direct script execution has no package context.
 
 ROOT = Path(__file__).resolve().parent
 ARMS = ("production_fts", "raw_fts", "raw_bm25")
+STANDARD_TWIN_FIXTURE = "relay_twin_standard.md"
+EXTENDED_TWIN_FIXTURE = "relay_twin_extended.md"
+NOT_MEASURED = "not measured"
+BINARY_FIXTURE_SUFFIXES = frozenset({".pdf", ".png"})
+# These probes use existing fixture literals, not a product routing vocabulary.
+CONTROL_QUERIES = (
+    ("control_boolean_positive", "relay cumulative", '"relay" AND "cumulative"',
+     [STANDARD_TWIN_FIXTURE], [EXTENDED_TWIN_FIXTURE]),
+    ("control_boolean_not_cumulative", "relay -cumulative", '"relay" AND -"cumulative"',
+     [EXTENDED_TWIN_FIXTURE], [STANDARD_TWIN_FIXTURE]),
+    ("control_boolean_not_immediate", "relay -immediate", '"relay" AND -"immediate"',
+     [STANDARD_TWIN_FIXTURE], [EXTENDED_TWIN_FIXTURE]),
+    ("control_rare_identifier", "coalesce_shard_windows", '"coalesce_shard_windows"',
+     ["lattice_pipeline_utils.py"], []),
+    ("control_compound_identifier", "RLY-STD-204", '"RLY-STD-204"',
+     [STANDARD_TWIN_FIXTURE], [EXTENDED_TWIN_FIXTURE]),
+    ("control_near_twin_phrase", '"frame window" immediate', '"frame window" AND "immediate"',
+     [EXTENDED_TWIN_FIXTURE], [STANDARD_TWIN_FIXTURE]),
+)
 
 
 def sha256(data: bytes) -> str:
@@ -45,14 +64,13 @@ def ordinary_bm25(query: str) -> str:
     return " AND ".join(map(quote_token, tokens))
 
 
-def prepare() -> dict[str, Any]:
-    suite = ROOT / "golden_hardening_suite.json"
-    paths, cases, _ = load_suite(suite)
-    documents = []
-    excluded = []
+def corpus_documents(paths: list[Path]) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
+    """Freeze UTF-8 corpus bytes; binaries are excluded and reported, never dropped silently."""
+    documents: list[dict[str, Any]] = []
+    excluded: list[dict[str, str]] = []
     for path in paths:
         relative = path.relative_to(ROOT).as_posix()
-        if path.suffix.lower() in {".pdf", ".png"}:
+        if path.suffix.lower() in BINARY_FIXTURE_SUFFIXES:
             excluded.append({"path": relative, "reason": "binary fixture; extraction not measured"})
             continue
         data = path.read_bytes()
@@ -62,45 +80,44 @@ def prepare() -> dict[str, Any]:
             **{f"{kind}_id": str(uuid5(NAMESPACE_URL, f"irg285:{relative}:{kind}"))
                for kind in ("document", "revision", "chunk")},
         })
+    return documents, excluded
+
+
+def case_query(case: Any, paths: list[Path], selected: set[str]) -> dict[str, Any]:
+    """Resolve one suite case against the frozen corpus or explain its exclusion."""
+    if not case.relevant_documents:
+        raise ValueError("no document relevance")
+    for marker in case.expected_documents_contains + case.relevant_documents:
+        matches = [path.name for path in paths if marker in path.name]
+        if not matches or not set(matches) <= selected:
+            raise ValueError("expected/relevant document outside UTF-8 corpus or unresolved")
+    resolved: list[str] = []
+    for marker in case.relevant_documents:
+        resolved.extend(path.name for path in paths if marker in path.name)
+    bm25 = ordinary_bm25(case.search_query)
+    return {"id": case.case_id, "query": case.search_query, "bm25_query": bm25,
+            "relevant_documents": sorted(set(resolved)), "excluded_documents": []}
+
+
+def control_query(row: tuple[str, str, str, list[str], list[str]]) -> dict[str, Any]:
+    case_id, query, bm25, relevant, forbidden = row
+    return {"id": case_id, "query": query, "bm25_query": bm25,
+            "relevant_documents": list(relevant), "excluded_documents": list(forbidden)}
+
+
+def prepare() -> dict[str, Any]:
+    suite = ROOT / "golden_hardening_suite.json"
+    paths, cases, _ = load_suite(suite)
+    documents, excluded = corpus_documents(paths)
     selected = {doc["key"] for doc in documents}
-    queries = []
-    excluded_cases = []
+    queries: list[dict[str, Any]] = []
+    excluded_cases: list[dict[str, str]] = []
     for case in cases:
         try:
-            if not case.relevant_documents:
-                raise ValueError("no document relevance")
-            resolved = []
-            for marker in case.expected_documents_contains + case.relevant_documents:
-                matches = [path.name for path in paths if marker in path.name]
-                if not matches or not set(matches) <= selected:
-                    raise ValueError("expected/relevant document outside UTF-8 corpus or unresolved")
-            for marker in case.relevant_documents:
-                resolved.extend(path.name for path in paths if marker in path.name)
-            bm25 = ordinary_bm25(case.search_query)
+            queries.append(case_query(case, paths, selected))
         except ValueError as error:
             excluded_cases.append({"id": case.case_id, "reason": str(error)})
-            continue
-        queries.append({"id": case.case_id, "query": case.search_query, "bm25_query": bm25,
-                        "relevant_documents": sorted(set(resolved)), "excluded_documents": []})
-
-    # These probes use existing fixture literals, not a product routing vocabulary.
-    controls = [
-        ("control_boolean_positive", "relay cumulative", '"relay" AND "cumulative"',
-         ["relay_twin_standard.md"], ["relay_twin_extended.md"]),
-        ("control_boolean_not_cumulative", "relay -cumulative", '"relay" AND -"cumulative"',
-         ["relay_twin_extended.md"], ["relay_twin_standard.md"]),
-        ("control_boolean_not_immediate", "relay -immediate", '"relay" AND -"immediate"',
-         ["relay_twin_standard.md"], ["relay_twin_extended.md"]),
-        ("control_rare_identifier", "coalesce_shard_windows", '"coalesce_shard_windows"',
-         ["lattice_pipeline_utils.py"], []),
-        ("control_compound_identifier", "RLY-STD-204", '"RLY-STD-204"',
-         ["relay_twin_standard.md"], ["relay_twin_extended.md"]),
-        ("control_near_twin_phrase", '"frame window" immediate', '"frame window" AND "immediate"',
-         ["relay_twin_extended.md"], ["relay_twin_standard.md"]),
-    ]
-    for case_id, query, bm25, relevant, forbidden in controls:
-        queries.append({"id": case_id, "query": query, "bm25_query": bm25,
-                        "relevant_documents": relevant, "excluded_documents": forbidden})
+    queries.extend(control_query(row) for row in CONTROL_QUERIES)
     manifest = {
         "schema_version": 1, "documents": documents, "queries": queries,
         "limit": 10, "warmups": 2, "repetitions": 15,
@@ -115,7 +132,7 @@ def prepare() -> dict[str, Any]:
             "excluded_cases": excluded_cases,
             "control_intent": {row[0]: {"original_pg_query": row[1],
                                        "include": row[3], "exclude": row[4]}
-                               for row in controls},
+                               for row in CONTROL_QUERIES},
             "boolean_mapping": "PostgreSQL websearch minus exclusion maps to native AND -\"term\"; "
                                "pg_search 0.26.2 uses minus exclusion, not a NOT keyword.",
             "comparison_limits": [
@@ -148,6 +165,39 @@ def unique_strings(values: Any, label: str, *, nonempty: bool = False) -> None:
     require(len(values) == len(set(values)), f"duplicate {label}")
 
 
+def validate_document_entry(doc: dict[str, Any]) -> None:
+    path = Path(doc["path"])
+    require(not path.is_absolute() and ".." not in path.parts and
+            path.name == doc["key"], "invalid document path/key")
+    require(path.suffix.lower() not in BINARY_FIXTURE_SUFFIXES, "binary fixture in manifest")
+    require(isinstance(doc.get("text"), str), "invalid document text")
+    require(sha256(doc["text"].encode("utf-8")) == doc.get("sha256"), "document checksum mismatch")
+    require(doc.get("title") == path.stem, "document title mismatch")
+    for kind in ("document", "revision", "chunk"):
+        require(doc[f"{kind}_id"] == str(uuid5(NAMESPACE_URL, f"irg285:{doc['path']}:{kind}")),
+                f"invalid {kind} identity")
+
+
+def validate_documents(documents: list[Any]) -> set[str]:
+    for field in ("key", "path", "document_id", "revision_id", "chunk_id"):
+        unique_strings([doc.get(field) for doc in documents if isinstance(doc, dict)], field, nonempty=True)
+        require(all(isinstance(doc, dict) for doc in documents), "invalid document")
+    keys = {doc["key"] for doc in documents}
+    for doc in documents:
+        validate_document_entry(doc)
+    return keys
+
+
+def validate_query_entry(query: dict[str, Any], keys: set[str]) -> None:
+    for field in ("query", "bm25_query"):
+        require(isinstance(query.get(field), str) and bool(query[field].strip()), f"invalid {field}")
+    for field in ("relevant_documents", "excluded_documents"):
+        unique_strings(query.get(field), field, nonempty=field == "relevant_documents")
+        require(set(query[field]) <= keys, f"unknown {field}")
+    require(not set(query["relevant_documents"]) & set(query["excluded_documents"]),
+            "overlapping relevance and exclusion")
+
+
 def validate_manifest(manifest: Any) -> None:
     require(isinstance(manifest, dict), "manifest must be an object")
     require(type(manifest.get("schema_version")) is int and manifest["schema_version"] == 1,
@@ -157,33 +207,13 @@ def validate_manifest(manifest: Any) -> None:
         require(type(manifest.get(key)) is int and manifest[key] == expected, f"invalid {key}")
     documents = manifest.get("documents")
     require(isinstance(documents, list) and bool(documents), "missing documents")
-    for field in ("key", "path", "document_id", "revision_id", "chunk_id"):
-        unique_strings([doc.get(field) for doc in documents if isinstance(doc, dict)], field, nonempty=True)
-        require(all(isinstance(doc, dict) for doc in documents), "invalid document")
-    keys = {doc["key"] for doc in documents}
-    for doc in documents:
-        path = Path(doc["path"])
-        require(not path.is_absolute() and ".." not in path.parts and
-                path.name == doc["key"], "invalid document path/key")
-        require(path.suffix.lower() not in {".pdf", ".png"}, "binary fixture in manifest")
-        require(isinstance(doc.get("text"), str), "invalid document text")
-        require(sha256(doc["text"].encode("utf-8")) == doc.get("sha256"), "document checksum mismatch")
-        require(doc.get("title") == path.stem, "document title mismatch")
-        for kind in ("document", "revision", "chunk"):
-            require(doc[f"{kind}_id"] == str(uuid5(NAMESPACE_URL, f"irg285:{doc['path']}:{kind}")),
-                    f"invalid {kind} identity")
+    keys = validate_documents(documents)
     queries = manifest.get("queries")
     require(isinstance(queries, list) and bool(queries), "missing queries")
     require(all(isinstance(query, dict) for query in queries), "invalid query")
     unique_strings([query.get("id") for query in queries], "query IDs", nonempty=True)
     for query in queries:
-        for field in ("query", "bm25_query"):
-            require(isinstance(query.get(field), str) and bool(query[field].strip()), f"invalid {field}")
-        for field in ("relevant_documents", "excluded_documents"):
-            unique_strings(query.get(field), field, nonempty=field == "relevant_documents")
-            require(set(query[field]) <= keys, f"unknown {field}")
-        require(not set(query["relevant_documents"]) & set(query["excluded_documents"]),
-                "overlapping relevance and exclusion")
+        validate_query_entry(query, keys)
 
 
 def percentile95(samples: list[float]) -> float:
@@ -191,8 +221,7 @@ def percentile95(samples: list[float]) -> float:
     return sorted(samples)[math.ceil(0.95 * len(samples)) - 1]
 
 
-def evaluate(manifest: dict[str, Any], receipt: dict[str, Any]) -> dict[str, Any]:
-    validate_manifest(manifest)
+def validate_receipt_header(manifest: dict[str, Any], receipt: Any) -> dict[str, Any]:
     require(isinstance(receipt, dict), "receipt must be an object")
     require(type(receipt.get("schema_version")) is int and receipt["schema_version"] == 1,
             "unsupported receipt schema")
@@ -210,72 +239,105 @@ def evaluate(manifest: dict[str, Any], receipt: dict[str, Any]) -> dict[str, Any
             number(value, field)
             if field == "index_bytes":
                 require(type(value) is int, "index size must be integer bytes")
+    return versions
+
+
+def ranked_hit_keys(
+    hits: list[Any], arm: str, chunks: dict[str, dict[str, Any]]
+) -> tuple[list[str], list[str]]:
+    """Validate hits and return their reference duplicates plus ranked document keys."""
+    seen_chunks: set[str] = set()
+    duplicates: list[str] = []
+    ranked: list[str] = []
+    for hit in hits:
+        require(isinstance(hit, dict) and isinstance(hit.get("chunk_id"), str), "invalid hit")
+        chunk = hit["chunk_id"]
+        require(chunk in chunks, "unknown chunk")
+        if chunk in seen_chunks:
+            require(arm == "production_fts", "duplicate chunk in diagnostic pair")
+            if chunk not in duplicates:
+                duplicates.append(chunk)
+        seen_chunks.add(chunk)
+        doc = chunks[chunk]
+        require(hit.get("document_key") == doc["key"], "hit document mismatch")
+        require(hit.get("text_sha256") == doc["sha256"], "hit checksum mismatch")
+        number(hit.get("score"), "score", nonnegative=False)
+        if doc["key"] not in ranked:
+            ranked.append(doc["key"])
+    return duplicates, ranked
+
+
+def evaluate_result(
+    result_index: int,
+    result: Any,
+    manifest: dict[str, Any],
+    chunks: dict[str, dict[str, Any]],
+    queries: dict[str, dict[str, Any]],
+    expected: set[tuple[str, str]],
+    seen: set[tuple[str, str]],
+) -> tuple[str, dict[str, Any]]:
+    require(isinstance(result, dict), "invalid result")
+    arm, query_id = result.get("arm"), result.get("query_id")
+    require(isinstance(arm, str) and isinstance(query_id, str), "invalid result identity")
+    pair = (arm, query_id)
+    require(pair in expected and pair not in seen, "unknown/duplicate arm-query pair")
+    seen.add(pair)
+    samples = result.get("samples_ms")
+    require(isinstance(samples, list) and len(samples) == manifest["repetitions"], "invalid sample count")
+    for sample in samples:
+        number(sample, "latency sample")
+    hits = result.get("hits")
+    require(isinstance(hits, list) and len(hits) <= manifest["limit"], "invalid hits count")
+    duplicates, ranked = ranked_hit_keys(hits, arm, chunks)
+    query = queries[query_id]
+    # Product reference anomalies must not contaminate or invalidate the
+    # independently complete raw pair, nor become an accepted product score.
+    metrics = None if duplicates else compute_rank_metrics(ranked, set(query["relevant_documents"]))
+    return arm, {
+        "query_id": query_id, "rank_metrics": metrics,
+        "status": "invalid_reference" if duplicates else "measured",
+        "duplicate_chunk_ids": duplicates, "native_result_index": result_index,
+        "excluded_hits": [key for key in ranked if key in query["excluded_documents"]],
+        "latency_ms": {"median": statistics.median(samples), "p95": percentile95(samples)},
+    }
+
+
+def arm_summary(rows: list[dict[str, Any]], pooled: list[float]) -> dict[str, Any]:
+    metrics = [row["rank_metrics"] for row in rows]
+    invalid = [row["query_id"] for row in rows if row["status"] == "invalid_reference"]
+    return {
+        "status": "invalid_reference" if invalid else "measured",
+        "invalid_query_ids": sorted(invalid),
+        "queries": sorted(rows, key=lambda row: row["query_id"]),
+        "aggregate_rank_metrics": None if invalid else {
+            key: statistics.mean(metric[key] for metric in metrics)
+            for key in metrics[0] if key == "mrr" or key.startswith("hit@")},
+        "exclusion_violation_count": sum(len(row["excluded_hits"]) for row in rows),
+        "latency_context": "observed invalid-reference path" if invalid else "measured treatment path",
+        "warm_client_latency_ms": {"median": statistics.median(pooled),
+                                   "p95": percentile95(pooled)},
+    }
+
+
+def evaluate(manifest: dict[str, Any], receipt: dict[str, Any]) -> dict[str, Any]:
+    validate_manifest(manifest)
+    versions = validate_receipt_header(manifest, receipt)
     chunks = {doc["chunk_id"]: doc for doc in manifest["documents"]}
     queries = {query["id"]: query for query in manifest["queries"]}
     expected = {(arm, query_id) for arm in ARMS for query_id in queries}
-    seen = set()
+    seen: set[tuple[str, str]] = set()
     results = receipt.get("results")
     require(isinstance(results, list), "missing results")
     per_arm: dict[str, list[dict[str, Any]]] = {arm: [] for arm in ARMS}
     pooled: dict[str, list[float]] = {arm: [] for arm in ARMS}
     for result_index, result in enumerate(results):
-        require(isinstance(result, dict), "invalid result")
-        arm, query_id = result.get("arm"), result.get("query_id")
-        require(isinstance(arm, str) and isinstance(query_id, str), "invalid result identity")
-        pair = (arm, query_id)
-        require(pair in expected and pair not in seen, "unknown/duplicate arm-query pair")
-        seen.add(pair)
-        samples = result.get("samples_ms")
-        require(isinstance(samples, list) and len(samples) == manifest["repetitions"], "invalid sample count")
-        for sample in samples:
-            number(sample, "latency sample")
-        hits = result.get("hits")
-        require(isinstance(hits, list) and len(hits) <= manifest["limit"], "invalid hits count")
-        seen_chunks = set()
-        duplicates = []
-        ranked = []
-        for hit in hits:
-            require(isinstance(hit, dict) and isinstance(hit.get("chunk_id"), str), "invalid hit")
-            chunk = hit["chunk_id"]
-            require(chunk in chunks, "unknown chunk")
-            if chunk in seen_chunks:
-                require(arm == "production_fts", "duplicate chunk in diagnostic pair")
-                if chunk not in duplicates:
-                    duplicates.append(chunk)
-            seen_chunks.add(chunk)
-            doc = chunks[chunk]
-            require(hit.get("document_key") == doc["key"], "hit document mismatch")
-            require(hit.get("text_sha256") == doc["sha256"], "hit checksum mismatch")
-            number(hit.get("score"), "score", nonnegative=False)
-            if doc["key"] not in ranked:
-                ranked.append(doc["key"])
-        query = queries[query_id]
-        # Product reference anomalies must not contaminate or invalidate the
-        # independently complete raw pair, nor become an accepted product score.
-        metrics = None if duplicates else compute_rank_metrics(ranked, set(query["relevant_documents"]))
-        per_arm[arm].append({"query_id": query_id, "rank_metrics": metrics,
-                             "status": "invalid_reference" if duplicates else "measured",
-                             "duplicate_chunk_ids": duplicates, "native_result_index": result_index,
-                             "excluded_hits": [key for key in ranked if key in query["excluded_documents"]],
-                             "latency_ms": {"median": statistics.median(samples), "p95": percentile95(samples)}})
-        pooled[arm].extend(samples)
+        arm, row = evaluate_result(
+            result_index, result, manifest, chunks, queries, expected, seen
+        )
+        per_arm[arm].append(row)
+        pooled[arm].extend(result["samples_ms"])
     require(seen == expected, "missing arm-query pairs")
-    summaries = {}
-    for arm, rows in per_arm.items():
-        metrics = [row["rank_metrics"] for row in rows]
-        invalid = [row["query_id"] for row in rows if row["status"] == "invalid_reference"]
-        summaries[arm] = {
-            "status": "invalid_reference" if invalid else "measured",
-            "invalid_query_ids": sorted(invalid),
-            "queries": sorted(rows, key=lambda row: row["query_id"]),
-            "aggregate_rank_metrics": None if invalid else {
-                key: statistics.mean(metric[key] for metric in metrics)
-                for key in metrics[0] if key == "mrr" or key.startswith("hit@")},
-            "exclusion_violation_count": sum(len(row["excluded_hits"]) for row in rows),
-            "latency_context": "observed invalid-reference path" if invalid else "measured treatment path",
-            "warm_client_latency_ms": {"median": statistics.median(pooled[arm]),
-                                       "p95": percentile95(pooled[arm])},
-        }
+    summaries = {arm: arm_summary(rows, pooled[arm]) for arm, rows in per_arm.items()}
     return {"schema_version": 1, "manifest_sha256": manifest["manifest_sha256"],
             "status": "partial_diagnostic" if summaries["production_fts"]["invalid_query_ids"] else "measured",
             "diagnostic_pair_status": "measured",
@@ -284,7 +346,7 @@ def evaluate(manifest: dict[str, Any], receipt: dict[str, Any]) -> dict[str, Any
             "setup_ms": receipt["setup_ms"], "index_bytes": receipt["index_bytes"],
             "latency_method": "warm client samples; pooled equal repetitions; p95 nearest rank; setup separate",
             "rank_method": "document first occurrence; equal-query mean of canonical compute_rank_metrics",
-            "final_answer": "not measured", "UI": "not measured", "MCP": "not measured",
+            "final_answer": NOT_MEASURED, "UI": NOT_MEASURED, "MCP": NOT_MEASURED,
             "adoption": "not decided", "comparison_limits": manifest.get("settings", {}).get("comparison_limits", [])}
 
 

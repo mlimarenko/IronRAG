@@ -386,6 +386,9 @@ pub async fn list_provider_call_descriptors_by_execution_ids(
     .await
 }
 
+/// Counts every provider-call row of one execution, whatever its state. Used by
+/// the paginated provider-call listing, whose `total` must match the rows the
+/// same filter returns.
 pub async fn count_provider_calls_by_execution<'e>(
     executor: impl Executor<'e, Database = Postgres>,
     owning_execution_kind: &str,
@@ -403,46 +406,83 @@ pub async fn count_provider_calls_by_execution<'e>(
     .await
 }
 
-/// Counts provider calls of one execution that recorded usage without a
-/// matching catalog price. A partially priced call counts once, so the value
-/// is comparable with `provider_call_count` rather than with usage rows.
+/// Counts the provider calls of one execution whose call state is `completed`,
+/// i.e. the settled observations of that execution.
+///
+/// A reservation is created before the request leaves, so `started`, `failed` and
+/// `canceled` rows are unsettled attempts: they are excluded here. `completed`
+/// does not by itself prove a paid attempt either — a completed call can still be
+/// unpriced or usage-less, which `count_unpriced_provider_calls_by_execution`
+/// records.
+pub async fn count_settled_provider_calls_by_execution<'e>(
+    executor: impl Executor<'e, Database = Postgres>,
+    owning_execution_kind: &str,
+    owning_execution_id: Uuid,
+) -> Result<i64, sqlx::Error> {
+    sqlx::query_scalar::<_, i64>(
+        "select count(*)::bigint
+         from billing_provider_call
+         where owning_execution_kind = $1::billing_owning_execution_kind
+           and owning_execution_id = $2
+           and call_state = 'completed'::billing_call_state",
+    )
+    .bind(owning_execution_kind)
+    .bind(owning_execution_id)
+    .fetch_one(executor)
+    .await
+}
+
+/// Counts provider calls of one execution whose liability no charge proves: a
+/// reservation that never completed, a completed call that reported no usage at
+/// all, a call that recorded usage without a matching catalog price, or a call of
+/// a kind whose usage is mandatory but incomplete. A partially priced call counts
+/// once, so the value is comparable with `provider_call_count` rather than with
+/// usage rows.
 pub async fn count_unpriced_provider_calls_by_execution<'e>(
     executor: impl Executor<'e, Database = Postgres>,
     owning_execution_kind: &str,
     owning_execution_id: Uuid,
 ) -> Result<i64, sqlx::Error> {
     // Source vision requires input and output; search embedding requires input
-    // only. Neither absent usage nor an unfinished call proves zero liability.
+    // only. Neither absent usage nor an unfinished reservation proves zero
+    // liability: a request that reached the provider may still be billed, and a
+    // completed call without usage rows was never priced at all.
     sqlx::query_scalar::<_, i64>(
         "select count(*)::bigint
          from billing_provider_call provider_call
          where provider_call.owning_execution_kind = $1::billing_owning_execution_kind
            and provider_call.owning_execution_id = $2
-           and (exists (
-              select 1
-              from billing_usage usage
-             where usage.provider_call_id = provider_call.id
-               and not exists (
+           and (
+              provider_call.call_state <> 'completed'::billing_call_state
+              or not exists (
                  select 1
-                 from billing_charge charge
-                 where charge.usage_id = usage.id
-               )
-            ) or (
-               provider_call.call_kind in ($3, $4)
-              and (
-                provider_call.call_state <> 'completed'
-                or not exists (
-                  select 1 from billing_usage input_usage
-                  where input_usage.provider_call_id = provider_call.id
-                    and input_usage.usage_kind = 'prompt_tokens'
-                )
-                 or (provider_call.call_kind = $3 and not exists (
-                   select 1 from billing_usage output_usage
-                  where output_usage.provider_call_id = provider_call.id
-                    and output_usage.usage_kind = 'completion_tokens'
-                 ))
+                 from billing_usage reported_usage
+                where reported_usage.provider_call_id = provider_call.id
               )
-            ))",
+              or exists (
+                 select 1
+                 from billing_usage usage
+                where usage.provider_call_id = provider_call.id
+                  and not exists (
+                    select 1
+                    from billing_charge charge
+                    where charge.usage_id = usage.id
+                  )
+              ) or (
+                provider_call.call_kind in ($3, $4)
+               and (
+                 not exists (
+                   select 1 from billing_usage input_usage
+                   where input_usage.provider_call_id = provider_call.id
+                     and input_usage.usage_kind = 'prompt_tokens'
+                 )
+                  or (provider_call.call_kind = $3 and not exists (
+                    select 1 from billing_usage output_usage
+                   where output_usage.provider_call_id = provider_call.id
+                     and output_usage.usage_kind = 'completion_tokens'
+                 ))
+               )
+             ))",
     )
     .bind(owning_execution_kind)
     .bind(owning_execution_id)
@@ -450,4 +490,43 @@ pub async fn count_unpriced_provider_calls_by_execution<'e>(
     .bind(crate::domains::billing::KNOWLEDGE_SEARCH_EMBEDDING_CALL_KIND)
     .fetch_one(executor)
     .await
+}
+
+/// Terminalizes one durable send row that produced no usable reply.
+///
+/// This is the pool-only entry the transport guard uses after a drop, so a
+/// canceled or failed send never stays `started` and never claims usage. A row
+/// that already reached a terminal state keeps it: a concurrent settlement
+/// always wins over this fallback.
+pub async fn finish_provider_call_without_usage(
+    postgres: &PgPool,
+    provider_call_id: Uuid,
+    call_state: &'static str,
+) -> Result<bool, sqlx::Error> {
+    debug_assert!(
+        matches!(call_state, "failed" | "canceled"),
+        "only a no-usage terminal state may be written here"
+    );
+    let mut transaction = postgres.begin().await?;
+    let Some(existing) =
+        get_provider_call_by_id_for_update(&mut *transaction, provider_call_id).await?
+    else {
+        return Ok(false);
+    };
+    if existing.call_state != "started" {
+        return Ok(true);
+    }
+    let Some(provider_call) = update_provider_call_state(
+        &mut *transaction,
+        provider_call_id,
+        call_state,
+        Some(Utc::now()),
+    )
+    .await?
+    else {
+        return Ok(true);
+    };
+    mark_execution_cost_rollup_dirty(&mut *transaction, &provider_call).await?;
+    transaction.commit().await?;
+    Ok(true)
 }

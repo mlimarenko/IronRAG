@@ -4,6 +4,10 @@ use futures::StreamExt;
 
 use anyhow::Context;
 
+#[derive(Debug, thiserror::Error)]
+#[error("lexical search store unavailable")]
+pub(super) struct LexicalStoreUnavailable;
+
 use super::{
     AppState, BTreeSet, DOCUMENT_IDENTITY_CHUNKS_PER_DOCUMENT,
     DOCUMENT_IDENTITY_FOCUS_PREFIX_CHARS, DOCUMENT_IDENTITY_FOCUSED_CHUNKS_PER_DOCUMENT,
@@ -23,6 +27,7 @@ pub(super) struct ChunkRetrievalLaneOutcome {
     pub(super) lexical_query_count: usize,
     pub(super) lexical_elapsed_ms: u128,
     pub(super) degraded_lane_count: usize,
+    pub(super) degradations: Vec<super::super::types::RetrievalDegradation>,
 }
 
 pub(super) struct PrimaryRetrievalRequest<'a> {
@@ -30,6 +35,7 @@ pub(super) struct PrimaryRetrievalRequest<'a> {
     pub(super) library_id: Uuid,
     pub(super) limit: usize,
     pub(super) question_embedding: &'a [f32],
+    pub(super) vector_readiness: super::super::types::QueryVectorReadiness,
     pub(super) vector_search_context: Option<&'a RuntimeVectorSearchContext>,
     pub(super) document_index: &'a HashMap<Uuid, KnowledgeDocumentRow>,
     pub(super) plan_keywords: &'a [String],
@@ -49,6 +55,7 @@ pub(super) async fn execute_primary_retrieval(
         library_id,
         limit,
         question_embedding,
+        vector_readiness,
         vector_search_context,
         document_index,
         plan_keywords,
@@ -59,22 +66,17 @@ pub(super) async fn execute_primary_retrieval(
         temporal_start,
         temporal_end,
     } = request;
-    let vector_future = async {
-        let started = std::time::Instant::now();
-        if question_embedding.is_empty() {
-            tracing::info!(
-                stage = "retrieval.vector_skip",
-                reason = "question_embedding_empty",
-                "vector retrieve skipped: no question embedding"
-            );
-            return Ok::<(Vec<RuntimeMatchedChunk>, u128), anyhow::Error>((Vec::new(), 0));
-        }
+    // The identity fence and dimensional contract are not optional lane
+    // failures: returning lexical hits after either fails can mix inventories.
+    let _vector_guard = if question_embedding.is_empty() {
+        None
+    } else {
         let context = vector_search_context.ok_or_else(|| QueryServiceError::StateConflict {
             message: format!(
                 "runtime query for library {library_id} has a vector without a ready exact-profile preflight; retry the query"
             ),
         })?;
-        let _vector_guard =
+        let guard =
             state.application_services.search.vector_plane_read_guard(state, library_id).await?;
         validate_runtime_vector_search_context(state, library_id, context).await?;
         validate_embedding_vector_dimensions(
@@ -82,6 +84,34 @@ pub(super) async fn execute_primary_retrieval(
             question_embedding,
             "runtime chunk search",
         )?;
+        Some(guard)
+    };
+    let vector_future = async {
+        let started = std::time::Instant::now();
+        if vector_readiness == super::super::types::QueryVectorReadiness::ProviderUnavailable {
+            return Err(super::super::embed::EmbeddingProviderUnavailable.into());
+        }
+        if question_embedding.is_empty() {
+            if vector_readiness != super::super::types::QueryVectorReadiness::EmptyInventory {
+                return Err(anyhow::Error::new(QueryServiceError::StateConflict {
+                    message: "ready vector retrieval has no query embedding".into(),
+                }));
+            }
+            tracing::info!(
+                stage = "retrieval.vector_skip",
+                reason = "question_embedding_empty",
+                "vector retrieve skipped: no question embedding"
+            );
+            return Ok::<(Vec<RuntimeMatchedChunk>, u128), anyhow::Error>((Vec::new(), 0));
+        }
+        if vector_readiness != super::super::types::QueryVectorReadiness::Ready {
+            return Err(anyhow::Error::new(QueryServiceError::StateConflict {
+                message: "query embedding supplied without a ready vector lane".into(),
+            }));
+        }
+        let Some(context) = vector_search_context else {
+            return Err(anyhow::anyhow!("vector search context missing after preflight"));
+        };
         let raw_hits = state
             .search_store
             .search_chunk_vectors_by_similarity(
@@ -97,7 +127,16 @@ pub(super) async fn execute_primary_retrieval(
                 temporal_end,
             )
             .await
-            .context("failed to search active chunk vectors for runtime query")?;
+            .context("failed to search active chunk vectors for runtime query")
+            .map_err(|error| {
+                if error.downcast_ref::<QueryServiceError>().is_none()
+                    && is_operational_vector_error(&error)
+                {
+                    error
+                } else {
+                    anyhow::Error::new(QueryServiceError::Internal(error))
+                }
+            })?;
         tracing::info!(
             stage = "retrieval.vector_search",
             raw_hit_count = raw_hits.len(),
@@ -112,7 +151,8 @@ pub(super) async fn execute_primary_retrieval(
             plan_keywords,
             hydration_document_ids,
         )
-        .await?;
+        .await
+        .map_err(|error| anyhow::Error::new(QueryServiceError::Internal(error)))?;
         let elapsed = started.elapsed();
         crate::services::query::turn_spans::record_span(
             "retrieve.vector",
@@ -151,6 +191,15 @@ pub(super) async fn execute_primary_retrieval(
                             format!(
                                 "failed to run lexical chunk search for runtime query: {lexical_query}"
                             )
+                        })
+                        .map_err(|error| {
+                            if error.downcast_ref::<QueryServiceError>().is_none()
+                                && is_operational_vector_error(&error)
+                            {
+                                anyhow::Error::new(LexicalStoreUnavailable)
+                            } else {
+                                anyhow::Error::new(QueryServiceError::Internal(error))
+                            }
                         });
                     let result = match search_result {
                         Ok(hits) => {
@@ -164,6 +213,7 @@ pub(super) async fn execute_primary_retrieval(
                                 hydration_document_ids,
                             )
                             .await
+                            .map_err(|error| anyhow::Error::new(QueryServiceError::Internal(error)))
                         }
                         Err(error) => Err(error),
                     };
@@ -177,7 +227,7 @@ pub(super) async fn execute_primary_retrieval(
         indexed_results.sort_by_key(|(query_index, _)| *query_index);
         let per_query_results =
             indexed_results.into_iter().map(|(_, result)| result).collect::<Vec<_>>();
-        let lexical_hits =
+        let (lexical_hits, partial_degradation) =
             combine_lexical_query_results(per_query_results, lexical_query_count, lexical_limit)?;
         let elapsed = started.elapsed();
         crate::services::query::turn_spans::record_span(
@@ -187,14 +237,27 @@ pub(super) async fn execute_primary_retrieval(
             None,
             Some(lexical_hits.len() as u64),
         );
-        Ok::<(Vec<RuntimeMatchedChunk>, usize, u128), anyhow::Error>((
+        Ok::<(Vec<RuntimeMatchedChunk>, usize, u128, bool), anyhow::Error>((
             lexical_hits,
             lexical_query_count,
             elapsed.as_millis(),
+            partial_degradation,
         ))
     };
     let (vector_result, lexical_result) = tokio::join!(vector_future, lexical_future);
     combine_chunk_retrieval_lanes(vector_result, lexical_result)
+}
+
+fn is_operational_vector_error(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        cause.downcast_ref::<sqlx::Error>().is_some_and(|error| match error {
+            sqlx::Error::Io(_) | sqlx::Error::PoolTimedOut | sqlx::Error::PoolClosed => true,
+            sqlx::Error::Database(database) => {
+                database.code().is_some_and(|code| code.starts_with("08") || code == "57P03")
+            }
+            _ => false,
+        })
+    })
 }
 
 /// Logs a failed vector chunk lane without holding the record inside the lane combiner.
@@ -221,15 +284,29 @@ fn log_lexical_lane_failure(summary: &str) {
 
 pub(super) fn combine_chunk_retrieval_lanes(
     vector_result: anyhow::Result<(Vec<RuntimeMatchedChunk>, u128)>,
-    lexical_result: anyhow::Result<(Vec<RuntimeMatchedChunk>, usize, u128)>,
+    lexical_result: anyhow::Result<(Vec<RuntimeMatchedChunk>, usize, u128, bool)>,
 ) -> anyhow::Result<ChunkRetrievalLaneOutcome> {
     let mut degraded_lane_count = 0usize;
+    let mut degradations = Vec::new();
     let mut failures = Vec::new();
 
     let (vector_hits, vector_elapsed_ms) = match vector_result {
         Ok(result) => result,
         Err(error) => {
+            if error.downcast_ref::<QueryServiceError>().is_some() {
+                return Err(error);
+            }
             degraded_lane_count += 1;
+            degradations.push(
+                if error
+                    .downcast_ref::<super::super::embed::EmbeddingProviderUnavailable>()
+                    .is_some()
+                {
+                    super::super::types::RetrievalDegradation::VectorProvider
+                } else {
+                    super::super::types::RetrievalDegradation::VectorStore
+                },
+            );
             let summary = format!("{error:#}");
             log_vector_lane_failure(&summary);
             failures.push(format!("vector: {summary}"));
@@ -238,9 +315,19 @@ pub(super) fn combine_chunk_retrieval_lanes(
     };
 
     let (lexical_hits, lexical_query_count, lexical_elapsed_ms) = match lexical_result {
-        Ok(result) => result,
+        Ok((hits, count, elapsed, partial_degradation)) => {
+            if partial_degradation {
+                degraded_lane_count += 1;
+                degradations.push(super::super::types::RetrievalDegradation::LexicalStore);
+            }
+            (hits, count, elapsed)
+        }
         Err(error) => {
+            if error.downcast_ref::<LexicalStoreUnavailable>().is_none() {
+                return Err(error);
+            }
             degraded_lane_count += 1;
+            degradations.push(super::super::types::RetrievalDegradation::LexicalStore);
             let summary = format!("{error:#}");
             log_lexical_lane_failure(&summary);
             failures.push(format!("lexical: {summary}"));
@@ -271,6 +358,7 @@ pub(super) fn combine_chunk_retrieval_lanes(
         lexical_query_count,
         lexical_elapsed_ms,
         degraded_lane_count,
+        degradations,
     })
 }
 

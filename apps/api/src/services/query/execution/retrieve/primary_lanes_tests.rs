@@ -1,31 +1,5 @@
 use super::test_prelude::*;
-
-#[test]
-fn vector_search_always_runs_regardless_of_exact_literal_flag() {
-    // Required contract since v0.3.3: vector retrieval is always
-    // exercised alongside lexical. The `exact_literal_technical` flag
-    // on the intent profile influences ranking/boost, never excludes
-    // the whole vector lane. Skipping the vector lane on exact-literal
-    // questions causes BM25 stem collisions to promote unrelated
-    // templates over the actual configuration sections.
-    let mut literal_plan = RuntimeQueryPlan {
-        requested_mode: crate::domains::query::RuntimeQueryMode::Document,
-        planned_mode: crate::domains::query::RuntimeQueryMode::Document,
-        intent_profile: QueryIntentProfile::default(),
-        keywords: vec!["endpoint".to_string()],
-        high_level_keywords: vec!["endpoint".to_string()],
-        low_level_keywords: vec!["system".to_string()],
-        entity_keywords: Vec::new(),
-        concept_keywords: Vec::new(),
-        top_k: 8,
-        context_budget_chars: 4_000,
-        hyde_recommended: false,
-    };
-
-    assert!(!should_skip_vector_search(&literal_plan));
-    literal_plan.intent_profile.exact_literal_technical = true;
-    assert!(!should_skip_vector_search(&literal_plan));
-}
+use crate::services::query::error::QueryServiceError;
 
 #[test]
 fn chunk_retrieval_lanes_continue_when_vector_lane_fails() {
@@ -33,11 +7,12 @@ fn chunk_retrieval_lanes_continue_when_vector_lane_fails() {
 
     let outcome = combine_chunk_retrieval_lanes(
         Err(anyhow::anyhow!("vector backend unavailable")),
-        Ok((vec![lexical_chunk.clone()], 3, 42)),
+        Ok((vec![lexical_chunk.clone()], 3, 42, false)),
     )
     .expect("lexical lane should keep retrieval usable");
 
     assert_eq!(outcome.degraded_lane_count, 1);
+    assert_eq!(outcome.degradations, vec![super::super::types::RetrievalDegradation::VectorStore]);
     assert!(outcome.vector_hits.is_empty());
     assert_eq!(outcome.lexical_hits.len(), 1);
     assert_eq!(outcome.lexical_hits[0].chunk_id, lexical_chunk.chunk_id);
@@ -46,12 +21,51 @@ fn chunk_retrieval_lanes_continue_when_vector_lane_fails() {
 }
 
 #[test]
+fn embedding_unavailability_keeps_lexical_evidence_and_its_failure_class() {
+    let lexical_chunk = runtime_chunk("lexical", 0.8);
+    let outcome = combine_chunk_retrieval_lanes(
+        Err(super::super::embed::EmbeddingProviderUnavailable.into()),
+        Ok((vec![lexical_chunk.clone()], 1, 1, false)),
+    )
+    .expect("lexical evidence should survive an unavailable embedding provider");
+    assert_eq!(outcome.lexical_hits[0].chunk_id, lexical_chunk.chunk_id);
+    assert_eq!(
+        outcome.degradations,
+        vec![super::super::types::RetrievalDegradation::VectorProvider]
+    );
+    assert!(
+        combine_chunk_retrieval_lanes(
+            Err(super::super::embed::EmbeddingProviderUnavailable.into()),
+            Ok((Vec::new(), 1, 1, false)),
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn chunk_retrieval_does_not_hide_vector_identity_conflict_with_lexical_evidence() {
+    let conflict = QueryServiceError::StateConflict { message: "inventory changed".into() };
+    let result = combine_chunk_retrieval_lanes(
+        Err(anyhow::Error::new(conflict)),
+        Ok((vec![runtime_chunk("lexical", 0.8)], 1, 1, false)),
+    );
+    let error = match result {
+        Ok(_) => panic!("identity conflict must fail even with lexical evidence"),
+        Err(error) => error,
+    };
+    assert!(matches!(
+        error.downcast_ref::<QueryServiceError>(),
+        Some(QueryServiceError::StateConflict { .. })
+    ));
+}
+
+#[test]
 fn chunk_retrieval_lanes_continue_when_lexical_lane_fails() {
     let vector_chunk = runtime_chunk("vector", 0.9);
 
     let outcome = combine_chunk_retrieval_lanes(
         Ok((vec![vector_chunk.clone()], 17)),
-        Err(anyhow::anyhow!("lexical backend unavailable")),
+        Err(super::primary_lanes::LexicalStoreUnavailable.into()),
     )
     .expect("vector lane should keep retrieval usable");
 
@@ -66,7 +80,7 @@ fn chunk_retrieval_lanes_continue_when_lexical_lane_fails() {
 fn chunk_retrieval_lanes_fail_when_both_lanes_fail() {
     let result = combine_chunk_retrieval_lanes(
         Err(anyhow::anyhow!("vector backend unavailable")),
-        Err(anyhow::anyhow!("lexical backend unavailable")),
+        Err(super::primary_lanes::LexicalStoreUnavailable.into()),
     );
     let error = match result {
         Ok(_) => panic!("both failed lanes must fail retrieval"),
@@ -76,7 +90,7 @@ fn chunk_retrieval_lanes_fail_when_both_lanes_fail() {
     let message = format!("{error:#}");
     assert!(message.contains("all chunk retrieval lanes failed"));
     assert!(message.contains("vector backend unavailable"));
-    assert!(message.contains("lexical backend unavailable"));
+    assert!(message.contains("lexical search store unavailable"));
 }
 
 #[test]
@@ -88,7 +102,7 @@ fn chunk_retrieval_fails_when_a_degraded_lane_leaves_no_evidence() {
     // lane failure must fail the turn instead.
     let result = combine_chunk_retrieval_lanes(
         Err(anyhow::anyhow!("pool timed out while waiting for an open connection")),
-        Ok((Vec::new(), 8, 12)),
+        Ok((Vec::new(), 8, 12, false)),
     );
     let error = match result {
         Ok(_) => panic!("a degraded lane with no surviving evidence must fail retrieval"),
@@ -104,8 +118,9 @@ fn chunk_retrieval_fails_when_a_degraded_lane_leaves_no_evidence() {
 fn chunk_retrieval_allows_an_empty_bundle_when_both_lanes_ran_clean() {
     // A question that genuinely matches nothing is not a failure: both lanes
     // ran, neither degraded, and the empty result must stay a normal outcome.
-    let outcome = combine_chunk_retrieval_lanes(Ok((Vec::new(), 9)), Ok((Vec::new(), 4, 11)))
-        .expect("a clean search that matched nothing must remain a success");
+    let outcome =
+        combine_chunk_retrieval_lanes(Ok((Vec::new(), 9)), Ok((Vec::new(), 4, 11, false)))
+            .expect("a clean search that matched nothing must remain a success");
 
     assert_eq!(outcome.degraded_lane_count, 0);
     assert!(outcome.vector_hits.is_empty());
@@ -117,27 +132,59 @@ fn lexical_query_results_keep_successful_subqueries_when_one_fails() {
     let first = runtime_chunk("first", 0.9);
     let second = runtime_chunk("second", 0.7);
 
-    let hits = combine_lexical_query_results(
+    let (hits, degraded) = combine_lexical_query_results(
         vec![
             Ok(vec![first.clone()]),
-            Err(anyhow::anyhow!("one lexical subquery failed")),
+            Err(super::primary_lanes::LexicalStoreUnavailable.into()),
             Ok(vec![second.clone()]),
         ],
         3,
         8,
     )
     .expect("successful lexical subqueries should keep the lane usable");
+    assert!(degraded);
 
     let ids = hits.into_iter().map(|chunk| chunk.chunk_id).collect::<BTreeSet<_>>();
     assert_eq!(ids, BTreeSet::from([first.chunk_id, second.chunk_id]));
 }
 
 #[test]
+fn lexical_probe_identity_and_unknown_hydration_failures_are_never_hidden() {
+    for failure in [
+        anyhow::Error::new(QueryServiceError::StateConflict { message: "stale identity".into() }),
+        anyhow::anyhow!("unknown hydration failure"),
+    ] {
+        let result = combine_lexical_query_results(
+            vec![Ok(vec![runtime_chunk("good", 1.0)]), Err(failure)],
+            2,
+            8,
+        );
+        assert!(result.is_err());
+    }
+}
+
+#[test]
+fn partial_lexical_probe_outage_is_reported_in_combined_outcome() {
+    let (hits, degraded) = combine_lexical_query_results(
+        vec![
+            Ok(vec![runtime_chunk("good", 1.0)]),
+            Err(super::primary_lanes::LexicalStoreUnavailable.into()),
+        ],
+        2,
+        8,
+    )
+    .expect("one operational outage retains successful evidence");
+    let outcome = combine_chunk_retrieval_lanes(Ok((Vec::new(), 0)), Ok((hits, 2, 1, degraded)))
+        .expect("partial lexical evidence remains usable");
+    assert_eq!(outcome.degradations, vec![super::super::types::RetrievalDegradation::LexicalStore]);
+}
+
+#[test]
 fn lexical_query_results_fail_when_all_subqueries_fail() {
     let result = combine_lexical_query_results(
         vec![
-            Err(anyhow::anyhow!("first lexical subquery failed")),
-            Err(anyhow::anyhow!("second lexical subquery failed")),
+            Err(super::primary_lanes::LexicalStoreUnavailable.into()),
+            Err(super::primary_lanes::LexicalStoreUnavailable.into()),
         ],
         2,
         8,
@@ -148,9 +195,7 @@ fn lexical_query_results_fail_when_all_subqueries_fail() {
     };
 
     let message = format!("{error:#}");
-    assert!(message.contains("all lexical chunk search queries failed"));
-    assert!(message.contains("first lexical subquery failed"));
-    assert!(message.contains("second lexical subquery failed"));
+    assert!(message.contains("lexical search store unavailable"));
 }
 
 #[test]
@@ -159,7 +204,7 @@ fn lexical_query_results_fail_when_survivors_matched_nothing_after_a_failure() {
     // not "nothing matched". Reporting it as a clean empty lane would hide the
     // degradation from the lane-level evidence floor.
     let result = combine_lexical_query_results(
-        vec![Ok(Vec::new()), Err(anyhow::anyhow!("pool timed out"))],
+        vec![Ok(Vec::new()), Err(super::primary_lanes::LexicalStoreUnavailable.into())],
         2,
         16,
     );
@@ -168,15 +213,17 @@ fn lexical_query_results_fail_when_survivors_matched_nothing_after_a_failure() {
         Err(error) => error,
     };
 
-    assert!(format!("{error:#}").contains("lexical chunk search degraded to no evidence"));
+    assert!(format!("{error:#}").contains("lexical search store unavailable"));
 }
 
 #[test]
 fn lexical_query_results_allow_an_empty_lane_when_every_subquery_ran_clean() {
-    let hits = combine_lexical_query_results(vec![Ok(Vec::new()), Ok(Vec::new())], 2, 16)
-        .expect("a clean lexical search that matched nothing must remain a success");
+    let (hits, degraded) =
+        combine_lexical_query_results(vec![Ok(Vec::new()), Ok(Vec::new())], 2, 16)
+            .expect("a clean lexical search that matched nothing must remain a success");
 
     assert!(hits.is_empty());
+    assert!(!degraded);
 }
 
 #[test]

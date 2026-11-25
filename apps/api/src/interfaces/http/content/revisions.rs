@@ -121,6 +121,7 @@ pub async fn create_revision(
                     document_hint: payload.document_hint,
                     mime_type: payload.mime_type,
                     file_bytes: payload.file_bytes,
+                    enrichment_scope: payload.enrichment_scope,
                 },
             )
             .await?
@@ -158,6 +159,7 @@ pub async fn create_revision(
                         "visibility binding is only valid for complete replacement".to_owned(),
                     ));
                 }
+                ensure_append_has_no_enrichment_scope(payload.enrichment_scope)?;
                 let appended_text = payload.appended_text.ok_or_else(|| {
                     ApiError::BadRequest("appendedText is required when mode is append".to_string())
                 })?;
@@ -213,6 +215,7 @@ pub async fn create_revision(
                             source_uri: payload.source_uri,
                             document_hint: payload.document_hint,
                             file_bytes: markdown.into_bytes(),
+                            enrichment_scope: payload.enrichment_scope,
                         },
                     )
                     .await?
@@ -326,4 +329,38 @@ pub async fn reprocess_document(
     )
     .await?;
     Ok(Json(map_mutation_admission(admission)))
+}
+
+/// Append materializes in the request and its inline executor runs the summary
+/// and graph stages unconditionally, so a bounded plan cannot be honoured
+/// there. Refusing the request keeps the promised plan honest instead of
+/// recording one plan and paying for another.
+fn ensure_append_has_no_enrichment_scope(
+    scope: Option<crate::domains::content::EnrichmentScope>,
+) -> Result<(), ApiError> {
+    match scope {
+        None => Ok(()),
+        Some(_) => Err(ApiError::BadRequest(
+            "enrichmentScope is not supported for mode=append; use mode=replace for a bounded plan"
+                .to_string(),
+        )),
+    }
+}
+
+#[cfg(test)]
+mod append_scope_tests {
+    use crate::domains::content::EnrichmentScope;
+    use crate::interfaces::http::router_support::ApiError;
+
+    use super::ensure_append_has_no_enrichment_scope;
+
+    #[test]
+    fn append_refuses_a_bounded_plan_instead_of_recording_an_unhonoured_one() {
+        assert!(ensure_append_has_no_enrichment_scope(None).is_ok());
+        let refused =
+            ensure_append_has_no_enrichment_scope(Some(EnrichmentScope::TextAndEmbedding))
+                .expect_err("append must refuse a bounded plan");
+        assert!(matches!(refused, ApiError::BadRequest(_)));
+        assert!(refused.to_string().contains("mode=append"));
+    }
 }

@@ -1,5 +1,5 @@
 use crate::shared::extraction::{
-    RawExtractionPage, build_text_layout, build_text_layout_from_content,
+    RawExtractionPage, build_text_layout, build_text_layout_from_content, image,
     text_quality::assess_text_quality, text_render::normalize_for_structured_preparation,
 };
 
@@ -92,6 +92,7 @@ pub(super) fn with_extraction_quality_markers(
         == RecognitionCapability::ImageOcr)
         .then(|| recognition_engine_ocr_source(recognition_profile.engine.as_str()));
     let text_quality = assess_text_quality(&normalized.normalized_text);
+    let evidence_limitation = evidence_limitation_marker(&source_map);
     source_map.insert(
         EXTRACTION_QUALITY_KEY.to_string(),
         serde_json::json!({
@@ -109,9 +110,22 @@ pub(super) fn with_extraction_quality_markers(
             "text_score": text_quality.score,
             "text_low_confidence": text_quality.low_confidence,
             "text_reasons": text_quality.reasons,
+            "evidence_limitation": evidence_limitation,
         }),
     );
     with_recognition_source_map(serde_json::Value::Object(source_map), recognition_profile)
+}
+
+/// One explicit marker when any unit carries an evidence limitation, so a
+/// consumer of the quality record does not have to walk the per-unit list.
+fn evidence_limitation_marker(
+    source_map: &serde_json::Map<String, serde_json::Value>,
+) -> Option<&'static str> {
+    let units = source_map.get("unit_evidence")?.as_array()?;
+    units
+        .iter()
+        .any(|unit| unit.get("evidence_limitation").and_then(serde_json::Value::as_str).is_some())
+        .then_some(image::LOW_CONFIDENCE_WITHOUT_VISUAL_READING)
 }
 
 fn normalize_image_ocr_text(content_text: &str) -> String {
@@ -182,5 +196,85 @@ mod tests {
 
         assert_eq!(normalized.source_text, content);
         assert_eq!(normalized.normalized_text, content);
+    }
+
+    fn recognition_profile() -> crate::domains::recognition::RecognitionProfile {
+        use crate::domains::recognition::{
+            RecognitionCapability, RecognitionEngine, RecognitionProfile, RecognitionStructureTier,
+        };
+        RecognitionProfile {
+            capability: RecognitionCapability::DocumentLayout,
+            engine: RecognitionEngine::Xberg,
+            structure_tier: RecognitionStructureTier::Layout,
+        }
+    }
+
+    fn normalized_pdf(content: &str) -> super::NormalizedExtractedContent {
+        let hints = build_text_layout_from_content(content).structure_hints;
+        normalize_extracted_content(UploadFileKind::Pdf, content, &hints)
+    }
+
+    #[test]
+    fn content_quality_carries_a_unit_evidence_limitation() {
+        let normalized = normalized_pdf("Native layer text");
+        let source_map = serde_json::json!({
+            "unit_evidence": [
+                {
+                    "ordinal": 1,
+                    "text_score": 0.2,
+                    "text_low_confidence": true,
+                    "text_reasons": ["dense_unstable_tokens"],
+                    "native_text_low_confidence": true,
+                    "visual_coverage": "native_text",
+                    "evidence_limitation": "low_confidence_native_text_without_visual_reading"
+                },
+                {
+                    "ordinal": 2,
+                    "text_score": 1.0,
+                    "text_low_confidence": false,
+                    "text_reasons": [],
+                    "native_text_low_confidence": false,
+                    "visual_coverage": "native_text"
+                }
+            ]
+        });
+
+        let markers = super::with_extraction_quality_markers(
+            source_map,
+            &normalized,
+            0,
+            None,
+            recognition_profile(),
+        );
+
+        assert_eq!(
+            markers["content_quality"]["evidence_limitation"],
+            serde_json::json!("low_confidence_native_text_without_visual_reading")
+        );
+    }
+
+    #[test]
+    fn content_quality_has_no_limitation_without_a_unit_evidence_marker() {
+        let normalized = normalized_pdf("Native layer text");
+        let source_map = serde_json::json!({
+            "unit_evidence": [{
+                "ordinal": 1,
+                "text_score": 1.0,
+                "text_low_confidence": false,
+                "text_reasons": [],
+                "native_text_low_confidence": false,
+                "visual_coverage": "native_text"
+            }]
+        });
+
+        let markers = super::with_extraction_quality_markers(
+            source_map,
+            &normalized,
+            0,
+            None,
+            recognition_profile(),
+        );
+
+        assert_eq!(markers["content_quality"]["evidence_limitation"], serde_json::Value::Null);
     }
 }

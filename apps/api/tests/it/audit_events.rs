@@ -2361,6 +2361,8 @@ async fn audit_events_surface_assistant_models_cost_and_runtime_subjects() -> Re
         assert_eq!(total_cost, Decimal::new(123, 4));
         assert_eq!(event["assistantCall"]["currencyCode"], json!("USD"));
         assert_eq!(event["assistantCall"]["providerCallCount"], json!(1));
+        assert_eq!(event["assistantCall"]["costCoverage"], json!("complete"));
+        assert_eq!(event["assistantCall"]["unpricedProviderCallCount"], json!(0));
         assert_eq!(
             event["assistantCall"]["models"][0]["providerKind"],
             json!(fixture.provider_kind.as_str())
@@ -2415,6 +2417,24 @@ async fn audit_events_hide_assistant_costs_without_usage_read() -> Result<()> {
             })
             .await?;
 
+        let stored = latest_audit_event_for_action(fixture.pool(), "query.execution.run").await?;
+        let message =
+            stored.redacted_message.as_deref().context("missing stored redacted message")?;
+        assert!(!message.contains(fixture.model_name.as_str()));
+        assert!(!message.contains("0.0055"));
+
+        // Keep a pre-fix record in the fixture: neither the feed nor its search
+        // may expose the detailed text saved in that record.
+        let old_message = format!(
+            "assistant call completed | calls: 1 | models: {} | cost: 0.0055 USD",
+            fixture.model_name
+        );
+        sqlx::query("update audit_event set redacted_message = $1 where id = $2")
+            .bind(old_message)
+            .bind(stored.id)
+            .execute(fixture.pool())
+            .await?;
+
         let (status, body) = fixture
             .rest_get(
                 &audit_reader,
@@ -2434,6 +2454,20 @@ async fn audit_events_hide_assistant_costs_without_usage_read() -> Result<()> {
             event.get("assistantCall").is_none(),
             "assistantCall must be hidden without usage_read"
         );
+        assert!(event["internalMessage"].is_null());
+        let message =
+            event["redactedMessage"].as_str().context("missing redacted audit message")?;
+        assert!(!message.contains(fixture.model_name.as_str()));
+        assert!(!message.contains("0.0055"));
+
+        let (status, body) = fixture
+            .rest_get(
+                &audit_reader,
+                &format!("/v1/audit/events?libraryId={}&search=0.0055", fixture.library_id),
+            )
+            .await?;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body["items"].as_array().context("missing audit search items")?.is_empty());
 
         Ok(())
     }

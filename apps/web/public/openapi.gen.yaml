@@ -1238,6 +1238,8 @@ paths:
           description: Caller is not authenticated
         '403':
           description: Caller is not authorized for the execution's library
+        '404':
+          description: No measured provider-call evidence for the execution
   /v1/billing/executions/{executionKind}/{executionId}/charges:
     get:
       tags:
@@ -4624,6 +4626,38 @@ paths:
           description: Caller cannot mutate the job's library
         '404':
           description: Job not found
+  /v1/ops/ingest-queue/jobs/{jobId}/execute:
+    post:
+      tags:
+      - ops
+      summary: Execute ingest queue job.
+      description: Reads or controls ingest runtime state. Operators use these endpoints to inspect queued work, attempts, stage events, and document-processing failures. Call it to create work or submit a command. Some commands complete synchronously, while ingest, mutation, and runtime work can continue asynchronously.
+      operationId: executeIngestQueueJob
+      parameters:
+      - name: jobId
+        in: path
+        description: Queued ingest job identifier
+        required: true
+        schema:
+          type: string
+          format: uuid
+      responses:
+        '200':
+          description: Executed ingest job with its latest attempt and async operation
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/IngestJobResponse'
+        '400':
+          description: Job is not queued
+        '401':
+          description: Caller is not authenticated
+        '403':
+          description: Caller cannot mutate the job's library
+        '404':
+          description: Job not found
+        '409':
+          description: Job has no admitted mutation origin or is already leased
   /v1/ops/ingest-queue/jobs/{jobId}/move:
     post:
       tags:
@@ -5330,6 +5364,12 @@ paths:
       responses:
         '200':
           description: Turn execution result with grounded answer + evidence references
+          headers:
+            x-ironrag-query-execution-id:
+              schema:
+                type: string
+                format: uuid
+              description: 'Streamed responses only: the parent execution ID, available before the first event. Recover an interrupted stream with GET /v1/query/executions/{executionId}.'
           content:
             application/json:
               schema:
@@ -6466,6 +6506,15 @@ components:
           type: integer
           format: int32
           description: Position assigned by evidence ranking.
+        revisionId:
+          type:
+          - string
+          - 'null'
+          format: uuid
+          description: |-
+            Immutable document revision the chunk was extracted from, hydrated from
+            the chunk row at read time. Absent for historical references and for
+            chunks whose document no longer exists.
         score:
           type: number
           format: double
@@ -7366,12 +7415,17 @@ components:
       - queryExecutionId
       - models
       - providerCallCount
+      - unpricedProviderCallCount
       properties:
         conversationId:
           type:
           - string
           - 'null'
           format: uuid
+        costCoverage:
+          oneOf:
+          - type: 'null'
+          - $ref: '#/components/schemas/CostCoverageStatus'
         currencyCode:
           type:
           - string
@@ -7395,6 +7449,9 @@ components:
           type:
           - string
           - 'null'
+        unpricedProviderCallCount:
+          type: integer
+          format: int64
     AuditAssistantModelResponse:
       type: object
       required:
@@ -9112,6 +9169,13 @@ components:
           type:
           - string
           - 'null'
+        enrichment_scope:
+          oneOf:
+          - type: 'null'
+          - $ref: '#/components/schemas/EnrichmentScope'
+            description: |-
+              Absent means full enrichment. `text_and_embedding` asks for the bounded
+              plan: base text publication and embeddings only, no summary or graph.
         external_key:
           type:
           - string
@@ -9151,6 +9215,13 @@ components:
           type:
           - string
           - 'null'
+        enrichmentScope:
+          oneOf:
+          - type: 'null'
+          - $ref: '#/components/schemas/EnrichmentScope'
+            description: |-
+              Absent means full enrichment. `text_and_embedding` asks for the bounded
+              plan: base text publication and embeddings only, no summary or graph.
         externalKey:
           type:
           - string
@@ -9315,6 +9386,11 @@ components:
           type:
           - string
           - 'null'
+        enrichment_scope:
+          oneOf:
+          - type: 'null'
+          - $ref: '#/components/schemas/EnrichmentScope'
+            description: Absent means full enrichment; `mode=append` refuses the field.
         file:
           type: string
           format: binary
@@ -9363,6 +9439,15 @@ components:
           type:
           - string
           - 'null'
+        enrichmentScope:
+          oneOf:
+          - type: 'null'
+          - $ref: '#/components/schemas/EnrichmentScope'
+            description: |-
+              Absent means full enrichment. `text_and_embedding` asks for the bounded
+              plan: base text publication and embeddings only, no summary or graph.
+              Only replacement accepts it: the inline append executor always runs full
+              enrichment, so `mode=append` refuses the field.
         fileName:
           type:
           - string
@@ -9770,6 +9855,7 @@ components:
       - attemptNo
       - attemptKind
       - status
+      - retryable
       - queueStartedAt
       - stageEvents
       properties:
@@ -9778,10 +9864,44 @@ components:
         attemptNo:
           type: integer
           format: int32
+        costCoverage:
+          oneOf:
+          - type: 'null'
+          - $ref: '#/components/schemas/CostCoverageStatus'
         currencyCode:
           type:
           - string
           - 'null'
+        currentStage:
+          type:
+          - string
+          - 'null'
+          description: Stage the worker reported when the attempt ended or was updated.
+        failedProviderCallCount:
+          type:
+          - integer
+          - 'null'
+          format: int64
+          description: |-
+            Reservations terminated as `failed` or `canceled`: no settled usage, and
+            no proof the provider billed nothing.
+        failureClass:
+          type:
+          - string
+          - 'null'
+          description: |-
+            Durable typed failure class written by the ingest worker, e.g.
+            `provider` or `worker_aborted`. `None` while the attempt has not failed.
+        failureCode:
+          type:
+          - string
+          - 'null'
+          description: Stable machine-readable failure code for this attempt.
+        failureMessage:
+          type:
+          - string
+          - 'null'
+          description: Worker-produced failure message. Carries no provider response body.
         finishedAt:
           type:
           - string
@@ -9790,9 +9910,20 @@ components:
         jobId:
           type: string
           format: uuid
+        providerCallCount:
+          type:
+          - integer
+          - 'null'
+          format: int64
+          description: |-
+            Calls whose call state is `completed`; a settled observation, not proof
+            that a price was observed.
         queueStartedAt:
           type: string
           format: date-time
+        retryable:
+          type: boolean
+          description: Whether the bounded retry contract allows another attempt.
         stageEvents:
           type: array
           items:
@@ -9808,7 +9939,23 @@ components:
           type:
           - string
           - 'null'
+          description: |-
+            Cost attributed to this attempt's own provider calls; `None` when none of
+            them carries a catalog price.
         totalElapsedMs:
+          type:
+          - integer
+          - 'null'
+          format: int64
+        unpricedProviderCallCount:
+          type:
+          - integer
+          - 'null'
+          format: int64
+          description: |-
+            Calls whose liability no charge proves, including reservations that never
+            completed.
+        unsettledProviderCallCount:
           type:
           - integer
           - 'null'
@@ -9912,27 +10059,43 @@ components:
       type: object
       required:
       - documentId
-      - totalCost
-      - currencyCode
       - providerCallCount
       - unpricedProviderCallCount
-      - costCoverage
       properties:
         costCoverage:
-          $ref: '#/components/schemas/CostCoverageStatus'
+          oneOf:
+          - type: 'null'
+          - $ref: '#/components/schemas/CostCoverageStatus'
+            description: |-
+              Pricing completeness of the document's calls. `None` when no execution
+              produced a derived cost row for it at all.
         currencyCode:
-          type: string
+          type:
+          - string
+          - 'null'
         documentId:
           type: string
           format: uuid
         providerCallCount:
           type: integer
           format: int64
+          description: |-
+            Calls whose call state is `completed`: a settled observation, not proof
+            that a price was observed.
         totalCost:
-          type: string
+          type:
+          - string
+          - 'null'
+          description: |-
+            Cost measured by this document's ledger charges. `None` when the document
+            has no derived cost row or when no call in it carries a price;
+            `cost_coverage` distinguishes the two.
         unpricedProviderCallCount:
           type: integer
           format: int64
+          description: |-
+            Calls whose liability no charge proves, including reservations that never
+            completed.
     DocumentDateRange:
       type: object
       description: RFC3339 UTC bound, inclusive lower / exclusive upper, `min <= max`.
@@ -10042,14 +10205,54 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/DocumentAttempt'
+        costCoverage:
+          oneOf:
+          - type: 'null'
+          - $ref: '#/components/schemas/CostCoverageStatus'
+            description: |-
+              Pricing completeness of every call above. `None` when the ledger
+              recorded no call for this document at all.
         currencyCode:
           type:
           - string
           - 'null'
+        failedProviderCallCount:
+          type:
+          - integer
+          - 'null'
+          format: int64
+          description: |-
+            Reservations terminated as `failed` or `canceled`. The state proves no
+            settled usage, not that the provider billed nothing.
+        providerCallCount:
+          type:
+          - integer
+          - 'null'
+          format: int64
+          description: |-
+            Calls whose call state is `completed`. Usage and price may still be
+            absent; see `unpricedProviderCallCount`.
         totalCost:
           type:
           - string
           - 'null'
+          description: |-
+            Cost measured by the provider-call ledger. `None` when no call in this
+            document carries a catalog price — never a substituted zero.
+        unpricedProviderCallCount:
+          type:
+          - integer
+          - 'null'
+          format: int64
+          description: |-
+            Calls whose liability no charge proves: completed calls without a price
+            plus every reservation that never completed.
+        unsettledProviderCallCount:
+          type:
+          - integer
+          - 'null'
+          format: int64
+          description: Reservations still `started` when this document was read.
     DocumentListPageResponse:
       type: object
       required:
@@ -10128,9 +10331,12 @@ components:
       - ready
       - processing
       - queued
+      - paused
       - failed
       - canceled
+      - pendingMaterialization
       - empty
+      - readable
       properties:
         canceled:
           type: integer
@@ -10141,12 +10347,24 @@ components:
         failed:
           type: integer
           format: int64
+        paused:
+          type: integer
+          format: int64
+        pendingMaterialization:
+          type: integer
+          format: int64
         processing:
           type: integer
           format: int64
         queued:
           type: integer
           format: int64
+        readable:
+          type: integer
+          format: int64
+          description: |-
+            Documents in the same filtered set with a current readable revision,
+            whatever bucket they landed in. Content presence, not a status.
         ready:
           type: integer
           format: int64
@@ -10244,6 +10462,10 @@ components:
           - integer
           - 'null'
           format: int32
+        costCoverage:
+          oneOf:
+          - type: 'null'
+          - $ref: '#/components/schemas/CostCoverageStatus'
         currencyCode:
           type:
           - string
@@ -10258,15 +10480,34 @@ components:
           type:
           - string
           - 'null'
+          description: Cost measured for this stage by the provider-call ledger.
+        failedProviderCallCount:
+          type:
+          - integer
+          - 'null'
+          format: int64
+          description: |-
+            Reservations terminated as `failed` or `canceled`: no settled usage, and
+            no proof the provider billed nothing.
         finishedAt:
           type:
           - string
           - 'null'
           format: date-time
+        message:
+          type:
+          - string
+          - 'null'
+          description: Worker stage message (no provider response body).
         modelName:
           type:
           - string
           - 'null'
+        pricedProviderCallCount:
+          type:
+          - integer
+          - 'null'
+          format: int64
         promptTokens:
           type:
           - integer
@@ -10313,6 +10554,16 @@ components:
           - integer
           - 'null'
           format: int32
+        unpricedProviderCallCount:
+          type:
+          - integer
+          - 'null'
+          format: int64
+        unsettledProviderCallCount:
+          type:
+          - integer
+          - 'null'
+          format: int64
     DocumentStatus:
       type: string
       description: Operational lifecycle of a document ingestion attempt.
@@ -10323,6 +10574,8 @@ components:
       - failed
       - canceled
       - empty
+      - paused
+      - pending_materialization
     DocumentSummary:
       type: object
       description: List-view metadata and current processing state for one document.
@@ -10420,6 +10673,18 @@ components:
           - 'null'
           format: uuid
           description: Owning workspace when included by the response surface.
+    EnrichmentScope:
+      type: string
+      description: |-
+        Which enrichment the admitted mutation asked for.
+
+        `Full` is the behaviour every existing request has: base publication,
+        embedding, document summary and graph extraction. `TextAndEmbedding` is an
+        explicit bounded plan: base publication, embedding and execution-profile
+        validation only, with no summary, graph or provider-backed enrichment.
+      enum:
+      - full
+      - text_and_embedding
     FacetValue:
       type:
       - string
@@ -10605,12 +10870,12 @@ components:
       description: Document coverage and generation readiness for one library graph.
       required:
       - libraryId
-      - documentCountsByReadiness
+      - documentCountsByStatus
       - graphReadyDocumentCount
       - graphSparseDocumentCount
       - typedFactDocumentCount
       properties:
-        documentCountsByReadiness:
+        documentCountsByStatus:
           type: array
           items:
             type: array
@@ -10619,7 +10884,7 @@ components:
             - type: string
             - type: integer
               format: int64
-          description: Document totals grouped by readiness state.
+          description: Document totals grouped by canonical document status.
         graphReadyDocumentCount:
           type: integer
           format: int64
@@ -11972,7 +12237,7 @@ components:
       type: object
       required:
       - libraryId
-      - documentCountsByReadiness
+      - documentCountsByStatus
       - graphStatus
       - nodeCount
       - edgeCount
@@ -11981,7 +12246,7 @@ components:
       - typedFactDocumentCount
       - updatedAt
       properties:
-        documentCountsByReadiness:
+        documentCountsByStatus:
           type: object
           additionalProperties:
             type: integer
@@ -12752,6 +13017,10 @@ components:
           type:
           - string
           - 'null'
+          description: |-
+            Charged cost of the library. `None` when no execution in it has a
+            derived cost row, or when every dispatchable call is unpriced:
+            `cost_coverage` distinguishes unmeasured from unknown.
         unpricedProviderCallCount:
           type:
           - integer
@@ -12767,10 +13036,26 @@ components:
         `/knowledge/libraries/{id}/summary`) MUST read from this shape.
 
         Invariants enforced by the shared aggregator:
-          * `total == ready + processing + queued + failed + canceled + empty`
-          * `graph_ready + graph_sparse == ready` (graph readiness is a
-            split of the ready bucket; it does not overlap with processing
-            / queued / failed / canceled).
+
+          * Every document has exactly one operational bucket. The total equals
+            `ready + processing + queued + paused + failed + canceled + pending_materialization + empty`.
+          * `graph_ready + graph_sparse <= ready`. Both graph numbers describe the
+            current revision's channel state: `graph_ready` is a readable-and-ready
+            document with a complete graph (`graph_state = 'ready'`) whose active
+            projection carries a node with evidence from that exact revision, and
+            `graph_sparse` is a graph-capable document without such full coverage —
+            a `graph_degraded` graph (with or without a node) or a complete graph the
+            projection does not cover. The two never overlap. A ready document whose
+            current revision has no graph capability yet — vectors still pending or
+            failed, graph not extracted — is neither number; it is not a gap and must
+            never be produced by complementary arithmetic. The document-list `graph
+            gap` selector is the broader `ready - graph_ready` deficit, which does
+            include those still-enriching documents.
+          * `ready <= readable <= total`. `readable` is a separate fact — readable
+            text exists in the current revision — and is not an operational status,
+            a graph-coverage number, or the configured `ingestionReadiness.ready`
+            binding/config flag. Optional enrichment may still be pending or
+            degraded behind it.
 
         `in_flight` is intentionally NOT a field on this struct — it is a
         derived value `processing + queued`. Adding it would invite the
@@ -12780,11 +13065,14 @@ components:
       - ready
       - processing
       - queued
+      - paused
       - failed
       - canceled
+      - pendingMaterialization
       - empty
       - graphReady
       - graphSparse
+      - readable
       - recomputedAt
       properties:
         canceled:
@@ -12795,8 +13083,9 @@ components:
           type: integer
           format: int64
           description: |-
-            Documents with no content and no ingest work pending — admitted
-            with no revision, no readable revision, and no active mutation.
+            Documents with no content, no work pending and no pending
+            publication commitment — admitted with no revision, no readable
+            revision, and no active mutation.
         failed:
           type: integer
           format: int64
@@ -12804,11 +13093,34 @@ components:
         graphReady:
           type: integer
           format: int64
-          description: Ready documents with complete graph materialization.
+          description: |-
+            Ready documents with full graph readiness (`vector_state = 'ready'` and
+            `graph_state = 'ready'`) whose active projection carries a document node
+            with evidence from the exact current readable revision. A
+            `graph_degraded` revision never counts here, even with a node.
         graphSparse:
           type: integer
           format: int64
-          description: Ready documents with sparse graph materialization.
+          description: |-
+            Ready documents whose graph capability is partial or whose complete
+            graph the projection does not cover — disjoint from `graph_ready`. A
+            `graph_degraded` revision is sparse even with a projection node; never
+            `ready - graph_ready`, which additionally names documents still waiting
+            for capability.
+        paused:
+          type: integer
+          format: int64
+          description: |-
+            Documents whose newest work is held by an operator pause — not
+            waiting for a worker and not running. Distinct from `queued`.
+        pendingMaterialization:
+          type: integer
+          format: int64
+          description: |-
+            Documents with an accepted publication commitment (visibility
+            intent) and no current readable revision yet. Connector phase is
+            owned by the connector journal, so this bucket never claims a
+            running ingest.
         processing:
           type: integer
           format: int64
@@ -12817,10 +13129,20 @@ components:
           type: integer
           format: int64
           description: Documents waiting for a worker attempt.
+        readable:
+          type: integer
+          format: int64
+          description: |-
+            Documents with a current readable revision, whatever their
+            operational bucket. Presence of readable content is observed
+            independently of status, graph coverage and binding readiness, so a
+            failed or held re-ingest never hides material a reader can still use.
         ready:
           type: integer
           format: int64
-          description: Successfully ingested documents.
+          description: |-
+            Documents whose current readable revision is published and whose
+            latest work carries no blocking failure: the ingestable population.
         recomputedAt:
           type: string
           format: date-time
@@ -13095,6 +13417,16 @@ components:
             $ref: '#/components/schemas/GrantResponse'
         principal:
           $ref: '#/components/schemas/PrincipalResponse'
+        sessionId:
+          type:
+          - string
+          - 'null'
+          format: uuid
+          description: |-
+            The authenticated browser session row this request proved, present only
+            for cookie-session callers. It is the value the financial caller fence
+            admits as `IamSession`, so a client can register itself without reading
+            or echoing its cookie. An API-token caller has no session and omits it.
         user:
           oneOf:
           - type: 'null'
@@ -14983,7 +15315,7 @@ components:
       - undetermined
     SemanticEvidenceLink:
       type: object
-      description: A verifier-proposed quote validated against an authorized source entry.
+      description: A verifier citation resolved to exact bytes in an authorized source entry.
       required:
       - sourceId
       - span
@@ -14998,7 +15330,7 @@ components:
         span:
           $ref: '#/components/schemas/SemanticByteSpan'
           description: |-
-            Server-derived half-open UTF-8 byte range of a unique exact quote within
+            Server-derived half-open UTF-8 byte range of the exact quote within
             the selected text. Provider-supplied spans are not accepted.
       additionalProperties: false
     SemanticEvidenceScope:
@@ -15043,6 +15375,37 @@ components:
       - empty_answer
       - input_limit_exceeded
       - unsupported_structured_transport
+    SemanticPreparationBound:
+      type: string
+      description: Exact preparation bound that refused the verifier input.
+      enum:
+      - answer_utf8_bytes
+      - question_utf8_bytes
+      - answer_units
+      - source_entries
+      - evidence_utf8_bytes
+    SemanticPreparationLimit:
+      type: object
+      description: Measured value and configured limit for the refused preparation bound.
+      required:
+      - bound
+      - actual
+      - limit
+      properties:
+        actual:
+          type: integer
+          format: int64
+          description: Measured value of the refused input.
+          minimum: 0
+        bound:
+          $ref: '#/components/schemas/SemanticPreparationBound'
+          description: The bound that refused preparation.
+        limit:
+          type: integer
+          format: int64
+          description: Configured limit for that bound.
+          minimum: 0
+      additionalProperties: false
     SemanticResponseClassification:
       type: string
       description: Candidate-answer classification, not the operational status of the verifier.
@@ -15237,6 +15600,13 @@ components:
         outcome:
           $ref: '#/components/schemas/SemanticVerificationOutcome'
           description: Semantic or operational result.
+        preparationLimit:
+          oneOf:
+          - type: 'null'
+          - $ref: '#/components/schemas/SemanticPreparationLimit'
+            description: |-
+              Present exactly when a preparation bound refused the input. Absent for a
+              completed, failed or ordinary not-run report.
         protocolVersion:
           type: integer
           format: int32
@@ -17074,6 +17444,9 @@ components:
           type:
           - string
           - 'null'
+          description: |-
+            Charged cost of the workspace. `None` under the same rule as
+            [`LibraryCostSummary::total_cost`].
         unpricedProviderCallCount:
           type:
           - integer

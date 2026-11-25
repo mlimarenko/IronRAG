@@ -32,7 +32,7 @@ use super::{
     ContentService, PrefetchedDocumentSummaryData, ReconcileFailedIngestMutationCommand,
     map_document_pipeline_job, map_document_row, map_knowledge_document_row,
     map_knowledge_revision_readiness, map_knowledge_revision_row, map_mutation_row,
-    map_revision_row, map_structured_revision_row, map_web_page_provenance_row, segment_excerpt,
+    map_structured_revision_row, map_web_page_provenance_row, segment_excerpt,
 };
 
 mod deletion;
@@ -88,56 +88,18 @@ fn apply_document_hint_to_active_revision(
     }
 }
 
-async fn load_document_list_knowledge(
-    state: &AppState,
-    rows: &[ContentDocumentListRow],
-) -> Result<(HashMap<Uuid, KnowledgeDocumentRow>, HashMap<Uuid, KnowledgeRevisionRow>), ApiError> {
-    let document_ids = rows.iter().map(|row| row.id).collect::<Vec<_>>();
-    let documents = if document_ids.is_empty() {
-        HashMap::new()
-    } else {
-        state
-            .document_store
-            .list_documents_by_ids(&document_ids)
-            .await
-            .map_err(|error| ApiError::internal_with_log(error, "internal"))?
-            .into_iter()
-            .map(|row| (row.document_id, row))
-            .collect()
-    };
-    let revision_ids = rows
-        .iter()
-        .filter_map(|row| row.readable_revision_id.or(row.active_revision_id))
-        .collect::<HashSet<_>>()
-        .into_iter()
-        .collect::<Vec<_>>();
-    let revisions = if revision_ids.is_empty() {
-        HashMap::new()
-    } else {
-        state
-            .document_store
-            .list_revisions_by_ids(&revision_ids)
-            .await
-            .map_err(|error| ApiError::internal_with_log(error, "internal"))?
-            .into_iter()
-            .map(|row| (row.revision_id, row))
-            .collect()
-    };
-    Ok((documents, revisions))
-}
-
 fn next_document_list_cursor(
     rows: &[ContentDocumentListRow],
     items: &[ContentDocumentListEntry],
     sort: DocumentListSortColumn,
     has_more: bool,
 ) -> Option<DocumentListCursorValue> {
-    // A cost-sorted continuation is a cost-dependent read: it must not be
-    // offered while the rollup reconciles, because the NULL-cost cursor bucket
-    // would then encode a stale order.
-    if !has_more
-        || sort == DocumentListSortColumn::Cost && rows.iter().any(|r| r.cost_total.is_none())
-    {
+    // A cost-sorted continuation is a cost-dependent read. Staleness is already
+    // excluded upstream: a reconciling rollup answers a pending page with no
+    // cursor. An absent per-document cost is a stable "unmeasured" fact, so the
+    // keyset's NULL-cost bucket orders it deterministically instead of stopping
+    // pagination for every library that holds an unmeasured document.
+    if !has_more {
         return None;
     }
     rows.last().map(|row| DocumentListCursorValue {
@@ -198,9 +160,11 @@ pub struct ListDocumentsPageCommand {
     pub snapshot_at: DateTime<Utc>,
     pub sort: DocumentListSortColumn,
     pub sort_desc: bool,
-    /// Server-side status filter. Empty = no filter. Values must be one of
-    /// `canceled`, `failed`, `processing`, `queued`, `ready` — matching the
-    /// derived `derived_status` column in `list_document_page_rows`.
+    /// Server-side status filter. Empty = no filter. Values must be one of the
+    /// canonical `DocumentStatus` buckets — `canceled`, `empty`, `failed`,
+    /// `paused`, `pending_materialization`, `processing`, `queued`, `ready` —
+    /// matching the derived `derived_status` column in
+    /// `list_document_page_rows`. `DocumentStatus::ALL` is the list of them.
     pub status_filter: Vec<DocumentStatus>,
     /// Server-side document-id filter. `None` = no filter. `Some(ids)`
     /// restricts the page to exactly those documents — including the empty
@@ -281,32 +245,34 @@ pub struct ContentDocumentListPageResult {
     /// marker, while a cost sort / cost filter / text search is
     /// `scope_pending = true` with no items, cursor or total.
     pub scope_pending: bool,
-    /// Scope-wide total, observable even when a filter resolves the page to
-    /// zero rows. `None` when the read was withheld (`scope_pending`).
+    /// Total of the filtered scope the rows were read from — the status pill
+    /// and every other list filter narrow it exactly as they narrow the rows —
+    /// observable even when the filter resolves the page to zero rows. `None`
+    /// when the read was withheld (`scope_pending`).
     pub total_count: Option<i64>,
     /// Status-bucket counts over the same scope, present only when requested.
     pub status_counts: Option<content_document_list_repository::DocumentListStatusCountsRow>,
+    /// Ephemeral identity of the filtered population this page was read from,
+    /// computed in the same REPEATABLE READ snapshot as the rows. A continuation
+    /// token carries it so a later page can refuse to skip documents whose
+    /// status, readable revision or publication commitment changed in between;
+    /// a mismatch ends the continuation instead of silently dropping rows. It is
+    /// a snapshot identity, not persisted state or a second read model.
+    pub scope_fingerprint: String,
 }
 
-/// Derives a `ContentDocumentListEntry` from the joined Postgres row and the
-/// (optional) knowledge-document + effective-revision rows for the
-/// same document. This is the single shared place where document list
-/// status / readiness enums are computed — both the list handler and the
-/// library summary aggregator go through it so there is no drift between
-/// surfaces.
+/// Derives a `ContentDocumentListEntry` from the joined Postgres row alone. The
+/// page query already selects the canonical readable revision and that exact
+/// revision's channel states, so mapping never performs a second publication or
+/// knowledge lookup — a lagging optional projection cannot turn published
+/// content into `empty`/`failed`. This is the single shared place where document
+/// list status / readiness enums are computed, so there is no drift between the
+/// list handler and the library summary aggregator.
 fn build_document_list_entry(
     row: &ContentDocumentListRow,
-    _knowledge_document: Option<&KnowledgeDocumentRow>,
-    effective_revision: Option<&KnowledgeRevisionRow>,
 ) -> Result<ContentDocumentListEntry, ApiError> {
-    let effective_revision = effective_revision.filter(|revision| {
-        Some(revision.revision_id) == row.readable_revision_id
-            && revision.document_id == row.id
-            && revision.workspace_id == row.workspace_id
-            && revision.library_id == row.library_id
-    });
     let (cost_total, cost_currency_code) = document_costs(row)?;
-    let (status, readiness) = document_status_and_readiness(row, effective_revision);
+    let (status, readiness) = document_status_and_readiness(row);
     let source_descriptor = row.readable_revision_id.and_then(|revision_id| {
         let source_kind = row.revision_content_source_kind.as_deref()?;
         Some(describe_content_source(
@@ -385,46 +351,54 @@ fn document_costs(
     if row.billing_rollup_dirty {
         return Ok((None, None));
     }
-    match (&row.cost_total, &row.cost_currency_code) {
-        (Some(total), Some(currency_code)) => Ok((Some(*total), Some(currency_code.clone()))),
-        _ => Err(ApiError::Conflict(format!(
+    // A document whose derived costs span currencies is still a dimensionally
+    // invalid sum and fails the page closed.
+    if row.billing_cost_mixed_currency {
+        return Err(ApiError::Conflict(format!(
             "document {} has billing costs in multiple currencies; request per-currency charges",
             row.id
-        ))),
+        )));
+    }
+    // No measured price is a truthful state, not an error: the row keeps both
+    // cost fields absent so the grid renders no amount and the cost filter
+    // excludes it instead of treating the document as free.
+    match (&row.cost_total, &row.cost_currency_code) {
+        (Some(total), Some(currency_code)) => Ok((Some(*total), Some(currency_code.clone()))),
+        _ => Ok((None, None)),
     }
 }
 
 fn document_status_and_readiness(
     row: &ContentDocumentListRow,
-    effective_revision: Option<&KnowledgeRevisionRow>,
 ) -> (DocumentStatus, DocumentReadiness) {
-    let signals = document_knowledge_signals(row, effective_revision);
+    let signals = document_knowledge_signals(row);
     let readiness = document_readiness(row, signals);
-    (document_status(row, signals, readiness), readiness)
+    (document_status(row), readiness)
 }
 
-fn document_knowledge_signals(
-    row: &ContentDocumentListRow,
-    effective_revision: Option<&KnowledgeRevisionRow>,
-) -> DocumentKnowledgeSignals<'static> {
-    let revision_hard_failed = effective_revision.is_some_and(|revision| {
-        revision.text_state == "failed" || revision.vector_state == "failed"
-    });
-    let revision_text_ready = effective_revision
-        .is_some_and(|revision| revision_text_state_is_readable(&revision.text_state));
-    let revision_graph_ready =
-        effective_revision.is_some_and(|revision| revision.graph_state == "ready");
-    let graph_failed = effective_revision.is_some_and(|revision| revision.graph_state == "failed");
+fn document_knowledge_signals(row: &ContentDocumentListRow) -> DocumentKnowledgeSignals<'static> {
+    // Readable presence is the canonical publication fact: `readable_revision_id`
+    // is selected through `content_current_revision`, which already fences
+    // `text_state = 'text_readable'`. Channel states from the same row only add
+    // optional capability, so an absent or lagging knowledge projection can never
+    // remove readable content.
+    let revision_text_ready = row.readable_revision_id.is_some();
+    let revision_vector_ready = row.knowledge_vector_state.as_deref() == Some("ready");
+    let revision_graph_ready = row.knowledge_graph_state.as_deref() == Some("ready");
+    let revision_graph_degraded = row.knowledge_graph_state.as_deref() == Some("graph_degraded");
+    let graph_failed = row.knowledge_graph_state.as_deref() == Some("failed");
     let mutation_failed = row.mutation_state.as_deref().is_some_and(|state| state == "failed");
-    let job_failed = row.job_queue_state.as_deref() == Some("failed");
+    let job_failed = job_failed_hides_readable_content(row);
 
     DocumentKnowledgeSignals {
         processing_active: mutation_is_inflight(row) || job_is_inflight(row),
-        hard_failure: revision_hard_failed || mutation_failed || job_failed,
+        hard_failure: mutation_failed || job_failed,
         canceled_terminal: mutation_is_canceled(row) || job_is_canceled(row),
         revision_text_ready,
+        revision_vector_ready,
         revision_graph_ready,
-        preparation_ready: revision_graph_ready,
+        revision_graph_degraded,
+        preparation_ready: false,
         preparation_failed: false,
         graph_failed,
         observed_preparation_state: None,
@@ -444,27 +418,20 @@ fn document_readiness(
     }
 }
 
-fn document_status(
-    row: &ContentDocumentListRow,
-    signals: DocumentKnowledgeSignals<'_>,
-    readiness: DocumentReadiness,
-) -> DocumentStatus {
-    let revision_hard_failed_without_text = signals.hard_failure
-        && !signals.revision_text_ready
-        && !mutation_has_failed(row)
-        && !job_has_failed(row);
-    if mutation_has_failed(row) || job_has_failed(row) || revision_hard_failed_without_text {
+/// Per-row mirror of `DERIVED_STATUS_CASE_SQL` in
+/// `infra::repositories::content_document_list_repository`. Operational status is
+/// derived from the same Postgres-visible signals the SQL filter uses — mutation,
+/// latest job kind/state, current readable revision and the publication
+/// commitment — so the filter, the pill and the payload can never name different
+/// buckets, and enhancement readiness never reclassifies readable content.
+fn document_status(row: &ContentDocumentListRow) -> DocumentStatus {
+    if mutation_has_failed(row) || job_failed_hides_readable_content(row) {
         return DocumentStatus::Failed;
     }
     if row.job_queue_state.as_deref() == Some("leased") {
         return DocumentStatus::Processing;
     }
-    if matches!(
-        readiness,
-        DocumentReadiness::GraphReady
-            | DocumentReadiness::GraphSparse
-            | DocumentReadiness::Readable
-    ) {
+    if row.readable_revision_id.is_some() {
         return DocumentStatus::Ready;
     }
     if mutation_is_canceled(row) || job_is_canceled(row) {
@@ -473,16 +440,41 @@ fn document_status(
     if row.job_queue_state.as_deref() == Some("queued") {
         return DocumentStatus::Queued;
     }
-    if signals.processing_active {
+    if mutation_is_inflight(row) {
         return DocumentStatus::Processing;
+    }
+    if row.job_queue_state.as_deref() == Some("paused") {
+        return DocumentStatus::Paused;
     }
     if row.job_queue_state.as_deref() == Some("completed") {
         return DocumentStatus::Failed;
     }
-    if row.job_queue_state.as_deref() == Some("paused") {
-        return DocumentStatus::Queued;
+    if document_pending_materialization(row) {
+        return DocumentStatus::PendingMaterialization;
     }
     DocumentStatus::Empty
+}
+
+/// Canonical suppression fact shared with
+/// `ContentDocumentReadSnapshot.suppressed` / `unresolved_head_suppression!()`:
+/// the head holds an accepted publication commitment and no current readable
+/// revision exists. It is not work in flight, so it must not read as `queued`
+/// or `processing`; it is also not the content-free admission `empty` names.
+fn document_pending_materialization(row: &ContentDocumentListRow) -> bool {
+    row.visibility_intent_id.is_some() && row.readable_revision_id.is_none()
+}
+
+/// Mirror of the SQL enrichment branch: a failed `graph_refresh`/`reembed` job
+/// only enriches material an earlier revision already published, so it must stay
+/// `ready` while that readable revision is still canonical. Every other failed
+/// job hides readable content and stays `failed`.
+fn job_failed_hides_readable_content(row: &ContentDocumentListRow) -> bool {
+    if !job_has_failed(row) {
+        return false;
+    }
+    let enrichment_only =
+        content_document_list_repository::is_document_enrichment_job_kind(row.job_kind.as_deref());
+    !(enrichment_only && row.readable_revision_id.is_some())
 }
 
 fn mutation_has_failed(row: &ContentDocumentListRow) -> bool {
@@ -509,10 +501,6 @@ fn job_is_inflight(row: &ContentDocumentListRow) -> bool {
     row.job_queue_state.as_deref().is_some_and(|state| matches!(state, "queued" | "leased"))
 }
 
-fn revision_text_state_is_readable(state: &str) -> bool {
-    crate::domains::content::revision_text_state_is_readable(state)
-}
-
 fn derive_document_list_progress_percent(
     status: DocumentStatus,
     attempt_progress_percent: i32,
@@ -520,8 +508,13 @@ fn derive_document_list_progress_percent(
     match status {
         DocumentStatus::Ready => Some(100),
         DocumentStatus::Queued | DocumentStatus::Empty => Some(0),
-        DocumentStatus::Processing | DocumentStatus::Failed | DocumentStatus::Canceled => {
-            Some(attempt_progress_percent.clamp(0, 99))
-        }
+        // A held job reports where its last attempt stopped; a pending
+        // publication commitment has no attempt of its own, so it reports no
+        // progress instead of a fabricated 0 %.
+        DocumentStatus::PendingMaterialization => None,
+        DocumentStatus::Processing
+        | DocumentStatus::Failed
+        | DocumentStatus::Canceled
+        | DocumentStatus::Paused => Some(attempt_progress_percent.clamp(0, 99)),
     }
 }

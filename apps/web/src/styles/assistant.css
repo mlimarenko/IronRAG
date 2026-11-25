@@ -2,6 +2,10 @@
   height: 100%;
   display: grid;
   grid-template-columns: 246px minmax(0, 1fr);
+  /* Without an explicit row the implicit auto row grows to the chat surface's
+     min-content height; on a short screen that pushes the history out of the
+     viewport instead of letting the message list take the leftover space. */
+  grid-template-rows: minmax(0, 1fr);
   background: var(--surface);
 }
 /* The debug column is a stored width the operator drags; `auto` is the resize
@@ -414,7 +418,11 @@
 }
 .composer textarea {
   min-height: 46px;
-  max-height: 170px;
+  /* A long draft scrolls inside the field before it can push the history or
+     the send button off a short screen. `lh` keeps the tall-screen limit tied
+     to the actual text instead of a fixed pixel count. */
+  max-height: min(14lh, 30dvh);
+  overflow-y: auto;
   resize: none;
   border: 0;
   outline: 0;
@@ -745,6 +753,24 @@
   }
   .evidence-summary {
     grid-template-columns: repeat(2, 1fr);
+  }
+}
+
+/*
+ * Touch-sized composer: a 44px send target and 16px field text. The latter
+ * stops iOS from zooming the focused textarea. Both rules stay inside the
+ * composer and keep the send column wide enough for the target.
+ */
+@media (max-width: 767px), (pointer: coarse) {
+  .composer {
+    grid-template-columns: minmax(0, 1fr) 44px;
+  }
+  .composer .button--icon {
+    width: 44px;
+    height: 44px;
+  }
+  .composer textarea {
+    font-size: 1rem;
   }
 }
 

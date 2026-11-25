@@ -1,6 +1,7 @@
 //! Live baseline delta: financial counters are not vector source truth.
 //!
-//! `consume_financial_attempt` updates
+//! The canonical admission owner (`billing_repository::admit_provider_send`)
+//! updates
 //! `ai_provider_catalog.capability_flags_json -> 'financialAdmission'` for every
 //! physical provider attempt. The baseline `AFTER UPDATE` trigger treated that
 //! counter write as a provider configuration change and bumped every bound

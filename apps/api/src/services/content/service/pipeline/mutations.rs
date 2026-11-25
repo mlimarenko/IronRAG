@@ -79,6 +79,30 @@ struct InlineTextSource<'a> {
     mime_type: Option<&'a str>,
 }
 
+/// The attempt identity and failure payload of an inline enrichment that must be
+/// recorded as failed after its base mutation was applied.
+struct InlineEnrichmentFailure<'a> {
+    attempt_id: Uuid,
+    attempt_started_at: chrono::DateTime<Utc>,
+    failure_code: &'static str,
+    failure_message: &'a str,
+}
+
+/// The leased attempt an inline mutation finalizes, as its terminal handlers
+/// need it.
+#[derive(Clone, Copy)]
+struct InlineAttemptIdentity {
+    id: Uuid,
+    started_at: chrono::DateTime<Utc>,
+}
+
+/// Outcome of the post-lease lifecycle boundary: the pipeline result, or the
+/// unwind payload of a panic inside the detached task.
+type InlineLifecycleResult = Result<
+    Result<InlineContentPipelineOutcome, InlinePipelineFailure>,
+    Box<dyn std::any::Any + Send>,
+>;
+
 impl ContentService {
     /// Materializes an inline append. Admission has already committed in the
     /// caller; the lease, heartbeat and whole pipeline run in a detached
@@ -115,15 +139,24 @@ impl ContentService {
         // request span explicitly: an ingest detached by a client disconnect
         // must stay correlatable with the request that admitted it.
         let request_span = tracing::Span::current();
+        // The spawned task starts with an empty ambient scope, so the caller
+        // is reinstated here from the mutation this request already admitted:
+        // the exact row id plus the principal that record names. No worker or
+        // API-token identity is substituted, and a mutation without a recorded
+        // origin stays unattributed, which a fenced grant refuses.
+        let caller = crate::shared::provider_http::DispatchCaller::mutation_origin(
+            mutation_id,
+            admission.mutation.requested_by_principal_id,
+        );
         let ingest = tokio::spawn(tracing::Instrument::instrument(
-            async move {
+            crate::shared::provider_http::with_dispatch_caller(caller, async move {
                 // `Box::pin` keeps the whole inline pipeline future off this
                 // task's await stack; `clippy::large-futures` caps it at 20 KiB.
                 Box::pin(
                     service.run_inline_text_mutation(state, admission, text, file_name, mime_type),
                 )
                 .await
-            },
+            }),
             request_span,
         ));
         match ingest.await {
@@ -172,7 +205,7 @@ impl ContentService {
         // Armed after the lease. If this task exits abnormally without reaching
         // the finalizer below, the guard marks the attempt failed; the caller
         // may already be detached and unable to observe the panic.
-        let mut abort_guard = InlineAttemptAbortGuard {
+        let abort_guard = InlineAttemptAbortGuard {
             service: self.clone(),
             state: state.clone(),
             context: context.clone(),
@@ -189,50 +222,88 @@ impl ContentService {
         // terminal failure instead of an unwind that skips the finalizer; the
         // panic is resumed after finalization so it still surfaces in the task
         // result.
-        let lifecycle_result = std::panic::AssertUnwindSafe(async {
-            self.update_mutation(
-                state,
-                UpdateMutationCommand {
-                    mutation_id: context.mutation_id,
-                    mutation_state: "running".to_string(),
-                    completed_at: None,
-                    failure_code: None,
-                    conflict_code: None,
-                },
-            )
-            .await?;
-            self.run_inline_pre_publication_stages(
-                state,
-                &context,
-                authority,
-                InlineTextSource {
-                    text: &text,
-                    file_name: file_name.as_deref(),
-                    mime_type: mime_type.as_deref(),
-                },
-                &cancellation_token,
-            )
-            .await
-        })
-        .catch_unwind()
+        let lifecycle_result = Box::pin(
+            std::panic::AssertUnwindSafe(async {
+                self.update_mutation(
+                    state,
+                    UpdateMutationCommand {
+                        mutation_id: context.mutation_id,
+                        mutation_state: "running".to_string(),
+                        completed_at: None,
+                        failure_code: None,
+                        conflict_code: None,
+                    },
+                )
+                .await?;
+                Box::pin(self.run_inline_pre_publication_stages(
+                    state,
+                    &context,
+                    authority,
+                    InlineTextSource {
+                        text: &text,
+                        file_name: file_name.as_deref(),
+                        mime_type: mime_type.as_deref(),
+                    },
+                    &cancellation_token,
+                ))
+                .await
+            })
+            .catch_unwind(),
+        )
         .await;
         drop(heartbeat_guard);
 
+        self.apply_inline_lifecycle_outcome(
+            state,
+            &context,
+            InlineAttemptIdentity { id: attempt.id, started_at: attempt.started_at },
+            abort_guard,
+            lifecycle_result,
+        )
+        .await
+    }
+
+    /// Publishes the terminal state that the post-lease outcome selects. Each arm
+    /// disarms the abort guard: the attempt is settled by the handler it calls.
+    async fn apply_inline_lifecycle_outcome(
+        &self,
+        state: &AppState,
+        context: &InlineMutationContext,
+        attempt: InlineAttemptIdentity,
+        mut abort_guard: InlineAttemptAbortGuard,
+        lifecycle_result: InlineLifecycleResult,
+    ) -> Result<ContentMutationAdmission, ApiError> {
         match lifecycle_result {
             Ok(Ok(InlineContentPipelineOutcome::Applied)) => {
                 abort_guard.disarm();
                 // This inline path publishes the attempt terminal state itself
                 // and never calls `finalize_attempt`, so the success metric is
                 // recorded here (IRG-204).
-                self.finish_inline_applied_mutation(state, &context, attempt.started_at).await
+                self.finish_inline_applied_mutation(state, context, attempt.started_at, true).await
+            }
+            Ok(Ok(InlineContentPipelineOutcome::AppliedWithEnrichmentFailure {
+                failure_code,
+                failure_message,
+            })) => {
+                abort_guard.disarm();
+                self.finalize_inline_enrichment_failure(
+                    state,
+                    context,
+                    InlineEnrichmentFailure {
+                        attempt_id: attempt.id,
+                        attempt_started_at: attempt.started_at,
+                        failure_code,
+                        failure_message: &failure_message,
+                    },
+                )
+                .await;
+                // The base mutation is durably applied. Return the canonical
+                // applied admission; the failed channel state stays visible.
+                self.finish_inline_applied_mutation(state, context, attempt.started_at, false).await
             }
             Ok(Ok(InlineContentPipelineOutcome::AuthorityLost)) => {
                 abort_guard.disarm();
-                warn!(
-                    attempt_id = %attempt.id,
-                    mutation_id = %context.mutation_id,
-                    "inline content publication arrived after attempt authority moved; preserving current owner state",
-                );
+                log_inline_authority_lost(attempt.id, context.mutation_id);
                 self.get_mutation_admission(state, context.mutation_id).await
             }
             Ok(Err(failure)) => {
@@ -240,7 +311,7 @@ impl ContentService {
                 self.finalize_failed_inline_mutation(
                     state,
                     InlineFailureFinalization {
-                        context: &context,
+                        context,
                         attempt_id: attempt.id,
                         attempt_started_at: attempt.started_at,
                         failure: &failure,
@@ -257,7 +328,7 @@ impl ContentService {
                 self.finalize_failed_inline_mutation(
                     state,
                     InlineFailureFinalization {
-                        context: &context,
+                        context,
                         attempt_id: attempt.id,
                         attempt_started_at: attempt.started_at,
                         failure: &failure,
@@ -275,13 +346,16 @@ impl ContentService {
         state: &AppState,
         context: &InlineMutationContext,
         attempt_started_at: chrono::DateTime<Utc>,
+        record_success_metric: bool,
     ) -> Result<ContentMutationAdmission, ApiError> {
-        crate::observability::metrics::record_ingest_attempt(
-            "content_mutation",
-            crate::observability::metrics::IngestOutcome::Succeeded,
-            None,
-            crate::observability::metrics::elapsed_seconds(attempt_started_at, Utc::now()),
-        );
+        if record_success_metric {
+            crate::observability::metrics::record_ingest_attempt(
+                "content_mutation",
+                crate::observability::metrics::IngestOutcome::Succeeded,
+                None,
+                crate::observability::metrics::elapsed_seconds(attempt_started_at, Utc::now()),
+            );
+        }
         invalidate_library_embedding_profile_inventory(context.library_id);
         if let Err(error) = self
             .converge_document_technical_facts(
@@ -505,7 +579,62 @@ impl ContentService {
                 ),
             )
             .await?;
-        self.run_inline_post_chunk_pipeline(state, context, attempt_id, cancellation_token).await
+        Box::pin(self.run_inline_post_chunk_pipeline(
+            state,
+            context,
+            attempt_id,
+            cancellation_token,
+        ))
+        .await
+    }
+
+    /// Terminalizes an inline attempt whose optional enrichment failed after the
+    /// base mutation was already applied. The published head/item/aggregate and
+    /// linked operation stay exactly as published; only the failed channel
+    /// states, payload cleanup and attempt/job transition are written.
+    async fn finalize_inline_enrichment_failure(
+        &self,
+        state: &AppState,
+        context: &InlineMutationContext,
+        failure: InlineEnrichmentFailure<'_>,
+    ) {
+        let InlineEnrichmentFailure {
+            attempt_id,
+            attempt_started_at,
+            failure_code,
+            failure_message,
+        } = failure;
+        let outcome = ingest_repository::fail_content_ingest_attempt(
+            &state.persistence.postgres,
+            &ingest_repository::FailContentIngestAttempt {
+                workspace_id: context.workspace_id,
+                library_id: context.library_id,
+                document_id: context.document_id,
+                revision_id: context.revision_id,
+                mutation_id: context.mutation_id,
+                mutation_item_id: context.item_id,
+                attempt_id,
+                current_stage: None,
+                failure_class: Some("content_mutation_enrichment".to_string()),
+                failure_code: Some(failure_code.to_string()),
+                failure_disposition: Some(OpsFailureDisposition::OperationalTerminal),
+                failure_message: Some(format!("{failure_code}: {failure_message}")),
+                retryable: false,
+                operational_defer: None,
+                delete_vectors: false,
+                failed_at: Utc::now(),
+            },
+        )
+        .await;
+        match outcome {
+            Ok(ingest_repository::FailContentIngestAttemptOutcome::Applied { .. }) => {
+                record_inline_enrichment_failure_metric(attempt_started_at, failure_code);
+            }
+            Ok(ingest_repository::FailContentIngestAttemptOutcome::AuthorityLost { .. }) => {
+                log_inline_enrichment_authority_lost(context, attempt_id);
+            }
+            Err(error) => log_inline_enrichment_record_failed(context, attempt_id, &error),
+        }
     }
 
     async fn finalize_failed_inline_mutation(
@@ -582,5 +711,46 @@ fn warn_inline_failure_finalization(
         %attempt_id,
         ?finalize_error,
         "failed to atomically publish inline mutation failure; lease recovery will reconcile the attempt",
+    );
+}
+
+fn record_inline_enrichment_failure_metric(
+    attempt_started_at: chrono::DateTime<Utc>,
+    failure_code: &'static str,
+) {
+    crate::observability::metrics::record_ingest_attempt(
+        "content_mutation",
+        crate::observability::metrics::IngestOutcome::Failed,
+        Some(failure_code),
+        crate::observability::metrics::elapsed_seconds(attempt_started_at, Utc::now()),
+    );
+}
+
+fn log_inline_enrichment_authority_lost(context: &InlineMutationContext, attempt_id: Uuid) {
+    warn!(
+        mutation_id = %context.mutation_id,
+        attempt_id = %attempt_id,
+        "inline enrichment failure arrived after attempt authority moved; preserving current owner state",
+    );
+}
+
+fn log_inline_authority_lost(attempt_id: Uuid, mutation_id: Uuid) {
+    warn!(
+        attempt_id = %attempt_id,
+        mutation_id = %mutation_id,
+        "inline content publication arrived after attempt authority moved; preserving current owner state",
+    );
+}
+
+fn log_inline_enrichment_record_failed<E: std::fmt::Debug>(
+    context: &InlineMutationContext,
+    attempt_id: Uuid,
+    error: &E,
+) {
+    warn!(
+        mutation_id = %context.mutation_id,
+        attempt_id = %attempt_id,
+        ?error,
+        "failed to record inline enrichment failure; applied base result is preserved",
     );
 }

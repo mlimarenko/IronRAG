@@ -110,7 +110,7 @@ pub async fn get_library_summary(
         state.application_services.knowledge.get_library_summary(&state, library.id).await?;
     Ok(Json(KnowledgeLibrarySummaryResponse {
         library_id: summary.library_id,
-        document_counts_by_readiness: summary.document_counts_by_readiness,
+        document_counts_by_status: summary.document_counts_by_status,
         graph_status: summary.graph_status,
         node_count: summary.node_count,
         edge_count: summary.edge_count,

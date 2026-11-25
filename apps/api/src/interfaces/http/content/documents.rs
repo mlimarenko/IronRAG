@@ -254,9 +254,12 @@ pub async fn list_documents(
             ready: counts.ready.unwrap_or_default(),
             processing: counts.processing.unwrap_or_default(),
             queued: counts.queued.unwrap_or_default(),
+            paused: counts.paused.unwrap_or_default(),
             failed: counts.failed.unwrap_or_default(),
             canceled: counts.canceled.unwrap_or_default(),
+            pending_materialization: counts.pending_materialization.unwrap_or_default(),
             empty: counts.empty.unwrap_or_default(),
+            readable: counts.readable.unwrap_or_default(),
         }),
         snapshot_at,
         scope_pending: result.scope_pending,
@@ -298,7 +301,7 @@ pub(super) fn ensure_cost_facet_readable(
     library_id: Uuid,
     rollup_dirty: bool,
     terminal_error_code: Option<&str>,
-    has_null_cost: bool,
+    has_mixed_currency_cost: bool,
 ) -> Result<(), ApiError> {
     crate::services::ops::billing::ensure_billing_rollup_readable(
         "library",
@@ -306,7 +309,7 @@ pub(super) fn ensure_cost_facet_readable(
         rollup_dirty,
         terminal_error_code,
     )?;
-    if has_null_cost {
+    if has_mixed_currency_cost {
         return Err(ApiError::Conflict(format!(
             "library {library_id} has billing costs in multiple currencies; request per-currency charges"
         )));
@@ -571,7 +574,7 @@ pub async fn list_document_facets(
         page: facet_page,
         rollup_dirty,
         terminal_error_code,
-        has_null_cost,
+        has_mixed_currency_cost,
     } = content_document_list_repository::read_document_facet_page(
         &state.persistence.postgres,
         content_document_list_repository::DocumentListFacetQuery {
@@ -616,7 +619,7 @@ pub async fn list_document_facets(
             library.id,
             rollup_dirty,
             terminal_error_code.as_deref(),
-            has_null_cost,
+            has_mixed_currency_cost,
         )?;
     }
     let cost_rollup_freshness = CostRollupFreshness::from_rollup_dirty(rollup_dirty);
@@ -753,6 +756,9 @@ fn map_document_list_entry(entry: ContentDocumentListEntry) -> ContentDocumentLi
     }
 }
 
+/// Parses the comma-separated `status` filter into canonical buckets. Every
+/// `DocumentStatus` variant is accepted; the rejection message lists them from
+/// `DocumentStatus::ALL` so the vocabulary has one owner.
 pub(super) fn parse_document_status_filter(raw: &str) -> Result<Vec<DocumentStatus>, ApiError> {
     let mut out = Vec::new();
     for token in raw.split(',').map(str::trim).filter(|s| !s.is_empty()) {
@@ -760,12 +766,19 @@ pub(super) fn parse_document_status_filter(raw: &str) -> Result<Vec<DocumentStat
             "canceled" => DocumentStatus::Canceled,
             "empty" => DocumentStatus::Empty,
             "failed" => DocumentStatus::Failed,
+            "paused" => DocumentStatus::Paused,
+            "pending_materialization" => DocumentStatus::PendingMaterialization,
             "processing" => DocumentStatus::Processing,
             "queued" => DocumentStatus::Queued,
             "ready" => DocumentStatus::Ready,
             _ => {
+                let allowed = DocumentStatus::ALL
+                    .iter()
+                    .map(|status| status.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ");
                 return Err(ApiError::BadRequest(format!(
-                    "unknown status filter value `{token}`; allowed: canceled, empty, failed, processing, queued, ready"
+                    "unknown status filter value `{token}`; allowed: {allowed}"
                 )));
             }
         };
@@ -987,6 +1000,7 @@ pub async fn create_document(
                     mime_type: payload.mime_type,
                     file_bytes: payload.file_bytes,
                     parent_external_key: payload.parent_external_key,
+                    enrichment_scope: payload.enrichment_scope,
                 },
             )
             .await?
@@ -1013,6 +1027,10 @@ pub async fn create_document(
                     source_identity: None,
                     revision: build_revision_metadata(&payload)?,
                     parent_external_key: payload.parent_external_key.clone(),
+                    // The JSON create names its plan here; the multipart form
+                    // carries the same field through its own allow-list and
+                    // parsed shape, so both create paths reach admission.
+                    enrichment_scope: payload.enrichment_scope,
                 },
             )
             .await?
@@ -1327,6 +1345,7 @@ pub async fn delete_document(
                 source_identity: None,
                 revision: None,
                 parent_async_operation_id: None,
+                enrichment_scope: None,
             },
         )
         .await?;

@@ -3,6 +3,16 @@ use std::collections::{BTreeSet, HashMap};
 
 use crate::integrations::typesafe::{MAX_SCORE_LEVELS, MIN_SCORE_LEVELS};
 
+fn map_provider_update_error(error: ai_repository::ProviderCatalogUpdateError) -> ApiError {
+    match error {
+        ai_repository::ProviderCatalogUpdateError::Refused => {
+            ApiError::BadRequest("provider financial policy update refused".to_owned())
+        }
+        ai_repository::ProviderCatalogUpdateError::InvalidStoredState => ApiError::Internal,
+        ai_repository::ProviderCatalogUpdateError::Persistence(error) => map_ai_write_error(error),
+    }
+}
+
 struct NormalizedModelCatalogSpec {
     model_name: String,
     lifecycle_state: String,
@@ -146,7 +156,7 @@ impl AiCatalogService {
             if financial_requested { required.as_ref() } else { None },
         )
         .await
-        .map_err(map_ai_write_error)?
+        .map_err(map_provider_update_error)?
         .ok_or_else(|| ApiError::resource_not_found("provider_catalog", command.provider_id))?;
         map_provider_row(row)
     }
@@ -666,6 +676,25 @@ fn validate_model_catalog_binding_contract(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn provider_update_refusal_is_safe_and_persistence_remains_internal() {
+        use axum::{http::StatusCode, response::IntoResponse};
+
+        let refused = map_provider_update_error(ai_repository::ProviderCatalogUpdateError::Refused);
+        assert_eq!(refused.kind(), "bad_request");
+        assert_eq!(refused.to_string(), "bad request: provider financial policy update refused");
+        assert_eq!(refused.into_response().status(), StatusCode::BAD_REQUEST);
+
+        for error in [
+            ai_repository::ProviderCatalogUpdateError::InvalidStoredState,
+            ai_repository::ProviderCatalogUpdateError::Persistence(sqlx::Error::PoolClosed),
+        ] {
+            let mapped = map_provider_update_error(error);
+            assert_eq!(mapped.kind(), "internal");
+            assert_eq!(mapped.into_response().status(), StatusCode::INTERNAL_SERVER_ERROR);
+        }
+    }
 
     #[test]
     fn normalizes_model_catalog_spec_and_deduplicates_allowed_purposes() {

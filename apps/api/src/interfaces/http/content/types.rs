@@ -226,9 +226,14 @@ pub struct DocumentListStatusCounts {
     pub ready: i64,
     pub processing: i64,
     pub queued: i64,
+    pub paused: i64,
     pub failed: i64,
     pub canceled: i64,
+    pub pending_materialization: i64,
     pub empty: i64,
+    /// Documents in the same filtered set with a current readable revision,
+    /// whatever bucket they landed in. Content presence, not a status.
+    pub readable: i64,
 }
 
 #[derive(Debug, Deserialize, utoipa::ToSchema)]
@@ -269,6 +274,9 @@ pub struct CreateDocumentRequest {
     pub source_uri: Option<String>,
     pub document_hint: Option<String>,
     pub storage_key: Option<String>,
+    /// Absent means full enrichment. `text_and_embedding` asks for the bounded
+    /// plan: base text publication and embeddings only, no summary or graph.
+    pub enrichment_scope: Option<crate::domains::content::EnrichmentScope>,
 }
 
 /// Multipart form for a file-backed document admission.
@@ -285,6 +293,9 @@ pub struct CreateDocumentMultipartRequest {
     pub idempotency_key: Option<String>,
     pub title: Option<String>,
     pub document_hint: Option<String>,
+    /// Absent means full enrichment. `text_and_embedding` asks for the bounded
+    /// plan: base text publication and embeddings only, no summary or graph.
+    pub enrichment_scope: Option<crate::domains::content::EnrichmentScope>,
 }
 
 /// Discriminates the two JSON revision shapes on `POST .../revisions`. File
@@ -320,6 +331,11 @@ pub struct CreateRevisionRequest {
     pub source_uri: Option<String>,
     pub document_hint: Option<String>,
     pub visibility_intent_id: Option<Uuid>,
+    /// Absent means full enrichment. `text_and_embedding` asks for the bounded
+    /// plan: base text publication and embeddings only, no summary or graph.
+    /// Only replacement accepts it: the inline append executor always runs full
+    /// enrichment, so `mode=append` refuses the field.
+    pub enrichment_scope: Option<crate::domains::content::EnrichmentScope>,
 }
 
 /// Multipart form for a file-backed document revision.
@@ -334,6 +350,8 @@ pub struct CreateRevisionMultipartRequest {
     pub language_code: Option<String>,
     pub source_uri: Option<String>,
     pub visibility_intent_id: Option<Uuid>,
+    /// Absent means full enrichment; `mode=append` refuses the field.
+    pub enrichment_scope: Option<crate::domains::content::EnrichmentScope>,
 }
 
 #[derive(Debug, Deserialize, utoipa::ToSchema)]
@@ -847,6 +865,9 @@ impl DocumentColumnFilters {
             cost: filter_decimal_values(self.cost)?,
             pipeline_time: filter_scalar_values(self.pipeline_time)?,
             finished_at: filter_timestamp_values(self.finished_at)?,
+            // `readable` is not a grid column, so the HTTP grid payload cannot
+            // set it. The MCP surface owns that predicate (`readableOnly`).
+            readable: None,
         })
     }
 }
@@ -1124,4 +1145,80 @@ pub(super) fn decode_document_facet_cursor(token: &str) -> Result<DocumentFacetC
         .map_err(|_| ApiError::BadRequest("invalid facet cursor encoding".to_string()))?;
     serde_json::from_slice(&bytes)
         .map_err(|_| ApiError::BadRequest("invalid facet cursor payload".to_string()))
+}
+
+#[cfg(test)]
+mod enrichment_scope_dto_tests {
+    use super::*;
+
+    fn body(scope: serde_json::Value) -> serde_json::Value {
+        serde_json::json!({
+            "mode": "replace",
+            "markdown": "text",
+            "fileName": "note.md",
+            "enrichmentScope": scope,
+        })
+    }
+
+    #[test]
+    fn an_omitted_scope_keeps_the_existing_request_shape() {
+        let request: CreateRevisionRequest = serde_json::from_value(serde_json::json!({
+            "mode": "replace",
+            "markdown": "text",
+            "fileName": "note.md",
+        }))
+        .expect("an existing request still parses");
+        assert_eq!(request.enrichment_scope, None);
+    }
+
+    fn create_body(scope: Option<serde_json::Value>) -> serde_json::Value {
+        let mut body = serde_json::json!({
+            "externalKey": "corpus-note",
+            "fileName": "note.md",
+            "contentSourceKind": "upload",
+        });
+        if let Some(scope) = scope {
+            body["enrichmentScope"] = scope;
+        }
+        body
+    }
+
+    #[test]
+    fn the_json_create_dto_carries_a_bounded_plan_and_defaults_to_full() {
+        let plain: CreateDocumentRequest =
+            serde_json::from_value(create_body(None)).expect("an existing request still parses");
+        assert_eq!(plain.enrichment_scope, None, "absence keeps the documented full plan");
+
+        let bounded: CreateDocumentRequest =
+            serde_json::from_value(create_body(Some(serde_json::json!("text_and_embedding"))))
+                .expect("the bounded plan is admitted on create");
+        assert_eq!(
+            bounded.enrichment_scope,
+            Some(crate::domains::content::EnrichmentScope::TextAndEmbedding),
+        );
+
+        assert!(
+            serde_json::from_value::<CreateDocumentRequest>(create_body(Some(serde_json::json!(
+                "everything"
+            ))))
+            .is_err(),
+            "an unknown plan is refused on create too, never treated as full",
+        );
+    }
+
+    #[test]
+    fn a_bounded_scope_parses_and_an_unknown_one_is_refused() {
+        let request: CreateRevisionRequest =
+            serde_json::from_value(body(serde_json::json!("text_and_embedding")))
+                .expect("the bounded plan is an admitted value");
+        assert_eq!(
+            request.enrichment_scope,
+            Some(crate::domains::content::EnrichmentScope::TextAndEmbedding),
+        );
+        assert!(
+            serde_json::from_value::<CreateRevisionRequest>(body(serde_json::json!("everything")))
+                .is_err(),
+            "an unknown plan is refused at the boundary, never treated as full",
+        );
+    }
 }

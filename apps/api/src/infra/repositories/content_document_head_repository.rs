@@ -39,7 +39,16 @@ macro_rules! published_item_eligibility {
                 and r.admission_identity->>'visibilityIntentId'=h.visibility_intent_id::text
                 and k.text_state='text_readable' and k.text_readable_at is not null
                 and intent.document_id=d.id
-                and k.vector_state='ready' and k.vector_ready_at is not null and k.graph_state in ('ready','graph_degraded')
+                -- Permitted current text is what makes an intent-bound revision
+                -- eligible for its readable head. Vector and graph readiness are
+                -- optional enrichment of the same revision and must not gate it;
+                -- the query lanes gate on the channel states themselves.
+                -- This predicate is applied before the coordinated
+                -- `content_current_revision` view change lands, so until the lead
+                -- applies that shared change it is deliberately broader than the
+                -- view: the head may be published while the view still hides the
+                -- revision. It must match the view's membership once the view is
+                -- relaxed, and never diverge from it afterwards.
                 and r.revision_number>intent.revision_floor
                 and intent_mutation.workspace_id=d.workspace_id and intent_mutation.library_id=d.library_id
                 and r.admission_identity->'replacement'=intent_mutation.request_identity->'replacement'

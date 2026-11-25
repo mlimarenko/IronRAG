@@ -1,3 +1,4 @@
+use super::graph_evidence_loading::graph_evidence_from_hydrated_chunks;
 use super::test_prelude::*;
 
 #[test]
@@ -217,53 +218,30 @@ fn graph_evidence_targets_for_query_keep_multi_anchor_node_under_target_cap_pres
 }
 
 #[test]
-fn graph_evidence_text_replaces_weak_support_chunk_text() {
-    let mut chunk = runtime_chunk("document title without the requested literal", 1.0);
+fn graph_annotations_remain_labeled_claim_context_and_chunks_keep_canonical_text() {
+    let graph_index = graph_index_with_nodes(Vec::new());
+    let target_id = Uuid::now_v7();
+    let row = runtime_graph_evidence_row(
+        target_id,
+        "Needle setting: alpha.path = /srv/alpha and port = 9407",
+    );
+    // The annotation is claim context, so it is rendered as a labeled graph
+    // line, never merged into the chunk's canonical source text.
+    let line = graph_evidence_context_line(&row, &graph_index, &HashMap::new(), &[])
+        .expect("graph claim context line");
+    assert!(line.rendered().contains("alpha.path = /srv/alpha"));
+    assert!(line.rendered().contains("[graph-evidence"));
+
+    let chunk = runtime_chunk("Canonical chunk prose.", 1.0);
     let chunk_id = chunk.chunk_id;
-    let mut evidence_texts_by_chunk = HashMap::new();
-    evidence_texts_by_chunk.insert(
-        chunk_id,
-        vec!["Needle setting: alpha.path = /srv/alpha and port = 9407".to_string()],
-    );
-
-    apply_graph_evidence_texts_to_chunks(
-        std::slice::from_mut(&mut chunk),
-        &evidence_texts_by_chunk,
-        &["alpha".to_string(), "9407".to_string()],
-        &["alpha".to_string(), "9407".to_string()],
-    );
-
-    assert!(chunk.source_text.starts_with("Needle setting: alpha.path"));
-    assert!(chunk.source_text.contains("Source chunk:"));
-    assert!(chunk.excerpt.contains("alpha.path"));
-}
-
-#[test]
-fn graph_evidence_text_overlay_focuses_long_mixed_rows() {
-    let mut chunk = runtime_chunk("generic support chunk", 1.0);
-    let chunk_id = chunk.chunk_id;
-    let filler = (0..80)
-        .map(|index| format!("Generic section {index}: profile forms and archive notes."))
-        .collect::<Vec<_>>()
-        .join(" | ");
-    let mut evidence_texts_by_chunk = HashMap::new();
-    evidence_texts_by_chunk.insert(
-        chunk_id,
-        vec![format!(
-            "{filler} | Sample connectors: Option One, Option Two, custom route | More unrelated material."
-        )],
-    );
-
-    apply_graph_evidence_texts_to_chunks(
-        std::slice::from_mut(&mut chunk),
-        &evidence_texts_by_chunk,
-        &["sample".to_string(), "connectors".to_string()],
-        &["sample".to_string(), "connectors".to_string(), "route".to_string()],
-    );
-
-    assert!(chunk.source_text.contains("Sample connectors"));
-    assert!(chunk.source_text.contains("custom route"));
-    assert!(!chunk.source_text.contains("Generic section 0"));
+    let document_id = chunk.document_id;
+    let retrieved =
+        graph_evidence_from_hydrated_chunks(vec![chunk], vec![line.clone()], vec![document_id]);
+    assert_eq!(retrieved.chunks[0].chunk_id, chunk_id);
+    assert_eq!(retrieved.chunks[0].source_text, "Canonical chunk prose.");
+    assert_eq!(retrieved.chunks[0].score_kind, RuntimeChunkScoreKind::GraphEvidence);
+    assert_eq!(retrieved.context_lines, vec![line]);
+    assert_eq!(retrieved.source_document_ids, vec![document_id]);
 }
 
 #[test]
@@ -276,13 +254,9 @@ fn graph_evidence_chunk_hits_use_ranked_text_rows_as_chunk_candidates() {
     );
     row.chunk_id = Some(chunk_id);
 
-    let (hits, evidence_texts_by_chunk) = graph_evidence_chunk_hits_from_rows(&[row]);
+    let hits = graph_evidence_chunk_hits_from_rows(&[row]);
 
     assert_eq!(hits, vec![(chunk_id, graph_evidence_chunk_score(0))]);
-    assert_eq!(
-        evidence_texts_by_chunk.get(&chunk_id).and_then(|texts| texts.first()),
-        Some(&"Needle setting: alpha.path = /srv/alpha and port = 9407".to_string())
-    );
 }
 
 #[test]
@@ -373,10 +347,31 @@ fn graph_evidence_context_line_formats_delimited_row_fields() {
     let line = graph_evidence_context_line(&row, &graph_index, &source_labels, &[])
         .expect("graph evidence line");
 
-    assert!(line.contains("[graph-evidence source=\"https://example.test/docs/alpha\"]"));
-    assert!(!line.contains("alpha-source"));
-    assert!(line.contains("- Column Alpha: keep A"));
-    assert!(line.contains("- Column Beta: keep B"));
+    assert!(
+        line.rendered().contains("[graph-evidence source=\"https://example.test/docs/alpha\"]")
+    );
+    assert!(!line.rendered().contains("alpha-source"));
+    assert!(line.rendered().contains("- Column Alpha: keep A"));
+    assert!(line.rendered().contains("- Column Beta: keep B"));
+}
+
+#[test]
+fn graph_evidence_context_line_keeps_evidence_separate_from_its_header() {
+    let graph_index = graph_index_with_nodes(Vec::new());
+    let document_id = Uuid::now_v7();
+    let mut row =
+        runtime_graph_evidence_row(Uuid::now_v7(), "Column Alpha: keep A | Column Beta: keep B");
+    row.document_id = Some(document_id);
+    row.source_file_name = None;
+    let source_labels = HashMap::from([(document_id, "alpha-source".to_string())]);
+
+    let line = graph_evidence_context_line(&row, &graph_index, &source_labels, &[])
+        .expect("graph evidence line");
+
+    let evidence = line.evidence_text().expect("graph evidence carries its claim body");
+    assert_eq!(evidence, "- Column Alpha: keep A\n- Column Beta: keep B");
+    assert_eq!(line.passage_evidence_text(), Some(evidence));
+    assert_eq!(line.rendered(), format!("[graph-evidence source=\"alpha-source\"]\n{evidence}"));
 }
 
 #[test]
@@ -402,9 +397,13 @@ fn graph_evidence_context_line_focuses_long_mixed_rows() {
     )
     .expect("graph evidence line");
 
-    assert!(line.contains("Sample connectors"));
-    assert!(line.contains("custom route"));
-    assert!(!line.contains("Generic section 0"));
+    assert!(line.rendered().contains("Sample connectors"));
+    assert!(line.rendered().contains("custom route"));
+    assert!(!line.rendered().contains("Generic section 0"));
+    let evidence = line.evidence_text().expect("focused graph evidence");
+    assert!(evidence.contains("Sample connectors"));
+    assert!(!evidence.contains("Generic section 0"));
+    assert!(line.rendered().ends_with(&format!("\n{evidence}")));
 }
 
 #[test]

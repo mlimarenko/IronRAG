@@ -83,6 +83,7 @@ mod iam_user_repository;
 mod incremental_graph_reconcile;
 mod ingest_attempts;
 mod ingest_cancellation;
+mod ingest_execute_response;
 mod ingest_preparation_fencing;
 mod ingest_publication;
 mod ingest_repository;
@@ -116,6 +117,7 @@ mod stranded_fan_out_repair;
 mod structured_block_repository;
 mod structured_preparation;
 mod terminal_graph_state_repair;
+mod text_publication_schema;
 #[cfg(feature = "test-support")]
 mod topology_preparation;
 mod web_ingest_contracts;

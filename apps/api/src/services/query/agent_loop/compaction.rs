@@ -55,24 +55,10 @@ pub(super) fn compact_grounded_answer_structured_content_for_model(
     value: &Value,
     fallback_limit: usize,
 ) -> Value {
-    let reference_limit = if try_parse_grounded_answer_completion_envelope(value)
-        .is_some_and(|envelope| envelope.finalizable)
-    {
-        TOOL_MODEL_FINALIZABLE_GROUNDED_REFERENCE_LIMIT
-    } else {
-        TOOL_MODEL_GROUNDED_REFERENCE_LIMIT
-    };
-    compact_grounded_answer_structured_content(value, fallback_limit, reference_limit)
-}
-
-pub(super) fn compact_grounded_answer_structured_content_for_verification(
-    value: &Value,
-    fallback_limit: usize,
-) -> Value {
     compact_grounded_answer_structured_content(
         value,
         fallback_limit,
-        TOOL_VERIFICATION_GROUNDED_REFERENCE_LIMIT,
+        TOOL_MODEL_GROUNDED_REFERENCE_LIMIT,
     )
 }
 
@@ -99,6 +85,7 @@ pub(super) fn compact_grounded_answer_structured_content(
         "finalizable": completion_envelope.as_ref().is_some_and(|envelope| envelope.finalizable),
         "completion": completion_envelope.as_ref().map(|envelope| serde_json::json!(&envelope.completion)).unwrap_or(Value::Null),
         "repairPolicy": completion_envelope.as_ref().map(|envelope| serde_json::json!(&envelope.repair_policy)).unwrap_or(Value::Null),
+        "sequenceBudget": completion_envelope.as_ref().map(|envelope| serde_json::json!(&envelope.sequence_budget)).unwrap_or(Value::Null),
         "readiness": completion_envelope.as_ref().map(|envelope| serde_json::json!(&envelope.readiness)).unwrap_or(Value::Null),
         "mustPreserveSpans": value.get("mustPreserveSpans").cloned().unwrap_or_else(|| serde_json::json!([])),
         "clarification": value.get("clarification").cloned().unwrap_or_else(|| serde_json::json!({"required": false})),
@@ -132,6 +119,15 @@ pub(super) fn compact_existing_grounded_answer_profile(
         .and_then(Value::as_u64)
         .unwrap_or_else(|| u64::try_from(references.len()).unwrap_or(u64::MAX));
     let returned_reference_count = u64::try_from(references.len()).unwrap_or(u64::MAX);
+    let upstream_reference_count = reference_summary
+        .and_then(|summary| summary.get("references"))
+        .and_then(Value::as_array)
+        .map_or(0, Vec::len);
+    let attribution = bounded_grounded_attribution(reference_summary);
+    let attribution_omitted = attribution.is_null()
+        && reference_summary
+            .and_then(|summary| summary.get("attribution"))
+            .is_some_and(|value| !value.is_null());
 
     let candidate_summary = value.get("answerCandidateSummary");
     let answer_candidates = bounded_json_array(
@@ -159,6 +155,7 @@ pub(super) fn compact_existing_grounded_answer_profile(
         "finalizable": completion_envelope.as_ref().is_some_and(|envelope| envelope.finalizable),
         "completion": completion_envelope.as_ref().map(|envelope| serde_json::json!(&envelope.completion)).unwrap_or(Value::Null),
         "repairPolicy": completion_envelope.as_ref().map(|envelope| serde_json::json!(&envelope.repair_policy)).unwrap_or(Value::Null),
+        "sequenceBudget": completion_envelope.as_ref().map(|envelope| serde_json::json!(&envelope.sequence_budget)).unwrap_or(Value::Null),
         "readiness": completion_envelope.as_ref().map(|envelope| serde_json::json!(&envelope.readiness)).unwrap_or(Value::Null),
         "verifier": value.get("verifier").cloned().unwrap_or_else(|| serde_json::json!({"state": verifier_state.clone()})),
         "verificationState": verifier_state,
@@ -170,6 +167,10 @@ pub(super) fn compact_existing_grounded_answer_profile(
             "returnedCount": returned_reference_count,
             "truncated": total_reference_count > returned_reference_count,
             "references": references,
+            "attribution": attribution,
+            "attributionScope": "upstream_reference_projection",
+            "secondaryTruncated": references.len() < upstream_reference_count || attribution_omitted,
+            "attributionOmitted": attribution_omitted,
         },
         "answerCandidateSummary": {
             "totalCount": total_candidate_count,
@@ -241,7 +242,7 @@ pub(super) fn enforce_grounded_structured_content_limit(value: Value, char_limit
         .map(|span| span.chars().take(160).collect::<String>())
         .collect::<Vec<_>>();
     let completion_envelope = parse_grounded_answer_completion_envelope(&value);
-    serde_json::json!({
+    let mut compact = serde_json::json!({
         "truncated": true,
         "originalCharCount": original_char_count,
         "executionId": value.get("executionId").cloned().unwrap_or(Value::Null),
@@ -254,6 +255,7 @@ pub(super) fn enforce_grounded_structured_content_limit(value: Value, char_limit
         "finalizable": completion_envelope.as_ref().is_some_and(|envelope| envelope.finalizable),
         "completion": completion_envelope.as_ref().map(|envelope| serde_json::json!(&envelope.completion)).unwrap_or(Value::Null),
         "repairPolicy": completion_envelope.as_ref().map(|envelope| serde_json::json!(&envelope.repair_policy)).unwrap_or(Value::Null),
+        "sequenceBudget": completion_envelope.as_ref().map(|envelope| serde_json::json!(&envelope.sequence_budget)).unwrap_or(Value::Null),
         "readiness": completion_envelope.as_ref().map(|envelope| serde_json::json!(&envelope.readiness)).unwrap_or(Value::Null),
         "clarification": value.get("clarification").cloned().unwrap_or_else(|| serde_json::json!({"required": false})),
         "verificationState": value.get("verificationState").cloned().unwrap_or(Value::Null),
@@ -265,8 +267,110 @@ pub(super) fn enforce_grounded_structured_content_limit(value: Value, char_limit
             "returnedCount": 0,
             "truncated": true,
             "references": [],
+            "attributionScope": "upstream_reference_projection",
+            "secondaryTruncated": true,
+            "attributionOmitted": summary.get("attribution").is_some_and(|value| !value.is_null())
+                || summary.get("attributionOmitted").and_then(Value::as_bool).unwrap_or(false),
         })).unwrap_or(Value::Null),
-    })
+    });
+    if let Some(summary) = value.get("referenceSummary") {
+        let mut candidate = compact.clone();
+        candidate["referenceSummary"]["attribution"] = bounded_grounded_attribution(Some(summary));
+        candidate["referenceSummary"]["attributionOmitted"] = serde_json::json!(
+            summary.get("attributionOmitted").and_then(Value::as_bool).unwrap_or(false)
+                || (candidate["referenceSummary"]["attribution"].is_null()
+                    && summary.get("attribution").is_some_and(|value| !value.is_null()))
+        );
+        if grounded_json_size(&candidate) <= char_limit {
+            compact = candidate;
+        }
+        if let Some(references) = summary.get("references").and_then(Value::as_array) {
+            for reference in references.iter().take(TOOL_MODEL_GROUNDED_REFERENCE_LIMIT) {
+                let Some(projected) = bounded_grounded_reference(reference) else {
+                    continue;
+                };
+                let mut candidate = compact.clone();
+                let Some(items) = candidate
+                    .pointer_mut("/referenceSummary/references")
+                    .and_then(Value::as_array_mut)
+                else {
+                    break;
+                };
+                items.push(projected);
+                let count = items.len();
+                candidate["referenceSummary"]["returnedCount"] = serde_json::json!(count);
+                let total = summary.get("totalCount").and_then(Value::as_u64);
+                candidate["referenceSummary"]["truncated"] = serde_json::json!(
+                    summary.get("truncated").and_then(Value::as_bool).unwrap_or(true)
+                        || total.is_none_or(|total| count as u64 != total)
+                );
+                if grounded_json_size(&candidate) > char_limit {
+                    break;
+                }
+                compact = candidate;
+            }
+        }
+    }
+    compact
+}
+
+fn grounded_json_size(value: &Value) -> usize {
+    serde_json::to_string(value).map_or(usize::MAX, |value| value.chars().count())
+}
+
+fn bounded_grounded_attribution(summary: Option<&Value>) -> Value {
+    let Some(value) = summary.and_then(|summary| summary.get("attribution")) else {
+        return Value::Null;
+    };
+    if grounded_json_size(value) <= 1_024 { value.clone() } else { Value::Null }
+}
+
+fn bounded_grounded_reference(reference: &Value) -> Option<Value> {
+    let source = reference.as_object()?;
+    let mut projected = serde_json::Map::new();
+    for field in [
+        "kind",
+        "chunkId",
+        "segmentId",
+        "factId",
+        "nodeId",
+        "edgeId",
+        "sourceId",
+        "documentId",
+        "revisionId",
+        "documentTitle",
+        "excerpt",
+    ] {
+        if let Some(Value::String(text)) = source.get(field) {
+            let limit = if matches!(field, "excerpt" | "documentTitle") { 240 } else { 128 };
+            if text.chars().count() <= limit {
+                projected.insert(field.to_string(), Value::String(text.clone()));
+            } else if matches!(field, "excerpt" | "documentTitle") {
+                projected
+                    .insert(field.to_string(), Value::String(text.chars().take(limit).collect()));
+                projected.insert(format!("{field}Truncated"), Value::Bool(true));
+            }
+        }
+    }
+    for field in ["claimUnitIds", "sourceIds"] {
+        if let Some(Value::Array(values)) = source.get(field) {
+            let retained = values
+                .iter()
+                .take(8)
+                .filter_map(|value| {
+                    value
+                        .as_str()
+                        .filter(|text| text.chars().count() <= 128)
+                        .map(|text| Value::String(text.to_string()))
+                })
+                .collect::<Vec<_>>();
+            if retained.len() < values.len() {
+                projected.insert(format!("{field}Truncated"), Value::Bool(true));
+            }
+            projected.insert(field.to_string(), Value::Array(retained));
+        }
+    }
+    (!projected.is_empty()).then_some(Value::Object(projected))
 }
 
 pub(super) fn bounded_json_array(value: Option<&Value>, limit: usize) -> Vec<Value> {
@@ -299,10 +403,6 @@ pub(super) fn compact_reference_array(value: Option<&Value>, limit: usize) -> Va
 
 pub(super) fn compact_structured_content_for_model(value: &Value) -> Value {
     compact_structured_content(value, TOOL_MODEL_STRUCTURED_JSON_CHAR_LIMIT)
-}
-
-pub(super) fn compact_structured_content_for_verification(value: &Value) -> Value {
-    compact_structured_content(value, TOOL_VERIFICATION_STRUCTURED_JSON_CHAR_LIMIT)
 }
 
 pub(super) fn compact_structured_content(value: &Value, char_limit: usize) -> Value {

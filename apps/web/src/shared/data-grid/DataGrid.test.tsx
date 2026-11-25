@@ -356,3 +356,278 @@ describe('DataGrid', () => {
     ).toBeNull()
   })
 })
+
+describe('DataGrid rendering and dispatch', () => {
+  beforeEach(async () => {
+    await i18n.changeLanguage('en')
+  })
+
+  it('renders a custom cell, a service column and both end alignments', () => {
+    render(
+      <DataGrid
+        {...base}
+        columns={[
+          {
+            id: 'name',
+            label: 'Name',
+            value: (row) => row.name,
+            cell: (row) => <em>{row.name}</em>,
+          },
+          { id: 'amount', label: 'Amount', value: (row) => row.amount, align: 'end' },
+        ]}
+        serviceColumns={[
+          { id: 'actions', label: 'Actions', align: 'end', cell: () => <a href="#open">Open</a> },
+        ]}
+        state={createGridState()}
+        onStateChange={vi.fn()}
+      />,
+    )
+    const row = within(screen.getByRole('table')).getAllByRole('row')[1]!
+    const [nameCell, amountCell, actionCell] = within(row).getAllByRole('cell')
+    expect(nameCell?.querySelector('em')).toHaveTextContent('Beta')
+    expect(nameCell).not.toHaveClass('is-end')
+    expect(amountCell).toHaveClass('is-end')
+    expect(actionCell).toHaveClass('is-end')
+    expect(within(row).getByRole('link', { name: 'Open' })).toBeVisible()
+  })
+
+  it('activates the clicked row in single mode and toggles it in multiple mode', async () => {
+    const onActivate = vi.fn()
+    const onToggle = vi.fn()
+    const { rerender } = render(
+      <DataGrid
+        {...base}
+        state={createGridState()}
+        onStateChange={vi.fn()}
+        selection={{
+          activeRowId: 'a',
+          onActivate,
+          isSelectable: (row) => row.id !== 'c',
+          headerLabel: 'Selection',
+          rowLabel: (row) => row.name,
+        }}
+      />,
+    )
+    const user = userEvent.setup()
+    const betaRow = within(screen.getByRole('table')).getByText('Beta').closest('tr')!
+    const alphaRow = within(screen.getByRole('table')).getByText('Alpha').closest('tr')!
+    const gammaRow = within(screen.getByRole('table')).getByText('Gamma').closest('tr')!
+    expect(alphaRow).toHaveAttribute('aria-selected', 'true')
+    expect(gammaRow).toHaveClass('is-blocked')
+
+    await user.click(gammaRow)
+    expect(onActivate).not.toHaveBeenCalled()
+    await user.click(betaRow)
+    expect(onActivate).toHaveBeenCalledWith(expect.objectContaining({ id: 'b' }))
+
+    rerender(
+      <DataGrid
+        {...base}
+        state={createGridState()}
+        onStateChange={vi.fn()}
+        selection={{
+          mode: 'multiple',
+          selectedIds: new Set(['a']),
+          onToggle,
+          onToggleAll: vi.fn(),
+          headerLabel: 'Select all',
+          rowLabel: (row) => row.name,
+        }}
+      />,
+    )
+    await user.click(within(screen.getByRole('table')).getByText('Beta').closest('tr')!)
+    expect(onToggle).toHaveBeenCalledWith(expect.objectContaining({ id: 'b' }))
+    expect(screen.getByRole('checkbox', { name: 'Select all' })).toBePartiallyChecked()
+  })
+
+  it('moves the local page and page size through the reducer', async () => {
+    render(<LocalGrid />)
+    const user = userEvent.setup()
+    expect(screen.getByText('1–1 of 3')).toBeVisible()
+    await user.click(screen.getByRole('button', { name: 'Next' }))
+    expect(screen.getByText('2–2 of 3')).toBeVisible()
+    await user.selectOptions(screen.getByRole('combobox', { name: 'Rows per page' }), '50')
+    expect(screen.getByText('1–3 of 3')).toBeVisible()
+  })
+
+  it('dispatches a remote page-size change and honours caller labels and extras', async () => {
+    const changed = vi.fn()
+    render(
+      <DataGrid
+        {...base}
+        mode="remote"
+        total={40}
+        state={createGridState()}
+        onStateChange={changed}
+        searchLabel="Find a record"
+        searchPlaceholder="Filter the list"
+        toolbarExtras={<span>Quick filters</span>}
+        pageSizeOptions={[10, 20]}
+        pagination={{
+          canPrevious: false,
+          canNext: true,
+          onPrevious: vi.fn(),
+          onNext: vi.fn(),
+          shown: { from: 1, to: 3 },
+        }}
+      />,
+    )
+    const search = screen.getByRole('searchbox', { name: 'Find a record' })
+    expect(search).toHaveAttribute('placeholder', 'Filter the list')
+    expect(screen.getByText('Quick filters')).toBeVisible()
+    await userEvent
+      .setup()
+      .selectOptions(screen.getByRole('combobox', { name: 'Rows per page' }), '20')
+    expect(changed).toHaveBeenCalledOnce()
+    expect(changed.mock.calls[0]![0](createGridState())).toEqual(
+      expect.objectContaining({ pageSize: 20, page: 1 }),
+    )
+  })
+
+  it('clears every active filter from the toolbar chips', async () => {
+    render(<LocalGrid />)
+    const user = userEvent.setup()
+    await user.click(
+      within(screen.getByRole('columnheader', { name: /Amount/ })).getByRole('button'),
+    )
+    await user.click(screen.getByRole('menuitemcheckbox', { name: '2' }))
+    await user.keyboard('{Escape}')
+    expect(screen.getByRole('button', { name: /Remove filter.*Amount.*2/i })).toBeVisible()
+    await user.click(screen.getByRole('button', { name: 'Clear filters' }))
+    expect(screen.queryByRole('button', { name: /Remove filter/ })).toBeNull()
+    expect(within(screen.getByRole('table')).getByText('Beta')).toBeVisible()
+  })
+
+  it('clears the sort and one column filter from the open column menu', async () => {
+    render(<LocalGrid />)
+    const user = userEvent.setup()
+    const amountHeader = () => screen.getByRole('columnheader', { name: /Amount/ })
+    const openAmountMenu = () => user.click(within(amountHeader()).getByRole('button'))
+
+    await openAmountMenu()
+    expect(screen.getByRole('menuitem', { name: 'Clear sort' })).toHaveAttribute(
+      'aria-disabled',
+      'true',
+    )
+    await user.click(screen.getByRole('menuitem', { name: 'Sort descending' }))
+    expect(amountHeader()).toHaveAttribute('aria-sort', 'descending')
+    await openAmountMenu()
+    await user.click(screen.getByRole('menuitem', { name: 'Clear sort' }))
+    expect(amountHeader()).not.toHaveAttribute('aria-sort')
+
+    await openAmountMenu()
+    await user.click(screen.getByRole('menuitemcheckbox', { name: '2' }))
+    await user.keyboard('{Escape}')
+    expect(amountHeader().querySelector('.data-grid__head-filter')).not.toBeNull()
+    await openAmountMenu()
+    await user.click(screen.getByRole('menuitem', { name: 'Clear column' }))
+    expect(amountHeader().querySelector('.data-grid__head-filter')).toBeNull()
+    expect(screen.queryByRole('button', { name: /Remove filter/ })).toBeNull()
+  })
+
+  it('narrows a local facet list by the typed value and reports no matches', async () => {
+    render(<LocalGrid />)
+    const user = userEvent.setup()
+    await user.click(within(screen.getByRole('columnheader', { name: /Name/ })).getByRole('button'))
+    const filterSearch = within(screen.getByRole('menu')).getByRole('searchbox')
+    await user.type(filterSearch, 'bet')
+    expect(filterSearch).toHaveValue('bet')
+    // Typing narrows the list without letting Radix typeahead steal the focus.
+    expect(filterSearch).toHaveFocus()
+    await user.keyboard('{ArrowDown}')
+    expect(filterSearch).toHaveValue('bet')
+    expect(screen.getByRole('menuitemcheckbox', { name: 'Beta' })).toBeVisible()
+    expect(screen.queryByRole('menuitemcheckbox', { name: 'Alpha' })).toBeNull()
+    await user.clear(filterSearch)
+    await user.type(filterSearch, 'zzz')
+    expect(screen.getByText('No values')).toBeVisible()
+    expect(screen.getByRole('menuitem', { name: 'Clear column' })).toHaveAttribute(
+      'aria-disabled',
+      'true',
+    )
+  })
+
+  it('matches the NULL bucket by its displayed label in a local facet list', async () => {
+    render(<LocalGrid />)
+    const user = userEvent.setup()
+    await user.click(
+      within(screen.getByRole('columnheader', { name: /Amount/ })).getByRole('button'),
+    )
+    await user.type(within(screen.getByRole('menu')).getByRole('searchbox'), '∅')
+    expect(screen.getByRole('menuitemcheckbox', { name: '∅' })).toBeVisible()
+    expect(screen.queryByRole('menuitemcheckbox', { name: '2' })).toBeNull()
+  })
+
+  it('drives a server facet menu through search, load more, failure and pending', async () => {
+    const onSearch = vi.fn()
+    const onLoadMore = vi.fn()
+    let page = {
+      options: [{ key: gridFacetKey(900), value: 900, label: '900', count: 4 }],
+      hasMore: true,
+      pending: false,
+      error: false,
+    }
+    const serverFacets = { page: () => page, onOpen: vi.fn(), onSearch, onLoadMore }
+    const props = {
+      ...base,
+      mode: 'remote' as const,
+      total: 40,
+      rows: rows.slice(0, 1),
+      state: createGridState({ filters: { amount: [gridFacetKey(null)] } }),
+      onStateChange: vi.fn(),
+      serverFacets,
+    }
+    const view = render(<DataGrid {...props} />)
+    const user = userEvent.setup()
+    await user.click(
+      within(screen.getByRole('columnheader', { name: /Amount/ })).getByRole('button'),
+    )
+    const menuSearch = within(screen.getByRole('menu')).getByRole('searchbox')
+    await user.type(menuSearch, '9')
+    expect(onSearch).toHaveBeenCalledWith('amount', '9')
+    // A selected value the server page did not return stays visible.
+    expect(screen.getByRole('menuitemcheckbox', { name: '∅' })).toBeVisible()
+
+    await user.click(screen.getByRole('menuitem', { name: 'Load more values' }))
+    expect(onLoadMore).toHaveBeenCalledWith('amount')
+    expect(screen.getByRole('menu')).toBeVisible()
+
+    page = { options: [], hasMore: true, pending: true, error: false }
+    view.rerender(<DataGrid {...props} />)
+    expect(screen.getByText('Loading values…')).toBeVisible()
+    expect(screen.getByRole('menuitem', { name: 'Load more values' })).toHaveAttribute(
+      'aria-disabled',
+      'true',
+    )
+
+    page = { options: [], hasMore: false, pending: false, error: true }
+    view.rerender(<DataGrid {...props} state={createGridState()} />)
+    expect(screen.getByText('Values unavailable')).toBeVisible()
+    expect(screen.queryByText('No values')).toBeNull()
+
+    page = {
+      options: [{ key: gridFacetKey(900), value: 900, label: '900', count: 4 }],
+      hasMore: false,
+      pending: false,
+      error: true,
+    }
+    view.rerender(<DataGrid {...props} state={createGridState()} />)
+    expect(screen.queryByText('Values unavailable')).toBeNull()
+    expect(screen.getByRole('menuitemcheckbox', { name: /900/ })).toBeVisible()
+  })
+
+  it('keeps a closed column trigger focused after Escape', async () => {
+    render(<LocalGrid />)
+    const user = userEvent.setup()
+    const trigger = within(screen.getByRole('columnheader', { name: /Name/ })).getByRole('button')
+    trigger.focus()
+    await user.keyboard('{Escape}')
+    expect(screen.queryByRole('menu')).toBeNull()
+    expect(trigger).toHaveFocus()
+    await user.keyboard('{Enter}')
+    expect(screen.getByRole('menu')).toBeVisible()
+    await user.keyboard('{Escape}')
+    expect(screen.queryByRole('menu')).toBeNull()
+    expect(trigger).toHaveFocus()
+  })
+})

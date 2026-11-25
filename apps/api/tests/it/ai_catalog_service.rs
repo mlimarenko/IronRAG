@@ -24,10 +24,14 @@ use ironrag_backend::{
     infra::{persistence::Persistence, repositories::ai_repository},
     integrations::llm::{LlmGateway, UnifiedGateway, build_text_chat_request},
     interfaces::http::router_support::ApiError,
-    services::ai_catalog_service::{
-        CreateAiBindingCommand, CreateModelCatalogCommand, CreateProviderCatalogCommand,
-        UpdateAiBindingCommand, UpdateModelCatalogCommand,
+    services::{
+        ai_catalog_service::{
+            CreateAiBindingCommand, CreateModelCatalogCommand, CreateProviderCatalogCommand,
+            UpdateAiBindingCommand, UpdateModelCatalogCommand,
+        },
+        catalog_service::{CreateLibraryCommand, CreateWorkspaceCommand},
     },
+    shared::provider_send::{ProviderSendAttribution, ProviderSendScope, with_provider_send},
 };
 
 use crate::temp_postgres_database::TempPostgresDatabase;
@@ -135,14 +139,21 @@ async fn store_reasoning_fixture(
     ai.create_binding(state, command).await.map_err(Into::into)
 }
 
+/// The binding purpose and wire mode one reasoning roundtrip exercises.
+struct ReasoningCase<'a> {
+    purpose: AiBindingPurpose,
+    wire: &'a str,
+}
+
 async fn reasoning_roundtrip_case(
     fixture: &DecisionCatalogFixture,
     provider_id: Uuid,
     gateway: &UnifiedGateway,
     bodies: &mut tokio::sync::mpsc::Receiver<serde_json::Value>,
-    purpose: AiBindingPurpose,
-    wire: &str,
+    execution: &ProviderSendFixtureExecution,
+    case: ReasoningCase<'_>,
 ) -> Result<()> {
+    let ReasoningCase { purpose, wire } = case;
     let state = &fixture.state;
     let ai = &state.application_services.ai_catalog;
     let stored = store_reasoning_fixture(fixture, provider_id, purpose, wire).await?;
@@ -164,7 +175,7 @@ async fn reasoning_roundtrip_case(
         "server profile must replace the forged client profile"
     );
     assert_reasoning_independent_embedding_profile(&resolved);
-    let body = capture_reasoning_payload(gateway, bodies, &resolved).await?;
+    let body = capture_reasoning_payload(gateway, bodies, &resolved, execution, purpose).await?;
     assert_selected_reasoning_payload(&body, wire, &extra);
 
     // Updating to unset retains the existing raw behaviour, distinct from typed none.
@@ -187,20 +198,105 @@ async fn reasoning_roundtrip_case(
     .await?;
     let resolved = ai.resolve_runtime_binding_by_id(state, stored.id).await?;
     assert!(resolved.extra_parameters_json.get("reasoningMode").is_none());
-    let body = capture_reasoning_payload(gateway, bodies, &resolved).await?;
+    let body = capture_reasoning_payload(gateway, bodies, &resolved, execution, purpose).await?;
     assert_eq!(body["reasoning_effort"], "high");
     assert!(body.get("thinking").is_none());
     Ok(())
+}
+
+/// The owning execution a real provider send must name.
+///
+/// Admission resolves a send's workspace and library from the owning execution
+/// row, so the payload test needs a real workspace, a real library and one
+/// `billing_knowledge_search` row that references both.
+struct ProviderSendFixtureExecution {
+    workspace_id: Uuid,
+    library_id: Uuid,
+    knowledge_search_id: Uuid,
+}
+
+impl ProviderSendFixtureExecution {
+    async fn create(fixture: &DecisionCatalogFixture) -> Result<Self> {
+        let state = &fixture.state;
+        let catalog = &state.application_services.catalog;
+        let workspace = catalog
+            .create_workspace(
+                state,
+                CreateWorkspaceCommand {
+                    slug: Some(format!("ai-catalog-send-{}", Uuid::now_v7().simple())),
+                    display_name: "AI catalog provider send workspace".to_string(),
+                    created_by_principal_id: None,
+                },
+            )
+            .await
+            .context("create the provider send fixture workspace")?;
+        let library = catalog
+            .create_library(
+                state,
+                CreateLibraryCommand {
+                    workspace_id: workspace.id,
+                    slug: Some(format!("ai-catalog-send-{}", Uuid::now_v7().simple())),
+                    display_name: "AI catalog provider send library".to_string(),
+                    description: Some("owning execution for the real gateway payload".to_string()),
+                    created_by_principal_id: None,
+                },
+            )
+            .await
+            .context("create the provider send fixture library")?;
+        let knowledge_search_id = Uuid::now_v7();
+        ironrag_backend::infra::repositories::billing_repository::
+            create_test_knowledge_search_execution(
+                &state.persistence.postgres,
+                knowledge_search_id,
+                workspace.id,
+                library.id,
+            )
+        .await
+        .context("failed to create the fixture knowledge-search execution")?;
+        Ok(Self { workspace_id: workspace.id, library_id: library.id, knowledge_search_id })
+    }
+
+    fn attribution(
+        &self,
+        resolved: &ironrag_backend::services::ai_catalog_service::ResolvedRuntimeBinding,
+        purpose: ironrag_backend::domains::ai::AiBindingPurpose,
+    ) -> ProviderSendAttribution {
+        ProviderSendAttribution {
+            workspace_id: self.workspace_id,
+            library_id: self.library_id,
+            owning_execution_kind: "knowledge_search".to_string(),
+            owning_execution_id: self.knowledge_search_id,
+            call_kind: purpose.as_str().to_string(),
+            binding_id: Some(resolved.binding_id),
+            provider_catalog_id: resolved.provider_catalog_id,
+            model_catalog_id: resolved.model_catalog_id,
+            runtime_execution_id: None,
+            runtime_task_kind: None,
+        }
+    }
+
+    fn scope(
+        &self,
+        resolved: &ironrag_backend::services::ai_catalog_service::ResolvedRuntimeBinding,
+        purpose: ironrag_backend::domains::ai::AiBindingPurpose,
+    ) -> ProviderSendScope {
+        ProviderSendScope::new(self.attribution(resolved, purpose), Uuid::now_v7())
+    }
 }
 
 async fn capture_reasoning_payload(
     gateway: &UnifiedGateway,
     bodies: &mut tokio::sync::mpsc::Receiver<serde_json::Value>,
     resolved: &ironrag_backend::services::ai_catalog_service::ResolvedRuntimeBinding,
+    execution: &ProviderSendFixtureExecution,
+    purpose: ironrag_backend::domains::ai::AiBindingPurpose,
 ) -> Result<serde_json::Value> {
-    gateway
-        .generate(build_text_chat_request(resolved.chat_request_seed(), "fixture".to_string()))
-        .await?;
+    with_provider_send(
+        execution.scope(resolved, purpose),
+        gateway
+            .generate(build_text_chat_request(resolved.chat_request_seed(), "fixture".to_string())),
+    )
+    .await?;
     tokio::time::timeout(std::time::Duration::from_secs(5), bodies.recv())
         .await?
         .context("mock provider must receive the real payload")
@@ -275,12 +371,20 @@ async fn selected_reasoning_binding_roundtrips_to_real_gateway_payload() -> Resu
             )
             .await?;
         let gateway = UnifiedGateway::from_settings(&state.settings, std::sync::Arc::clone(&state.dispatch_admission))?;
+        let execution = ProviderSendFixtureExecution::create(&fixture).await?;
         for (purpose, wire) in [
             (AiBindingPurpose::QueryAnswer, "reasoning_effort_none"),
             (AiBindingPurpose::QueryCompile, "thinking_disabled"),
         ] {
-            reasoning_roundtrip_case(&fixture, provider.id, &gateway, &mut bodies, purpose, wire)
-                .await?;
+            reasoning_roundtrip_case(
+                &fixture,
+                provider.id,
+                &gateway,
+                &mut bodies,
+                &execution,
+                ReasoningCase { purpose, wire },
+            )
+            .await?;
         }
         let account_id = create_active_account(fixture.pool(), provider.id, "discovery").await?;
         let discovered = ai.list_available_provider_models(state, account_id).await?;

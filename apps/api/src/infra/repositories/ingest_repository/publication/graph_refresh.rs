@@ -317,7 +317,7 @@ async fn publish_graph_refresh_completion(
             attempt_id: input.attempt_id,
             job_id: job.id,
             completed_at: input.completed_at,
-            graph_state: &input.graph_state,
+            attempt_degradation_code: &input.graph_state,
         },
         &effects.terminal_stage_events,
         super::content_success::PublicationCompletionLabels {

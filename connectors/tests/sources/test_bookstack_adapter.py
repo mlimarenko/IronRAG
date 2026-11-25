@@ -624,3 +624,80 @@ async def test_fetch_defers_when_an_image_url_answers_with_something_else() -> N
     result = await adapter.fetch(ref)
     assert isinstance(result, SourceFetchDeferred)
     assert "did not resolve to an image" in result.reason
+
+
+@pytest.mark.asyncio
+async def test_attachment_index_record_without_integer_ids_fails_loud() -> None:
+    fake = FakeBookStack()
+    fake.attachments = [{"id": "99", "uploaded_to": 1}]
+    adapter = _adapter_with(fake)
+
+    with pytest.raises(BookStackError, match="integer id/uploaded_to"):
+        async for _ in adapter.iter_items():
+            pass
+
+
+@pytest.mark.asyncio
+async def test_fetch_defers_an_unexpected_ref_kind() -> None:
+    adapter = _adapter_with(FakeBookStack())
+    ref = SourceItemRef(
+        item_id="deadbeef",
+        kind=KIND_IMAGE,
+        external_key="bookstack:image:deadbeef",
+    )
+
+    result = await adapter.fetch(ref)
+
+    assert isinstance(result, SourceFetchDeferred)
+    assert result.reason == f"unexpected ref kind: {KIND_IMAGE}"
+
+
+@pytest.mark.asyncio
+async def test_fetch_defers_a_non_integer_page_id() -> None:
+    adapter = _adapter_with(FakeBookStack())
+    ref = SourceItemRef(
+        item_id="hello",
+        kind=KIND_PAGE,
+        external_key="bookstack:page:hello",
+    )
+
+    result = await adapter.fetch(ref)
+
+    assert isinstance(result, SourceFetchDeferred)
+    assert result.reason == "BookStack page id is not an integer"
+
+
+@pytest.mark.asyncio
+async def test_fetch_defers_when_image_references_cannot_be_collected(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    adapter = _adapter_with(FakeBookStack())
+    ref = await anext(adapter.iter_items())
+
+    def broken_collector(text: str, base_url: str) -> list[str]:
+        raise RuntimeError("markdown parser exploded")
+
+    monkeypatch.setattr(
+        "ironrag_connector.sources.bookstack.adapter.collect_bookstack_image_urls",
+        broken_collector,
+    )
+
+    result = await adapter.fetch(ref)
+
+    assert isinstance(result, SourceFetchDeferred)
+    assert "inline image references unreadable" in result.reason
+
+
+@pytest.mark.asyncio
+async def test_fetch_defers_an_attachment_record_without_a_valid_id() -> None:
+    class BadAttachmentId(FakeBookStack):
+        async def list_page_attachments(self, page_id: int) -> list[dict[str, Any]]:
+            return [{"id": "99", "name": "spec.pdf"}]
+
+    adapter = _adapter_with(BadAttachmentId())
+    ref = await anext(adapter.iter_items())
+
+    result = await adapter.fetch(ref)
+
+    assert isinstance(result, SourceFetchDeferred)
+    assert result.reason == "attachment record without a valid id"

@@ -10,7 +10,10 @@ use uuid::Uuid;
 use crate::{
     app::state::AppState,
     domains::ops::{ASYNC_OP_STATUS_FAILED, ASYNC_OP_STATUS_READY},
-    infra::repositories::{content_document_repository, ingest_repository, ops_repository},
+    infra::repositories::{
+        admission_repository, content_document_head_repository, content_document_repository,
+        ingest_repository, ops_repository,
+    },
     interfaces::http::{
         auth::AuthContext,
         authorization::{
@@ -740,11 +743,8 @@ async fn resolve_single_library_for_documents(
 /// when the retry is a child of a batch parent `async_operation`; for
 /// direct single-document retries it stays `None`.
 ///
-/// This function is also the path that handles failed documents whose
-/// head was never promoted — it delegates to `resolve_reprocess_revision`
-/// which falls back to the latest revision row when the head is `NULL`,
-/// and to `force_reset_inflight_for_retry` so an earlier stuck mutation
-/// doesn't block the new admission.
+/// Reprocess only the current readable revision. A document without one must
+/// be materialized by its source rather than by replaying historical bytes.
 pub async fn reprocess_single_document(
     state: &AppState,
     parent_id: Option<Uuid>,
@@ -803,9 +803,9 @@ async fn reprocess_single_document_with_hook(
             .await
             .map_err(|e| ApiError::internal_with_log(e, "internal"))?
             .ok_or_else(|| ApiError::resource_not_found("document", document_id))?;
-    // A previously-tombstoned document (orphan auto-fail, manual delete, or
-    // a row left behind by an earlier batch) still has a `content_document`
-    // row in Postgres but `document_state='deleted'`. From the retry path's
+    // A previously-tombstoned document (manual delete or a row left behind by
+    // an earlier batch) still has a `content_document` row in Postgres but
+    // `document_state='deleted'`. From the retry path's
     // POV there is nothing to do — skip silently (no child mutation, no
     // failure) so stale selections from the UI do not generate noise.
     if document.document_state == "deleted" || document.deleted_at.is_some() {
@@ -813,7 +813,34 @@ async fn reprocess_single_document_with_hook(
     }
 
     let active_revision =
-        state.application_services.content.resolve_reprocess_revision(state, document_id).await?;
+        state.application_services.content.get_current_revision(state, document_id).await?;
+    let Some(active_revision) = active_revision else {
+        let head = content_document_head_repository::get_document_head(
+            &state.persistence.postgres,
+            document_id,
+        )
+        .await
+        .map_err(|error| ApiError::internal_with_log(error, "internal"))?
+        .ok_or_else(|| {
+            ApiError::internal_with_log(
+                format!("document {document_id} has no content head"),
+                "content admission head integrity failure",
+            )
+        })?;
+        if admission_repository::unbound_visibility_intent_required(
+            head.visibility_intent_id,
+            None,
+            "reprocess",
+            false,
+        ) {
+            return Err(ApiError::VisibilityIntentRequired(format!(
+                "document {document_id} requires a visibility intent"
+            )));
+        }
+        return Err(ApiError::BadRequest(
+            "document has no current readable revision; materialize it from its source".to_string(),
+        ));
+    };
 
     // Web-captured documents: retry means "go back to the site and pull the
     // current version", not "re-parse the same captured bytes". We re-fetch
@@ -824,7 +851,7 @@ async fn reprocess_single_document_with_hook(
     // `admit_mutation` below commits a revision that references it. The guard
     // owns the per-library storage lock through that commit.
     let staged_blob_guard: Option<PersistedRevisionSourceGuard>;
-    let reprocess_metadata = if active_revision.content_source_kind == "web_page" {
+    let mut reprocess_metadata = if active_revision.content_source_kind == "web_page" {
         let source_uri = active_revision.source_uri.as_deref().ok_or_else(|| {
             ApiError::BadRequest("web-captured document has no source_uri to re-fetch".to_string())
         })?;
@@ -849,6 +876,9 @@ async fn reprocess_single_document_with_hook(
         staged_blob_guard = resolved.guard;
         build_reprocess_revision_metadata(&active_revision, resolved.source)
     };
+    // Admission rechecks this base against the current revision under the
+    // document lock, including a visibility intent arriving after the read.
+    reprocess_metadata.base_revision_id = Some(active_revision.id);
 
     // IRG-203 SITE-2: the reset+admit sequence commits across several awaits
     // (`cancel_jobs_for_document`, then the mutation reconciliation, then
@@ -998,6 +1028,7 @@ async fn run_reset_and_admit(
                 source_identity: None,
                 revision: Some(reprocess_metadata),
                 parent_async_operation_id: parent_id,
+                enrichment_scope: None,
             },
         )
         .await?;

@@ -152,43 +152,6 @@ pub(super) fn tool_result_model_message(
     })
 }
 
-pub(super) fn tool_result_verification_text(
-    tool_name: &str,
-    result: &crate::interfaces::http::mcp::McpToolResult,
-) -> Option<String> {
-    if result.is_error || !tool_result_can_ground_final_answer(tool_name) {
-        return None;
-    }
-    let content_text =
-        tool_result_preview_with_limit(&result.content, TOOL_VERIFICATION_CONTENT_CHAR_LIMIT)
-            .unwrap_or_default();
-    let structured_content = if tool_name == GROUNDED_ANSWER_TOOL_NAME {
-        compact_grounded_answer_structured_content_for_verification(
-            &result.structured_content,
-            TOOL_VERIFICATION_STRUCTURED_JSON_CHAR_LIMIT,
-        )
-    } else {
-        compact_structured_content_for_verification(&result.structured_content)
-    };
-    let structured_text = serde_json::to_string_pretty(&structured_content)
-        .unwrap_or_else(|error| format!("failed to serialize compact structured content: {error}"));
-    let mut sections = Vec::new();
-    if !content_text.trim().is_empty() {
-        sections.push(format!("content:\n{}", content_text.trim()));
-    }
-    if structured_content != Value::Null && structured_content != serde_json::json!({}) {
-        sections.push(format!("structuredContent:\n{structured_text}"));
-    }
-    (!sections.is_empty()).then(|| sections.join("\n\n"))
-}
-
-pub(super) fn tool_result_can_ground_final_answer(tool_name: &str) -> bool {
-    matches!(tool_name, GROUNDED_ANSWER_TOOL_NAME)
-        || is_document_content_tool(tool_name)
-        || is_graph_content_tool(tool_name)
-        || is_runtime_content_tool(tool_name)
-}
-
 pub(super) fn tool_model_content_char_limit(tool_name: &str) -> usize {
     match tool_name {
         GROUNDED_ANSWER_TOOL_NAME => TOOL_MODEL_GROUNDED_ANSWER_CONTENT_CHAR_LIMIT,
@@ -257,6 +220,9 @@ pub(super) fn grounded_answer_repair_reason(
     let Some(envelope) = grounded_answer_completion_envelope(result) else {
         return Some(GroundedAnswerRepairReason::VerificationIncomplete);
     };
+    if !envelope.repair_policy.required {
+        return None;
+    }
     if matches!(
         grounded_answer_typed_outcome(tool_name, result).map(|outcome| outcome.disposition),
         Some(QueryAnswerDisposition::SafeFallback | QueryAnswerDisposition::Clarification)

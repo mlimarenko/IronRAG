@@ -61,7 +61,6 @@ GITLEAKS_LOG_OPTS ?=
 	backend-audit-strict \
 	ci-backend-gates \
 	ci-backend-functional \
-	ci-python-functional \
 	ci-frontend-gates \
 	ci-ops-gates \
 	secret-check \
@@ -161,12 +160,12 @@ BACKEND_LIB_IGNORED_SUITES ?= \
   infra::postgres::pg_search_store::vector_support_tests:1 \
   infra::postgres::pg_search_store::vector_inventory::tests:5 \
   infra::repositories::runtime_graph_repository::coordination::tests:1 \
-  infra::repositories::webhook_outbox_repository::tests:4 \
+  infra::repositories::webhook_outbox_repository::tests:5 \
   interfaces::http::mcp::tests:1 \
   services::graph::extract::persistence_retry::tests::native:1 \
   services::graph::gc::tests:2 \
   services::maintenance::provider_source_generation_fence_schema::tests:1 \
-  services::query::execution::semantic_rerank::binding_tests:2 \
+  services::query::execution::semantic_rerank::binding_tests:4 \
   services::query::service::turn::controlled_semantic::native_tests:3 \
   services::query::result_cache::tests:2 \
   services::query::search::tests:1
@@ -214,13 +213,13 @@ backend-doc:
 # to close.
 # Derive it from cargo, never by hand:
 #   cargo test -p ironrag-backend --all-features --test it 2>&1 | tail -1
-BACKEND_FAST_TEST_COUNT ?= 45
+BACKEND_FAST_TEST_COUNT ?= 44
 
 BACKEND_INTEGRATION_SUITES ?= ai_catalog_repository:3 ai_catalog_service:6 ai_config_generation_fencing:4 \
-  atomic_admission:33 audit_events:17 billing_rollups:16 \
-  bootstrap_stack:6 cancellation_class:8 canonical_read_visibility:6 \
-  catalog_repository:16 content_document_graph_coverage:7 content_lifecycle:22 \
-  content_repository:22 content_revision_lineage:1 credential_encryption:1 \
+  atomic_admission:34 audit_events:17 billing_rollups:26 \
+  bootstrap_stack:7 cancellation_class:9 canonical_read_visibility:7 \
+  catalog_repository:16 content_document_graph_coverage:8 content_lifecycle:23 \
+  content_repository:23 content_revision_lineage:1 credential_encryption:1 \
   document_external_key_reclaim:4 extract_graph:1 extract_repository:1 \
   governance_auth:13 graph_atomicity_fencing:16 graph_projection_repository:3 \
   graph_rebuild_guard_lifecycle:3 graph_reextract_repository:25 graph_snapshot_fencing:7 \
@@ -229,17 +228,17 @@ BACKEND_INTEGRATION_SUITES ?= ai_catalog_repository:3 ai_catalog_service:6 ai_co
   greenfield_bootstrap::user_preference:1 greenfield_bootstrap::vision_recognition:2 \
   greenfield_bootstrap::xberg_recognition:1 iam_preferences:1 iam_user_repository:2 \
   incremental_graph_reconcile:2 \
-  ingest_attempts:6 ingest_cancellation:2 ingest_preparation_fencing:4 \
-  ingest_publication:16 ingest_repository:19 ingest_unit_fencing:1 \
-  knowledge_lifecycle:21 knowledge_revision_states:1 knowledge_search:24 \
-  knowledge_search::embedding_accounting:12 knowledge_search::lexical_intent:1 login_rate_limit:3 \
-  mcp_knowledge:3 mcp_memory_contracts:6 mcp_memory_permissions:5 \
-  mcp_memory_reads:8 mcp_memory_reads::image_accounting:4 mcp_memory_search:11 \
+  ingest_attempts:6 ingest_cancellation:2 ingest_execute_response:2 ingest_preparation_fencing:4 \
+  ingest_publication:23 ingest_repository:19 ingest_unit_fencing:1 \
+  knowledge_lifecycle:21 knowledge_revision_states:1 knowledge_search:28 \
+  knowledge_search::embedding_accounting:15 knowledge_search::lexical_intent:1 login_rate_limit:3 \
+  mcp_knowledge:3 mcp_memory_contracts:6 mcp_memory_permissions:6 \
+  mcp_memory_reads:10 mcp_memory_reads::image_accounting:4 mcp_memory_search:11 \
   mcp_public_writers:3 oidc_sso:9 ops_state:6 \
   provider_batch_resolution:1 query_grounding:24 revision_prefix_fetch:1 \
   runtime_graph_extraction_repository:8 runtime_graph_node_hints:1 runtime_orphan_reconcile:18 \
   snapshot_transfer:30 stranded_fan_out_repair:9 structured_block_repository:1 \
-  terminal_graph_state_repair:6 web_ingest_recursive_crawl:5 web_ingest_repository:8 \
+  terminal_graph_state_repair:6 text_publication_schema:1 web_ingest_recursive_crawl:5 web_ingest_repository:8 \
   web_ingest_single_page:6 web_ingest_visibility:2 webhook_delivery:15 \
   webhook_outbound:15 workspace_restore_atomicity:3
 
@@ -565,6 +564,15 @@ connectors-sync:
 connectors-test:
 	uv run --directory $(CONNECTORS_DIR) --all-extras pytest -q
 
+python-coverage:
+	uv run --project $(CONNECTORS_DIR) --all-extras coverage erase \
+		--rcfile=scripts/ci/python-coverage.toml
+	uv run --project $(CONNECTORS_DIR) --all-extras coverage run \
+		--rcfile=scripts/ci/python-coverage.toml -m pytest -q $(CONNECTORS_DIR)/tests
+	$(MAKE) benchmark-contract-test BENCHMARK_TEST_PYTHON='uv run --project $(CONNECTORS_DIR) --all-extras --with requests coverage run --rcfile=scripts/ci/python-coverage.toml --append'
+	uv run --project $(CONNECTORS_DIR) --all-extras coverage xml \
+		--rcfile=scripts/ci/python-coverage.toml -o coverage/python-coverage.xml
+
 connectors-lint:
 	# --no-cache: an editable sibling used to change import classification, and a
 	# stale Ruff cache hid the resulting CI error.
@@ -588,8 +596,6 @@ ci-backend-gates: backend-lint backend-test-fast migration-check openapi-check o
 
 # Fast CI path: run each functional suite once without LLVM instrumentation.
 ci-backend-functional: backend-test-fast backend-test-lib-ignored backend-test-integration migration-check openapi-check openapi-public-check
-
-ci-python-functional: connectors-sync connectors-test
 
 ci-frontend-gates: frontend-lint frontend-typecheck frontend-i18n-audit frontend-coverage frontend-color-gate frontend-deadcode frontend-swagger-check frontend-sdk-check
 
@@ -716,8 +722,13 @@ benchmark-golden:
 benchmark-golden-seed:
 	@$(MAKE) benchmark-grounded-seed IRONRAG_BENCHMARK_SUITES="$(IRONRAG_GOLDEN_SUITES)" IRONRAG_BENCHMARK_OUTPUT_DIR="$(IRONRAG_GOLDEN_OUTPUT_DIR)" IRONRAG_BENCHMARK_LIBRARY_NAME="Golden Benchmark Seed"
 
+BENCHMARK_CONTRACT_SUITES := grounded_query chunking semantic_rerank atomic_assertions
+BENCHMARK_TEST_PYTHON ?= python3
+
 benchmark-contract-test:
-	python3 -m unittest discover -s apps/api/benchmarks/grounded_query -p 'test_*.py'
+	@set -e; for suite in $(BENCHMARK_CONTRACT_SUITES); do \
+		$(BENCHMARK_TEST_PYTHON) -m unittest discover -s "apps/api/benchmarks/$$suite" -p 'test_*.py'; \
+	done
 
 benchmark-regression:
 	@test -n "$(IRONRAG_BENCHMARK_BASELINE_DIR)" || (echo "IRONRAG_BENCHMARK_BASELINE_DIR is required" && exit 1)

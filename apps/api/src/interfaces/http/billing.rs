@@ -168,6 +168,7 @@ pub async fn list_charges(
         (status = 200, description = "Total billing cost for the execution", body = BillingExecutionCost),
         (status = 401, description = "Caller is not authenticated"),
         (status = 403, description = "Caller is not authorized for the execution's library"),
+        (status = 404, description = "No measured provider-call evidence for the execution"),
     ),
 )]
 #[tracing::instrument(

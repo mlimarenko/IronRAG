@@ -111,25 +111,16 @@ pub(super) async fn resolve_ingest_content(
         // cancellation. Dropping this future would lose paid empty-attempt usage.
         let result = ContentService::build_runtime_extraction_plan(
             state,
-            revision.library_id,
-            &file_name,
-            Some(revision.mime_type.as_str()),
-            &stored_bytes,
+            crate::services::content::service::RuntimeExtractionUpload {
+                library_id: revision.library_id,
+                authority,
+                file_name: &file_name,
+                mime_type: Some(revision.mime_type.as_str()),
+                file_bytes: &stored_bytes,
+            },
             cancellation_token,
         )
         .await;
-        let calls = match &result {
-            Ok(plan) => {
-                super::preparation::vision_billing_usage_items(&plan.usage_json).map_err(|_| {
-                    ContentExtractionError::extraction_failed_terminal(
-                        "extract_usage_receipt_invalid",
-                        "visual recognition returned an invalid billing receipt",
-                    )
-                })?
-            }
-            Err(error) => error.vision_calls.clone(),
-        };
-        super::preparation::capture_vision_call_receipts(state, authority, &calls).await;
         ensure_extraction_not_cancelled(cancellation_token, revision.revision_id)?;
         let plan = result
             .map_err(|rejection| ContentExtractionError::from_upload_rejection(&rejection))?;
@@ -141,6 +132,7 @@ pub(super) async fn resolve_ingest_content(
             "contentLength": content_char_count,
             "fileKind": plan.file_kind.as_str(),
             "recognition": plan.source_map.get("recognition").cloned().unwrap_or_else(|| serde_json::json!({})),
+            "evidenceLimitation": plan.source_map["content_quality"]["evidence_limitation"].clone(),
             "warningCount": plan.extraction_warnings.len(),
             "lineCount": plan.source_format_metadata.line_count,
             "pageCount": plan.source_format_metadata.page_count,
@@ -669,6 +661,7 @@ async fn resolve_resumable_pdf_extract_content(
         "contentLength": content_char_count,
         "fileKind": plan.file_kind.as_str(),
         "recognition": plan.source_map.get("recognition").cloned().unwrap_or_else(|| serde_json::json!({})),
+        "evidenceLimitation": plan.source_map["content_quality"]["evidence_limitation"].clone(),
         "warningCount": plan.extraction_warnings.len(),
         "lineCount": plan.source_format_metadata.line_count,
         "pageCount": plan.source_format_metadata.page_count,
@@ -773,14 +766,16 @@ async fn extract_pdf_run_streamed(
                 }
                 let mut native = batch.extraction;
                 let result = ContentService::recognize_runtime_native_output(
-                    &state, library_id, crate::shared::extraction::file_extract::UploadFileKind::Pdf,
-                    &mut native, Some(&identity), &cancellation_token,
+                    &state,
+                    crate::services::content::service::NativeRecognitionTarget {
+                        library_id,
+                        kind: crate::shared::extraction::file_extract::UploadFileKind::Pdf,
+                        native: &mut native,
+                        expected_identity: Some(&identity),
+                        authority: Some(authority),
+                    },
+                    &cancellation_token,
                 ).await;
-                let calls = match &result {
-                    Ok(receipt) => receipt.calls.as_slice(),
-                    Err(error) => error.vision_calls(),
-                };
-                super::preparation::capture_vision_call_receipts(&state, authority, calls).await;
                 if cancellation_token.is_cancelled() {
                     return Err(anyhow::Error::new(PdfExtractStreamControl::Cancelled));
                 }
@@ -902,11 +897,16 @@ async fn extract_pdf_run_streamed(
                 xberg::XbergBatchStreamError::Extraction(source) => {
                     pdf_xberg_failure(&source, "pdf_page_range_extract_failed", message)
                 }
-                xberg::XbergBatchStreamError::Batch(_) => {
-                    ContentExtractionError::extraction_failed(
+                xberg::XbergBatchStreamError::Batch(source) => {
+                    let provider_call_id = source
+                        .downcast_ref::<crate::shared::extraction::file_extract::FileExtractError>()
+                        .and_then(|error| error.provider_call_id());
+                    let mut failure = ContentExtractionError::extraction_failed(
                         "pdf_page_range_extract_failed",
                         message,
-                    )
+                    );
+                    failure.provider_call_id = provider_call_id;
+                    failure
                 }
             }
         }),
@@ -1051,6 +1051,8 @@ pub(super) fn merge_pdf_unit_outputs(
     let mut source_maps = Vec::new();
     let mut visual_outcomes = Vec::new();
     let mut native_units = Vec::new();
+    let mut unit_evidence = Vec::new();
+    let mut inferred_visual_structure = Vec::new();
     for mut output in outputs {
         if !content.is_empty() && !output.content_text.is_empty() {
             content.push_str("\n\n");
@@ -1074,6 +1076,16 @@ pub(super) fn merge_pdf_unit_outputs(
         }
         if let Some(items) = output.source_map.get("units").and_then(serde_json::Value::as_array) {
             native_units.extend(items.iter().cloned());
+        }
+        if let Some(items) =
+            output.source_map.get("unit_evidence").and_then(serde_json::Value::as_array)
+        {
+            unit_evidence.extend(items.iter().cloned());
+        }
+        if let Some(items) =
+            output.source_map.get("inferred_visual_structure").and_then(serde_json::Value::as_array)
+        {
+            inferred_visual_structure.extend(items.iter().cloned());
         }
         source_maps.push(output.source_map);
         warnings.extend(output.warnings);
@@ -1114,6 +1126,8 @@ pub(super) fn merge_pdf_unit_outputs(
             "source_format": "pdf",
             "native_extractions":source_maps,
             "units":native_units,
+            "unit_evidence":unit_evidence,
+            "inferred_visual_structure":inferred_visual_structure,
             "visual_recognition":visual_outcomes,
             "timings": {
                 "resumableUnits": true,

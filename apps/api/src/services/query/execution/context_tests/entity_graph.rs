@@ -1,4 +1,5 @@
 use super::*;
+use crate::services::query::execution::RuntimeMatchedRelationship;
 
 #[test]
 fn target_entity_context_lines_surface_explicit_graph_summaries() {
@@ -16,10 +17,40 @@ fn target_entity_context_lines_surface_explicit_graph_summaries() {
     let lines = target_entity_context_lines(&query_ir, &graph_index);
 
     assert_eq!(lines.len(), 2);
-    assert!(lines[0].contains("alpha-core"));
-    assert!(lines[0].contains("Runs the Alpha Suite core service."));
-    assert!(lines[1].contains("alpha-sync"));
-    assert!(!lines.join("\n").contains("beta-core"));
+    assert!(lines[0].rendered().contains("alpha-core"));
+    assert!(lines[0].rendered().contains("Runs the Alpha Suite core service."));
+    assert!(lines[1].rendered().contains("alpha-sync"));
+    assert!(lines.iter().all(|line| !line.rendered().contains("beta-core")));
+}
+
+#[test]
+fn target_entity_context_lines_pair_summary_evidence_with_the_rendered_line() {
+    let mut query_ir = entity_ir();
+    query_ir.target_entities = vec![
+        EntityMention { label: "alpha-core".to_string(), role: EntityRole::Object },
+        EntityMention { label: "alpha-sync".to_string(), role: EntityRole::Object },
+    ];
+    let graph_index = graph_index_with_nodes(vec![
+        runtime_graph_node("alpha-core", "artifact", Some("Runs the Alpha Suite core service.")),
+        runtime_graph_node("alpha-sync", "artifact", None),
+    ]);
+
+    let lines = target_entity_context_lines(&query_ir, &graph_index);
+
+    assert_eq!(lines.len(), 2);
+    assert_eq!(lines[0].evidence_text(), Some("Runs the Alpha Suite core service."));
+    assert_eq!(lines[0].passage_evidence_text(), None);
+    assert_eq!(
+        lines[0].rendered(),
+        "[graph-node] target_match=explicit evidence: Runs the Alpha Suite core service. \
+         | entity_hint: alpha-core (artifact)"
+    );
+    assert_eq!(lines[1].evidence_text(), None);
+    assert_eq!(lines[1].passage_evidence_text(), None);
+    assert_eq!(
+        lines[1].rendered(),
+        "[graph-node] target_match=explicit entity_hint: alpha-sync (artifact)"
+    );
 }
 
 #[test]
@@ -41,8 +72,8 @@ fn wildcard_inventory_target_context_expands_matching_graph_nodes() {
     let lines = target_entity_context_lines(&query_ir, &graph_index);
 
     assert!(lines.len() > TARGET_ENTITY_CONTEXT_LINE_LIMIT);
-    assert!(lines.iter().any(|line| line.contains("alpha-089")));
-    assert!(!lines.join("\n").contains("beta-000"));
+    assert!(lines.iter().any(|line| line.rendered().contains("alpha-089")));
+    assert!(lines.iter().all(|line| !line.rendered().contains("beta-000")));
 }
 
 #[test]
@@ -63,7 +94,7 @@ fn descriptive_wildcard_target_context_keeps_default_cap() {
     let lines = target_entity_context_lines(&query_ir, &graph_index);
 
     assert_eq!(lines.len(), TARGET_ENTITY_CONTEXT_LINE_LIMIT);
-    assert!(!lines.iter().any(|line| line.contains("alpha-064")));
+    assert!(!lines.iter().any(|line| line.rendered().contains("alpha-064")));
 }
 
 #[test]
@@ -317,4 +348,67 @@ fn entity_target_context_rejects_embedded_short_exact_match() {
 
     assert!(!context.contains("[entity-match exact] OTO"));
     assert!(context.contains("[entity-match token-overlap] Alex Otoya"));
+}
+
+#[test]
+fn graph_edge_context_marks_only_short_recorded_wording_as_exact() {
+    const SHORT_STATEMENT: &str =
+        "Alpha Sync does not publish records until Beta Gateway confirms readiness.";
+    const LONG_STATEMENT: &str = "Alpha Sync records queue depth for every shard and keeps the previous reading for comparison.\nBeta Gateway reports readiness only after the shard list is complete and the probe window closes.\nGamma Worker replays the last successful batch when the gateway reports an incomplete shard list.";
+    let context = assemble_bounded_context(
+        &[],
+        &[
+            RuntimeMatchedRelationship {
+                edge_id: Uuid::now_v7(),
+                relation_type: "depends_on".to_string(),
+                from_node_id: Uuid::now_v7(),
+                from_label: "Alpha Sync".to_string(),
+                to_node_id: Uuid::now_v7(),
+                to_label: "Beta Gateway".to_string(),
+                summary: Some(SHORT_STATEMENT.to_string()),
+                support_count: 3,
+                score: Some(0.7),
+            },
+            RuntimeMatchedRelationship {
+                edge_id: Uuid::now_v7(),
+                relation_type: "reports".to_string(),
+                from_node_id: Uuid::now_v7(),
+                from_label: "Alpha Sync".to_string(),
+                to_node_id: Uuid::now_v7(),
+                to_label: "Beta Gateway".to_string(),
+                summary: Some(LONG_STATEMENT.to_string()),
+                support_count: 1,
+                score: Some(0.65),
+            },
+            RuntimeMatchedRelationship {
+                edge_id: Uuid::now_v7(),
+                relation_type: "uses".to_string(),
+                from_node_id: Uuid::now_v7(),
+                from_label: "Gamma Worker".to_string(),
+                to_node_id: Uuid::now_v7(),
+                to_label: "Delta Queue".to_string(),
+                summary: None,
+                support_count: 2,
+                score: Some(0.6),
+            },
+        ],
+        &[ordinary_chunk("Alpha Sync waits for the gateway.", "Alpha Sync waits for the gateway.")],
+        4_096,
+    );
+
+    let exact_marker = RuntimeMatchedRelationship::EXACT_WORDING_FIELD;
+    assert!(context.contains(&format!(
+        "[graph-edge evidence] evidence: {SHORT_STATEMENT} | {exact_marker} | relation_hint: Alpha Sync --depends_on--> Beta Gateway | support_count: 3"
+    )));
+    assert!(context.contains(&format!(
+        "[graph-edge evidence] evidence: {LONG_STATEMENT} | relation_hint: Alpha Sync --reports--> Beta Gateway"
+    )));
+    assert_eq!(
+        context.matches(exact_marker).count(),
+        1,
+        "a statement past the protected-span limit stays ordinary evidence"
+    );
+    assert!(context.contains(
+        "[graph-edge relation_hint] Gamma Worker --uses--> Delta Queue | support_count: 2"
+    ));
 }

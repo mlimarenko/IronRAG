@@ -1,10 +1,14 @@
 use super::{
-    ProviderUsageSemantics, configured_provider_usage_semantics,
-    execution_cost_rollup_error_is_retryable, normalize_token_usage,
-    parse_service_tier_multipliers, provider_usage_semantics_for_payload, service_tier_multiplier,
+    ProviderUsageSemantics, configured_provider_usage_semantics, derived_cost_coverage,
+    execution_cost_has_observation, execution_cost_rollup_error_is_retryable, measured_scope_cost,
+    normalize_token_usage, parse_service_tier_multipliers, provider_usage_semantics_for_payload,
+    service_tier_multiplier,
 };
 use crate::domains::ai::ModelPricing;
-use crate::domains::{billing::PricingBillingUnit, provider_profiles::ProviderUsagePolicy};
+use crate::domains::{
+    billing::{CostCoverageStatus, PricingBillingUnit},
+    provider_profiles::ProviderUsagePolicy,
+};
 use crate::interfaces::http::router_support::ApiError;
 use rust_decimal::Decimal;
 
@@ -256,4 +260,92 @@ fn derived_rollup_retries_only_transient_internal_failures() {
     assert!(!execution_cost_rollup_error_is_retryable(&ApiError::Conflict(
         "multiple currencies".to_string(),
     )));
+}
+
+#[test]
+fn a_stored_row_without_calls_is_not_a_measured_free_scope() {
+    assert_eq!(
+        measured_scope_cost(true, Decimal::ZERO, "USD", 0, 0),
+        (None, None, None),
+        "a stored derived row is not evidence that a price was observed"
+    );
+}
+
+#[test]
+fn an_unpriced_scope_is_unknown_and_never_a_free_zero() {
+    assert_eq!(
+        measured_scope_cost(true, Decimal::ZERO, "USD", 0, 3),
+        (None, None, Some(CostCoverageStatus::Unknown)),
+    );
+}
+
+#[test]
+fn a_charge_observed_next_to_an_unresolved_reservation_is_partial() {
+    let charged = Decimal::from_str_exact("0.5000").expect("valid decimal");
+
+    assert_eq!(
+        measured_scope_cost(true, charged, "EUR", 1, 2),
+        (Some(charged), Some("EUR".to_string()), Some(CostCoverageStatus::Partial)),
+        "an observed charge keeps the total visible and makes the scope partial, not unknown"
+    );
+    // 1 completed (priced) call + 1 reservation that never completed.
+    let charged = Decimal::from_str_exact("0.4000").expect("valid decimal");
+    assert_eq!(
+        measured_scope_cost(true, charged, "USD", 1, 1),
+        (Some(charged), Some("USD".to_string()), Some(CostCoverageStatus::Partial)),
+        "the unpriced count is not comparable with the completed count as a denominator"
+    );
+}
+
+#[test]
+fn a_priced_zero_next_to_an_unresolved_reservation_has_no_provable_price() {
+    // The rollup does not store the priced count, so a zero total plus an
+    // unresolved observation cannot prove that a call was priced at zero.
+    assert_eq!(
+        measured_scope_cost(true, Decimal::ZERO, "USD", 1, 1),
+        (None, None, Some(CostCoverageStatus::Unknown)),
+    );
+}
+
+#[test]
+fn a_fully_priced_scope_reports_its_genuine_zero() {
+    assert_eq!(
+        measured_scope_cost(true, Decimal::ZERO, "USD", 2, 0),
+        (Some(Decimal::ZERO), Some("USD".to_string()), Some(CostCoverageStatus::Complete)),
+    );
+}
+
+#[test]
+fn a_partially_priced_scope_reports_its_lower_bound() {
+    let charged = Decimal::from_str_exact("0.2500").expect("valid decimal");
+
+    assert_eq!(
+        measured_scope_cost(true, charged, "USD", 3, 1),
+        (Some(charged), Some("USD".to_string()), Some(CostCoverageStatus::Partial)),
+    );
+    assert_eq!(
+        measured_scope_cost(true, Decimal::ZERO, "USD", 3, 1),
+        (None, None, Some(CostCoverageStatus::Unknown)),
+        "a zero total cannot prove a priced call from rollup counts alone"
+    );
+}
+
+#[test]
+fn derived_rollup_coverage_uses_observed_charges_not_a_settled_denominator() {
+    assert_eq!(derived_cost_coverage(0, Decimal::ZERO), CostCoverageStatus::Complete);
+    assert_eq!(
+        derived_cost_coverage(1, Decimal::from_str_exact("0.4000").expect("valid decimal")),
+        CostCoverageStatus::Partial
+    );
+    assert_eq!(derived_cost_coverage(1, Decimal::ZERO), CostCoverageStatus::Unknown);
+}
+
+#[test]
+fn an_execution_cost_without_any_call_observation_is_not_evidence() {
+    assert!(
+        !execution_cost_has_observation(0, 0),
+        "a derived cost with no settled and no unpriced call records no observation"
+    );
+    assert!(execution_cost_has_observation(1, 0));
+    assert!(execution_cost_has_observation(0, 1));
 }

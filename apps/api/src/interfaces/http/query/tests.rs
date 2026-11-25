@@ -47,6 +47,7 @@ fn chunk_reference(rank: i32, id: u128) -> ironrag_contracts::assistant::Assista
     ironrag_contracts::assistant::AssistantChunkReference {
         execution_id: Uuid::from_u128(1),
         chunk_id: Uuid::from_u128(id),
+        revision_id: None,
         rank,
         score: 1.0 / f64::from(rank.max(1)),
         document_id: None,
@@ -89,6 +90,17 @@ fn technical_fact_reference(
         display_value: id.to_string(),
         rank,
         score: 1.0 / f64::from(rank.max(1)),
+    }
+}
+
+fn technical_fact_reference_with_revision(
+    rank: i32,
+    id: u128,
+    revision_id: u128,
+) -> ironrag_contracts::assistant::AssistantTechnicalFactReference {
+    ironrag_contracts::assistant::AssistantTechnicalFactReference {
+        revision_id: Uuid::from_u128(revision_id),
+        ..technical_fact_reference(rank, id)
     }
 }
 
@@ -186,6 +198,89 @@ fn execution_detail_from_evidence(
     }
 }
 
+fn semantic_report_with_claim(
+    locator: ironrag_contracts::assistant::semantic_verification::SemanticSourceLocator,
+    document_id: Uuid,
+    revision_id: Uuid,
+) -> ironrag_contracts::assistant::semantic_verification::SemanticVerificationReport {
+    use ironrag_contracts::assistant::semantic_verification::{
+        SEMANTIC_VERIFICATION_PROTOCOL_VERSION, SemanticAnswerUnit, SemanticAssessment,
+        SemanticByteSpan, SemanticClaimSupport, SemanticCompleteness, SemanticEvidenceLink,
+        SemanticEvidenceScope, SemanticResponseClassification, SemanticSourceEntry,
+        SemanticUnitVerdict, SemanticVerificationOutcome, SemanticVerificationReport,
+    };
+    let quote = "Authorized claim support";
+    SemanticVerificationReport {
+        protocol_version: SEMANTIC_VERIFICATION_PROTOCOL_VERSION,
+        question_sha256: "b".repeat(64),
+        checked_answer_sha256: "c".repeat(64),
+        visible_answer_sha256: Some("c".repeat(64)),
+        evidence_manifest_sha256: "d".repeat(64),
+        answer_units: vec![SemanticAnswerUnit {
+            unit_id: "unit-1".to_string(),
+            span: SemanticByteSpan { start: 0, end: 1 },
+            text: "x".to_string(),
+        }],
+        sources: vec![SemanticSourceEntry {
+            source_id: "source-1".to_string(),
+            document_id,
+            document_revision_id: revision_id,
+            locator,
+            scope: SemanticEvidenceScope::SelectedExcerpt,
+            text_sha256: "a".repeat(64),
+            text: quote.to_string(),
+        }],
+        elapsed_ms: 1,
+        provider_call_id: None,
+        preparation_limit: None,
+        outcome: SemanticVerificationOutcome::Completed {
+            assessment: SemanticAssessment {
+                claim_support: SemanticClaimSupport::Supported,
+                units: vec![SemanticUnitVerdict {
+                    unit_id: "unit-1".to_string(),
+                    support: SemanticClaimSupport::Supported,
+                    asserts_document_absence: false,
+                    evidence: vec![SemanticEvidenceLink {
+                        source_id: "source-1".to_string(),
+                        span: SemanticByteSpan { start: 0, end: quote.len() },
+                        quote: quote.to_string(),
+                    }],
+                }],
+                completeness: SemanticCompleteness::Complete,
+                missing_caveats: Vec::new(),
+                response_classification: SemanticResponseClassification::FactualAnswer,
+            },
+        },
+    }
+}
+
+fn semantic_report_not_run()
+-> ironrag_contracts::assistant::semantic_verification::SemanticVerificationReport {
+    use ironrag_contracts::assistant::semantic_verification::{
+        SEMANTIC_VERIFICATION_PROTOCOL_VERSION, SemanticNotRunReason, SemanticPreparationBound,
+        SemanticPreparationLimit, SemanticVerificationOutcome, SemanticVerificationReport,
+    };
+    SemanticVerificationReport {
+        protocol_version: SEMANTIC_VERIFICATION_PROTOCOL_VERSION,
+        question_sha256: "b".repeat(64),
+        checked_answer_sha256: "c".repeat(64),
+        visible_answer_sha256: None,
+        evidence_manifest_sha256: "d".repeat(64),
+        answer_units: Vec::new(),
+        sources: Vec::new(),
+        elapsed_ms: 0,
+        provider_call_id: None,
+        preparation_limit: Some(SemanticPreparationLimit {
+            bound: SemanticPreparationBound::SourceEntries,
+            actual: 49,
+            limit: 48,
+        }),
+        outcome: SemanticVerificationOutcome::NotRun {
+            reason: SemanticNotRunReason::InputLimitExceeded,
+        },
+    }
+}
+
 fn query_execution_detail_with_chunks(count: usize) -> QueryExecutionDetail {
     let now = Utc::now();
     let execution = query_execution_with_state(
@@ -215,6 +310,7 @@ fn query_execution_detail_with_chunks(count: usize) -> QueryExecutionDetail {
             .map(|index| QueryChunkReference {
                 execution_id,
                 chunk_id: Uuid::from_u128(1_000 + index as u128),
+                revision_id: Some(Uuid::from_u128(2_000 + index as u128)),
                 rank: i32::try_from(index + 1).expect("test rank fits i32"),
                 score: 1.0 / (index + 1) as f64,
                 document_id: None,
@@ -458,7 +554,7 @@ fn map_turn_to_message_preserves_hydrated_evidence() {
 }
 
 #[test]
-fn ui_reference_projection_caps_all_reference_kinds_globally() {
+fn ui_reference_projection_caps_metadata_after_document_sources() {
     let evidence = evidence_bundle_with_references(
         (0..8).map(|index| chunk_reference(20 + index, 10 + index as u128)).collect(),
         Vec::new(),
@@ -475,8 +571,8 @@ fn ui_reference_projection_caps_all_reference_kinds_globally() {
         + projected.relation_references.len();
 
     assert_eq!(returned_count, UI_VISIBLE_REFERENCE_LIMIT);
-    assert_eq!(projected.technical_fact_references.len(), 5);
-    assert_eq!(projected.chunk_references.len(), 7);
+    assert_eq!(projected.chunk_references.len(), 8);
+    assert_eq!(projected.technical_fact_references.len(), 4);
     assert_eq!(
         projected.reference_summary,
         Some(ironrag_contracts::assistant::AssistantReferenceSummary {
@@ -540,6 +636,190 @@ fn ui_reference_projection_breaks_rank_ties_by_kind_then_original_order() {
     );
     assert_eq!(projected.entity_references.len(), 3);
     assert!(projected.relation_references.is_empty());
+}
+
+#[test]
+fn ui_reference_projection_keeps_cross_document_sources_before_same_revision_metadata() {
+    let document_a = Uuid::from_u128(200);
+    let document_b = Uuid::from_u128(201);
+    let revision_id = Uuid::from_u128(202);
+    let mut chunk = chunk_reference(1, 203);
+    chunk.document_id = Some(document_a);
+    chunk.document_title = Some("Card source".to_string());
+    chunk.section_path = vec!["Ops".to_string()];
+    chunk.excerpt = Some("Opening of the card source".to_string());
+    let mut segment = prepared_segment_reference(6, 204);
+    segment.revision_id = revision_id;
+    segment.document_id = Some(document_b);
+    segment.document_title = Some("Claim source".to_string());
+    let facts = (0..7)
+        .map(|index| technical_fact_reference_with_revision(1, 210 + index, revision_id.as_u128()))
+        .collect();
+    let evidence =
+        evidence_bundle_with_references(vec![chunk], vec![segment], facts, Vec::new(), Vec::new());
+
+    let projected = project_ui_evidence_bundle(evidence);
+
+    assert_eq!(projected.chunk_references.len(), 1);
+    assert_eq!(projected.prepared_segment_references.len(), 1);
+    assert_eq!(projected.technical_fact_references.len(), 2);
+    assert_eq!(projected.chunk_references[0].document_id, Some(document_a));
+    assert_eq!(projected.prepared_segment_references[0].document_id, Some(document_b));
+    assert_eq!(
+        projected.reference_summary,
+        Some(ironrag_contracts::assistant::AssistantReferenceSummary {
+            total_count: 9,
+            returned_count: 4,
+            truncated: true,
+        })
+    );
+}
+
+#[test]
+fn ui_reference_projection_prefers_semantic_claim_source_over_higher_ranked_metadata() {
+    use ironrag_contracts::assistant::semantic_verification::SemanticSourceLocator;
+
+    let linked_chunk = Uuid::from_u128(220);
+    let other_chunk = Uuid::from_u128(221);
+    let linked_document = Uuid::from_u128(222);
+    let mut linked = chunk_reference(9, 220);
+    linked.document_id = Some(linked_document);
+    let mut other = chunk_reference(1, 221);
+    other.document_id = Some(Uuid::from_u128(223));
+    let report = semantic_report_with_claim(
+        SemanticSourceLocator::Chunk { chunk_id: linked_chunk },
+        linked_document,
+        Uuid::from_u128(224),
+    );
+    let mut evidence = evidence_bundle_with_references(
+        vec![other, linked],
+        Vec::new(),
+        vec![technical_fact_reference(1, 225)],
+        Vec::new(),
+        Vec::new(),
+    );
+    evidence.semantic_verification = Some(report.clone());
+
+    let projected = project_ui_evidence_bundle(evidence);
+
+    assert_eq!(
+        projected.chunk_references.iter().map(|reference| reference.chunk_id).collect::<Vec<_>>(),
+        vec![linked_chunk, other_chunk]
+    );
+    assert_eq!(projected.semantic_verification.as_ref(), Some(&report));
+}
+
+#[test]
+fn ui_reference_projection_retains_unavailable_semantics_without_inventing_sources() {
+    let mut chunk = chunk_reference(1, 230);
+    chunk.document_id = Some(Uuid::from_u128(231));
+    let facts =
+        (0..7).map(|index| technical_fact_reference_with_revision(1, 232 + index, 300)).collect();
+    let report = semantic_report_not_run();
+    let mut evidence =
+        evidence_bundle_with_references(vec![chunk], Vec::new(), facts, Vec::new(), Vec::new());
+    evidence.semantic_verification = Some(report.clone());
+
+    let projected = project_ui_evidence_bundle(evidence);
+
+    assert_eq!(projected.chunk_references.len(), 1);
+    assert_eq!(projected.technical_fact_references.len(), 2);
+    assert_eq!(projected.semantic_verification.as_ref(), Some(&report));
+    assert_eq!(
+        projected.reference_summary,
+        Some(ironrag_contracts::assistant::AssistantReferenceSummary {
+            total_count: 8,
+            returned_count: 3,
+            truncated: true,
+        })
+    );
+}
+
+#[test]
+fn ui_reference_projection_does_not_fabricate_a_reference_for_document_slice_claims() {
+    use ironrag_contracts::assistant::semantic_verification::SemanticSourceLocator;
+
+    let report = semantic_report_with_claim(
+        SemanticSourceLocator::DocumentSlice { start: 0, end: 10 },
+        Uuid::from_u128(240),
+        Uuid::from_u128(241),
+    );
+    let mut evidence = evidence_bundle_with_references(
+        vec![chunk_reference(1, 242)],
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+    );
+    evidence.semantic_verification = Some(report.clone());
+
+    let projected = project_ui_evidence_bundle(evidence);
+
+    assert_eq!(projected.chunk_references.len(), 1);
+    assert_eq!(
+        projected.reference_summary,
+        Some(ironrag_contracts::assistant::AssistantReferenceSummary {
+            total_count: 1,
+            returned_count: 1,
+            truncated: false,
+        })
+    );
+    assert_eq!(projected.semantic_verification.as_ref(), Some(&report));
+}
+
+#[test]
+fn ui_reference_projection_selects_a_lower_ranked_document_diverse_chunk() {
+    let document_a = Uuid::from_u128(250);
+    let document_b = Uuid::from_u128(251);
+    let mut chunks = (0..20)
+        .map(|index| {
+            let mut reference = chunk_reference(index + 1, 300 + index as u128);
+            reference.document_id = Some(document_a);
+            reference
+        })
+        .collect::<Vec<_>>();
+    let mut lower = chunk_reference(40, 400);
+    lower.document_id = Some(document_b);
+    chunks.push(lower);
+    let evidence =
+        evidence_bundle_with_references(chunks, Vec::new(), Vec::new(), Vec::new(), Vec::new());
+
+    let projected = project_ui_evidence_bundle(evidence);
+
+    assert_eq!(projected.chunk_references.len(), UI_VISIBLE_REFERENCE_LIMIT);
+    assert!(
+        projected
+            .chunk_references
+            .iter()
+            .any(|reference| reference.chunk_id == Uuid::from_u128(400))
+    );
+    assert_eq!(
+        projected.reference_summary,
+        Some(ironrag_contracts::assistant::AssistantReferenceSummary {
+            total_count: 21,
+            returned_count: UI_VISIBLE_REFERENCE_LIMIT,
+            truncated: true,
+        })
+    );
+}
+
+#[test]
+fn mapped_chunk_reference_carries_the_authoritative_revision() {
+    let revision_id = Uuid::from_u128(410);
+    let mapped = map_chunk_reference(QueryChunkReference {
+        execution_id: Uuid::from_u128(1),
+        chunk_id: Uuid::from_u128(411),
+        revision_id: Some(revision_id),
+        rank: 3,
+        score: 0.5,
+        document_id: Some(Uuid::from_u128(412)),
+        document_title: Some("Source document".to_string()),
+        section_path: vec!["Ops".to_string()],
+        excerpt: Some("Opening text".to_string()),
+    });
+
+    assert_eq!(mapped.revision_id, Some(revision_id));
+    assert_eq!(mapped.document_id, Some(Uuid::from_u128(412)));
 }
 
 #[test]

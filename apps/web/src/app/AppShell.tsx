@@ -72,11 +72,13 @@ export function AppShell({ children }: Readonly<{ children: ReactNode }>) {
   )
 
   const telemetryEnabled = telemetryConsent.consent === 'granted'
+  // The menu is signed in. Its analytics action belongs to this principal's
+  // account preference only; an unresolved or other-principal state must not
+  // offer a choice that the account load would silently overwrite.
   const telemetryAvailable =
-    telemetryConsent.status === 'anonymous' || telemetryConsent.status === 'ready'
-  const telemetryLabel = telemetryAvailable
-    ? t(telemetryEnabled ? 'analytics.menuDisable' : 'analytics.menuEnable')
-    : t('analytics.menuUnavailable')
+    telemetryConsent.status === 'ready' && telemetryConsent.principalId === user?.id
+  const telemetryToggleKey = telemetryEnabled ? 'analytics.menuDisable' : 'analytics.menuEnable'
+  const telemetryLabel = telemetryAvailable ? t(telemetryToggleKey) : t('analytics.menuUnavailable')
 
   const isAdmin = user?.role === 'admin'
   const release = useQuery({

@@ -10,6 +10,17 @@ from pathlib import Path
 FIELDS = {"subject", "assertion", "negation", "conditions", "time", "units", "scope"}
 
 
+def claim_defect(claim: object) -> str | None:
+    """Name the first field defect of one claim, or None when it is usable."""
+    if not isinstance(claim, dict) or set(claim) != FIELDS:
+        return "invalid_claim_fields"
+    if any(not isinstance(value, str) or len(value) > 4096 for value in claim.values()):
+        return "invalid_claim_value"
+    if not claim["subject"].strip() or not claim["assertion"].strip():
+        return "missing_subject_or_assertion"
+    return None
+
+
 def parse_claims(text: str, reached_token_cap: bool) -> dict:
     if reached_token_cap:
         return {"state": "output_cap", "claims": []}
@@ -23,14 +34,9 @@ def parse_claims(text: str, reached_token_cap: bool) -> dict:
     if not isinstance(claims, list) or len(claims) > 16:
         return {"state": "invalid_claim_population", "claims": []}
     for claim in claims:
-        if not isinstance(claim, dict) or set(claim) != FIELDS:
-            return {"state": "invalid_claim_fields", "claims": []}
-        if any(
-            not isinstance(value, str) or len(value) > 4096 for value in claim.values()
-        ):
-            return {"state": "invalid_claim_value", "claims": []}
-        if not claim["subject"].strip() or not claim["assertion"].strip():
-            return {"state": "missing_subject_or_assertion", "claims": []}
+        defect = claim_defect(claim)
+        if defect is not None:
+            return {"state": defect, "claims": []}
     return {"state": "parsed" if claims else "empty", "claims": claims}
 
 

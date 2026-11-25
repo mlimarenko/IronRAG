@@ -154,6 +154,8 @@ export function mapAudit(raw: AuditEventResponse): AuditEvent {
           totalCost: raw.assistantCall.totalCost ?? null,
           currencyCode: raw.assistantCall.currencyCode ?? null,
           providerCallCount: raw.assistantCall.providerCallCount,
+          unpricedProviderCallCount: raw.assistantCall.unpricedProviderCallCount,
+          costCoverage: raw.assistantCall.costCoverage ?? null,
         }
         if (raw.assistantCall.conversationId) {
           mappedCall.conversationId = raw.assistantCall.conversationId

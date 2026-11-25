@@ -171,3 +171,141 @@ async def test_image_on_a_client_bound_elsewhere_is_refused_before_any_request()
             await bookstack.download_image("/uploads/a.png")
 
     assert transport.seen == []
+
+
+def _attachment_url(offset: int, page_size: int = 100) -> str:
+    return f"{BASE}/api/attachments?count={page_size}&offset={offset}"
+
+
+@pytest.mark.asyncio
+async def test_instance_attachment_listing_yields_every_record() -> None:
+    transport = _Transport(
+        {
+            _attachment_url(0): httpx.Response(
+                200, json={"data": [{"id": 5, "uploaded_to": 2}], "total": 1}
+            )
+        }
+    )
+    async with _client(transport) as client:
+        listed = [
+            attachment
+            async for attachment in BookStackClient(_settings(), client=client).list_attachments()
+        ]
+
+    assert listed == [{"id": 5, "uploaded_to": 2}]
+
+
+@pytest.mark.asyncio
+async def test_collection_without_json_is_a_typed_error() -> None:
+    transport = _Transport({_attachment_url(0): httpx.Response(200, text="<html>proxy</html>")})
+    async with _client(transport) as client:
+        bookstack = BookStackClient(_settings(), client=client)
+        with pytest.raises(BookStackError, match="malformed collection JSON"):
+            async for _ in bookstack.list_attachments():
+                pass
+
+
+@pytest.mark.asyncio
+async def test_collection_total_changing_between_pages_is_a_typed_error() -> None:
+    transport = _Transport(
+        {
+            _attachment_url(0, 1): httpx.Response(
+                200, json={"data": [{"id": 1, "uploaded_to": 2}], "total": 2}
+            ),
+            _attachment_url(1, 1): httpx.Response(
+                200, json={"data": [{"id": 2, "uploaded_to": 2}], "total": 3}
+            ),
+        }
+    )
+    async with _client(transport) as client:
+        bookstack = BookStackClient(_settings(), client=client)
+        with pytest.raises(BookStackError, match="total changed from 2 to 3"):
+            async for _ in bookstack.list_attachments(page_size=1):
+                pass
+
+
+@pytest.mark.asyncio
+async def test_collection_page_size_must_be_positive() -> None:
+    transport = _Transport({})
+    async with _client(transport) as client:
+        bookstack = BookStackClient(_settings(), client=client)
+        with pytest.raises(ValueError, match="page_size must be positive"):
+            async for _ in bookstack.list_attachments(page_size=0):
+                pass
+
+    assert transport.seen == []
+
+
+@pytest.mark.asyncio
+async def test_inline_attachment_content_is_base64_decoded() -> None:
+    transport = _Transport(
+        {
+            f"{BASE}/api/attachments/9": httpx.Response(
+                200,
+                json={
+                    "id": 9,
+                    "name": "spec.pdf",
+                    "extension": "pdf",
+                    "external": False,
+                    "content": "aGVsbG8=",
+                },
+            )
+        }
+    )
+    async with _client(transport) as client:
+        payload, mime, name = await BookStackClient(
+            _settings(), client=client
+        ).get_attachment_payload(9)
+
+    assert payload == b"hello"
+    assert (mime, name) == ("application/pdf", "spec.pdf")
+
+
+@pytest.mark.asyncio
+async def test_inline_attachment_without_content_reports_no_bytes() -> None:
+    transport = _Transport(
+        {
+            f"{BASE}/api/attachments/9": httpx.Response(
+                200, json={"id": 9, "name": "spec.pdf", "extension": "pdf", "content": ""}
+            )
+        }
+    )
+    async with _client(transport) as client:
+        payload, mime, name = await BookStackClient(
+            _settings(), client=client
+        ).get_attachment_payload(9)
+
+    assert payload == b""
+    assert (mime, name) == ("application/pdf", "spec.pdf")
+
+
+@pytest.mark.asyncio
+async def test_inline_attachment_with_undecodable_content_is_a_read_failure() -> None:
+    transport = _Transport(
+        {
+            f"{BASE}/api/attachments/9": httpx.Response(
+                200, json={"id": 9, "name": "spec.pdf", "content": "not base64!"}
+            )
+        }
+    )
+    async with _client(transport) as client:
+        bookstack = BookStackClient(_settings(), client=client)
+        with pytest.raises(BookStackError, match="not valid base64"):
+            await bookstack.get_attachment_payload(9)
+
+
+@pytest.mark.asyncio
+async def test_external_attachment_with_an_authority_relative_url_is_refused() -> None:
+    """A protocol-relative link names another origin; it is not source content."""
+
+    transport = _Transport(
+        {
+            f"{BASE}/api/attachments/7": _external_attachment(7, "//evil.example/steal"),
+        }
+    )
+    async with _client(transport) as client:
+        bookstack = BookStackClient(_settings(), client=client)
+        with pytest.raises(BookStackError, match="download refused"):
+            await bookstack.get_attachment_payload(7)
+
+    assert transport.hosts == ["wiki.example.com"]

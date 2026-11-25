@@ -1,5 +1,34 @@
 use super::*;
 
+#[test]
+fn graph_provider_reservation_uses_real_execution_owner() {
+    let binding = sample_runtime_binding();
+    let attempt = uuid::Uuid::now_v7();
+    let extraction = uuid::Uuid::now_v7();
+    let runtime = uuid::Uuid::now_v7();
+    let ingest = super::super::graph_provider_reservation_command(
+        &binding,
+        Some(attempt),
+        extraction,
+        runtime,
+    );
+    assert_eq!(ingest.owning_execution_kind, "ingest_attempt");
+    assert_eq!(ingest.owning_execution_id, attempt);
+    assert!(ingest.runtime_execution_id.is_none());
+    assert!(ingest.runtime_task_kind.is_none());
+    let graph =
+        super::super::graph_provider_reservation_command(&binding, None, extraction, runtime);
+    assert_eq!(graph.owning_execution_kind, "graph_extraction_attempt");
+    assert_eq!(graph.owning_execution_id, extraction);
+    assert_eq!(graph.runtime_execution_id, Some(runtime));
+    assert_eq!(
+        graph.runtime_task_kind,
+        Some(crate::domains::agent_runtime::RuntimeTaskKind::GraphExtract)
+    );
+    assert_eq!(graph.provider_catalog_id, binding.provider_catalog_id);
+    assert_eq!(graph.model_catalog_id, binding.model_catalog_id);
+}
+
 async fn resolve_sample_graph_extraction(
     gateway: &FakeGateway,
     max_provider_attempts: usize,
@@ -7,6 +36,7 @@ async fn resolve_sample_graph_extraction(
     resolve_graph_extraction_with_gateway(
         gateway,
         GraphExtractionLoopRequest {
+            billing: None,
             extraction_recovery: &ExtractionRecoveryService,
             provider_failure_classification: &crate::services::ops::provider_failure::ProviderFailureClassificationService::default(),
             runtime_binding: &sample_runtime_binding(),

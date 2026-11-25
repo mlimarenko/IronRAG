@@ -52,6 +52,7 @@ pub struct UploadAdmissionError {
     /// [`FileExtractError::failure_class`].
     extraction_failure_class: Option<ExtractionFailureClass>,
     pub vision_calls: Vec<crate::shared::extraction::image::VisionCallReceipt>,
+    pub provider_call_id: Option<uuid::Uuid>,
 }
 
 impl UploadAdmissionError {
@@ -62,6 +63,7 @@ impl UploadAdmissionError {
             message: "multipart upload stream failed".to_string(),
             extraction_failure_class: None,
             vision_calls: Vec::new(),
+            provider_call_id: None,
             details: Box::new(UploadRejectionDetails {
                 file_name: None,
                 rejection_kind: Some("multipart_stream_failure".to_string()),
@@ -105,6 +107,7 @@ impl UploadAdmissionError {
             message,
             extraction_failure_class: None,
             vision_calls: Vec::new(),
+            provider_call_id: None,
             details: Box::new(UploadRejectionDetails {
                 file_name: file_name.map(str::to_string),
                 rejection_kind: Some("invalid_file_body".to_string()),
@@ -137,6 +140,7 @@ impl UploadAdmissionError {
             message,
             extraction_failure_class: None,
             vision_calls: Vec::new(),
+            provider_call_id: None,
             details: Box::new(UploadRejectionDetails {
                 file_name: file_name.map(str::to_string),
                 rejection_kind: Some("multipart_stream_failure".to_string()),
@@ -166,6 +170,7 @@ impl UploadAdmissionError {
             message: format!("file {file_name} exceeds the {upload_limit_mb} MB upload limit"),
             extraction_failure_class: None,
             vision_calls: Vec::new(),
+            provider_call_id: None,
             details: Box::new(UploadRejectionDetails {
                 file_name: Some(file_name.to_string()),
                 rejection_kind: Some("upload_limit_exceeded".to_string()),
@@ -189,6 +194,7 @@ impl UploadAdmissionError {
             message: format!("upload batch exceeds the {upload_limit_mb} MB upload limit"),
             extraction_failure_class: None,
             vision_calls: Vec::new(),
+            provider_call_id: None,
             details: Box::new(UploadRejectionDetails {
                 file_name: None,
                 rejection_kind: Some("upload_limit_exceeded".to_string()),
@@ -213,6 +219,7 @@ impl UploadAdmissionError {
             message: format!("request body exceeded the {upload_limit_mb} MB upload limit"),
             extraction_failure_class: None,
             vision_calls: Vec::new(),
+            provider_call_id: None,
             details: Box::new(UploadRejectionDetails {
                 file_name: None,
                 rejection_kind: Some("upload_limit_exceeded".to_string()),
@@ -247,6 +254,7 @@ impl UploadAdmissionError {
             message,
             extraction_failure_class: None,
             vision_calls: Vec::new(),
+            provider_call_id: None,
             details: Box::new(UploadRejectionDetails {
                 file_name: file_name.map(str::to_string),
                 rejection_kind: Some("upload_limit_exceeded".to_string()),
@@ -272,6 +280,7 @@ impl UploadAdmissionError {
             message: message.clone(),
             extraction_failure_class: None,
             vision_calls: Vec::new(),
+            provider_call_id: None,
             details: Box::new(UploadRejectionDetails {
                 file_name: None,
                 rejection_kind: Some("missing_upload_file".to_string()),
@@ -297,6 +306,7 @@ impl UploadAdmissionError {
         Self {
             error_kind,
             vision_calls: error.vision_calls().to_vec(),
+            provider_call_id: error.provider_call_id(),
             extraction_failure_class: Some(error.failure_class()),
             details: Box::new(UploadRejectionDetails {
                 file_name: Some(file_name.to_string()),
@@ -352,6 +362,10 @@ pub enum FileExtractError {
         class: ExtractionFailureClass,
         message: String,
         calls: Vec<crate::shared::extraction::image::VisionCallReceipt>,
+        /// Reserved billing provider-call row of the failed physical Vision
+        /// attempt, set only when a reservation had already succeeded. Never
+        /// synthesized by the extraction boundary.
+        provider_call_id: Option<uuid::Uuid>,
     },
     UnsupportedBinary,
     InvalidUtf8,
@@ -388,6 +402,17 @@ impl FileExtractError {
         match self {
             Self::VisionFailed { calls, .. } => calls,
             _ => &[],
+        }
+    }
+
+    /// Reserved billing provider-call row of the failed physical Vision attempt,
+    /// when a reservation had already succeeded. `None` means no reservation
+    /// was made for the failed attempt or the failure is not a Vision failure.
+    #[must_use]
+    pub const fn provider_call_id(&self) -> Option<uuid::Uuid> {
+        match self {
+            Self::VisionFailed { provider_call_id, .. } => *provider_call_id,
+            _ => None,
         }
     }
     #[must_use]

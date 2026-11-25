@@ -138,8 +138,6 @@ pub struct GraphExtractionTaskFailure {
 
 #[derive(Debug, Clone)]
 pub(crate) struct GraphExtractionOutcome {
-    pub graph_extraction_id: Option<uuid::Uuid>,
-    pub runtime_execution_id: Option<uuid::Uuid>,
     pub provider_kind: String,
     pub model_name: String,
     pub prompt_hash: String,
@@ -236,11 +234,12 @@ pub(crate) struct ResolvedGraphExtraction {
 // extraction boundary. The provider-failure detail alone measures ~176 bytes,
 // so each payload that only ever travels with the error is boxed to keep the
 // `Err`-variant under `clippy::result_large_err`'s 128-byte default. The
-// message, shape key, size and attempt list stay inline: they are small and
-// read on the hot path.
+// message, size and attempt list stay inline: they are small and read on the
+// hot path.
 #[derive(Debug, Clone)]
 pub(crate) struct GraphExtractionFailureOutcome {
-    pub(crate) request_shape_key: String,
+    pub(crate) provider_call_id: Option<uuid::Uuid>,
+    pub(crate) request_shape_key: Box<str>,
     pub(crate) request_size_bytes: usize,
     pub(crate) error_message: String,
     pub(crate) provider_failure: Option<Box<RuntimeProviderFailureDetail>>,
@@ -253,8 +252,9 @@ pub(crate) struct GraphExtractionFailureOutcome {
 
 #[derive(Debug, Clone)]
 pub(crate) struct GraphExtractionExecutionError {
-    pub message: String,
-    pub request_shape_key: String,
+    pub provider_call_id: Option<uuid::Uuid>,
+    pub message: Box<str>,
+    pub request_shape_key: Box<str>,
     pub request_size_bytes: usize,
     pub provider_failure: Option<Box<RuntimeProviderFailureDetail>>,
     pub provider_admission_error:
@@ -263,6 +263,15 @@ pub(crate) struct GraphExtractionExecutionError {
     pub recovery_attempts: Vec<GraphExtractionRecoveryRecord>,
     pub resume_state: Box<GraphExtractionResumeState>,
     pub cancelled: bool,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct GraphProviderCallId(pub uuid::Uuid);
+
+impl fmt::Display for GraphProviderCallId {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "graph provider call {}", self.0)
+    }
 }
 
 impl fmt::Display for GraphExtractionExecutionError {

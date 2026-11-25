@@ -27,9 +27,8 @@ export function AnalyticsConsent() {
   }
 
   return (
-    <aside
+    <section
       className="consent-banner"
-      role="region"
       aria-label={t('analytics.consentTitle')}
       data-testid="analytics-consent"
     >
@@ -46,6 +45,6 @@ export function AnalyticsConsent() {
           {t('analytics.consentAllow')}
         </Button>
       </div>
-    </aside>
+    </section>
   )
 }

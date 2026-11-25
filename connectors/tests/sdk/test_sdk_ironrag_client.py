@@ -21,6 +21,7 @@ from ironrag_connector.ironrag import (
     IronRagVisibilityConflictError,
     OperationStatusValue,
     ReplacementIdentity,
+    RevisionFile,
     RevisionProvenance,
     VisibilityIntentRequest,
 )
@@ -35,6 +36,7 @@ OP = UUID("00000000-0000-0000-0000-0000000000f1")
 
 def _payload_receipt() -> dict[str, object]:
     return {
+        "mutation": {"id": "00000000-0000-0000-0000-0000000000a1"},
         "asyncOperationId": str(OP),
         "visibilityIntentId": None,
         "resultRevisionId": str(WS),
@@ -1456,9 +1458,7 @@ async def test_create_revision_replace_multipart_file() -> None:
     handle_result = await client.create_revision(
         DOC,
         mode="replace",
-        file_bytes=b"new bytes",
-        file_name="page.md",
-        mime_type="text/markdown",
+        file=RevisionFile(name="page.md", mime_type="text/markdown", data=b"new bytes"),
         idempotency_key="idem-2",
     )
     await client.aclose()
@@ -1524,14 +1524,8 @@ async def test_visibility_contract_revision_binding_and_complete_metadata_wire(
         return httpx.Response(
             202,
             json={
-                "asyncOperationId": str(OP),
-                "resultRevisionId": str(WS),
-                "resultChecksum": "sha256:" + "a" * 64,
-                "requestFingerprint": "opaque-payload",
+                **_payload_receipt(),
                 "visibilityIntentId": str(OP),
-                "items": [
-                    {"id": str(LIB_2), "document_id": str(DOC), "result_revision_id": str(WS)}
-                ],
             },
         )
 
@@ -1539,9 +1533,7 @@ async def test_visibility_contract_revision_binding_and_complete_metadata_wire(
     multipart = await client.create_revision(
         DOC,
         mode="replace",
-        file_bytes=b"safe",
-        file_name="page.txt",
-        mime_type="text/plain",
+        file=RevisionFile(name="page.txt", mime_type="text/plain", data=b"safe"),
         title="Title",
         document_hint="Hint",
         provenance=provenance,
@@ -1567,8 +1559,7 @@ async def test_visibility_contract_revision_binding_and_complete_metadata_wire(
         DOC,
         mode="replace",
         markdown="safe",
-        file_name="page.md",
-        mime_type="text/markdown",
+        file=RevisionFile(name="page.md", mime_type="text/markdown"),
         provenance=provenance,
         visibility_intent_id=OP,
         idempotency_key="payload-2",
@@ -1932,13 +1923,16 @@ async def test_http_400_content_unsupported_on_revision_admission_is_typed() -> 
         failureDisposition="content_unsupported",
     )
     client = _client(httpx.MockTransport(lambda request: httpx.Response(400, json=body)))
+    revision_file = RevisionFile(
+        name="probe.bin",
+        mime_type="application/octet-stream",
+        data=b"\x00\xff",
+    )
     with pytest.raises(IronRagProblemError) as caught:
         await client.create_revision(
             DOC,
             mode="replace",
-            file_bytes=b"\x00\xff",
-            file_name="probe.bin",
-            mime_type="application/octet-stream",
+            file=revision_file,
             idempotency_key="irg188",
         )
     await client.aclose()
@@ -2141,3 +2135,688 @@ async def test_non_admission_get_operation_400_proof_is_a_plain_problem_error() 
     await client.aclose()
 
     assert type(caught.value).__name__ == "IronRagProblemError"
+
+
+@pytest.mark.asyncio
+async def test_replace_receipt_reads_top_level_job_id_and_mutation_id() -> None:
+    seen: dict[str, bytes] = {}
+    mutation_id = "00000000-0000-0000-0000-0000000000aa"
+    job_id = "00000000-0000-0000-0000-0000000000bb"
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/v1/version":
+            return httpx.Response(200, json={"contentVisibilityContract": "visibility-intent/2"})
+        seen["content"] = request.content
+        body = _payload_receipt()
+        body["mutation"] = {"id": mutation_id}
+        body["jobId"] = job_id
+        return httpx.Response(202, json=body)
+
+    client = _client(httpx.MockTransport(handle), advertise_contract=False)
+    receipt = await client.create_revision(
+        DOC,
+        mode="replace",
+        markdown="safe",
+        idempotency_key="bounded",
+        enrichment_scope="text_and_embedding",
+    )
+    assert receipt.job_id == UUID(job_id)
+    assert receipt.mutation_id == UUID(mutation_id)
+    assert b'"enrichmentScope":"text_and_embedding"' in seen["content"]
+
+
+@pytest.mark.asyncio
+async def test_multipart_create_carries_scope_and_top_level_job_id() -> None:
+    seen: dict[str, bytes] = {}
+    mutation_id = "00000000-0000-0000-0000-0000000000cc"
+    job_id = "00000000-0000-0000-0000-0000000000dd"
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/v1/version":
+            return httpx.Response(200, json={"contentVisibilityContract": "visibility-intent/2"})
+        seen["content"] = request.content
+        return httpx.Response(
+            201,
+            json={
+                "document": {
+                    "document": {
+                        "id": str(DOC),
+                        "library_id": str(LIB),
+                        "external_key": "bounded-doc",
+                        "document_state": "active",
+                    },
+                    "head": {
+                        "document_id": str(DOC),
+                        "visibility_intent_id": None,
+                        "readable_revision_id": None,
+                    },
+                },
+                "mutation": {
+                    "mutation": {"id": mutation_id},
+                    "items": [
+                        {
+                            "id": str(WS),
+                            "document_id": str(DOC),
+                            "result_revision_id": str(WS),
+                        }
+                    ],
+                    "jobId": job_id,
+                    "asyncOperationId": str(OP),
+                    "resultRevisionId": str(WS),
+                    "resultChecksum": "sha256:" + "a" * 64,
+                    "requestFingerprint": "opaque-payload",
+                    "visibilityIntentId": None,
+                },
+            },
+        )
+
+    client = _client(httpx.MockTransport(handle), advertise_contract=False)
+    document = await client.create_document(
+        LIB,
+        external_key="bounded-doc",
+        file_bytes=b"bounded",
+        file_name="bounded.md",
+        mime_type="text/markdown",
+        enrichment_scope="text_and_embedding",
+    )
+    assert document.admission is not None
+    assert document.admission.job_id == UUID(job_id)
+    assert document.admission.mutation_id == UUID(mutation_id)
+    assert b'name="enrichment_scope"' in seen["content"]
+    assert b"text_and_embedding" in seen["content"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "mutation",
+    [None, "opaque", {}, {"workspace_id": str(WS)}],
+)
+async def test_admission_without_mutation_identity_is_refused(mutation: object) -> None:
+    def handle(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/v1/version":
+            return httpx.Response(200, json={"contentVisibilityContract": "visibility-intent/2"})
+        body = _payload_receipt()
+        if mutation is None:
+            body.pop("mutation")
+        else:
+            body["mutation"] = mutation
+        return httpx.Response(202, json=body)
+
+    client = _client(httpx.MockTransport(handle), advertise_contract=False)
+    with pytest.raises(IronRagError, match="no mutation identity"):
+        await client.create_revision(DOC, mode="replace", markdown="safe", idempotency_key="strict")
+
+
+# ---------------------------------------------------------------------------
+# execute_ingest_queue_job -- this job's own record, never the global queue
+# ---------------------------------------------------------------------------
+
+JOB = UUID("00000000-0000-0000-0000-0000000000c7")
+OTHER_JOB = UUID("00000000-0000-0000-0000-0000000000c8")
+
+
+def _job_row(job_id: UUID = JOB, **overrides: object) -> dict[str, object]:
+    row: dict[str, object] = {
+        "id": str(job_id),
+        "workspace_id": str(WS),
+        "library_id": str(LIB),
+        "job_kind": "content_mutation",
+        "queue_state": "completed",
+        "priority": 100,
+        "mutation_id": str(OP),
+        "connector_id": None,
+        "async_operation_id": str(OP),
+        "knowledge_document_id": str(DOC),
+        "knowledge_revision_id": str(WS),
+        "dedupe_key": None,
+        "queued_at": "2026-11-17T18:00:00Z",
+        "available_at": "2026-11-17T18:00:00Z",
+        "completed_at": "2026-11-17T20:38:24Z",
+    }
+    row.update(overrides)
+    return row
+
+
+def _attempt_row(job_id: UUID = JOB, **overrides: object) -> dict[str, object]:
+    row: dict[str, object] = {
+        "id": str(OP),
+        "job_id": str(job_id),
+        "attempt_number": 1,
+        "worker_principal_id": None,
+        "knowledge_generation_id": None,
+        "attempt_state": "succeeded",
+        "current_stage": "publish",
+        "started_at": "2026-11-17T18:00:01Z",
+        "heartbeat_at": "2026-11-17T20:38:20Z",
+        "finished_at": "2026-11-17T20:38:24Z",
+        "failure_class": None,
+        "failure_code": None,
+        "failure_message": None,
+        "progress_percent": 100,
+        "retryable": False,
+    }
+    row.update(overrides)
+    return row
+
+
+def _job_response(job_id: UUID = JOB, **overrides: object) -> dict[str, object]:
+    body: dict[str, object] = {
+        "job": _job_row(job_id),
+        "latestAttempt": _attempt_row(job_id),
+        "readiness": {
+            "knowledgeDocumentId": str(DOC),
+            "knowledgeRevisionId": str(WS),
+            "textState": "ready",
+            "vectorState": "ready",
+            "graphState": "ready",
+            "textReady": True,
+            "vectorReady": True,
+            "graphReady": True,
+        },
+    }
+    body.update(overrides)
+    return body
+
+
+@pytest.mark.asyncio
+async def test_execute_ingest_queue_job_posts_the_one_named_job() -> None:
+    calls: list[tuple[str, str, bytes]] = []
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        calls.append((request.method, request.url.path, request.content))
+        return httpx.Response(200, json=_job_response())
+
+    client = _client(httpx.MockTransport(handle), advertise_contract=False)
+    execution = await client.execute_ingest_queue_job(JOB)
+    await client.aclose()
+
+    assert calls == [("POST", f"/v1/ops/ingest-queue/jobs/{JOB}/execute", b"")]
+    # The answer is the executed job itself: state, attempt and readiness.
+    assert execution.job.id == JOB
+    assert execution.job.queue_state == "completed"
+    assert execution.job.completed_at is not None
+    assert execution.readiness.text_ready
+    assert execution.latest_attempt is not None
+    assert execution.latest_attempt.attempt_state == "succeeded"
+    assert set(execution.model_dump()) == {"job", "readiness", "latest_attempt"}
+
+
+@pytest.mark.asyncio
+async def test_execute_ingest_queue_job_uses_the_execute_budget() -> None:
+    """A real Full ingest runs inside the execute request.
+
+    The server answers only after that job's whole pipeline, so the exact-job
+    call must not ride the general request timeout; every other request keeps
+    it.
+    """
+    settings = _settings()
+    timeouts: list[tuple[str, object]] = []
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        timeouts.append((request.url.path, request.extensions.get("timeout")))
+        if request.url.path == f"/v1/ops/ingest-queue/jobs/{JOB}/execute":
+            return httpx.Response(200, json=_job_response())
+        return httpx.Response(200, json={"contentVisibilityContract": "visibility-intent/2"})
+
+    client = IronRagClient(
+        settings,
+        client=httpx.AsyncClient(
+            base_url="http://ironrag.example.com",
+            timeout=settings.request_timeout_seconds,
+            transport=httpx.MockTransport(handle),
+        ),
+    )
+    await client.ensure_visibility_contract()
+    await client.execute_ingest_queue_job(JOB)
+    await client.aclose()
+
+    ordinary = {"connect": 60.0, "read": 60.0, "write": 60.0, "pool": 60.0}
+    execute = {"connect": 1800.0, "read": 1800.0, "write": 1800.0, "pool": 1800.0}
+    execute_path = f"/v1/ops/ingest-queue/jobs/{JOB}/execute"
+    assert timeouts == [("/v1/version", ordinary), (execute_path, execute)]
+    assert settings.execute_ingest_job_timeout_seconds >= 1800.0
+
+
+@pytest.mark.asyncio
+async def test_execute_ingest_queue_job_keeps_a_failed_attempt_on_the_job() -> None:
+    """A retryable pipeline stop is reported on this job, not hidden.
+
+    The endpoint returns the job record; the failed attempt keeps its codes, and
+    no queue envelope or other job may appear in the parsed result.
+    """
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        body = _job_response()
+        body["job"] = _job_row(queue_state="queued", completed_at=None)
+        body["latestAttempt"] = _attempt_row(
+            attempt_state="failed",
+            current_stage="extract_content",
+            progress_percent=10,
+            failure_class="retryable",
+            failure_code="extract_content_failed",
+            failure_message="retryable extraction failure",
+            retryable=True,
+        )
+        return httpx.Response(200, json=body)
+
+    client = _client(httpx.MockTransport(handle), advertise_contract=False)
+    execution = await client.execute_ingest_queue_job(JOB)
+    await client.aclose()
+
+    assert execution.job.queue_state == "queued"
+    attempt = execution.latest_attempt
+    assert attempt is not None
+    assert attempt.attempt_state == "failed"
+    assert attempt.failure_code == "extract_content_failed"
+    assert attempt.failure_message == "retryable extraction failure"
+    assert attempt.retryable is True
+    # The client has no field that could carry the global queue or another job.
+    assert "items" not in execution.model_dump()
+
+
+@pytest.mark.asyncio
+async def test_execute_ingest_queue_job_refuses_a_mismatched_job_identity() -> None:
+    calls: list[str] = []
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        calls.append(request.url.path)
+        return httpx.Response(200, json=_job_response(job_id=OTHER_JOB))
+
+    client = _client(httpx.MockTransport(handle), advertise_contract=False)
+    with pytest.raises(IronRagError, match="different ingest job"):
+        await client.execute_ingest_queue_job(JOB)
+    await client.aclose()
+
+    assert len(calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_execute_ingest_queue_job_propagates_a_problem_without_retry() -> None:
+    """The endpoint documents 400 for a job that cannot run.
+
+    The server's exact problem code is not asserted here; the synthetic code
+    only proves the typed mapping and that no second request is made.
+    """
+    calls: list[str] = []
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        calls.append(request.url.path)
+        return httpx.Response(400, json=_problem("execution_refused", status=400))
+
+    client = _client(httpx.MockTransport(handle), advertise_contract=False)
+    with pytest.raises(IronRagProblemError) as excinfo:
+        await client.execute_ingest_queue_job(JOB)
+    await client.aclose()
+
+    assert len(calls) == 1
+    assert excinfo.value.problem.status == 400
+    assert excinfo.value.problem.code == "execution_refused"
+
+
+@pytest.mark.asyncio
+async def test_execute_ingest_queue_job_refuses_a_non_uuid_before_any_request() -> None:
+    paths: list[str] = []
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        paths.append(request.url.path)
+        raise AssertionError("an invalid job id must not issue HTTP requests")
+
+    client = _client(httpx.MockTransport(handle), advertise_contract=False)
+    with pytest.raises(IronRagError, match="UUID"):
+        await client.execute_ingest_queue_job("not-a-uuid")
+    await client.aclose()
+
+    assert paths == []
+
+
+# ---------------------------------------------------------------------------
+# Malformed 2xx bodies and problem bodies stay typed client errors.
+# ---------------------------------------------------------------------------
+
+
+def _document_envelope(*, document_id: UUID = DOC, head: object = None) -> dict[str, object]:
+    return {
+        "document": {
+            "document": {
+                "id": str(document_id),
+                "library_id": str(LIB),
+                "external_key": "source:page:1",
+                "document_state": "active",
+            },
+            "head": head,
+        }
+    }
+
+
+@pytest.mark.asyncio
+async def test_problem_body_without_an_object_keeps_the_http_status() -> None:
+    """A gateway answering with a JSON array is still the response's problem.
+
+    The typed error must carry the real status instead of inventing a 200 or
+    escaping as a pydantic validation error.
+    """
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(503, json=["upstream", "unavailable"])
+
+    client = _client(httpx.MockTransport(handle))
+    with pytest.raises(IronRagProblemError) as excinfo:
+        await client.get_document(DOC)
+    await client.aclose()
+
+    assert excinfo.value.problem.status == 503
+    assert excinfo.value.problem.code == "unknown"
+
+
+@pytest.mark.asyncio
+async def test_visibility_contract_read_maps_a_problem_response() -> None:
+    def handle(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(500, json=_problem("internal", status=500))
+
+    client = _client(httpx.MockTransport(handle), advertise_contract=False)
+    with pytest.raises(IronRagProblemError) as excinfo:
+        await client.ensure_visibility_contract()
+    await client.aclose()
+
+    assert excinfo.value.problem.status == 500
+
+
+@pytest.mark.asyncio
+async def test_visibility_contract_read_requires_json() -> None:
+    def handle(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, text="<html>proxy error page</html>")
+
+    client = _client(httpx.MockTransport(handle), advertise_contract=False)
+    with pytest.raises(IronRagError, match="not valid JSON"):
+        await client.ensure_visibility_contract()
+    await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_visibility_intent_rejects_an_unexpected_acceptance_status() -> None:
+    """Only 200/201 admit a receipt; anything else is not an acceptance proof."""
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/v1/version":
+            return httpx.Response(200, json={"contentVisibilityContract": "visibility-intent/2"})
+        return httpx.Response(202, json=_visibility_receipt())
+
+    client = _client(httpx.MockTransport(handle), advertise_contract=False)
+    intent_request = _visibility_request()
+    with pytest.raises(IronRagError, match="unexpected acceptance status"):
+        await client.create_visibility_intent(DOC, request=intent_request)
+    await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_list_documents_rejects_an_empty_nonterminal_cursor() -> None:
+    """An empty cursor is neither a terminator nor resumable."""
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"items": [], "nextCursor": ""})
+
+    client = _client(httpx.MockTransport(handle))
+    seen: list[object] = []
+
+    async def collect() -> None:
+        async for item in client.list_documents(LIB):
+            seen.append(item)
+
+    with pytest.raises(IronRagError, match="empty nonterminal pagination cursor"):
+        await collect()
+    await client.aclose()
+
+    assert seen == []
+
+
+@pytest.mark.asyncio
+async def test_get_document_rejects_a_non_object_payload() -> None:
+    def handle(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=[{"id": str(DOC)}])
+
+    client = _client(httpx.MockTransport(handle))
+    with pytest.raises(IronRagError, match="malformed document"):
+        await client.get_document(DOC)
+    await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_get_document_rejects_a_payload_without_the_head_envelope() -> None:
+    """A detail body that is not the canonical envelope cannot be read as a row."""
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"document": {"id": str(DOC)}})
+
+    client = _client(httpx.MockTransport(handle))
+    with pytest.raises(IronRagError, match="malformed document"):
+        await client.get_document(DOC)
+    await client.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "head",
+    [
+        {"document_id": str(WS)},
+        {"visibility_intent_id": str(WS)},
+        "not-a-head",
+    ],
+)
+async def test_get_document_rejects_a_head_for_another_document(head: object) -> None:
+    """Currentness may only come from the head that owns this document."""
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=_document_envelope(head=head))
+
+    client = _client(httpx.MockTransport(handle))
+    with pytest.raises(IronRagError, match="malformed document head identity"):
+        await client.get_document(DOC)
+    await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_execute_ingest_queue_job_requires_a_json_answer() -> None:
+    def handle(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, text="job accepted, see logs")
+
+    client = _client(httpx.MockTransport(handle), advertise_contract=False)
+    with pytest.raises(IronRagError, match="malformed executed ingest job"):
+        await client.execute_ingest_queue_job(JOB)
+    await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_create_document_json_sends_the_enrichment_scope() -> None:
+    bodies: list[bytes] = []
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        bodies.append(request.content)
+        return httpx.Response(201, json=_document_envelope())
+
+    client = _client(httpx.MockTransport(handle))
+    await client.create_document(
+        LIB,
+        external_key="source:page:1",
+        enrichment_scope="transcript",
+    )
+    await client.aclose()
+
+    assert '"enrichmentScope":"transcript"' in bodies[0].decode()
+
+
+@pytest.mark.asyncio
+async def test_create_document_upload_requires_a_payload_admission() -> None:
+    """A 2xx upload without a mutation admission proves nothing was admitted."""
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(201, json=_document_envelope())
+
+    client = _client(httpx.MockTransport(handle))
+    with pytest.raises(IronRagError, match="no complete payload admission"):
+        await client.create_document(
+            LIB,
+            external_key="source:image:1",
+            file_bytes=b"\x89PNG synthetic",
+            file_name="img.png",
+            mime_type="image/png",
+        )
+    await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_create_document_rejects_a_receipt_for_another_document() -> None:
+    receipt = _payload_receipt()
+    receipt["items"] = [{"id": str(LIB_2), "document_id": str(WS), "result_revision_id": str(WS)}]
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(201, json={**_document_envelope(), "mutation": receipt})
+
+    client = _client(httpx.MockTransport(handle))
+    with pytest.raises(IronRagError, match="mismatched document identity"):
+        await client.create_document(LIB, external_key="source:page:1")
+    await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_create_revision_rejects_an_enrichment_scope_on_append() -> None:
+    client = _client(httpx.MockTransport(lambda request: httpx.Response(202, json={})))
+    with pytest.raises(ValueError, match="enrichment_scope is not accepted"):
+        await client.create_revision(
+            DOC,
+            mode="append",
+            appended_text="more",
+            idempotency_key="k",
+            base_revision_id=OP,
+            enrichment_scope="full",
+        )
+    await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_create_revision_rejects_a_file_outside_replace_mode() -> None:
+    client = _client(httpx.MockTransport(lambda request: httpx.Response(202, json={})))
+    revision_file = RevisionFile(name="page.md", mime_type="text/markdown", data=b"bytes")
+    with pytest.raises(ValueError, match="file replacement requires mode='replace'"):
+        await client.create_revision(
+            DOC,
+            mode="append",
+            appended_text="more",
+            idempotency_key="k",
+            base_revision_id=OP,
+            file=revision_file,
+        )
+    await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_create_revision_multipart_sends_the_enrichment_scope() -> None:
+    bodies: list[bytes] = []
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        bodies.append(request.content)
+        return httpx.Response(202, json=_payload_receipt())
+
+    client = _client(httpx.MockTransport(handle))
+    await client.create_revision(
+        DOC,
+        mode="replace",
+        file=RevisionFile(name="page.md", mime_type="text/markdown", data=b"bytes"),
+        idempotency_key="idem-scope",
+        enrichment_scope="transcript",
+    )
+    await client.aclose()
+
+    assert b'name="enrichment_scope"' in bodies[0]
+    assert b"transcript" in bodies[0]
+
+
+@pytest.mark.asyncio
+async def test_create_revision_rejects_a_receipt_for_another_document() -> None:
+    receipt = _payload_receipt()
+    receipt["items"] = [{"id": str(LIB_2), "document_id": str(WS), "result_revision_id": str(WS)}]
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(202, json=receipt)
+
+    client = _client(httpx.MockTransport(handle))
+    with pytest.raises(IronRagError, match="mismatched document identity"):
+        await client.create_revision(
+            DOC, mode="replace", markdown="replacement", idempotency_key="k"
+        )
+    await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_create_revision_rejects_a_receipt_with_another_visibility_binding() -> None:
+    """The receipt must echo the binding the mutation was submitted with."""
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(202, json=_payload_receipt())
+
+    client = _client(httpx.MockTransport(handle))
+    with pytest.raises(IronRagError, match="mismatched visibility binding"):
+        await client.create_revision(
+            DOC,
+            mode="replace",
+            markdown="replacement",
+            idempotency_key="k",
+            visibility_intent_id=LIB,
+        )
+    await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_create_revision_rejects_a_non_object_admission_body() -> None:
+    def handle(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(202, json=["accepted"])
+
+    client = _client(httpx.MockTransport(handle))
+    with pytest.raises(IronRagError, match="malformed mutation admission"):
+        await client.create_revision(DOC, mode="replace", markdown="x", idempotency_key="k")
+    await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_create_revision_rejects_a_non_uuid_operation_id() -> None:
+    def handle(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(202, json={"asyncOperationId": "op-1"})
+
+    client = _client(httpx.MockTransport(handle))
+    with pytest.raises(IronRagError, match="malformed operation id"):
+        await client.create_revision(DOC, mode="replace", markdown="x", idempotency_key="k")
+    await client.aclose()
+
+
+def _mutated_receipt(mutate: object) -> dict[str, object]:
+    receipt = _payload_receipt()
+    assert callable(mutate)
+    mutate(receipt)
+    return receipt
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("mutate", "match"),
+    [
+        (lambda receipt: receipt.__setitem__("items", []), "invalid mutation items"),
+        (lambda receipt: receipt.__setitem__("items", ["row"]), "invalid mutation item"),
+        (
+            lambda receipt: receipt["items"][0].__setitem__("result_revision_id", str(DOC)),
+            "malformed payload admission identity",
+        ),
+        (lambda receipt: receipt.__setitem__("resultChecksum", ""), "malformed payload admission"),
+        (lambda receipt: receipt.pop("visibilityIntentId"), "malformed payload admission"),
+    ],
+)
+async def test_create_revision_rejects_malformed_admission_lineage(
+    mutate: object, match: str
+) -> None:
+    """Every receipt field the caller relies on is validated before return."""
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(202, json=_mutated_receipt(mutate))
+
+    client = _client(httpx.MockTransport(handle))
+    with pytest.raises(IronRagError, match=match):
+        await client.create_revision(DOC, mode="replace", markdown="x", idempotency_key="k")
+    await client.aclose()

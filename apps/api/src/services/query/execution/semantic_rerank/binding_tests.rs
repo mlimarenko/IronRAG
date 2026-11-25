@@ -514,3 +514,168 @@ async fn semantic_rerank_invokes_the_provider_tied_to_the_rerank_binding() -> an
 
     fixture.cleanup().await
 }
+
+/// A synthetic gateway that performs real durable admission in PostgreSQL
+/// (creating a `billing_provider_call` row and publishing it into the ambient
+/// `ProviderSendScope`) and then stalls past the provider timeout.
+#[derive(Clone)]
+struct AdmittingSlowGateway {
+    postgres: sqlx::PgPool,
+    /// When `true`, releases the claim with `uncertain = true` to simulate a
+    /// persistence or commit-ack uncertainty.
+    simulate_uncertain_admission: bool,
+}
+
+#[async_trait]
+impl LlmGateway for AdmittingSlowGateway {
+    async fn generate(&self, _request: ChatRequest) -> anyhow::Result<ChatResponse> {
+        let attribution = crate::shared::provider_send::current_send_attribution()
+            .context("semantic rerank must install an ambient provider send scope")?;
+        let provider_call_id = crate::shared::provider_send::claim_current_send_row()
+            .map_err(|error| anyhow!("claim send row: {error}"))?;
+        if self.simulate_uncertain_admission {
+            // Simulate a persistence/commit-ack uncertainty before stalling so
+            // the timeout path must stay fail-closed (`Integrity`).
+            crate::shared::provider_send::release_current_send_row(true);
+            tokio::time::sleep(Duration::from_secs(5)).await;
+            return Err(anyhow!("unexpected wake after uncertain admission"));
+        }
+        let admitted = crate::infra::repositories::billing_repository::admit_provider_send(
+            &self.postgres,
+            crate::infra::repositories::billing_repository::ProviderSendRequest {
+                required_scope: None,
+                caller: &crate::shared::provider_http::DispatchCaller::Unattributed,
+                model: "deepseek-v4-pro",
+                endpoint: "https://api.deepseek.com/v1/chat/completions",
+                body: &serde_json::json!({"model": "deepseek-v4-pro", "messages": []}),
+                attribution: &attribution,
+                provider_call_id,
+            },
+        )
+        .await
+        .map_err(|error| anyhow!("real send admission failed: {error:?}"))?;
+        crate::shared::provider_send::publish_current_send_row(admitted.provider_call_id);
+        // Stall past the decision deadline so the provider phase times out.
+        tokio::time::sleep(Duration::from_secs(5)).await;
+        Err(anyhow!("unexpected wake after admitted send"))
+    }
+
+    async fn embed(&self, _request: EmbeddingRequest) -> anyhow::Result<EmbeddingResponse> {
+        Err(anyhow!("embed is not used"))
+    }
+
+    async fn embed_many(
+        &self,
+        _request: EmbeddingBatchRequest,
+    ) -> anyhow::Result<EmbeddingBatchResponse> {
+        Err(anyhow!("embed_many is not used"))
+    }
+
+    async fn vision_extract(&self, _request: VisionRequest) -> anyhow::Result<VisionResponse> {
+        Err(anyhow!("vision_extract is not used"))
+    }
+}
+
+/// (c) When a real admitted physical send times out, explicit settlement
+/// terminalizes the `billing_provider_call` row as `canceled` without
+/// fabricating usage, clears `financial_state_unknown`, and classifies the
+/// attempt as `TimedOut` (degrading cleanly to lexical order instead of
+/// aborting the turn with `Integrity`).
+#[tokio::test]
+#[ignore = "requires local postgres service"]
+async fn semantic_rerank_admitted_timeout_settles_row_and_degrades_to_timed_out()
+-> anyhow::Result<()> {
+    let mut fixture = RerankFixture::create().await?;
+    fixture.add_binding("query_rerank", "deepseek", "deepseek-v4-pro").await?;
+    fixture.state.llm_gateway = Arc::new(AdmittingSlowGateway {
+        postgres: fixture.state.persistence.postgres.clone(),
+        simulate_uncertain_admission: false,
+    });
+
+    let financial_state_unknown = AtomicBool::new(false);
+    let attempt = execute_semantic_rerank_with_phase(
+        &fixture.state,
+        fixture.library_id,
+        fixture.execution_context(),
+        fixture.prepared_request()?,
+        SemanticRerankPolicy::bounded(400, 4, 1_200, 4_000),
+        &financial_state_unknown,
+    )
+    .await;
+
+    assert_eq!(
+        attempt,
+        SemanticRerankAttempt::Failed {
+            failure: SemanticRerankFailure::TimedOut,
+            prepared_candidate_count: 1,
+        },
+        "a settled after-send timeout must degrade as TimedOut, not Integrity",
+    );
+    assert!(
+        !financial_state_unknown.load(Ordering::Acquire),
+        "financial_state_unknown must be cleared once all admitted rows are terminalized",
+    );
+
+    let rows = sqlx::query_as::<_, (Uuid, String, bool)>(
+        "select id, call_state::text, completed_at is not null
+         from billing_provider_call
+         where owning_execution_id = $1",
+    )
+    .bind(fixture.query_execution_id)
+    .fetch_all(&fixture.state.persistence.postgres)
+    .await?;
+    assert_eq!(rows.len(), 1, "exactly one physical send row must exist");
+    assert_eq!(rows[0].1, "canceled", "the timed-out row must be durably terminalized");
+    assert!(rows[0].2, "the timed-out row must record completed_at");
+
+    let usage_rows: i64 = sqlx::query_scalar(
+        "select count(*)::bigint from billing_usage where provider_call_id = $1",
+    )
+    .bind(rows[0].0)
+    .fetch_one(&fixture.state.persistence.postgres)
+    .await?;
+    assert_eq!(usage_rows, 0, "settlement must not fabricate billing_usage rows");
+
+    fixture.cleanup().await
+}
+
+/// (d) When an admission in the send scope has an uncertain outcome (e.g.,
+/// persistence or commit-ack uncertainty), a timeout must stay fail-closed as
+/// `Integrity` and keep `financial_state_unknown = true`.
+#[tokio::test]
+#[ignore = "requires local postgres service"]
+async fn semantic_rerank_uncertain_admission_timeout_stays_fail_closed_integrity()
+-> anyhow::Result<()> {
+    let mut fixture = RerankFixture::create().await?;
+    fixture.add_binding("query_rerank", "deepseek", "deepseek-v4-pro").await?;
+    fixture.state.llm_gateway = Arc::new(AdmittingSlowGateway {
+        postgres: fixture.state.persistence.postgres.clone(),
+        simulate_uncertain_admission: true,
+    });
+
+    let financial_state_unknown = AtomicBool::new(false);
+    let attempt = execute_semantic_rerank_with_phase(
+        &fixture.state,
+        fixture.library_id,
+        fixture.execution_context(),
+        fixture.prepared_request()?,
+        SemanticRerankPolicy::bounded(400, 4, 1_200, 4_000),
+        &financial_state_unknown,
+    )
+    .await;
+
+    assert_eq!(
+        attempt,
+        SemanticRerankAttempt::Failed {
+            failure: SemanticRerankFailure::Integrity,
+            prepared_candidate_count: 1,
+        },
+        "an uncertain admission outcome must stay fail-closed as Integrity",
+    );
+    assert!(
+        financial_state_unknown.load(Ordering::Acquire),
+        "financial_state_unknown must stay true when admission outcome is uncertain",
+    );
+
+    fixture.cleanup().await
+}

@@ -1,18 +1,21 @@
 use super::super::types::AnswerVerificationStage;
 use super::{
-    SEMANTIC_PROVIDER_TIMEOUT, apply_semantic_report, execute_semantic_verification,
-    load_semantic_sources, preparation_failure_report, prepare, receipt_matches,
+    SEMANTIC_PROVIDER_TIMEOUT, SemanticPreparationError, apply_semantic_report,
+    execute_semantic_verification, load_semantic_sources, preparation_failure_report, prepare,
+    receipt_matches,
 };
 use crate::{
     agent_runtime::tasks::query_answer::QueryProviderCall,
     app::state::AppState,
+    domains::query::QueryVerificationWarning,
     services::query::{
         llm_context_debug::LlmIterationDebug, provider_billing::QueryProviderExecutionContext,
     },
 };
 use ironrag_contracts::assistant::semantic_verification::{
-    SemanticFailureCode, SemanticVerificationReport,
+    SemanticFailureCode, SemanticPreparationLimit, SemanticVerificationReport,
 };
+use uuid::Uuid;
 
 /// Called only after draft selection/revision. Paid attempts are retained before
 /// any subsequent provenance, visibility, snapshot or persistence can fail.
@@ -30,6 +33,7 @@ pub(crate) async fn verify_selected_candidate(
     iterations: &mut Vec<LlmIterationDebug>,
 ) -> anyhow::Result<()> {
     let SemanticCandidateContext { state, execution, question, reuse } = context;
+    let preparation_started = std::time::Instant::now();
     let sources = load_semantic_sources(
         state,
         execution,
@@ -43,13 +47,30 @@ pub(crate) async fn verify_selected_candidate(
     {
         Ok(prepared) => prepared,
         Err(error) => {
-            tracing::warn!(
-                execution_id = %execution.query_execution_id,
-                error = ?error,
-                "semantic preparation failed"
+            let preparation_elapsed_ms = preparation_started.elapsed().as_millis() as u64;
+            log_preparation_failure(execution.query_execution_id, error, preparation_elapsed_ms);
+            let report = preparation_failure_report(
+                question,
+                &stage.generation.answer,
+                error,
+                preparation_elapsed_ms,
             );
-            let report = preparation_failure_report(question, &stage.generation.answer, error, 0);
             apply_semantic_report(&mut stage.verification, report);
+            if let Some(measurement) = error.limit_measurement() {
+                stage.verification.warnings.push(QueryVerificationWarning {
+                    code: format!(
+                        "semantic_preparation_{}_exceeded",
+                        measurement.bound.as_str()
+                    ),
+                    message: format!(
+                        "semantic evidence preparation refused: bound={} actual={} limit={} preparation_elapsed_ms={}",
+                        measurement.bound, measurement.actual, measurement.limit,
+                        preparation_elapsed_ms
+                    ),
+                    related_segment_id: None,
+                    related_fact_id: None,
+                });
+            }
             return Ok(());
         }
     };
@@ -77,6 +98,49 @@ pub(crate) async fn verify_selected_candidate(
     }
     apply_semantic_report(&mut stage.verification, report);
     Ok(())
+}
+
+/// Typed diagnostics for a refused preparation: bound, measured size, limit and
+/// preparation time. The persisted report stays the canonical outcome; these
+/// fields are the operational receipt that the old anonymous refusal lacked.
+fn log_preparation_failure(
+    execution_id: Uuid,
+    error: SemanticPreparationError,
+    preparation_elapsed_ms: u64,
+) {
+    let Some(measurement) = error.limit_measurement() else {
+        log_preparation_refusal(execution_id, &error, preparation_elapsed_ms);
+        return;
+    };
+    log_preparation_bound_exceeded(execution_id, measurement, preparation_elapsed_ms);
+}
+
+fn log_preparation_refusal(
+    execution_id: Uuid,
+    error: &SemanticPreparationError,
+    preparation_elapsed_ms: u64,
+) {
+    tracing::warn!(
+        execution_id = %execution_id,
+        error = ?error,
+        preparation_elapsed_ms,
+        "semantic preparation failed"
+    );
+}
+
+fn log_preparation_bound_exceeded(
+    execution_id: Uuid,
+    measurement: SemanticPreparationLimit,
+    preparation_elapsed_ms: u64,
+) {
+    tracing::warn!(
+        execution_id = %execution_id,
+        bound = measurement.bound.as_str(),
+        actual = measurement.actual,
+        limit = measurement.limit,
+        preparation_elapsed_ms,
+        "semantic evidence preparation exceeded a typed input bound"
+    );
 }
 
 /// FnOnce admits at most one selected-candidate dispatch. A reused receipt is

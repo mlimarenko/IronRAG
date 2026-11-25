@@ -118,6 +118,8 @@ pub struct ContentAdmissionRequest {
     pub revision: Option<RevisionAdmission>,
     pub parent_async_operation_id: Option<Uuid>,
     pub priority: i32,
+    /// Absent means [`crate::domains::content::EnrichmentScope::Full`].
+    pub enrichment_scope: Option<crate::domains::content::EnrichmentScope>,
 }
 
 /// Authenticated scope for a complete visibility admission; no revision/job input.

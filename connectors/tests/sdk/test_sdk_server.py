@@ -317,8 +317,9 @@ async def test_webhook_only_delete_automatically_requests_gated_cleanup(
             assert orphaned.dependent_census_complete is True
             assert (LIB, "bookstack:attachment:shared") not in server.documents
         # A sweep does not request its successor, even if it released claims.
+        pending_report = reports.get()
         with pytest.raises(TimeoutError):
-            await asyncio.wait_for(reports.get(), timeout=0.05)
+            await asyncio.wait_for(pending_report, timeout=0.05)
         assert adapter.enumerations == (3 if legacy_owner else 1)
 
 

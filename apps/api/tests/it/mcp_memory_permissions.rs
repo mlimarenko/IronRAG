@@ -18,8 +18,10 @@ use ironrag_backend::{
     app::{config::Settings, seed_clean_v1_ai_catalog, state::AppState},
     infra::repositories::{
         catalog_repository, content_document_repository, content_revision_repository,
+        iam_repository,
     },
-    interfaces::http::router,
+    interfaces::http::{auth::hash_token, router},
+    shared::auth_tokens::mint_plaintext_api_token,
 };
 
 struct McpPermissionsFixture {
@@ -324,7 +326,7 @@ impl McpPermissionsFixture {
         )
         .await
         .with_context(|| format!("failed to create foreign revision for {external_key}"))?;
-        crate::content_lifecycle_support::seed_readable_revision_head(
+        crate::content_lifecycle_support::seed_readable_revision_projection(
             &self.state.persistence.postgres,
             document.id,
             revision.id,
@@ -555,8 +557,17 @@ async fn foreign_scope_rejections_do_not_leak_library_or_document_metadata() -> 
             )
             .await?;
         let read_body = serde_json::to_string(&read).context("failed to stringify read body")?;
+        let missing = fixture
+            .mcp_tool_call(
+                &token,
+                "read_document",
+                json!({ "documentId": Uuid::now_v7(), "mode": "full" }),
+            )
+            .await?;
         assert_eq!(read["result"]["isError"], json!(true));
         assert_eq!(read["result"]["structuredContent"]["errorKind"], json!("not_found"));
+        assert_eq!(read["result"]["isError"], missing["result"]["isError"]);
+        assert_eq!(read["result"]["structuredContent"], missing["result"]["structuredContent"]);
         assert!(!read_body.contains(&foreign_document_id.to_string()));
         assert!(!read_body.contains(&fixture.foreign_workspace_id.to_string()));
         assert!(!read_body.contains(&fixture.foreign_library_id.to_string()));
@@ -566,6 +577,300 @@ async fn foreign_scope_rejections_do_not_leak_library_or_document_metadata() -> 
     }
     .await;
 
+    fixture.cleanup().await?;
+    result
+}
+
+#[tokio::test]
+#[ignore = "requires local postgres and redis services"]
+async fn catalog_counts_and_pages_respect_document_grants() -> anyhow::Result<()> {
+    let settings = Settings::from_env().context("failed to load settings")?;
+    let fixture = Box::pin(McpPermissionsFixture::create(settings)).await?;
+    let result = async {
+        let readable = fixture.create_foreign_document("permitted-readable").await?;
+        let mut empty_ids = Vec::new();
+        for key in ["permitted-empty", "hidden-catalog-title"] {
+            let doc = content_document_repository::create_document(
+                &fixture.state.persistence.postgres,
+                &content_document_repository::NewContentDocument {
+                    workspace_id: fixture.foreign_workspace_id,
+                    library_id: fixture.foreign_library_id,
+                    external_key: key,
+                    document_state: "active",
+                    created_by_principal_id: None,
+                    parent_external_key: None,
+                    parent_document_id: None,
+                    document_role: "primary",
+                },
+            )
+            .await?;
+            empty_ids.push(doc.id);
+        }
+
+        let pool = &fixture.state.persistence.postgres;
+        let plaintext = mint_plaintext_api_token();
+        let token = iam_repository::create_api_token(
+            pool,
+            Some(fixture.foreign_workspace_id),
+            "document-catalog",
+            "test-token",
+            None,
+            None,
+        )
+        .await?;
+        iam_repository::create_api_token_secret(pool, token.principal_id, &hash_token(&plaintext))
+            .await?;
+        iam_token_support::create_principal_grants(
+            pool,
+            token.principal_id,
+            "document-catalog",
+            &[readable, empty_ids[0]].map(|id| iam_token_support::GrantSpec {
+                resource_kind: "document",
+                resource_id: id,
+                permission_kind: "document_read".to_string(),
+            }),
+        )
+        .await?;
+        let broad = fixture
+            .create_token(
+                Some(fixture.foreign_workspace_id),
+                "workspace",
+                &["documents:read"],
+                "broad-catalog",
+            )
+            .await?;
+        let denied = fixture.bearer_token(&["documents:read"], "denied-catalog").await?;
+
+        for (token, expected, readable_count) in [(&plaintext, 2, 1), (&broad, 3, 1)] {
+            let response = fixture.mcp_tool_call(token, "list_libraries", json!({})).await?;
+            let libraries = response["result"]["structuredContent"]["libraries"]
+                .as_array()
+                .context("library list")?;
+            let library = libraries
+                .iter()
+                .find(|item| item["libraryId"] == json!(fixture.foreign_library_id))
+                .context("authorized library missing")?;
+            assert_eq!(library["documentCount"], json!(expected));
+            assert_eq!(library["readableDocumentCount"], json!(readable_count));
+            let buckets =
+                library["documentCountsByStatus"].as_object().context("status buckets")?;
+            assert_eq!(buckets.values().map(|v| v.as_u64().unwrap()).sum::<u64>(), expected);
+
+            let mut ids = std::collections::BTreeSet::new();
+            let mut continuation = Value::Null;
+            loop {
+                let mut arguments = json!({
+                    "library": fixture.foreign_library_ref,
+                    "limit": 1,
+                });
+                if !continuation.is_null() {
+                    arguments["continuationToken"] = continuation.clone();
+                }
+                let response = fixture
+                    .mcp_tool_call_at(token, "/v1/mcp/diagnostics", "list_documents", arguments)
+                    .await?;
+                anyhow::ensure!(
+                    response["result"]["isError"] != json!(true),
+                    "document inventory failed: {} ({})",
+                    response["result"]["structuredContent"]["errorKind"],
+                    response["result"]["structuredContent"]["message"],
+                );
+                if expected == 2 {
+                    let body = serde_json::to_string(&response)?;
+                    assert!(!body.contains(&empty_ids[1].to_string()));
+                    assert!(!body.contains("hidden-catalog-title"));
+                }
+                let page = &response["result"]["structuredContent"];
+                let documents = page["documents"].as_array().context("document page")?;
+                assert_eq!(page["totalCount"], json!(expected));
+                assert_eq!(page["count"], json!(documents.len()));
+                for document in documents {
+                    assert!(document["status"].is_string());
+                    assert!(document["readinessKind"].is_string());
+                    assert!(
+                        ids.insert(
+                            document["documentId"].as_str().context("document id")?.to_owned()
+                        ),
+                        "duplicate document"
+                    );
+                }
+                if page["hasMore"] == json!(false) {
+                    break;
+                }
+                assert_eq!(page["hasMore"], json!(true));
+                continuation = page["continuationToken"].clone();
+                assert!(continuation.is_string());
+                assert!(ids.len() < 4, "pagination did not terminate");
+            }
+            assert_eq!(ids.len(), expected as usize);
+            assert!(ids.contains(&readable.to_string()));
+            assert!(ids.contains(&empty_ids[0].to_string()));
+            assert_eq!(ids.contains(&empty_ids[1].to_string()), expected == 3);
+
+            let response = fixture
+                .mcp_tool_call_at(
+                    token,
+                    "/v1/mcp/diagnostics",
+                    "list_documents",
+                    json!({
+                        "library": fixture.foreign_library_ref, "statusFilter": "empty", "limit": 10
+                    }),
+                )
+                .await?;
+            let page = &response["result"]["structuredContent"];
+            // The pill's total is the filtered set it returns: every authorized
+            // document except the single readable one is empty.
+            assert_eq!(page["totalCount"], json!(expected - 1));
+            assert_eq!(page["count"], json!(expected - 1));
+            assert_eq!(page["hasMore"], json!(false));
+            assert!(
+                page["documents"]
+                    .as_array()
+                    .context("empty documents")?
+                    .iter()
+                    .all(|doc| doc["status"] == "empty")
+            );
+            let response = fixture
+                .mcp_tool_call_at(
+                    token,
+                    "/v1/mcp/diagnostics",
+                    "list_documents",
+                    json!({
+                        "library": fixture.foreign_library_ref, "readableOnly": true
+                    }),
+                )
+                .await?;
+            let page = &response["result"]["structuredContent"];
+            assert_eq!(page["totalCount"], json!(1));
+            assert_eq!(page["count"], json!(1));
+            assert_eq!(page["hasMore"], json!(false));
+            assert_eq!(page["documents"][0]["documentId"], json!(readable));
+        }
+
+        let broad_first = fixture
+            .mcp_tool_call_at(
+                &broad,
+                "/v1/mcp/diagnostics",
+                "list_documents",
+                json!({ "library": fixture.foreign_library_ref, "limit": 1 }),
+            )
+            .await?;
+        let broad_page = &broad_first["result"]["structuredContent"];
+        assert_eq!(broad_page["hasMore"], json!(true));
+        let broad_cursor = broad_page["continuationToken"].as_str().context("broad cursor")?;
+
+        let scoped_first = fixture
+            .mcp_tool_call_at(
+                &plaintext,
+                "/v1/mcp/diagnostics",
+                "list_documents",
+                json!({ "library": fixture.foreign_library_ref, "limit": 1 }),
+            )
+            .await?;
+        let scoped_page = &scoped_first["result"]["structuredContent"];
+        assert_eq!(scoped_page["hasMore"], json!(true));
+        let scoped_cursor = scoped_page["continuationToken"].as_str().context("scoped cursor")?;
+        let first_id = scoped_page["documents"][0]["documentId"].as_str().context("first id")?;
+
+        for (token, args) in [
+            (&plaintext, json!({ "library": fixture.foreign_library_ref, "limit": 1, "continuationToken": broad_cursor })),
+            (&broad, json!({ "library": fixture.foreign_library_ref, "limit": 1, "continuationToken": broad_cursor, "statusFilter": "empty" })),
+        ] {
+            let response = fixture
+                .mcp_tool_call_at(token, "/v1/mcp/diagnostics", "list_documents", args)
+                .await?;
+            assert_eq!(response["result"]["isError"], json!(true));
+            assert_eq!(
+                response["result"]["structuredContent"]["errorKind"],
+                json!("invalid_continuation_token")
+            );
+        }
+
+        let added = content_document_repository::create_document(
+            pool,
+            &content_document_repository::NewContentDocument {
+                workspace_id: fixture.foreign_workspace_id,
+                library_id: fixture.foreign_library_id,
+                external_key: "added-hidden-catalog-title",
+                document_state: "active",
+                created_by_principal_id: None,
+                parent_external_key: None,
+                parent_document_id: None,
+                document_role: "primary",
+            },
+        )
+        .await?;
+        let changed = fixture
+            .mcp_tool_call_at(
+                &broad,
+                "/v1/mcp/diagnostics",
+                "list_documents",
+                json!({
+                    "library": fixture.foreign_library_ref,
+                    "limit": 1,
+                    "continuationToken": broad_cursor
+                }),
+            )
+            .await?;
+        assert_eq!(changed["result"]["isError"], json!(true));
+        assert_eq!(
+            changed["result"]["structuredContent"]["errorKind"],
+            json!("knowledge_not_ready")
+        );
+
+        let scoped_second = fixture
+            .mcp_tool_call_at(
+                &plaintext,
+                "/v1/mcp/diagnostics",
+                "list_documents",
+                json!({
+                    "library": fixture.foreign_library_ref,
+                    "limit": 1,
+                    "continuationToken": scoped_cursor
+                }),
+            )
+            .await?;
+        let page = &scoped_second["result"]["structuredContent"];
+        assert_eq!(page["totalCount"], json!(2));
+        assert_eq!(page["count"], json!(1));
+        assert_eq!(page["hasMore"], json!(false));
+        let second_id = page["documents"][0]["documentId"].as_str().context("second id")?;
+        assert_ne!(first_id, second_id);
+        let ids = [first_id.to_owned(), second_id.to_owned()]
+            .into_iter()
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(ids, [readable.to_string(), empty_ids[0].to_string()].into_iter().collect());
+        let scoped_body = serde_json::to_string(&scoped_second)?;
+        assert!(!scoped_body.contains(&added.id.to_string()));
+        assert!(!scoped_body.contains("added-hidden-catalog-title"));
+
+        let denied_libraries = fixture.mcp_tool_call(&denied, "list_libraries", json!({})).await?;
+        let denied_listing = fixture
+            .mcp_tool_call_at(
+                &denied,
+                "/v1/mcp/diagnostics",
+                "list_documents",
+                json!({
+                    "library": fixture.foreign_library_ref
+                }),
+            )
+            .await?;
+        assert_eq!(denied_listing["result"]["isError"], json!(true));
+        for response in [&denied_libraries, &denied_listing] {
+            let body = serde_json::to_string(response)?;
+            for secret in [
+                readable.to_string(),
+                empty_ids[0].to_string(),
+                empty_ids[1].to_string(),
+                "hidden-catalog-title".to_owned(),
+            ] {
+                assert!(!body.contains(&secret));
+            }
+            assert!(!body.contains(&fixture.foreign_library_id.to_string()));
+        }
+        Ok(())
+    }
+    .await;
     fixture.cleanup().await?;
     result
 }

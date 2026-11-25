@@ -151,6 +151,7 @@ pub async fn get_me(
             .into_iter()
             .map(map_grant_domain)
             .collect::<Result<Vec<_>, _>>()?,
+        session_id: auth.token_kind.is_session().then_some(auth.token_id),
     }))
 }
 

@@ -16,7 +16,11 @@ from typing import Protocol
 import pytest
 from test_gitrepos_support import LocalRepo
 
-from ironrag_connector.sources.gitrepos.git_client import GitClient
+from ironrag_connector.sources.gitrepos.git_client import (
+    GitClient,
+    GitCommandError,
+    GitTreeParseError,
+)
 from ironrag_connector.sources.gitrepos.repos import RepoSpec
 
 pytestmark = pytest.mark.asyncio
@@ -137,3 +141,136 @@ async def test_local_path_repo_reads_working_tree_without_clone(
     assert not (clone_root / "localrepo.git").exists()
     assert await client.head_sha(spec, "main") == origin.head_sha("main")
     assert [e.path for e in await client.list_tree(spec, "main")] == ["readme.md"]
+
+
+async def test_missing_local_path_fails_before_any_git_read(tmp_path: Path) -> None:
+    client = GitClient(tmp_path / "cache")
+    spec = RepoSpec(name="gone", local_path=tmp_path / "absent", branches=["main"])
+
+    with pytest.raises(GitCommandError) as excinfo:
+        await client.ensure_repo(spec)
+
+    assert "does not exist" in excinfo.value.stderr
+
+
+async def test_missing_git_binary_is_reported_as_a_failed_read(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A spawn failure must not escape as a raw OSError."""
+
+    def no_process(*args: object, **kwargs: object) -> object:
+        raise FileNotFoundError("git")
+
+    monkeypatch.setattr("asyncio.create_subprocess_exec", no_process)
+    client = GitClient(tmp_path / "cache")
+
+    with pytest.raises(GitCommandError) as excinfo:
+        await client._run(tmp_path, ["rev-parse", "HEAD"])
+
+    assert excinfo.value.code == -1
+    assert "git" in excinfo.value.stderr
+
+
+async def test_hung_git_process_is_killed_and_reported_as_a_timeout(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    killed: list[bool] = []
+
+    class HangingProcess:
+        returncode = None
+
+        async def communicate(self) -> tuple[bytes, bytes]:
+            raise TimeoutError
+
+        def kill(self) -> None:
+            killed.append(True)
+
+        async def wait(self) -> int:
+            return 0
+
+    async def hanging_process(*args: object, **kwargs: object) -> HangingProcess:
+        return HangingProcess()
+
+    monkeypatch.setattr("asyncio.create_subprocess_exec", hanging_process)
+    client = GitClient(tmp_path / "cache")
+
+    with pytest.raises(GitCommandError) as excinfo:
+        await client._run(tmp_path, ["rev-parse", "HEAD"], timeout_seconds=0.01)
+
+    assert excinfo.value.code == -1
+    assert excinfo.value.stderr == "timeout"
+    assert killed == [True]
+
+
+async def test_head_sha_propagates_a_non_missing_ref_failure(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Only a missing/ambiguous ref means ``None``; other failures stay loud."""
+
+    async def failing_run(*args: object, **kwargs: object) -> bytes:
+        raise GitCommandError(["git", "rev-parse"], 128, "fatal: not a git repository")
+
+    client = GitClient(tmp_path / "cache")
+    spec = RepoSpec(name="origin", url="file:///nowhere", branches=["main"])
+    monkeypatch.setattr(client, "_run", failing_run)
+
+    with pytest.raises(GitCommandError):
+        await client.head_sha(spec, "main")
+
+
+def _tree_sha() -> bytes:
+    return b"0" * 40
+
+
+async def test_ls_tree_census_skips_non_blob_entries(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    async def listing(*args: object, **kwargs: object) -> bytes:
+        return b"040000 tree " + _tree_sha() + b" -\tsubdir\x00"
+
+    client = GitClient(tmp_path / "cache")
+    spec = RepoSpec(name="origin", url="file:///nowhere", branches=["main"])
+    monkeypatch.setattr(client, "_run", listing)
+
+    assert await client.list_tree(spec, "main") == []
+
+
+async def test_ls_tree_census_skips_a_non_utf8_path(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """An unrepresentable path is outside the index scope, not a census failure."""
+
+    async def listing(*args: object, **kwargs: object) -> bytes:
+        return b"100644 blob " + _tree_sha() + b" 3\t" + b"\xff.txt\x00"
+
+    client = GitClient(tmp_path / "cache")
+    spec = RepoSpec(name="origin", url="file:///nowhere", branches=["main"])
+    monkeypatch.setattr(client, "_run", listing)
+
+    assert await client.list_tree(spec, "main") == []
+
+
+@pytest.mark.parametrize(
+    ("record", "detail"),
+    [
+        (b"100644 blob " + b"0" * 40, "no path"),
+        (b"100644 blob " + b"0" * 40 + b"\tpath", "expected mode, type, object id and size"),
+        (b"100644 xblob " + b"0" * 40 + b" 3\tpath", "unknown mode or object type"),
+        (b"100644 blob zzzz 3\tpath", "object id is not a git object name"),
+        (b"100644 blob " + b"0" * 40 + b" big\tpath", "blob size is not an integer"),
+    ],
+)
+async def test_ls_tree_census_refuses_an_untrustworthy_record(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, record: bytes, detail: str
+) -> None:
+    """A dropped record would later read as a deleted file, so it fails loudly."""
+
+    async def listing(*args: object, **kwargs: object) -> bytes:
+        return record
+
+    client = GitClient(tmp_path / "cache")
+    spec = RepoSpec(name="origin", url="file:///nowhere", branches=["main"])
+    monkeypatch.setattr(client, "_run", listing)
+
+    with pytest.raises(GitTreeParseError, match=detail):
+        await client.list_tree(spec, "main")

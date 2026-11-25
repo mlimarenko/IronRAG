@@ -718,6 +718,7 @@ def test_lookup_by_external_key(tmp_path: Path) -> None:
     row = store.get_by_external_key("echo:page:x")
     assert row is not None
     assert row.item_id == "x"
+    assert store.get_by_external_key("echo:page:missing") is None
     store.close()
 
 
@@ -1044,4 +1045,465 @@ def test_delete_by_library_purges_item_timeout_of_its_cursors(tmp_path: Path) ->
 
     assert store.item_timeout_attempts("page", "1") == 0
     assert store.item_timeout_attempts("page", "2") == 1
+    store.close()
+
+
+# ---------------------------------------------------------------------------
+# Durable-store refusals: startup, identity uniqueness, evidence and commit.
+# ---------------------------------------------------------------------------
+
+
+class _OneRow:
+    """The single-row cursor answer the WAL probe asks for."""
+
+    def __init__(self, value: str) -> None:
+        self._value = value
+
+    def fetchone(self) -> tuple[str]:
+        return (self._value,)
+
+
+class _ScriptedConnection:
+    """Answers the WAL journal-mode pragma from a script, delegating the rest."""
+
+    def __init__(self, connection: sqlite3.Connection, answers: list[object]) -> None:
+        self._connection = connection
+        self._answers = answers
+
+    def __getattr__(self, name: str) -> object:
+        return getattr(self._connection, name)
+
+    def execute(self, sql: str, *parameters: object) -> object:
+        if sql.startswith("PRAGMA journal_mode=WAL") and self._answers:
+            answer = self._answers.pop(0)
+            if isinstance(answer, Exception):
+                raise answer
+            assert isinstance(answer, str)
+            return _OneRow(answer)
+        return self._connection.execute(sql, *parameters)
+
+
+def _patch_wal_answers(monkeypatch: pytest.MonkeyPatch, answers: list[object]) -> None:
+    real_connect = sqlite3.connect
+
+    def connect(*args: object, **kwargs: object) -> _ScriptedConnection:
+        return _ScriptedConnection(real_connect(*args, **kwargs), answers)
+
+    monkeypatch.setattr("ironrag_connector.state.sqlite3.connect", connect)
+
+
+def test_state_store_refuses_an_unknown_cursor_schema(tmp_path: Path) -> None:
+    """A database it cannot identify is refused instead of half-migrated."""
+    db = tmp_path / "unknown.sqlite"
+    connection = sqlite3.connect(db)
+    try:
+        connection.execute("CREATE TABLE cursor (kind TEXT NOT NULL, item_id TEXT NOT NULL)")
+        connection.commit()
+    finally:
+        connection.close()
+
+    with pytest.raises(RuntimeError, match="unsupported cursor schema"):
+        StateStore(db)
+
+
+def test_state_store_retries_wal_enable_while_the_journal_is_locked(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A transient SQLite lock race is retried instead of failing the startup."""
+    busy = sqlite3.OperationalError("database is locked")
+    busy.sqlite_errorcode = sqlite3.SQLITE_BUSY
+    answers: list[object] = [busy, busy, "wal"]
+    _patch_wal_answers(monkeypatch, answers)
+
+    store = StateStore(tmp_path / "wal.sqlite")
+
+    assert answers == [], "both lock answers must be consumed by the retry loop"
+    store.upsert(
+        kind="page",
+        item_id="1",
+        change_token="A",
+        external_key="echo:page:1",
+        ironrag_document_id=None,
+        ironrag_library_id=str(UUID(int=1)),
+    )
+    row = store.get("page", "1")
+    assert row is not None
+    assert row.change_token == "A"
+    store.close()
+
+
+def test_state_store_refuses_a_database_that_will_not_enable_wal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A journal mode it did not ask for is not accepted as durable state."""
+    _patch_wal_answers(monkeypatch, ["delete"])
+
+    with pytest.raises(RuntimeError, match="refused to enable WAL"):
+        StateStore(tmp_path / "refused.sqlite")
+
+
+def test_state_store_does_not_retry_a_non_lock_wal_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Only lock races are retried; any other SQLite failure surfaces at once."""
+    _patch_wal_answers(monkeypatch, [sqlite3.OperationalError("disk I/O error")])
+
+    with pytest.raises(sqlite3.OperationalError, match="disk I/O error"):
+        StateStore(tmp_path / "broken.sqlite")
+
+
+def test_observation_requires_a_complete_source_identity(tmp_path: Path) -> None:
+    """An empty identity component cannot form one comparable source episode."""
+    store = StateStore(tmp_path / "s.sqlite")
+    with pytest.raises(ValueError, match="must be nonempty"):
+        _observe_materialization(store, adapter="")
+    store.close()
+
+
+def test_ordinary_materialization_requires_a_complete_payload_identity(
+    tmp_path: Path,
+) -> None:
+    """An intent-free attempt has no request to bind, so its body identity is required."""
+    store = StateStore(tmp_path / "s.sqlite")
+    observation = _observe_materialization(store)
+    with pytest.raises(ValueError, match="requires complete payload identity"):
+        store.prepare_materialization_attempt(
+            observation,
+            document_id=str(UUID(int=3)),
+            library_id=str(UUID(int=1)),
+            intent_required=False,
+        )
+    store.close()
+
+
+def test_ordinary_attempt_refuses_intent_phases_and_receipts(tmp_path: Path) -> None:
+    """An intent-free attempt can never acquire a visibility request or receipt."""
+    store = StateStore(tmp_path / "s.sqlite")
+    observation = _observe_materialization(store)
+    store.prepare_materialization_attempt(
+        observation, document_id=str(UUID(int=3)), library_id=str(UUID(int=1))
+    )
+    with pytest.raises(ValueError, match="identity conflicts with observation"):
+        store.prepare_materialization_attempt(
+            observation,
+            document_id=str(UUID(int=3)),
+            library_id=str(UUID(int=2)),
+        )
+    identity = PayloadIdentity(
+        document_id=UUID(int=3),
+        operation="replace",
+        replacement=observation.replacement,
+    )
+    ordinary_observation = _observe_materialization(store, "B", payload_identity=identity)
+    ordinary = store.prepare_materialization_attempt(
+        ordinary_observation,
+        document_id=str(UUID(int=3)),
+        library_id=str(UUID(int=1)),
+        intent_required=False,
+    )
+    with pytest.raises(ValueError, match="cannot enter an intent phase"):
+        store.transition_materialization_attempt(ordinary, phase="intent_superseded")
+    receipt = VisibilityIntentReceipt(
+        visibility_intent_id=UUID(int=4),
+        mutation_item_id=UUID(int=4),
+        mutation_id=UUID(int=5),
+        async_operation_id=UUID(int=6),
+        document_id=UUID(int=3),
+        revision_floor=1,
+        source_identity=ordinary_observation.source_identity,
+        materialization_token=ordinary_observation.materialization_token,
+        replacement=ordinary_observation.replacement,
+        request_fingerprint="opaque-server-fingerprint",
+    )
+    with pytest.raises(ValueError, match="no visibility receipt"):
+        store.transition_materialization_attempt(
+            ordinary, phase="payload_terminal", receipt=receipt
+        )
+    store.close()
+
+
+def test_payload_receipt_requires_a_submitting_attempt_and_a_matching_binding(
+    tmp_path: Path,
+) -> None:
+    """A receipt commits only the exact accepted body of a submitting payload."""
+    store = StateStore(tmp_path / "s.sqlite")
+    observation = _observe_materialization(store)
+    prepared = store.prepare_materialization_attempt(
+        observation, document_id=str(UUID(int=3)), library_id=str(UUID(int=1))
+    )
+    handle = OperationHandle(
+        operation_id=UUID(int=5),
+        document_id=UUID(int=3),
+        result_revision_id=UUID(int=6),
+        mutation_item_id=UUID(int=7),
+        result_checksum=observation.replacement.checksum,
+    )
+    with pytest.raises(ValueError, match="requires accepted intent and submitting phase"):
+        store.record_payload_receipt(prepared, handle)
+
+    identity = PayloadIdentity(
+        document_id=UUID(int=3),
+        operation="replace",
+        replacement=observation.replacement,
+    )
+    ordinary_observation = _observe_materialization(store, "B", payload_identity=identity)
+    ordinary = store.prepare_materialization_attempt(
+        ordinary_observation,
+        document_id=str(UUID(int=3)),
+        library_id=str(UUID(int=1)),
+        intent_required=False,
+    )
+    mismatched_receipt = handle.model_copy(update={"result_checksum": "sha256:" + "b" * 64})
+    with pytest.raises(ValueError, match="does not match visibility binding"):
+        store.record_payload_receipt(ordinary, mismatched_receipt)
+
+    accepted = store.record_payload_receipt(ordinary, handle)
+    rebound_receipt = handle.model_copy(update={"mutation_item_id": UUID(int=8)})
+    with pytest.raises(ValueError, match="payload receipt is immutable"):
+        store.record_payload_receipt(accepted, rebound_receipt)
+    store.close()
+
+
+def test_payload_identity_binding_refuses_a_foreign_target_and_rebinding(
+    tmp_path: Path,
+) -> None:
+    """One durable key names one document and one complete body, forever."""
+    store = StateStore(tmp_path / "s.sqlite")
+    observation = _observe_materialization(store)
+    identity = PayloadIdentity(
+        document_id=UUID(int=3),
+        operation="replace",
+        replacement=observation.replacement,
+    )
+    ordinary_observation = _observe_materialization(store, "B", payload_identity=identity)
+    ordinary = store.prepare_materialization_attempt(
+        ordinary_observation,
+        document_id=str(UUID(int=3)),
+        library_id=str(UUID(int=1)),
+        intent_required=False,
+    )
+
+    foreign_target = identity.model_copy(update={"document_id": UUID(int=9)})
+    with pytest.raises(ValueError, match="target mismatch"):
+        store.bind_payload_identity(ordinary, foreign_target)
+    rebound_identity = identity.model_copy(update={"caller_key": "another-namespace"})
+    with pytest.raises(ValueError, match="payload identity is immutable"):
+        store.bind_payload_identity(ordinary, rebound_identity)
+    store.close()
+
+
+def test_created_admission_requires_identity_and_only_settles_a_pending_row(
+    tmp_path: Path,
+) -> None:
+    """A create journal row is identity-bound and settles exactly once."""
+    store = StateStore(tmp_path / "s.sqlite")
+    observation = _observe_materialization(store)
+    handle = OperationHandle(
+        operation_id=UUID(int=5),
+        document_id=UUID(int=3),
+        result_revision_id=UUID(int=6),
+        mutation_item_id=UUID(int=7),
+        result_checksum=observation.replacement.checksum,
+    )
+    with pytest.raises(ValueError, match="requires complete payload identity"):
+        store.record_created_admission(
+            document_id=str(UUID(int=3)),
+            library_id=str(UUID(int=1)),
+            observation=observation,
+            handle=handle,
+        )
+
+    identity = PayloadIdentity(
+        document_id=UUID(int=3),
+        operation="create",
+        replacement=observation.replacement,
+    )
+    bound = _observe_materialization(store, payload_identity=identity)
+    pending = store.record_created_admission(
+        document_id=str(UUID(int=3)),
+        library_id=str(UUID(int=1)),
+        observation=bound,
+        handle=handle,
+    )
+    assert pending.phase == "payload_submitting"
+    assert store.pending_created_admission(str(UUID(int=3)), observation.replacement) == pending
+
+    settled = store.finalize_created_admission(pending)
+    assert settled.phase == "payload_terminal"
+    with pytest.raises(ValueError, match="only a pending created admission"):
+        store.finalize_created_admission(settled)
+    store.close()
+
+
+def test_target_evidence_must_name_the_scanned_target(tmp_path: Path) -> None:
+    """Absence is only applied to evidence captured for that exact target."""
+    store = StateStore(tmp_path / "s.sqlite")
+    store.upsert(
+        kind="page",
+        item_id="1",
+        change_token="A",
+        external_key="echo:page:1",
+        ironrag_document_id=str(UUID(int=3)),
+        ironrag_library_id="lib-1",
+    )
+    cursor = store.get("page", "1")
+    location = store.get_location("page", "1", "lib-1")
+    assert location is not None
+
+    with pytest.raises(ValueError, match="cursor absence evidence"):
+        store.confirm_library_absence(
+            kind="page",
+            item_id="1",
+            ironrag_library_id="lib-2",
+            expected_cursor=cursor,
+            expected_location=None,
+        )
+    foreign_location = replace(location, ironrag_library_id="lib-2")
+    with pytest.raises(ValueError, match="location absence evidence"):
+        store.confirm_library_absence(
+            kind="page",
+            item_id="1",
+            ironrag_library_id="lib-1",
+            expected_cursor=None,
+            expected_location=foreign_location,
+        )
+    assert store.get("page", "1") == cursor
+    store.close()
+
+
+def test_applied_commit_requires_the_observation_behind_its_attempts(
+    tmp_path: Path,
+) -> None:
+    """Attempt and membership fences are meaningless without an observation."""
+    store = StateStore(tmp_path / "s.sqlite")
+    observation = _observe_materialization(store)
+    identity = PayloadIdentity(
+        document_id=UUID(int=3),
+        operation="replace",
+        replacement=observation.replacement,
+    )
+    bound = _observe_materialization(store, "B", payload_identity=identity)
+    attempt = store.prepare_materialization_attempt(
+        bound,
+        document_id=str(UUID(int=3)),
+        library_id=str(UUID(int=1)),
+        intent_required=False,
+    )
+    upsert_args = {
+        "kind": "page",
+        "item_id": "1",
+        "change_token": "B",
+        "external_key": "echo:page:1",
+        "ironrag_document_id": str(UUID(int=3)),
+        "ironrag_library_id": str(UUID(int=1)),
+    }
+    with pytest.raises(ValueError, match="requires observation and current document"):
+        store.upsert(**upsert_args, expected_materialization_attempts=(attempt,))
+    with pytest.raises(ValueError, match="copy membership commit requires observation"):
+        store.upsert(
+            **upsert_args,
+            expected_visibility_episode=attempt.episode_id,
+            expected_copy_membership=frozenset(),
+        )
+    assert store.get("page", "1") is None
+    store.close()
+
+
+def test_applied_commit_refuses_a_superseded_intent_and_an_unaccepted_payload(
+    tmp_path: Path,
+) -> None:
+    """Neither a dead intent nor a payload without its receipt can advance a cursor."""
+    store = StateStore(tmp_path / "s.sqlite")
+    observation = _observe_materialization(store)
+    identity = PayloadIdentity(
+        document_id=UUID(int=3),
+        operation="replace",
+        replacement=observation.replacement,
+    )
+    bound = _observe_materialization(store, "B", payload_identity=identity)
+    ordinary = store.prepare_materialization_attempt(
+        bound,
+        document_id=str(UUID(int=3)),
+        library_id=str(UUID(int=1)),
+        intent_required=False,
+    )
+    with pytest.raises(ValueError, match="exact accepted payload receipt"):
+        store.upsert(
+            kind="page",
+            item_id="1",
+            change_token="B",
+            external_key="echo:page:1",
+            ironrag_document_id=str(UUID(int=3)),
+            ironrag_library_id=str(UUID(int=1)),
+            expected_visibility_episode=bound.episode_id,
+            expected_materialization_attempts=(ordinary,),
+        )
+
+    intent_observation = _observe_materialization(store, "C")
+    prepared = store.prepare_materialization_attempt(
+        intent_observation, document_id=str(UUID(int=3)), library_id=str(UUID(int=1))
+    )
+    submitting = store.transition_materialization_attempt(prepared, phase="intent_submitting")
+    request = submitting.request
+    assert request is not None
+    receipt = VisibilityIntentReceipt(
+        visibility_intent_id=UUID(int=4),
+        mutation_item_id=UUID(int=4),
+        mutation_id=UUID(int=5),
+        async_operation_id=UUID(int=6),
+        document_id=UUID(int=3),
+        revision_floor=1,
+        source_identity=request.source_identity,
+        materialization_token=request.materialization_token,
+        replacement=request.replacement,
+        request_fingerprint="opaque-server-fingerprint",
+    )
+    accepted = store.transition_materialization_attempt(
+        submitting, phase="intent_accepted", receipt=receipt
+    )
+    superseded = store.transition_materialization_attempt(accepted, phase="intent_superseded")
+    with pytest.raises(ValueError, match="accepted current intents"):
+        store.upsert(
+            kind="page",
+            item_id="1",
+            change_token="C",
+            external_key="echo:page:1",
+            ironrag_document_id=str(UUID(int=3)),
+            ironrag_library_id=str(UUID(int=1)),
+            expected_visibility_episode=intent_observation.episode_id,
+            expected_materialization_attempts=(superseded,),
+        )
+    assert store.get("page", "1") is None
+    store.close()
+
+
+def test_restore_deletes_an_absent_cursor_and_refuses_a_foreign_row(tmp_path: Path) -> None:
+    """A deferred parent restores exactly its own row, or none at all."""
+    store = StateStore(tmp_path / "s.sqlite")
+    store.upsert(
+        kind="page",
+        item_id="1",
+        change_token="v1",
+        external_key="echo:page:1",
+        ironrag_document_id=None,
+        ironrag_library_id="lib-1",
+    )
+    store.upsert(
+        kind="page",
+        item_id="2",
+        change_token="v1",
+        external_key="echo:page:2",
+        ironrag_document_id=None,
+        ironrag_library_id="lib-1",
+    )
+    foreign = store.get("page", "2")
+    assert foreign is not None
+
+    store.restore(None, kind="page", item_id="1")
+
+    assert store.get("page", "1") is None
+    with pytest.raises(ValueError, match="restore target does not match"):
+        store.restore(foreign, kind="page", item_id="1")
+    assert store.get("page", "1") is None
+    assert store.get("page", "2") == foreign
     store.close()

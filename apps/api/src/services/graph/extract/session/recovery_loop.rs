@@ -95,6 +95,10 @@ fn recovery_prompt_plan(
 /// budget. Grouping them keeps [`resolve_graph_extraction_with_gateway`] and
 /// the per-attempt [`GraphExtractionRecoveryContext`] from drifting apart.
 pub(crate) struct GraphExtractionLoopRequest<'a> {
+    pub(crate) billing: Option<(
+        &'a crate::app::state::AppState,
+        crate::services::ops::billing::ReserveExecutionProviderCallCommand,
+    )>,
     pub(crate) extraction_recovery: &'a ExtractionRecoveryService,
     pub(crate) provider_failure_classification: &'a ProviderFailureClassificationService,
     pub(crate) runtime_binding: &'a ResolvedRuntimeBinding,
@@ -110,6 +114,7 @@ pub(crate) async fn resolve_graph_extraction_with_gateway(
     cancellation_token: &CancellationToken,
 ) -> std::result::Result<ResolvedGraphExtraction, GraphExtractionFailureOutcome> {
     let GraphExtractionLoopRequest {
+        billing,
         extraction_recovery,
         provider_failure_classification,
         runtime_binding,
@@ -151,15 +156,20 @@ pub(crate) async fn resolve_graph_extraction_with_gateway(
             session.pending_follow_up.take(),
             request_size_soft_limit_bytes,
         );
+        let mut provider_call_id = None;
         let raw = request_graph_extraction_with_prompt_plan(
             gateway,
             runtime_binding,
             &prompt_plan,
-            lifecycle.clone(),
-            cancellation_token,
+            super::provider_call::GraphExtractionProviderCall {
+                lifecycle: lifecycle.clone(),
+                billing: billing.as_ref(),
+                reserved_call_id: &mut provider_call_id,
+                cancellation_token,
+            },
         )
         .await;
-        let attempt_resolution = match raw {
+        let mut attempt_resolution = match raw {
             Ok(raw) => resolve_raw_graph_extraction_attempt(
                 &recovery_context,
                 &mut session,
@@ -175,6 +185,9 @@ pub(crate) async fn resolve_graph_extraction_with_gateway(
                 provider_attempt_no,
             ),
         };
+        if let Some(Err(failure)) = &mut attempt_resolution {
+            failure.provider_call_id = provider_call_id;
+        }
         if let Some(result) = attempt_resolution {
             return result;
         }
@@ -280,7 +293,8 @@ fn terminal_graph_extraction_loop_failure(
 ) -> GraphExtractionFailureOutcome {
     let recovery_summary = terminal_recovery_summary(extraction_recovery, session, false);
     GraphExtractionFailureOutcome {
-        request_shape_key: format!("{GRAPH_EXTRACTION_VERSION}:unknown"),
+        provider_call_id: None,
+        request_shape_key: format!("{GRAPH_EXTRACTION_VERSION}:unknown").into(),
         request_size_bytes: 0,
         recovery_summary: Box::new(recovery_summary.clone()),
         error_message: "graph extraction retry loop ended without a terminal outcome".to_string(),
@@ -296,10 +310,11 @@ fn terminal_graph_extraction_loop_failure(
 
 pub(super) fn cancelled_graph_extraction_failure(
     _request: &GraphExtractionRequest,
-    request_shape_key: impl Into<String>,
+    request_shape_key: impl Into<Box<str>>,
     request_size_bytes: usize,
 ) -> GraphExtractionFailureOutcome {
     GraphExtractionFailureOutcome {
+        provider_call_id: None,
         request_shape_key: request_shape_key.into(),
         request_size_bytes,
         error_message: StageError::Cancelled.to_string(),

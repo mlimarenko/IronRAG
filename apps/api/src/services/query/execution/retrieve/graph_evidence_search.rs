@@ -2,16 +2,15 @@ use anyhow::Context;
 
 use super::{
     AppState, BTreeSet, GRAPH_EVIDENCE_CHUNK_CAP, GRAPH_EVIDENCE_SOURCE_DOCUMENT_PRIORITY_CAP,
-    GRAPH_EVIDENCE_TEXTS_PER_CHUNK, GraphEvidenceChunkHits, GraphEvidenceContextCandidate,
-    GraphEvidenceContextRequest, GraphEvidenceSourceDocumentCandidate, GraphEvidenceTextsByChunk,
-    GraphTargetEntityProfile, HashMap, HashSet, QueryGraphIndex, QueryIR, RankedGraphEvidenceRows,
-    RuntimeMatchedEntity, RuntimeMatchedRelationship, RuntimeQueryPlan, Uuid,
-    build_graph_evidence_text_queries, graph_evidence_chunk_score,
-    graph_evidence_context_candidate_fields, graph_evidence_context_fetch_cap,
-    graph_evidence_context_focus_texts, graph_evidence_context_focus_tokens,
-    graph_evidence_db_text_queries, graph_evidence_targets_for_query,
-    query_ir_lexical_focus_queries, rank_graph_evidence_context_rows,
-    repair_technical_layout_noise, repositories, score_graph_evidence_context_candidates,
+    GraphEvidenceChunkHits, GraphEvidenceContextCandidate, GraphEvidenceContextRequest,
+    GraphEvidenceSourceDocumentCandidate, GraphTargetEntityProfile, HashMap, HashSet,
+    QueryGraphIndex, QueryIR, RankedGraphEvidenceRows, RuntimeMatchedEntity,
+    RuntimeMatchedRelationship, RuntimeQueryPlan, Uuid, build_graph_evidence_text_queries,
+    graph_evidence_chunk_score, graph_evidence_context_candidate_fields,
+    graph_evidence_context_fetch_cap, graph_evidence_context_focus_texts,
+    graph_evidence_context_focus_tokens, graph_evidence_db_text_queries,
+    graph_evidence_targets_for_query, query_ir_lexical_focus_queries,
+    rank_graph_evidence_context_rows, repositories, score_graph_evidence_context_candidates,
 };
 
 /// Runtime graph bundle a graph-evidence search and its chunk hydration rank:
@@ -74,6 +73,7 @@ pub(super) async fn load_ranked_graph_evidence_rows_for_query(
             graph_evidence_context_fetch_cap() as i64,
         )
         .await
+        .map_err(super::super::graph_retrieval_error::graph_evidence_read_error)
         .context("failed to list graph evidence context for retrieved graph targets")?
     };
     let target_search_elapsed_ms = target_search_started.elapsed().as_millis();
@@ -111,6 +111,7 @@ pub(super) async fn load_ranked_graph_evidence_rows_for_query(
         graph_evidence_context_fetch_cap() as i64,
     )
     .await
+    .map_err(super::super::graph_retrieval_error::graph_evidence_read_error)
     .context("failed to search graph evidence context by evidence text")?;
     let text_search_elapsed_ms = text_started.elapsed().as_millis();
     let text_filter_started = std::time::Instant::now();
@@ -320,30 +321,19 @@ pub(super) async fn filter_graph_evidence_rows_for_target_documents(
 
 pub(crate) fn graph_evidence_chunk_hits_from_rows(
     rows: &[repositories::RuntimeGraphEvidenceRow],
-) -> (GraphEvidenceChunkHits, GraphEvidenceTextsByChunk) {
+) -> GraphEvidenceChunkHits {
     let mut seen_chunks = HashSet::<Uuid>::new();
-    let mut seen_texts = HashSet::<(Uuid, String)>::new();
-    let mut evidence_texts_by_chunk = HashMap::<Uuid, Vec<String>>::new();
     let mut hits = Vec::new();
     for row in rows {
         let Some(chunk_id) = row.chunk_id else {
             continue;
         };
-        if !seen_chunks.contains(&chunk_id) {
-            if hits.len() >= GRAPH_EVIDENCE_CHUNK_CAP {
-                continue;
-            }
-            seen_chunks.insert(chunk_id);
-            let score = graph_evidence_chunk_score(hits.len());
-            hits.push((chunk_id, score));
+        if seen_chunks.contains(&chunk_id) || hits.len() >= GRAPH_EVIDENCE_CHUNK_CAP {
+            continue;
         }
-        let evidence_text = repair_technical_layout_noise(row.evidence_text.trim());
-        if !evidence_text.is_empty() && seen_texts.insert((chunk_id, evidence_text.clone())) {
-            let texts = evidence_texts_by_chunk.entry(chunk_id).or_default();
-            if texts.len() < GRAPH_EVIDENCE_TEXTS_PER_CHUNK {
-                texts.push(evidence_text);
-            }
-        }
+        seen_chunks.insert(chunk_id);
+        let score = graph_evidence_chunk_score(hits.len());
+        hits.push((chunk_id, score));
     }
-    (hits, evidence_texts_by_chunk)
+    hits
 }

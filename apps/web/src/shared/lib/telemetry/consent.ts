@@ -62,7 +62,9 @@ function removeBrowserChoice(): void {
 }
 
 let principalId: string | null = null
-let status: TelemetryConsentStatus = 'anonymous'
+// No session has been resolved yet. Until the shell reports an anonymous
+// visitor or an account preference, nothing may be read, written or emitted.
+let status: TelemetryConsentStatus = 'loading'
 let accountConsent: TelemetryConsent = 'unset'
 let suppressBrowserConsent = false
 

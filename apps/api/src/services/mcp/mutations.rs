@@ -74,6 +74,7 @@ pub(crate) async fn upload_documents(
         validate_mcp_upload_batch_size(settings, total_upload_bytes)?;
 
         let mut command = UploadInlineDocumentCommand {
+            enrichment_scope: None,
             workspace_id: library.workspace_id,
             library_id: library.id,
             external_key: None,
@@ -231,6 +232,7 @@ pub(crate) async fn update_document(
                 mime_type: request.replacement_mime_type,
                 file_bytes,
                 visibility_intent_id: request.visibility_intent_id,
+                enrichment_scope: None,
             };
             let payload_identity = hash_replace_payload(&command)?;
             command.idempotency_key = Some(normalize_document_idempotency_key(

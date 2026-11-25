@@ -54,6 +54,7 @@ struct CachedQueryResult {
 
 const ANSWER_RUNTIME_FINGERPRINT_SOURCES: &[(&str, &str)] = &[
     ("mcp/access/documents/read.rs", include_str!("../mcp/access/documents/read.rs")),
+    ("agent_loop/compaction.rs", include_str!("agent_loop/compaction.rs")),
     ("agent_loop/grounded_state.rs", include_str!("agent_loop/grounded_state.rs")),
     ("agent_loop/tool_dispatch.rs", include_str!("agent_loop/tool_dispatch.rs")),
     ("agent_loop/iteration.rs", include_str!("agent_loop/iteration.rs")),
@@ -83,6 +84,10 @@ const ANSWER_RUNTIME_FINGERPRINT_SOURCES: &[(&str, &str)] = &[
     (
         "execution/semantic_verification/preparation.rs",
         include_str!("execution/semantic_verification/preparation.rs"),
+    ),
+    (
+        "execution/semantic_verification/selection.rs",
+        include_str!("execution/semantic_verification/selection.rs"),
     ),
     (
         "execution/semantic_verification/response.rs",
@@ -122,6 +127,7 @@ const ANSWER_RUNTIME_FINGERPRINT_SOURCES: &[(&str, &str)] = &[
         "domains/query_ir/validation_tests.rs",
         include_str!("../../domains/query_ir/validation_tests.rs"),
     ),
+    ("assistant_grounding.rs", include_str!("assistant_grounding.rs")),
     ("assistant_prompt.rs", include_str!("assistant_prompt.rs")),
     ("compiler.rs", include_str!("compiler.rs")),
     ("compiler/fingerprint.rs", include_str!("compiler/fingerprint.rs")),
@@ -136,6 +142,7 @@ const ANSWER_RUNTIME_FINGERPRINT_SOURCES: &[(&str, &str)] = &[
     ("compiler/tests/provider_behavior.rs", include_str!("compiler/tests/provider_behavior.rs")),
     ("completion_policy.rs", include_str!("completion_policy.rs")),
     ("latest_versions.rs", include_str!("latest_versions.rs")),
+    ("execution/chunk_support.rs", include_str!("execution/chunk_support.rs")),
     ("execution/answer/mod.rs", include_str!("execution/answer/mod.rs")),
     (
         "execution/answer/context_rendering.rs",
@@ -609,6 +616,7 @@ const ANSWER_RUNTIME_FINGERPRINT_SOURCES: &[(&str, &str)] = &[
         include_str!("service/context/prepared_references.rs"),
     ),
     ("service/formatting.rs", include_str!("service/formatting.rs")),
+    ("service/session.rs", include_str!("service/session.rs")),
     ("service/turn/mod.rs", include_str!("service/turn/mod.rs")),
     ("service/turn/agent_answer.rs", include_str!("service/turn/agent_answer.rs")),
     ("service/turn/agent_grounding.rs", include_str!("service/turn/agent_grounding.rs")),

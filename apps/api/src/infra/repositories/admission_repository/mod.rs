@@ -4,8 +4,8 @@ mod materialization;
 mod types;
 mod web;
 
-pub(crate) use content::admit_staged_upload_with_failpoint;
 pub use content::{admit_content_with_failpoint, admit_visibility_intent_with_failpoint};
+pub(crate) use content::{admit_staged_upload_with_failpoint, unbound_visibility_intent_required};
 pub use materialization::admit_web_capture_materialization_with_failpoint;
 pub use types::{
     AdmissionError, AdmissionFailpoint, AdmissionIngestJobRow, AdmissionOutcome,

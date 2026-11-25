@@ -12,7 +12,6 @@ fn verify_exact_port_answer(answer: &str, evidence_chunk: &str) -> RuntimeAnswer
         },
         evidence: &empty_authoritative_evidence(),
         chunks: &[runtime_chunk(evidence_chunk)],
-        prompt_context: evidence_chunk,
         assistant_grounding: &AssistantGroundingEvidence::default(),
     })
 }
@@ -39,7 +38,6 @@ fn verify_answer_does_not_treat_order_marker_as_verified_content() {
         },
         evidence: &empty_authoritative_evidence(),
         chunks: &[runtime_chunk("Restart the service and verify its status.")],
-        prompt_context: "Restart the service and verify its status.",
         assistant_grounding: &AssistantGroundingEvidence::default(),
     });
 
@@ -60,7 +58,6 @@ fn verify_exact_answer_fails_closed_for_unchecked_numbered_steps() {
         chunks: &[runtime_chunk(
             "The adapter setup procedure covers connection and status validation.",
         )],
-        prompt_context: "The adapter setup procedure covers connection and status validation.",
         assistant_grounding: &AssistantGroundingEvidence::default(),
     });
 
@@ -116,7 +113,6 @@ fn verify_exact_answer_does_not_verify_unchecked_identifier_suffix() {
         },
         evidence: &empty_authoritative_evidence(),
         chunks: &[runtime_chunk("The recorded epoch is 2030λ.")],
-        prompt_context: "The recorded epoch is 2030λ.",
         assistant_grounding: &AssistantGroundingEvidence::default(),
     });
 
@@ -132,7 +128,6 @@ fn verify_answer_does_not_verify_unchecked_multi_letter_identifier_suffix() {
         intent_profile: &QueryIntentProfile::default(),
         evidence: &empty_authoritative_evidence(),
         chunks: &[runtime_chunk("The selected record is 2030λx.")],
-        prompt_context: "The selected record is 2030λx.",
         assistant_grounding: &AssistantGroundingEvidence::default(),
     });
 
@@ -150,7 +145,6 @@ fn verify_answer_state_does_not_depend_on_answer_prose() {
         intent_profile: &QueryIntentProfile::default(),
         evidence: &empty_authoritative_evidence(),
         chunks: &[runtime_chunk(answer)],
-        prompt_context: answer,
         assistant_grounding: &AssistantGroundingEvidence::default(),
     });
 
@@ -169,7 +163,6 @@ fn verify_answer_does_not_support_positive_number_from_negative_evidence() {
         },
         evidence: &empty_authoritative_evidence(),
         chunks: &[runtime_chunk("The configured temperature is -90.")],
-        prompt_context: "The configured temperature is -90.",
         assistant_grounding: &AssistantGroundingEvidence::default(),
     });
 
@@ -196,7 +189,6 @@ fn verify_answer_marks_unchecked_non_exact_prose_as_not_run() {
         intent_profile: &QueryIntentProfile::default(),
         evidence: &empty_authoritative_evidence(),
         chunks: &[runtime_chunk("The procedure contains preparation, execution, and validation.")],
-        prompt_context: "The procedure contains preparation, execution, and validation.",
         assistant_grounding: &AssistantGroundingEvidence::default(),
     });
 
@@ -212,7 +204,6 @@ fn verify_answer_does_not_verify_unchecked_year_for_non_exact_intent() {
         intent_profile: &QueryIntentProfile::default(),
         evidence: &empty_authoritative_evidence(),
         chunks: &[runtime_chunk("The policy becomes effective in 2029.")],
-        prompt_context: "The policy becomes effective in 2029.",
         assistant_grounding: &AssistantGroundingEvidence::default(),
     });
 
@@ -234,7 +225,6 @@ fn verify_answer_does_not_verify_unchecked_version_and_date_for_non_exact_intent
         intent_profile: &QueryIntentProfile::default(),
         evidence: &empty_authoritative_evidence(),
         chunks: &[runtime_chunk("Release v1.2.3 was published on 2029-04-05.")],
-        prompt_context: "Release v1.2.3 was published on 2029-04-05.",
         assistant_grounding: &AssistantGroundingEvidence::default(),
     });
 
@@ -259,7 +249,6 @@ fn verify_exact_answer_accepts_supported_date_and_version_in_ordinary_prose() {
         },
         evidence: &empty_authoritative_evidence(),
         chunks: &[runtime_chunk("Release v2.4.1 was published on 2029-04-05.")],
-        prompt_context: "Release v2.4.1 was published on 2029-04-05.",
         assistant_grounding: &AssistantGroundingEvidence::default(),
     });
 
@@ -278,7 +267,6 @@ fn verify_exact_answer_rejects_unsupported_date_in_ordinary_prose() {
         },
         evidence: &empty_authoritative_evidence(),
         chunks: &[runtime_chunk("The selected record was published on 2029-04-05.")],
-        prompt_context: "The selected record was published on 2029-04-05.",
         assistant_grounding: &AssistantGroundingEvidence::default(),
     });
 
@@ -303,7 +291,6 @@ fn verify_answer_does_not_support_year_from_larger_identifier_number() {
         },
         evidence: &empty_authoritative_evidence(),
         chunks: &[runtime_chunk("The unrelated record identifier is ID 12029.")],
-        prompt_context: "The unrelated record identifier is ID 12029.",
         assistant_grounding: &AssistantGroundingEvidence::default(),
     });
 
@@ -322,7 +309,6 @@ fn verify_answer_does_not_support_version_from_longer_version_prefix() {
         },
         evidence: &empty_authoritative_evidence(),
         chunks: &[runtime_chunk("The selected source documents v2.40.")],
-        prompt_context: "The selected source documents v2.40.",
         assistant_grounding: &AssistantGroundingEvidence::default(),
     });
 
@@ -341,7 +327,6 @@ fn verify_exact_answer_marks_unchecked_named_prose_as_partial() {
         },
         evidence: &empty_authoritative_evidence(),
         chunks: &[runtime_chunk("The service owner is Alex and uses endpoint /status.")],
-        prompt_context: "The service owner is Alex and uses endpoint /status.",
         assistant_grounding: &AssistantGroundingEvidence::default(),
     });
 
@@ -366,7 +351,6 @@ fn verify_exact_answer_still_checks_explicitly_marked_named_literals() {
         },
         evidence: &empty_authoritative_evidence(),
         chunks: &[runtime_chunk("The selected record identifies a different owner.")],
-        prompt_context: "The selected record identifies a different owner.",
         assistant_grounding: &AssistantGroundingEvidence::default(),
     });
 

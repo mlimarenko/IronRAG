@@ -2,7 +2,7 @@ use std::{
     collections::HashSet,
     sync::{
         Arc, OnceLock,
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
     time::{Duration, Instant},
 };
@@ -20,12 +20,14 @@ use crate::{
     },
     domains::{agent_runtime::RuntimeTaskKind, ai::AiBindingPurpose},
     integrations::llm::{build_structured_chat_request, disable_bounded_answer_reasoning},
-    interfaces::http::router_support::ApiError,
     services::{
         ai_catalog_service::ResolvedRuntimeBinding,
-        ops::billing::ReserveExecutionProviderCallCommand,
         ops::billing::provider_reservation::PendingQueryProviderCallCompletion,
         query::support::RerankCandidate,
+    },
+    shared::{
+        provider_failure::ProviderFailure,
+        provider_send::{ProviderSendAttribution, ProviderSendScope, with_provider_send},
     },
 };
 
@@ -38,10 +40,7 @@ mod scoring;
 mod shadow_lease;
 
 pub(crate) use preparation::prepare_semantic_rerank_request;
-use provider_call::{
-    PendingProviderCallReservationGuard, ProviderCallReservationGuard,
-    spawn_provider_call_reservation_reconciliation,
-};
+use provider_call::ProviderCallReservationGuard;
 use provider_dispatch::{
     RerankProviderCall, RerankProviderCallRequest, RerankProviderTransport, call_rerank_provider,
 };
@@ -70,6 +69,11 @@ const SEMANTIC_RERANK_ANSWER_TOKENS_PER_CANDIDATE: i32 = 24;
 const SEMANTIC_RERANK_ANSWER_ENVELOPE_TOKENS: i32 = 64;
 /// Defensive ceiling for the rerank completion budget.
 const SEMANTIC_RERANK_MAX_OUTPUT_TOKENS: i32 = 2_048;
+/// Maximum time reserved inside the decision deadline for explicit durable
+/// settlement (completing usage or terminalizing timed-out send rows) before
+/// falling back. Capped at a quarter of the remaining budget so very short
+/// budgets still leave time for the provider call itself.
+const SEMANTIC_RERANK_MAX_SETTLEMENT_RESERVE: Duration = Duration::from_millis(150);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct SemanticRerankPolicy {
@@ -127,9 +131,9 @@ impl SemanticRerankPolicy {
 }
 
 /// Decision deadline for the complete optional semantic stage. Read-only
-/// binding resolution is directly cancel-safe. Durable reservation runs in an
-/// owned task with a caller-known ID, allowing the request to stop waiting at
-/// the deadline while late/ambiguous INSERTs are reconciled asynchronously.
+/// binding resolution is directly cancel-safe. The provider dispatch runs
+/// inside this budget, and its first send is admitted durably before the
+/// request leaves.
 #[derive(Debug, Clone, Copy)]
 struct SemanticRerankDecisionDeadline {
     expires_at: Instant,
@@ -306,12 +310,14 @@ impl SemanticCandidateOrder {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum SemanticRerankFailure {
     MissingBinding,
     TimedOut,
     ProviderFailure,
     InvalidResponse,
+    TerminalProvider(ProviderFailure),
+    Integrity,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -354,12 +360,15 @@ impl SemanticRerankDegradation {
     /// every fallback that is not one of the two gate cases is still counted
     /// and named.
     #[must_use]
-    pub(crate) const fn from_failure(failure: SemanticRerankFailure) -> Self {
+    pub(crate) fn from_failure(failure: SemanticRerankFailure) -> Self {
         match failure {
             SemanticRerankFailure::MissingBinding => Self::MissingBinding,
             SemanticRerankFailure::ProviderFailure => Self::ProviderFailure,
             SemanticRerankFailure::InvalidResponse => Self::InvalidResponse,
             SemanticRerankFailure::TimedOut => Self::TimedOut,
+            SemanticRerankFailure::TerminalProvider(_) | SemanticRerankFailure::Integrity => {
+                Self::ProviderFailure
+            }
         }
     }
 
@@ -404,14 +413,30 @@ pub(crate) fn semantic_rerank_degradation_count() -> u64 {
 /// decision deadline is the graceful bound that knows which phase expired;
 /// this is the guarantee that no scheduling or bookkeeping delay can hold the
 /// answer turn past the budget.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct FinancialStateUnknown;
+
 pub(crate) async fn await_semantic_rerank_within_turn_wait<F>(
     turn_wait: Duration,
     stage: F,
-) -> Option<SemanticRerankAttempt>
+    financial_state_unknown: &AtomicBool,
+) -> Result<Option<SemanticRerankAttempt>, FinancialStateUnknown>
 where
     F: std::future::Future<Output = SemanticRerankAttempt>,
 {
-    tokio::time::timeout(turn_wait, stage).await.ok()
+    match tokio::time::timeout(turn_wait, stage).await {
+        Ok(attempt) => Ok(Some(attempt)),
+        Err(_) if financial_state_unknown.load(Ordering::Acquire) => Err(FinancialStateUnknown),
+        Err(_) => Ok(None),
+    }
+}
+
+async fn pending_financial_phase<F: std::future::Future>(
+    financial_state_unknown: &AtomicBool,
+    phase: F,
+) -> F::Output {
+    financial_state_unknown.store(true, Ordering::Release);
+    phase.await
 }
 
 pub(crate) async fn execute_semantic_rerank(
@@ -420,6 +445,25 @@ pub(crate) async fn execute_semantic_rerank(
     execution_context: SemanticRerankExecutionContext,
     prepared: PreparedSemanticRerankRequest,
     policy: SemanticRerankPolicy,
+) -> SemanticRerankAttempt {
+    Box::pin(execute_semantic_rerank_with_phase(
+        state,
+        library_id,
+        execution_context,
+        prepared,
+        policy,
+        &AtomicBool::new(false),
+    ))
+    .await
+}
+
+pub(crate) async fn execute_semantic_rerank_with_phase(
+    state: &AppState,
+    library_id: Uuid,
+    execution_context: SemanticRerankExecutionContext,
+    prepared: PreparedSemanticRerankRequest,
+    policy: SemanticRerankPolicy,
+    financial_state_unknown: &AtomicBool,
 ) -> SemanticRerankAttempt {
     let started = Instant::now();
     let prepared_candidate_count = prepared.prepared_candidate_count();
@@ -431,8 +475,9 @@ pub(crate) async fn execute_semantic_rerank(
         started,
         prepared_candidate_count,
         decision_deadline: SemanticRerankDecisionDeadline::starting_at(started, policy.timeout),
+        financial_state_unknown,
     };
-    match run_semantic_rerank(&run).await {
+    match Box::pin(run_semantic_rerank(&run)).await {
         Ok(attempt) | Err(attempt) => attempt,
     }
 }
@@ -446,6 +491,7 @@ struct SemanticRerankRun<'a> {
     started: Instant,
     prepared_candidate_count: usize,
     decision_deadline: SemanticRerankDecisionDeadline,
+    financial_state_unknown: &'a AtomicBool,
 }
 
 impl SemanticRerankRun<'_> {
@@ -461,40 +507,75 @@ impl SemanticRerankRun<'_> {
     }
 }
 
-/// Runs the phase sequence. Any phase that fails returns its fallback attempt,
-/// which the entry point unwraps into the caller-visible result.
+/// Splits the remaining decision budget into the provider-dispatch slice and a
+/// bounded reserve for durable settlement inside the same turn deadline.
+///
+/// An expired budget here provably performed no provider send: the dispatch
+/// future was never polled, so no send was admitted, no reservation row exists
+/// and no counter moved. It degrades to the deterministic order like any other
+/// stage that produced no ranking.
+fn dispatch_budget_after_binding(
+    deadline: SemanticRerankDecisionDeadline,
+    prepared_candidate_count: usize,
+) -> Result<Duration, SemanticRerankAttempt> {
+    let remaining = deadline.remaining().ok_or(SemanticRerankAttempt::Failed {
+        failure: SemanticRerankFailure::TimedOut,
+        prepared_candidate_count,
+    })?;
+    let settlement_reserve = remaining.div_f32(4.0).min(SEMANTIC_RERANK_MAX_SETTLEMENT_RESERVE);
+    Ok(remaining.saturating_sub(settlement_reserve).max(Duration::from_millis(1)))
+}
+
+/// Runs the phase sequence and returns the typed attempt to the caller.
 async fn run_semantic_rerank(
     run: &SemanticRerankRun<'_>,
 ) -> Result<SemanticRerankAttempt, SemanticRerankAttempt> {
     let binding_timeout = run.decision_deadline.remaining().ok_or_else(|| run.timed_out())?;
     let binding = resolve_rerank_binding(run, binding_timeout).await?;
 
-    let reservation_timeout = run.decision_deadline.remaining().ok_or_else(|| run.timed_out())?;
-    let (provider_call_id, _pending_reservation) =
-        reserve_rerank_provider_call(run, &binding, reservation_timeout).await?;
+    // The logical call owns the attribution every physical send of this stage
+    // is admitted under; the row of each send is written by that admission, so
+    // nothing is inserted here.
+    let provider_send_scope = rerank_provider_send_scope(run, &binding);
+    let provider_call_id = provider_send_scope.logical_id();
     // Async task cancellation drops this guard. Its best-effort cleanup only
     // transitions a still-started row, so it can never overwrite a completed
-    // or explicitly failed reservation.
-    let mut reservation_guard = ProviderCallReservationGuard::new(run.state, provider_call_id);
+    // or explicitly failed row.
+    let mut reservation_guard = ProviderCallReservationGuard::new(run.state, provider_send_scope);
 
-    let Some(provider_timeout) = run.decision_deadline.remaining() else {
-        log_post_reservation_deadline_expired(run, provider_call_id);
-        return Err(run.timed_out());
-    };
+    let provider_timeout =
+        match dispatch_budget_after_binding(run.decision_deadline, run.prepared_candidate_count) {
+            Ok(provider_timeout) => provider_timeout,
+            Err(attempt) => {
+                log_dispatch_deadline_expired(run, provider_call_id);
+                return Err(attempt);
+            }
+        };
     let provider_started = Instant::now();
-    let provider_call = call_rerank_provider_phase(
-        run,
-        &binding,
-        provider_call_id,
-        provider_timeout,
-        provider_started,
-        &mut reservation_guard,
+    // The dispatch writes the durable row and debits the counter of each
+    // physical send, so a turn cut inside it may leave a financial write in
+    // flight: it stays fail-closed until accounting clears the flag.
+    let provider_call = pending_financial_phase(
+        run.financial_state_unknown,
+        call_rerank_provider_phase(
+            run,
+            &binding,
+            provider_call_id,
+            provider_timeout,
+            provider_started,
+            &mut reservation_guard,
+        ),
     )
     .await?;
     let provider_elapsed = provider_started.elapsed();
     let provider_runtime = provider_call.provider_runtime();
 
-    account_provider_usage(run, provider_call_id, &provider_call, &mut reservation_guard).await?;
+    pending_financial_phase(
+        run.financial_state_unknown,
+        account_provider_usage(run, provider_call_id, &provider_call, &mut reservation_guard),
+    )
+    .await?;
+    run.financial_state_unknown.store(false, Ordering::Release);
 
     let ranking = decode_rerank_ranking(run, provider_call, provider_call_id, provider_elapsed)?;
     let order = run.prepared.map_ranking_to_candidate_order(&ranking);
@@ -551,68 +632,40 @@ async fn resolve_rerank_binding(
     }
 }
 
-async fn reserve_rerank_provider_call(
+/// Builds the ambient send scope of one semantic rerank call.
+///
+/// It carries the attribution the durable reservation used to build: the query
+/// execution owns the call, the configured query runtime answers it as a stage
+/// of its `QueryAnswer` execution, and the resolved rerank binding pays. The
+/// logical id is the id the first admitted send reuses as its own row id.
+fn rerank_provider_send_scope(
     run: &SemanticRerankRun<'_>,
     binding: &ResolvedRuntimeBinding,
-    timeout: Duration,
-) -> Result<(Uuid, PendingProviderCallReservationGuard), SemanticRerankAttempt> {
-    // Execute the non-cancel-safe INSERT in an owned task using a caller-known
-    // ID. The request may stop waiting at its deadline, while the guard keeps
-    // the task alive and cancels any late/ambiguous committed reservation.
+) -> ProviderSendScope {
     let provider_call_id = Uuid::now_v7();
-    let reservation_state = run.state.clone();
-    let reservation_command = ReserveExecutionProviderCallCommand {
+    tracing::debug!(
+        stage = "retrieval.semantic_rerank",
+        library_id = %run.library_id,
+        query_execution_id = %run.execution_context.query_execution_id,
+        runtime_execution_id = %run.execution_context.runtime_execution_id,
+        %provider_call_id,
+        "opening semantic rerank provider send scope"
+    );
+    let attribution = ProviderSendAttribution {
         workspace_id: run.execution_context.workspace_id,
         library_id: run.library_id,
         owning_execution_kind: "query_execution".to_string(),
         owning_execution_id: run.execution_context.query_execution_id,
-        runtime_execution_id: Some(run.execution_context.runtime_execution_id),
-        // The configured query runtime owns retrieval/rerank as stages of its
-        // QueryAnswer execution.
-        runtime_task_kind: Some(RuntimeTaskKind::QueryAnswer),
+        call_kind: "query_rerank".to_string(),
         binding_id: Some(binding.binding_id),
         provider_catalog_id: binding.provider_catalog_id,
         model_catalog_id: binding.model_catalog_id,
-        call_kind: "query_rerank".to_string(),
+        runtime_execution_id: Some(run.execution_context.runtime_execution_id),
+        // The configured query runtime owns retrieval/rerank as stages of its
+        // QueryAnswer execution.
+        runtime_task_kind: Some(RuntimeTaskKind::QueryAnswer.as_str()),
     };
-    let reservation_task = tokio::spawn(async move {
-        reservation_state
-            .application_services
-            .billing
-            .reserve_execution_provider_call_with_id(
-                &reservation_state,
-                provider_call_id,
-                reservation_command,
-            )
-            .await
-    });
-    let mut pending_reservation =
-        PendingProviderCallReservationGuard::new(run.state, provider_call_id, reservation_task);
-    match pending_reservation.wait(timeout).await {
-        Some(Ok(Ok(returned_id))) if returned_id == provider_call_id => {
-            Ok((provider_call_id, pending_reservation))
-        }
-        Some(Ok(Ok(returned_id))) => {
-            spawn_provider_call_reservation_reconciliation(run.state, provider_call_id, None);
-            spawn_provider_call_reservation_reconciliation(run.state, returned_id, None);
-            log_reservation_ownership_mismatch(provider_call_id, returned_id);
-            Err(run.failure(SemanticRerankFailure::ProviderFailure))
-        }
-        Some(Ok(Err(error))) => {
-            spawn_provider_call_reservation_reconciliation(run.state, provider_call_id, None);
-            log_reservation_failed(run, &error);
-            Err(run.failure(SemanticRerankFailure::ProviderFailure))
-        }
-        Some(Err(error)) => {
-            spawn_provider_call_reservation_reconciliation(run.state, provider_call_id, None);
-            log_reservation_task_failed(run, &error);
-            Err(run.failure(SemanticRerankFailure::ProviderFailure))
-        }
-        None => {
-            log_reservation_deadline_exceeded(run, provider_call_id);
-            Err(run.timed_out())
-        }
-    }
+    ProviderSendScope::new(attribution, provider_call_id)
 }
 
 async fn call_rerank_provider_phase(
@@ -623,20 +676,44 @@ async fn call_rerank_provider_phase(
     provider_started: Instant,
     reservation_guard: &mut ProviderCallReservationGuard,
 ) -> Result<RerankProviderCall, SemanticRerankAttempt> {
-    match call_rerank_provider(RerankProviderCallRequest {
-        llm_gateway: &run.state.llm_gateway,
-        provider_budget: &run.state.provider_budget,
-        transport: RerankProviderTransport::from_settings(&run.state.settings),
-        binding,
-        prepared: run.prepared,
-        provider_call_id,
-        provider_timeout,
-    })
+    match with_provider_send(
+        reservation_guard.send_scope(),
+        call_rerank_provider(RerankProviderCallRequest {
+            llm_gateway: &run.state.llm_gateway,
+            provider_budget: &run.state.provider_budget,
+            transport: RerankProviderTransport::from_settings(&run.state.settings),
+            binding,
+            prepared: run.prepared,
+            provider_call_id,
+            provider_timeout,
+        }),
+    )
     .await
     {
         Ok(call) => Ok(call),
         Err(failure) => {
-            if failure == SemanticRerankFailure::ProviderFailure {
+            let failure = if failure == SemanticRerankFailure::TimedOut {
+                // The dispatch was already polled, so one or more physical
+                // sends may have been admitted or may have an uncertain
+                // admission outcome. Only degrade to `TimedOut` after every
+                // admitted row is durably terminalized without usage and no
+                // admission in this scope is uncertain; otherwise stay
+                // fail-closed (`Integrity`).
+                let settle_budget = run.decision_deadline.remaining().unwrap_or(Duration::ZERO);
+                match reservation_guard.settle_after_timeout(settle_budget).await {
+                    Ok(()) => {
+                        run.financial_state_unknown.store(false, Ordering::Release);
+                        SemanticRerankFailure::TimedOut
+                    }
+                    Err(()) => SemanticRerankFailure::Integrity,
+                }
+            } else {
+                failure
+            };
+            if matches!(
+                failure,
+                SemanticRerankFailure::ProviderFailure | SemanticRerankFailure::TerminalProvider(_)
+            ) {
                 reservation_guard.mark_failed();
             }
             log_provider_call_failed(
@@ -644,7 +721,7 @@ async fn call_rerank_provider_phase(
                 binding,
                 provider_call_id,
                 provider_started.elapsed(),
-                failure,
+                &failure,
             );
             Err(run.failure(failure))
         }
@@ -657,6 +734,11 @@ async fn account_provider_usage(
     provider_call: &RerankProviderCall,
     reservation_guard: &mut ProviderCallReservationGuard,
 ) -> Result<(), SemanticRerankAttempt> {
+    // Every send of this stage was refused, so no row exists and nothing was
+    // debited: there is no reply to settle.
+    let Some(send_id) = reservation_guard.current_send_id() else {
+        return Ok(());
+    };
     let accounting_state = run.state.clone();
     let usage_json = provider_call.usage_json().clone();
     let reconciliation_usage_json = usage_json.clone();
@@ -666,7 +748,7 @@ async fn account_provider_usage(
             .billing
             .complete_reserved_provider_call_deferred_rollup_with_retry(
                 &accounting_state,
-                provider_call_id,
+                send_id,
                 &usage_json,
             )
             .await
@@ -678,13 +760,13 @@ async fn account_provider_usage(
     reservation_guard.disarm();
     let mut pending_completion = PendingQueryProviderCallCompletion::new(
         run.state,
-        provider_call_id,
+        send_id,
         accounting_task,
         reconciliation_usage_json,
     );
     let Some(accounting_timeout) = run.decision_deadline.remaining() else {
         log_accounting_deadline_expired(run, provider_call_id);
-        return Err(run.timed_out());
+        return Err(run.failure(SemanticRerankFailure::Integrity));
     };
     match pending_completion.wait(accounting_timeout).await {
         Some(Ok(Ok(()))) => Ok(()),
@@ -694,15 +776,15 @@ async fn account_provider_usage(
             // stable event asynchronously without extending this optional
             // stage's response deadline.
             log_accounting_failed(run, provider_call_id, &error);
-            Err(run.failure(SemanticRerankFailure::ProviderFailure))
+            Err(run.failure(SemanticRerankFailure::Integrity))
         }
         Some(Err(error)) => {
             log_accounting_task_failed(run, provider_call_id, &error);
-            Err(run.failure(SemanticRerankFailure::ProviderFailure))
+            Err(run.failure(SemanticRerankFailure::Integrity))
         }
         None => {
             log_accounting_wait_exceeded(run, provider_call_id);
-            Err(run.timed_out())
+            Err(run.failure(SemanticRerankFailure::Integrity))
         }
     }
 }
@@ -756,58 +838,16 @@ fn log_binding_resolution_failed(run: &SemanticRerankRun<'_>, error: &impl std::
     );
 }
 
-fn log_reservation_ownership_mismatch(provider_call_id: Uuid, returned_id: Uuid) {
-    tracing::error!(
-        stage = "retrieval.semantic_rerank",
-        expected_provider_call_id = %provider_call_id,
-        returned_provider_call_id = %returned_id,
-        "semantic rerank billing reservation returned an unexpected ownership id"
-    );
-}
-
-fn log_reservation_failed(run: &SemanticRerankRun<'_>, error: &impl std::fmt::Display) {
-    tracing::error!(
-        stage = "retrieval.semantic_rerank",
-        library_id = %run.library_id,
-        query_execution_id = %run.execution_context.query_execution_id,
-        %error,
-        "semantic rerank billing reservation failed; provider call suppressed"
-    );
-}
-
-fn log_reservation_task_failed(run: &SemanticRerankRun<'_>, error: &impl std::fmt::Display) {
-    tracing::error!(
-        stage = "retrieval.semantic_rerank",
-        library_id = %run.library_id,
-        query_execution_id = %run.execution_context.query_execution_id,
-        %error,
-        "semantic rerank billing reservation task failed; provider call suppressed"
-    );
-}
-
-fn log_reservation_deadline_exceeded(run: &SemanticRerankRun<'_>, provider_call_id: Uuid) {
+fn log_dispatch_deadline_expired(run: &SemanticRerankRun<'_>, provider_call_id: Uuid) {
     tracing::warn!(
         stage = "retrieval.semantic_rerank",
-        deadline_phase = "durable_reservation",
+        deadline_phase = "provider_dispatch",
         library_id = %run.library_id,
         query_execution_id = %run.execution_context.query_execution_id,
         provider_call_id = %provider_call_id,
         prepared_candidate_count = run.prepared_candidate_count,
         elapsed_ms = run.started.elapsed().as_millis(),
-        "semantic rerank billing reservation exceeded the decision deadline"
-    );
-}
-
-fn log_post_reservation_deadline_expired(run: &SemanticRerankRun<'_>, provider_call_id: Uuid) {
-    tracing::warn!(
-        stage = "retrieval.semantic_rerank",
-        deadline_phase = "durable_reservation",
-        library_id = %run.library_id,
-        query_execution_id = %run.execution_context.query_execution_id,
-        provider_call_id = %provider_call_id,
-        prepared_candidate_count = run.prepared_candidate_count,
-        elapsed_ms = run.started.elapsed().as_millis(),
-        "semantic rerank decision deadline expired after durable reservation; provider call suppressed"
+        "semantic rerank decision deadline expired before provider dispatch; provider call suppressed"
     );
 }
 
@@ -816,7 +856,7 @@ fn log_provider_call_failed(
     binding: &ResolvedRuntimeBinding,
     provider_call_id: Uuid,
     provider_elapsed: Duration,
-    failure: SemanticRerankFailure,
+    failure: &SemanticRerankFailure,
 ) {
     tracing::warn!(
         stage = "retrieval.semantic_rerank",
@@ -828,7 +868,7 @@ fn log_provider_call_failed(
         prepared_candidate_count = run.prepared_candidate_count,
         provider_elapsed_ms = provider_elapsed.as_millis(),
         elapsed_ms = run.started.elapsed().as_millis(),
-        "semantic rerank provider call failed and deterministic fallback was used"
+        "semantic rerank provider call failed"
     );
 }
 

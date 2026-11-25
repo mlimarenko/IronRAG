@@ -22,7 +22,7 @@ fn completed_nonterminal_answer_is_retained_only_for_exhausted_repair_fallback()
             "structuredContent": structured_content,
             "isError": false
         })),
-        grounding_text: None,
+        source_texts: Vec::new(),
         document_reference: None,
         grounded_answer_body: Some("Completed tool answer.".to_string()),
         grounded_answer_outcome: None,
@@ -214,6 +214,7 @@ fn final_answer_prefers_verified_union_when_parent_drops_multi_tool_anchors() {
 
 #[test]
 fn successful_tool_result_becomes_verifier_grounding() {
+    let passage = "The release channel is stable.";
     let mut grounding = AssistantGroundingEvidence::default();
     let result = crate::interfaces::http::mcp::McpToolResult {
         content: vec![crate::interfaces::http::mcp::McpContentBlock {
@@ -221,21 +222,31 @@ fn successful_tool_result_becomes_verifier_grounding() {
             text: "Document read completed.".to_string(),
         }],
         structured_content: serde_json::json!({
+            "documentId": Uuid::from_u128(1),
+            "latestRevisionId": Uuid::from_u128(4),
             "documentTitle": "Alpha overview",
-            "content": "The release channel is stable."
+            "libraryId": Uuid::from_u128(2),
+            "workspaceId": Uuid::from_u128(3),
+            "readMode": "full",
+            "readabilityState": "readable",
+            "readinessKind": "ready",
+            "graphCoverageKind": "complete",
+            "content": passage,
+            "sliceStartOffset": 0,
+            "sliceEndOffset": passage.len(),
+            "totalContentLength": passage.len(),
+            "hasMore": false
         }),
         is_error: false,
     };
-    let evidence =
-        tool_result_verification_text("read_document", &result).expect("verification text");
-
-    push_tool_grounding_fragment(&mut grounding, "read_document", &evidence);
-
-    assert_eq!(grounding.verification_corpus.len(), 1);
-    assert!(grounding.verification_corpus[0].contains("read_document"));
-    assert!(grounding.verification_corpus[0].contains("Document read completed."));
-    assert!(grounding.verification_corpus[0].contains("The release channel is stable."));
-    assert!(!grounding.verification_corpus[0].contains("\\\"content\\\""));
+    let mut outcome = super::test_support::synthetic_success_outcome();
+    outcome.document_reference =
+        native_document_read_reference(READ_DOCUMENT_TOOL_NAME, &result).map(Box::new);
+    let mut budget =
+        crate::services::query::execution::semantic_verification::EvidenceBudget::new();
+    assert!(admit_tool_grounding(&mut grounding, &mut budget, READ_DOCUMENT_TOOL_NAME, &outcome));
+    let manifest = AgentEvidenceManifest::default();
+    assert_eq!(manifest.source_texts(&grounding).collect::<Vec<_>>(), [passage]);
 }
 
 #[test]
@@ -255,7 +266,13 @@ fn inventory_tool_result_is_not_verifier_grounding() {
         is_error: false,
     };
 
-    assert!(tool_result_verification_text("list_documents", &result).is_none());
+    assert!(
+        crate::interfaces::http::mcp::tools::source_evidence::admitted_source_texts(
+            "list_documents",
+            &result
+        )
+        .is_empty()
+    );
 }
 
 #[test]
@@ -266,9 +283,19 @@ fn search_and_graph_results_can_be_verifier_grounding() {
             text: "Found Alpha overview.".to_string(),
         }],
         structured_content: serde_json::json!({
-            "items": [{
+            "query": "subject S parameter P",
+            "limit": 1,
+            "libraries": ["workspace/library"],
+            "hits": [{
+                "documentId": Uuid::from_u128(1),
+                "libraryId": Uuid::from_u128(2),
+                "workspaceId": Uuid::from_u128(3),
                 "documentTitle": "Alpha overview",
-                "snippet": "The supported mode is standby."
+                "score": 0.9,
+                "excerpt": "The supported mode is standby.",
+                "readabilityState": "readable",
+                "readinessKind": "ready",
+                "graphCoverageKind": "complete"
             }]
         }),
         is_error: false,
@@ -280,20 +307,30 @@ fn search_and_graph_results_can_be_verifier_grounding() {
         }],
         structured_content: serde_json::json!({
             "entities": [{
+                "entityId": Uuid::from_u128(4),
                 "label": "Alpha controller",
-                "summary": "Controls standby mode."
+                "entityType": "service",
+                "summary": "Controls standby mode.",
+                "score": 3.0
             }]
         }),
         is_error: false,
     };
 
     let search_evidence =
-        tool_result_verification_text("search_documents", &search_result).expect("search evidence");
+        crate::interfaces::http::mcp::tools::source_evidence::admitted_source_texts(
+            "search_documents",
+            &search_result,
+        );
     let graph_evidence =
-        tool_result_verification_text("search_entities", &graph_result).expect("graph evidence");
+        crate::interfaces::http::mcp::tools::source_evidence::admitted_source_texts(
+            "search_entities",
+            &graph_result,
+        );
 
-    assert!(search_evidence.contains("The supported mode is standby."));
-    assert!(graph_evidence.contains("Controls standby mode."));
+    assert_eq!(search_evidence, vec!["The supported mode is standby.".to_string()]);
+    assert!(!search_evidence[0].contains("subject S parameter P"));
+    assert!(graph_evidence.iter().any(|text| text.contains("Controls standby mode.")));
 }
 
 #[test]
@@ -310,7 +347,13 @@ fn tool_error_result_is_not_verifier_grounding() {
         is_error: true,
     };
 
-    assert!(tool_result_verification_text("read_document", &result).is_none());
+    assert!(
+        crate::interfaces::http::mcp::tools::source_evidence::admitted_source_texts(
+            "read_document",
+            &result
+        )
+        .is_empty()
+    );
 }
 
 #[test]

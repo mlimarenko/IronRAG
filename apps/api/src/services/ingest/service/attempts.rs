@@ -261,4 +261,75 @@ impl IngestService {
             .await?;
         Ok(())
     }
+
+    /// Execute exactly the named queued job through the ordinary pipeline.
+    ///
+    /// The admission is decided before the queue row moves: the job's own
+    /// recorded mutation must name the principal that admitted it, otherwise
+    /// nothing is claimed and no counter moves. The lease is then taken by id,
+    /// so no other queued job is claimed, reordered or paused by this action,
+    /// and the same pipeline the worker runs executes the work.
+    pub async fn execute_job(
+        &self,
+        state: &AppState,
+        job_id: Uuid,
+        worker_id: &str,
+    ) -> Result<IngestJob, ApiError> {
+        use std::sync::Arc;
+
+        use crate::shared::provider_http::{DispatchCaller, with_dispatch_caller};
+        use tokio_util::sync::CancellationToken;
+
+        let existing = ingest_repository::get_ingest_job_by_id(&state.persistence.postgres, job_id)
+            .await
+            .map_err(|e| ApiError::internal_with_log(e, "internal"))?
+            .ok_or_else(|| ApiError::resource_not_found("ingest_job", job_id))?;
+        if existing.queue_state != "queued" {
+            return Err(ApiError::BadRequest(
+                "Only a queued job can be executed as a single admitted run".to_string(),
+            ));
+        }
+        let caller = recorded_job_caller(state, &existing).await;
+        if matches!(caller, DispatchCaller::Unattributed) {
+            return Err(ApiError::Conflict(
+                "Ingest job has no admitted mutation origin".to_string(),
+            ));
+        }
+
+        let queue_lease_token = format!("ops-execute-{}", Uuid::now_v7());
+        let claimed = ingest_repository::claim_queued_ingest_job_by_id(
+            &state.persistence.postgres,
+            job_id,
+            &queue_lease_token,
+            worker_id,
+        )
+        .await
+        .map_err(|e| ApiError::internal_with_log(e, "internal"))?
+        .ok_or_else(|| {
+            ApiError::Conflict(format!("ingest job {job_id} is not queued or is already leased"))
+        })?;
+
+        let owned_state = Arc::new(state.clone());
+        let cancellation_token = CancellationToken::new();
+        let outcome = with_dispatch_caller(
+            caller,
+            crate::services::ingest::worker::execute_ingest_job(
+                Arc::clone(&owned_state),
+                worker_id,
+                claimed,
+                cancellation_token,
+            ),
+        )
+        .await;
+        let row = ingest_repository::get_ingest_job_by_id(&state.persistence.postgres, job_id)
+            .await
+            .map_err(|e| ApiError::internal_with_log(e, "internal"))?
+            .ok_or_else(|| ApiError::resource_not_found("ingest_job", job_id))?;
+        match outcome {
+            Ok(()) => Ok(map_job_row(row)),
+            Err(error) => {
+                Err(ApiError::internal_with_log(error, "single admitted ingest run failed"))
+            }
+        }
+    }
 }

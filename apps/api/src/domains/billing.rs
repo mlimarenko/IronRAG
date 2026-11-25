@@ -117,7 +117,7 @@ pub enum BillingExecutionOwnerKind {
     KnowledgeSearch,
 }
 
-pub(crate) const MCP_SOURCE_IMAGE_DESCRIPTION_CALL_KIND: &str = "mcp_source_image_description";
+pub const MCP_SOURCE_IMAGE_DESCRIPTION_CALL_KIND: &str = "mcp_source_image_description";
 pub(crate) const KNOWLEDGE_SEARCH_EMBEDDING_CALL_KIND: &str = "knowledge_search_embedding";
 
 impl BillingExecutionOwnerKind {

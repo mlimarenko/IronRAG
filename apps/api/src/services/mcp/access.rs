@@ -26,6 +26,6 @@ pub(crate) use self::{
 };
 
 pub(crate) use self::catalog::{
-    library_catalog_ref, load_library_by_catalog_ref, load_sole_query_authorized_library,
-    load_workspace_by_catalog_ref_for_discovery,
+    library_catalog_ref, load_library_by_catalog_ref, load_library_for_document_inventory,
+    load_sole_query_authorized_library, load_workspace_by_catalog_ref_for_discovery,
 };

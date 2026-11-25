@@ -504,7 +504,7 @@ pub enum RuntimeGraphRebuildCoordination {
     FenceWriters { deadline: chrono::DateTime<chrono::Utc> },
 }
 
-// PostgreSQL 18 enforces both pre-transaction statement waits and the full
+// PostgreSQL enforces both pre-transaction statement waits and the full
 // transaction server-side. Each installation derives from the same absolute
 // cutoff, so time spent acquiring earlier locks is never added back.
 // After BEGIN, PostgreSQL does not shorten an active nonzero transaction timer;

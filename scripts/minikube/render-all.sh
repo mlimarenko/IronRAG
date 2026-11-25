@@ -824,8 +824,8 @@ if ! grep -F -q "pipingspace/ironrag-frontend:${APP_IMAGE_TAG}" "${BUNDLED_RENDE
 fi
 
 for rendered in "${BUNDLED_RENDER}" "${FILESYSTEM_RENDER}"; do
-  if ! grep -F -q 'image: "pgvector/pgvector:pg18"' "${rendered}"; then
-    echo "rendered Helm chart ${rendered} is missing bundled postgres image pgvector/pgvector:pg18" >&2
+  if ! grep -F -q 'image: "pgvector/pgvector:0.8.7-pg19-bookworm"' "${rendered}"; then
+    echo "rendered Helm chart ${rendered} is missing bundled PostgreSQL 19 with pgvector 0.8.7" >&2
     exit 1
   fi
   if ! grep -F -q 'image: "redis:8.10.1"' "${rendered}"; then

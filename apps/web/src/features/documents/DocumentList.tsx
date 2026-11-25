@@ -5,7 +5,7 @@ import { useTranslation } from 'react-i18next'
 
 import { DataGrid, type GridServiceColumn } from '@/shared/data-grid'
 import { formatCost, type CostSummary } from '@/shared/format'
-import { uploadStateLabel } from '@/shared/lib/enumLabels'
+import { documentStatusLabel, uploadStateLabel } from '@/shared/lib/enumLabels'
 import { screenPhase } from '@/shared/lib/screenPhase'
 import type { DocumentItem, Locale } from '@/shared/types'
 import { Badge, Button, IconButton, Panel, Progress, Segmented } from '@/shared/ui'
@@ -44,6 +44,8 @@ const STATUS_BUCKETS = [
   'graphready',
   'processing',
   'queued',
+  'paused',
+  'pending_materialization',
   'failed',
   'canceled',
   'empty',
@@ -53,6 +55,19 @@ function selectAllMatchingLabel(t: TFunction, expanding: boolean, total: number 
   if (expanding) return t('documents.selectAllBannerExpanding')
   if (total == null) return t('documents.selectAllBannerActionUnknown')
   return t('documents.selectAllBannerAction', { total })
+}
+
+/**
+ * The chip label for a status bucket. Union buckets stand for a set of statuses
+ * rather than one document status, so their translations live beside the
+ * primitive status keys instead of in `documentStatusLabel`.
+ */
+function statusBucketLabel(t: TFunction, status: (typeof STATUS_BUCKETS)[number]): string {
+  if (status === 'all') return t('documents.all')
+  if (UNION_STATUS_BUCKETS.includes(status)) {
+    return t(`documents.status${status.charAt(0).toUpperCase()}${status.slice(1)}`)
+  }
+  return documentStatusLabel(status, t)
 }
 
 /**
@@ -152,12 +167,15 @@ export function DocumentList({
       return (
         (counts?.processing ?? 0) +
         (counts?.queued ?? 0) +
+        (counts?.paused ?? 0) +
+        (counts?.pendingMaterialization ?? 0) +
         (counts?.failed ?? 0) +
         (counts?.canceled ?? 0) +
         (counts?.empty ?? 0)
       )
     if (status === 'inflight') return (counts?.processing ?? 0) + (counts?.queued ?? 0)
     if (status === 'vectorgap' || status === 'graphgap' || status === 'graphready') return null
+    if (status === 'pending_materialization') return counts?.pendingMaterialization ?? 0
     return counts?.[status] ?? 0
   }
   const statuses = STATUS_BUCKETS.filter(
@@ -172,10 +190,7 @@ export function DocumentList({
       // rest of the time.
       (!UNION_STATUS_BUCKETS.includes(status) && (countFor(status) ?? 0) > 0),
   ).map((status) => {
-    const label =
-      status === 'all'
-        ? t('documents.all')
-        : t(`documents.status${status[0]?.toUpperCase()}${status.slice(1)}`)
+    const label = statusBucketLabel(t, status)
     const count = documents.isScopePending ? null : countFor(status)
     return { value: status, label: count == null ? label : `${label} · ${count}` }
   })

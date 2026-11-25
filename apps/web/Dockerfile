@@ -31,13 +31,13 @@ RUN if [ -z "$(printf '%s' "${APP_VERSION}" | tr -d '[:space:]')" ]; then \
     fi \
  && ./node_modules/.bin/vite build
 
-FROM nginxinc/nginx-unprivileged@sha256:b3f2436575bd5be7386518084d842dac414ab4962712afa31e99e0942a56e3b2
+FROM nginx/nginx-unprivileged:1.30.7-alpine@sha256:0c53a1f2890c3526bfd201440f0fd3970e5b78f80630f58284aad0d34b5ec7bd
 USER root
 COPY --from=builder /app/dist /usr/share/nginx/html
 # Source maps stay out of the runtime image and are published as a release
 # artifact for symbolication instead.
-RUN find /usr/share/nginx/html -name '*.map' -delete
-RUN apk add --no-cache --upgrade \
+RUN find /usr/share/nginx/html -name '*.map' -delete \
+    && apk add --no-cache --upgrade \
         'c-ares>=1.34.8-r0' \
         'curl>=8.22.0-r0' \
         'libcurl>=8.22.0-r0' \
@@ -50,6 +50,7 @@ RUN apk add --no-cache --upgrade \
     && mkdir -p /etc/nginx/snippets /etc/nginx/templates-available /etc/nginx/templates \
     && chown -R nginx:root /etc/nginx
 COPY security-headers.conf /etc/nginx/snippets/ironrag-security-headers.conf
+COPY api-proxy.conf /etc/nginx/snippets/ironrag-api-proxy.conf
 COPY nginx.conf.template /etc/nginx/templates/default.conf.template
 COPY nginx-tls.conf.template /etc/nginx/templates-available/ironrag-tls.conf.template
 COPY docker-entrypoint.d/05-ironrag-tls-defaults.envsh /docker-entrypoint.d/05-ironrag-tls-defaults.envsh

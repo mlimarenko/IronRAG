@@ -2,10 +2,30 @@ import { useId } from 'react'
 import { useTranslation } from 'react-i18next'
 import { useNavigate } from 'react-router-dom'
 
-import type { SemanticEvidenceLink, SemanticVerificationReport } from '@/shared/api/generated'
+import type {
+  SemanticEvidenceLink,
+  SemanticMissingCaveat,
+  SemanticVerificationReport,
+} from '@/shared/api/generated'
 import { Badge, Button } from '@/shared/ui'
 
 type ReportProps = Readonly<{ report: SemanticVerificationReport }>
+
+// The API bounds each caveat's own evidence but not the caveat list, so two
+// caveats may share a description or an entire payload. The identity covers
+// the payload and repeats are told apart by occurrence, not by position.
+function keyedCaveats(caveats: readonly SemanticMissingCaveat[]) {
+  const seen = new Map<string, number>()
+  return caveats.map((caveat) => {
+    const identity = JSON.stringify([
+      caveat.description,
+      caveat.evidence.map((link) => [link.sourceId, link.span.start, link.span.end]),
+    ])
+    const occurrence = seen.get(identity) ?? 0
+    seen.set(identity, occurrence + 1)
+    return { caveat, key: occurrence === 0 ? identity : `${identity}#${occurrence}` }
+  })
+}
 
 function SourceQuotes({
   evidence,
@@ -15,13 +35,12 @@ function SourceQuotes({
   const navigate = useNavigate()
   return (
     <ul className="semantic-quotes">
-      {evidence.map((link, index) => {
+      {evidence.map((link) => {
         const source = report.sources.find((entry) => entry.sourceId === link.sourceId)
         return (
-          <li key={`${link.sourceId}-${index}`}>
+          <li key={`${link.sourceId}:${link.span.start}:${link.span.end}`}>
             <blockquote
               className="semantic-exact-text"
-              tabIndex={0}
               aria-label={t('assistant.semantic.sourceQuote')}
             >
               {link.quote}
@@ -53,6 +72,7 @@ export function SemanticVerificationDetails({ report }: ReportProps) {
   const differentCandidate =
     report.visibleAnswerSha256 != null && report.visibleAnswerSha256 !== report.checkedAnswerSha256
   const assessment = outcome.status === 'completed' ? outcome.assessment : null
+  const caveats = keyedCaveats(assessment?.missingCaveats ?? [])
 
   return (
     <section className="semantic-verification" aria-labelledby={headingId}>
@@ -85,14 +105,12 @@ export function SemanticVerificationDetails({ report }: ReportProps) {
               <dd>{t(`assistant.semantic.response.${assessment.responseClassification}`)}</dd>
             </div>
           </dl>
-          {assessment.missingCaveats.length > 0 ? (
+          {caveats.length > 0 ? (
             <div className="semantic-caveats">
               <h4>{t('assistant.semantic.missingCaveats')}</h4>
-              {assessment.missingCaveats.map((caveat, index) => (
-                <article key={index}>
-                  <p className="semantic-exact-text" tabIndex={0}>
-                    {caveat.description}
-                  </p>
+              {caveats.map(({ caveat, key }) => (
+                <article key={key}>
+                  <p className="semantic-exact-text">{caveat.description}</p>
                   <SourceQuotes evidence={caveat.evidence} report={report} />
                 </article>
               ))}
@@ -113,11 +131,7 @@ export function SemanticVerificationDetails({ report }: ReportProps) {
                     <Badge>{t(`assistant.semantic.support.${verdict.support}`)}</Badge>
                   ) : null}
                 </summary>
-                <p
-                  className="semantic-exact-text"
-                  tabIndex={0}
-                  aria-label={t('assistant.semantic.checkedText')}
-                >
+                <p className="semantic-exact-text" aria-label={t('assistant.semantic.checkedText')}>
                   {unit.text}
                 </p>
                 {verdict?.assertsDocumentAbsence ? (

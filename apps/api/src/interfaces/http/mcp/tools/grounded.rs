@@ -47,7 +47,7 @@ use crate::{
         query::{
             completion_policy::{
                 AnswerCompletionAssessment, AnswerCompletionContract,
-                GroundedAnswerCompletionEnvelope,
+                GroundedAnswerCompletionEnvelope, GroundedSequenceBudget,
             },
             service::{
                 CreateConversationCommand, ExecuteConversationTurnCommand,
@@ -58,7 +58,9 @@ use crate::{
     shared::text_tokens::backtick_literal_spans,
 };
 
-use super::super::{McpToolDescriptor, McpToolResult, ok_tool_result, tool_error_result};
+use super::super::{
+    McpToolDescriptor, McpToolResult, ok_tool_result, resync_tool_result_text, tool_error_result,
+};
 use super::ToolCallContext;
 
 const MCP_GROUNDED_MAX_LIBRARY_CHARS: usize = 256;
@@ -106,6 +108,13 @@ pub(crate) fn descriptor(name: &str) -> Option<McpToolDescriptor> {
                     "minLength": 1,
                     "maxLength": MCP_GROUNDED_MAX_QUERY_CHARS,
                     "description": "Natural-language question in the user's language. IronRAG's QueryCompiler turns it into a typed QueryIR (act, scope, target_types) before retrieval — no keyword pre-processing is required on the client side."
+                },
+                "sequenceAttempt": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 1,
+                    "default": 0,
+                    "description": "Zero for the initial call; one for its single repair or transient retry. This is caller protocol state, not an admission limit."
                 },
                 "conversationTurns": {
                     "type": "array",
@@ -166,11 +175,20 @@ pub(crate) async fn call_tool(
 }
 
 async fn grounded_answer(context: ToolCallContext<'_>, arguments: &Value) -> McpToolResult {
-    let routing = grounded_answer_conversation_routing(context.surface_kind);
     let request = match prepare_grounded_answer_request(arguments) {
         Ok(request) => request,
-        Err(error) => return tool_error_result(error),
+        Err(error) => return apply_grounded_answer_sequence_budget(tool_error_result(error), 0),
     };
+    let attempt = request.sequence_attempt;
+    let result = execute_grounded_answer(context, request).await;
+    apply_grounded_answer_sequence_budget(result, attempt)
+}
+
+async fn execute_grounded_answer(
+    context: ToolCallContext<'_>,
+    request: PreparedGroundedAnswerRequest,
+) -> McpToolResult {
+    let routing = grounded_answer_conversation_routing(context.surface_kind);
 
     // Scope check: the same POLICY_QUERY_RUN the UI handler uses for
     // `create_session` / `create_session_turn`. An MCP token without
@@ -264,6 +282,41 @@ async fn grounded_answer(context: ToolCallContext<'_>, arguments: &Value) -> Mcp
     )
 }
 
+fn apply_grounded_answer_sequence_budget(mut result: McpToolResult, attempt: u8) -> McpToolResult {
+    let previous_content = result.structured_content.clone();
+    let content = &mut result.structured_content;
+    let budget = if result.is_error {
+        let retryable = content.get("retryable").and_then(Value::as_bool) == Some(true);
+        let budget = GroundedSequenceBudget::failure(attempt, retryable);
+        if budget.remaining_calls == 0 {
+            content["retryable"] = json!(false);
+            if retryable {
+                let message = "Grounded answer temporarily unavailable; the sequence retry budget is exhausted.";
+                content["message"] = json!(message);
+                for block in &mut result.content {
+                    block.text = message.to_string();
+                }
+            }
+            if let Some(object) = content.as_object_mut() {
+                object.remove("retryAfterMs");
+                object.remove("repairHint");
+            }
+        }
+        budget
+    } else if let Ok(envelope) = GroundedAnswerCompletionEnvelope::from_structured_content(content)
+    {
+        let envelope = envelope.with_attempt(attempt);
+        content["repairPolicy"] = json!(&envelope.repair_policy);
+        content["readiness"] = json!(&envelope.readiness);
+        envelope.sequence_budget
+    } else {
+        GroundedSequenceBudget::failure(attempt, false)
+    };
+    content["sequenceBudget"] = json!(budget);
+    resync_tool_result_text(&mut result, &previous_content);
+    result
+}
+
 fn log_grounded_answer_execution_failure(
     request_id: &str,
     library_id: uuid::Uuid,
@@ -343,9 +396,11 @@ fn grounded_answer_result(
 }
 
 fn attach_grounded_answer_query_language(result: &mut McpToolResult, language: QueryLanguage) {
+    let previous_content = result.structured_content.clone();
     if let Some(structured_content) = result.structured_content.as_object_mut() {
         structured_content.insert("queryLanguage".to_string(), json!(language));
     }
+    resync_tool_result_text(result, &previous_content);
 }
 
 async fn enforce_transient_conversation_retention(
@@ -436,11 +491,42 @@ fn sanitize_grounded_answer_execution_error(error: ApiError) -> ApiError {
             )
         }
         ApiError::GatewayTimeout { .. } => ApiError::query_deadline_exceeded(),
-        ApiError::ServiceUnavailable { kind: "query_provider_unavailable", .. }
-        | ApiError::ProviderFailure(_) => ApiError::service_unavailable(
-            "query provider is temporarily unavailable; retry shortly",
-            "query_provider_unavailable",
-        ),
+        ApiError::ServiceUnavailable { kind: "query_state_conflict", .. } => {
+            ApiError::service_unavailable(
+                "query execution encountered a state conflict",
+                "query_state_conflict",
+            )
+        }
+        ApiError::ServiceUnavailable { kind: "query_provider_unavailable", .. } => {
+            ApiError::service_unavailable(
+                "query provider is temporarily unavailable; retry shortly",
+                "query_provider_unavailable",
+            )
+        }
+        ApiError::ServiceUnavailable { kind: "query_provider_admission_refused", .. } => {
+            ApiError::service_unavailable(
+                "query provider admission was refused",
+                "query_provider_admission_refused",
+            )
+        }
+        ApiError::ServiceUnavailable { kind: "query_provider_allowance_exhausted", .. } => {
+            ApiError::service_unavailable(
+                "query provider allowance is exhausted",
+                "query_provider_allowance_exhausted",
+            )
+        }
+        ApiError::ServiceUnavailable { kind: "query_provider_quota_exhausted", .. } => {
+            ApiError::service_unavailable(
+                "query provider quota is exhausted",
+                "query_provider_quota_exhausted",
+            )
+        }
+        ApiError::ServiceUnavailable { kind: "query_provider_request_rejected", .. } => {
+            ApiError::service_unavailable(
+                "query provider rejected the request",
+                "query_provider_request_rejected",
+            )
+        }
         ApiError::ServiceUnavailable {
             kind: "query_binding_unavailable" | "query_binding_not_configured",
             ..

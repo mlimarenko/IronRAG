@@ -226,9 +226,25 @@ async fn handle_session_tool_call(
         .and_then(Value::as_str)
         .is_some_and(tools::is_mutating_tool);
     let redis = state.persistence.redis.clone();
-    let tool_future =
-        handle_owned_mcp_tool_call(auth, state, request_id.to_string(), id, params, surface)
-            .instrument(tracing::Span::current());
+    // The session has already passed the owner and expiry checks for this
+    // request, so the digest and the principal below describe this caller and
+    // nothing the client supplied.
+    let caller_context = tools::ToolCallerIdentity {
+        session_fingerprint: session_scope.digest(),
+        owner_principal_id: auth.principal_id,
+    };
+    let tool_future = handle_owned_mcp_tool_call(
+        auth,
+        state,
+        tools::McpToolCallInput {
+            request_id: request_id.to_string(),
+            id,
+            params,
+            surface,
+            caller_context: Some(caller_context),
+        },
+    )
+    .instrument(tracing::Span::current());
     let receiver =
         Box::pin(start_distributed_bounded_mcp_tool_call(McpDistributedToolCallAdmission {
             registry: Arc::clone(&MCP_IN_FLIGHT_TOOL_CALLS),
@@ -338,7 +354,14 @@ async fn handle_session_mcp_transport_request(
     }
     // The session dispatch carries the full tool-call future; box it here so
     // the transport entry point stays below clippy's large-future threshold.
-    Box::pin(dispatch_session_mcp_method(auth, state, request, session_scope, context)).await
+    // Every paid attempt inside this call is attributed to the exact session
+    // that the coordination store just validated for this owner.
+    let caller = crate::shared::provider_http::DispatchCaller::McpSession(session_scope.digest());
+    Box::pin(crate::shared::provider_http::with_dispatch_caller(
+        caller,
+        dispatch_session_mcp_method(auth, state, request, session_scope, context),
+    ))
+    .await
 }
 
 async fn resolve_mcp_transport_session(

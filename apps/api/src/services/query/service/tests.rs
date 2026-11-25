@@ -40,8 +40,9 @@ use super::{
     session::{
         build_conversation_runtime_context,
         build_conversation_runtime_context_with_external_history,
-        build_prior_grounded_answer_context_messages, derive_conversation_title,
-        normalize_explicit_conversation_title, select_prior_grounded_answer_replay_executions,
+        build_prior_grounded_answer_context, derive_conversation_title,
+        normalize_explicit_conversation_title, prior_replay_candidate_refs,
+        select_prior_grounded_answer_replay_executions,
     },
 };
 

@@ -21,9 +21,6 @@ storage:
 dependencies:
   postgres:
     mode: bundled
-    image:
-      repository: pgvector/pgvector
-      tag: pg18
   redis:
     mode: bundled
     image:

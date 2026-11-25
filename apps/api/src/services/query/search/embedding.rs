@@ -10,6 +10,11 @@ use super::{
     },
     *,
 };
+use crate::{
+    integrations::llm::LlmGateway,
+    services::ops::billing::provider_reservation::ProviderCallReservation,
+    shared::provider_send::ProviderSendScope,
+};
 
 struct RevisionChunkEmbeddingBatchWrite<'a> {
     state: &'a AppState,
@@ -177,14 +182,25 @@ async fn sync_embed_chunk_stage_progress(
     }
 }
 
-async fn request_revision_chunk_embedding_batch(
+/// One revision's chunk-embedding batch: the library, attempt and revision it is
+/// billed to, the chunks it indexes and the binding that must serve them.
+pub(super) struct RevisionChunkEmbeddingBatch<'a> {
+    pub(super) library_id: Uuid,
+    pub(super) attempt_id: Uuid,
+    pub(super) revision_id: Uuid,
+    pub(super) chunks: &'a [&'a KnowledgeChunkRow],
+    pub(super) batch: Vec<usize>,
+    pub(super) binding: &'a ResolvedRuntimeBinding,
+}
+
+pub(super) async fn request_revision_chunk_embedding_batch(
     state: &AppState,
-    revision_id: Uuid,
-    chunks: &[&KnowledgeChunkRow],
-    batch: Vec<usize>,
-    binding: &ResolvedRuntimeBinding,
+    gateway: &dyn LlmGateway,
+    embedding_batch: RevisionChunkEmbeddingBatch<'_>,
     cancellation_token: &CancellationToken,
 ) -> AnyhowResult<(Vec<usize>, EmbeddingBatchResponse)> {
+    let RevisionChunkEmbeddingBatch { library_id, attempt_id, revision_id, chunks, batch, binding } =
+        embedding_batch;
     ensure_not_cancelled(cancellation_token)?;
     if let Some(bounds) = binding.embedding_input_bounds()
         && !bounds.accepts(batch.iter().map(|index| chunks[*index].normalized_text.as_str()))
@@ -202,18 +218,120 @@ async fn request_revision_chunk_embedding_batch(
         extra_parameters_json: binding.extra_parameters_json.clone(),
         dispatch: Some(binding.dispatch_authority()),
     };
-    let response = tokio::select! {
-        _ = cancellation_token.cancelled() => {
-            return Err(anyhow::Error::new(StageError::Cancelled));
+    // One durable ledger row per physical send, written by the send admission
+    // owner; the reservation carries the attribution this batch sends under. A
+    // reservation failure rejects the dispatch instead of sending untracked.
+    let mut provider_call =
+        reserve_embedding_provider_call(state, attempt_id, library_id, binding, cancellation_token)
+            .await?;
+    let provider_call_id = provider_call.provider_call_id();
+    let response = match dispatch_revision_chunk_embedding_batch(
+        gateway,
+        provider_call.send_scope(),
+        request,
+        cancellation_token,
+    )
+    .await
+    {
+        Ok(response) => response,
+        Err(error) if anyhow_is_cancelled(&error) => return Err(error),
+        Err(error) => {
+            tracing::warn!(%attempt_id, %revision_id, %provider_call_id, first_offset, "embed_chunk provider call failed");
+            return Err(fail_embedding_provider_call(provider_call, error, provider_call_id).await);
         }
-        result = state.llm_gateway.embed_many(request) => result.with_context(|| {
-            format!(
-                "failed to embed chunk batch for revision {revision_id} starting at offset {first_offset}"
-            )
-        })?,
     };
+    // Settle the exact response usage before the batch may publish success.
+    complete_embedding_provider_call(
+        &mut provider_call,
+        attempt_id,
+        revision_id,
+        provider_call_id,
+        &response.usage_json,
+    )
+    .await?;
     ensure_not_cancelled(cancellation_token)?;
     Ok((batch, response))
+}
+
+/// Reserves one durable ledger row for this batch before the paid request; a
+/// cancellation or reservation failure rejects the dispatch.
+async fn reserve_embedding_provider_call(
+    state: &AppState,
+    attempt_id: Uuid,
+    library_id: Uuid,
+    binding: &ResolvedRuntimeBinding,
+    cancellation_token: &CancellationToken,
+) -> AnyhowResult<ProviderCallReservation> {
+    tokio::select! {
+        _ = cancellation_token.cancelled() => Err(anyhow::Error::new(StageError::Cancelled)),
+        result = ProviderCallReservation::reserve_ingest_attempt(
+            state, attempt_id, binding.workspace_id, library_id, binding,
+        ) => Ok(result?),
+    }
+}
+
+/// Terminalizes a failed embedding batch call and maps it to the typed failure.
+async fn fail_embedding_provider_call(
+    mut provider_call: ProviderCallReservation,
+    error: anyhow::Error,
+    provider_call_id: Uuid,
+) -> anyhow::Error {
+    if let Err(settlement_error) = provider_call.fail().await {
+        tracing::error!(%provider_call_id, %settlement_error, "embed_chunk failure could not be terminalized; drop reconciliation will retry");
+        return anyhow::Error::new(settlement_error);
+    }
+    embedding_provider_failure(error, provider_call_id)
+}
+
+/// Settles the exact response usage. A failure keeps the response unpublished.
+async fn complete_embedding_provider_call(
+    provider_call: &mut ProviderCallReservation,
+    attempt_id: Uuid,
+    revision_id: Uuid,
+    provider_call_id: Uuid,
+    usage_json: &serde_json::Value,
+) -> AnyhowResult<()> {
+    provider_call.complete(usage_json).await.map_err(|error| {
+        tracing::error!(
+            %attempt_id,
+            %revision_id,
+            %provider_call_id,
+            %error,
+            "embed_chunk usage completion failed; response must not be published"
+        );
+        error
+    })?;
+    Ok(())
+}
+
+pub(super) fn embedding_provider_failure(
+    error: anyhow::Error,
+    provider_call_id: Uuid,
+) -> anyhow::Error {
+    match error.downcast::<crate::integrations::retry::ProviderCallError>() {
+        Ok(error) => {
+            error.report_terminal_failure();
+            QueryServiceError::EmbeddingProvider { provider_call_id, failure: error.into() }.into()
+        }
+        Err(error) => error,
+    }
+}
+
+pub(super) async fn dispatch_revision_chunk_embedding_batch(
+    gateway: &dyn LlmGateway,
+    provider_send_scope: ProviderSendScope,
+    request: EmbeddingBatchRequest,
+    cancellation_token: &CancellationToken,
+) -> AnyhowResult<EmbeddingBatchResponse> {
+    ensure_not_cancelled(cancellation_token)?;
+    tokio::select! {
+        biased;
+        _ = cancellation_token.cancelled() => Err(anyhow::Error::new(StageError::Cancelled)),
+        result = crate::shared::provider_send::with_provider_send(
+            provider_send_scope,
+            gateway.embed_many(request),
+        ) => result,
+    }
 }
 
 pub(super) fn revision_chunk_embedding_batches(chunk_count: usize) -> Vec<ChunkEmbeddingBatch> {
@@ -245,14 +363,19 @@ async fn learn_revision_embedding_dimensions(
             ),
         }
     })?;
-    let request = request_revision_chunk_embedding_batch(
+    let request = Box::pin(request_revision_chunk_embedding_batch(
         run.state,
-        run.revision_id,
-        chunks,
-        first_batch,
-        run.binding,
+        run.state.llm_gateway.as_ref(),
+        RevisionChunkEmbeddingBatch {
+            library_id: run.library_id,
+            attempt_id: run.attempt_id,
+            revision_id: run.revision_id,
+            chunks,
+            batch: first_batch,
+            binding: run.binding,
+        },
         run.cancellation_token,
-    )
+    ))
     .await;
     let (first_batch, response) =
         run.resolve_request_result(cleanup_owned_vector_ids, request).await?;
@@ -292,10 +415,15 @@ async fn persist_revision_embedding_batches(
     let batch_responses = stream::iter(batches.into_iter().map(|batch| {
         request_revision_chunk_embedding_batch(
             run.state,
-            run.revision_id,
-            chunks,
-            batch,
-            run.binding,
+            run.state.llm_gateway.as_ref(),
+            RevisionChunkEmbeddingBatch {
+                library_id: run.library_id,
+                attempt_id: run.attempt_id,
+                revision_id: run.revision_id,
+                chunks,
+                batch,
+                binding: run.binding,
+            },
             run.cancellation_token,
         )
     }))
@@ -596,15 +724,16 @@ impl SearchService {
             total_chunk_count: chunks.len(),
             reused_chunk_count: reused_chunk_ids.len(),
         };
-        let (expected_dimensions, learned_chunk_count) = learn_revision_embedding_dimensions(
-            &run,
-            chunks_ref,
-            &mut batches,
-            observed_dimensions,
-            &mut usage,
-            &mut cleanup_owned_vector_ids,
-        )
-        .await?;
+        let (expected_dimensions, learned_chunk_count) =
+            Box::pin(learn_revision_embedding_dimensions(
+                &run,
+                chunks_ref,
+                &mut batches,
+                observed_dimensions,
+                &mut usage,
+                &mut cleanup_owned_vector_ids,
+            ))
+            .await?;
         let chunks_embedded =
             persist_revision_embedding_batches(PersistRevisionEmbeddingBatchesInput {
                 run: &run,

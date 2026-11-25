@@ -42,6 +42,9 @@ use crate::integrations::llm::{
     ChatRequest, ChatResponse, EmbeddingBatchRequest, EmbeddingBatchResponse, EmbeddingRequest,
     EmbeddingResponse, VisionRequest, VisionResponse,
 };
+use crate::shared::extraction::image::{
+    LOW_CONFIDENCE_WITHOUT_VISUAL_READING, VISUAL_TRANSCRIPTION_EVIDENCE, VisualCoverage,
+};
 
 #[test]
 fn xberg_output_and_resource_faults_never_reject_the_input_bytes() {
@@ -95,6 +98,7 @@ async fn runtime_html_dispatch_preserves_declared_cp1251_without_a_meta_tag() {
     let policy = LibraryRecognitionPolicy::default();
     let plan = build_runtime_file_extraction_plan(FileExtractionRequest {
         max_output_tokens_override: None,
+        vision_ledger: None,
         vision_dispatch: None,
         cancellation_token: None,
         gateway: &FakeGateway,
@@ -318,6 +322,8 @@ macro_rules! vision_only_gateway {
 
 struct FakeGateway;
 struct EmptyVisionGateway;
+struct RelationVisionGateway;
+struct NoTextVisionGateway;
 struct FlakyVisionGateway {
     calls: AtomicUsize,
 }
@@ -405,6 +411,38 @@ vision_only_gateway!(
     |gateway: &ErroringVisionGateway, _request: VisionRequest| {
         gateway.calls.fetch_add(1, Ordering::SeqCst);
         Err(anyhow!("provider exploded"))
+    }
+);
+
+vision_only_gateway!(
+    RelationVisionGateway,
+    |_gateway: &RelationVisionGateway, mut request: VisionRequest| {
+        Ok(VisionResponse {
+            provider_kind: std::mem::take(&mut request.provider_kind),
+            model_name: std::mem::take(&mut request.model_name),
+            output_text: serde_json::json!({
+                "outcome":"text",
+                "text":"Sales and customers are drawn as separate boxes",
+                "relations":[{
+                    "subject":"sales","relation":"references","object":"customers",
+                    "direction":"sales -> customers"
+                }]
+            })
+            .to_string(),
+            usage_json: serde_json::json!({"total_tokens": 5}),
+        })
+    }
+);
+
+vision_only_gateway!(
+    NoTextVisionGateway,
+    |_gateway: &NoTextVisionGateway, mut request: VisionRequest| {
+        Ok(VisionResponse {
+            provider_kind: std::mem::take(&mut request.provider_kind),
+            model_name: std::mem::take(&mut request.model_name),
+            output_text: serde_json::json!({"outcome":"no_text"}).to_string(),
+            usage_json: serde_json::json!({"total_tokens": 3}),
+        })
     }
 );
 
@@ -1219,6 +1257,7 @@ async fn runtime_plan_uses_native_tabular_parser_for_xlsx_upload() {
     let policy = LibraryRecognitionPolicy::default();
     let result = build_runtime_file_extraction_plan(FileExtractionRequest {
         max_output_tokens_override: None,
+        vision_ledger: None,
         vision_dispatch: None,
         cancellation_token: None,
         gateway: &FakeGateway,
@@ -1295,6 +1334,7 @@ async fn runtime_plan_uses_vision_provider_for_non_xberg_images() {
 
     let result = build_runtime_file_extraction_plan(FileExtractionRequest {
         max_output_tokens_override: None,
+        vision_ledger: None,
         vision_dispatch: None,
         cancellation_token: None,
         gateway: &FakeGateway,
@@ -1344,6 +1384,7 @@ async fn runtime_plan_uses_vision_policy_for_static_raster_images() {
 
     let result = build_runtime_file_extraction_plan(FileExtractionRequest {
         max_output_tokens_override: None,
+        vision_ledger: None,
         vision_dispatch: None,
         cancellation_token: None,
         gateway: &FakeGateway,
@@ -1388,6 +1429,7 @@ async fn runtime_plan_rejects_empty_vision_image_text() {
 
     let error = build_runtime_file_extraction_plan(FileExtractionRequest {
         max_output_tokens_override: None,
+        vision_ledger: None,
         vision_dispatch: None,
         cancellation_token: None,
         gateway: &EmptyVisionGateway,
@@ -1418,6 +1460,7 @@ async fn runtime_plan_retries_once_when_vision_returns_empty_then_text() {
 
     let result = build_runtime_file_extraction_plan(FileExtractionRequest {
         max_output_tokens_override: None,
+        vision_ledger: None,
         vision_dispatch: None,
         cancellation_token: None,
         gateway: &gateway,
@@ -1456,6 +1499,7 @@ async fn runtime_plan_rejects_empty_vision_image_text_after_one_retry() {
 
     let error = build_runtime_file_extraction_plan(FileExtractionRequest {
         max_output_tokens_override: None,
+        vision_ledger: None,
         vision_dispatch: None,
         cancellation_token: None,
         gateway: &gateway,
@@ -1497,6 +1541,7 @@ async fn runtime_plan_does_not_retry_when_vision_returns_text() {
 
     let result = build_runtime_file_extraction_plan(FileExtractionRequest {
         max_output_tokens_override: None,
+        vision_ledger: None,
         vision_dispatch: None,
         cancellation_token: None,
         gateway: &gateway,
@@ -1527,6 +1572,7 @@ async fn runtime_plan_does_not_retry_vision_provider_errors() {
 
     let error = build_runtime_file_extraction_plan(FileExtractionRequest {
         max_output_tokens_override: None,
+        vision_ledger: None,
         vision_dispatch: None,
         cancellation_token: None,
         gateway: &gateway,
@@ -1623,6 +1669,7 @@ async fn vision_failure_class_survives_both_extraction_paths_without_leaking_det
         let policy = LibraryRecognitionPolicy::default();
         let error = build_runtime_file_extraction_plan(FileExtractionRequest {
             max_output_tokens_override: None,
+            vision_ledger: None,
             vision_dispatch: None,
             cancellation_token: None,
             gateway: &gateway,
@@ -1818,6 +1865,228 @@ async fn scan_text_merges_only_into_owning_page_and_retains_native_tables() {
     receipt.apply(&mut output);
     assert!(!output.source_map.to_string().contains("contentBase64"));
     assert!(output.extracted_images.is_empty());
+}
+
+/// Case/digit-turbulent token run that `text_quality` classifies as
+/// low-confidence OCR text.
+fn ocr_noise_text() -> &'static str {
+    concat!(
+        "summary topic alpha beta gamma ",
+        "abCD4efGH hiJKlmNO pQrST uvWXyZab ",
+        "cdEFGh3Ij klMNOprs tuVWxyZq mnOPqRst"
+    )
+}
+
+fn with_native_text(
+    mut native: crate::integrations::extraction_protocol::Extraction,
+    ordinal: u32,
+    text: &str,
+) -> crate::integrations::extraction_protocol::Extraction {
+    let unit = native.units.iter_mut().find(|unit| unit.ordinal == ordinal).expect("unit");
+    unit.content = text.to_string();
+    native.content =
+        native.units.iter().map(|unit| unit.content.as_str()).collect::<Vec<_>>().join("\n\n");
+    native
+}
+
+#[tokio::test]
+async fn native_only_extraction_records_per_unit_evidence_without_a_binding() {
+    let gateway = ErroringVisionGateway { calls: AtomicUsize::new(0) };
+    let mut native = with_native_text(native_visual_fixture(false), 1, ocr_noise_text());
+    let receipt =
+        recognize_native_visuals(&mut native, UploadFileKind::Pdf, visual_input(&gateway, None))
+            .await
+            .unwrap();
+    assert_eq!(gateway.calls.load(Ordering::SeqCst), 0);
+    assert_eq!(receipt.unit_evidence.len(), 2);
+    assert_eq!(receipt.unit_evidence[0].visual_coverage, VisualCoverage::NativeText);
+    assert_eq!(
+        receipt.unit_evidence[0].evidence_limitation,
+        Some(LOW_CONFIDENCE_WITHOUT_VISUAL_READING)
+    );
+    assert_eq!(receipt.unit_evidence[1].visual_coverage, VisualCoverage::None);
+    assert!(receipt.inferred_visual_structure.is_empty());
+
+    let mut output = xberg::project_native(
+        native,
+        xberg::XbergSource {
+            file_name: Some("scanned.pdf"),
+            mime_type: Some("application/pdf"),
+            source_format: "pdf",
+        },
+    )
+    .unwrap();
+    receipt.apply(&mut output);
+    assert_eq!(output.source_map["unit_evidence"][0]["ordinal"], serde_json::json!(1));
+    assert_eq!(
+        output.source_map["unit_evidence"][0]["visual_coverage"],
+        serde_json::json!("native_text")
+    );
+    assert_eq!(
+        output.source_map["unit_evidence"][0]["evidence_limitation"],
+        serde_json::json!(LOW_CONFIDENCE_WITHOUT_VISUAL_READING)
+    );
+    assert_eq!(output.source_map["inferred_visual_structure"], serde_json::json!([]));
+
+    let plan = build_xberg_pdf_extraction_plan(output);
+    assert_eq!(
+        plan.source_map["content_quality"]["evidence_limitation"],
+        serde_json::json!(LOW_CONFIDENCE_WITHOUT_VISUAL_READING)
+    );
+    assert_eq!(
+        extraction_quality_from_source_map(
+            &plan.source_map,
+            &plan.extraction_kind,
+            plan.extraction_warnings.len(),
+        )
+        .evidence_limitation
+        .as_deref(),
+        Some(LOW_CONFIDENCE_WITHOUT_VISUAL_READING)
+    );
+}
+
+#[tokio::test]
+async fn recognized_page_records_transcription_evidence_and_visual_coverage() {
+    let gateway = CountingTextVisionGateway { calls: AtomicUsize::new(0) };
+    let provider =
+        ProviderModelSelection { provider_kind: "openai".into(), model_name: "vision".into() };
+    let mut native = native_visual_fixture(true);
+    let receipt = recognize_native_visuals(
+        &mut native,
+        UploadFileKind::Pdf,
+        visual_input(&gateway, Some(&provider)),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(receipt.outcomes[0]["evidence"], serde_json::json!(VISUAL_TRANSCRIPTION_EVIDENCE));
+    assert_eq!(receipt.outcomes[0]["inferred"], serde_json::json!(false));
+    assert_eq!(receipt.unit_evidence[0].visual_coverage, VisualCoverage::NativeText);
+    assert_eq!(receipt.unit_evidence[1].visual_coverage, VisualCoverage::FullPageVision);
+    assert_eq!(receipt.unit_evidence[1].evidence_limitation, None);
+    assert!(receipt.inferred_visual_structure.is_empty());
+}
+
+#[tokio::test]
+async fn embedded_picture_reading_covers_a_low_confidence_native_unit() {
+    let gateway = CountingTextVisionGateway { calls: AtomicUsize::new(0) };
+    let provider =
+        ProviderModelSelection { provider_kind: "openai".into(), model_name: "vision".into() };
+    let mut native = native_visual_fixture(true);
+    native.visual_inputs[0].kind =
+        crate::integrations::extraction_protocol::VisualInputKind::EmbeddedPicture;
+    native.visual_inputs[0].source_unit = 1;
+    let mut native = with_native_text(native, 1, ocr_noise_text());
+    let receipt = recognize_native_visuals(
+        &mut native,
+        UploadFileKind::Pdf,
+        visual_input(&gateway, Some(&provider)),
+    )
+    .await
+    .unwrap();
+
+    assert!(receipt.unit_evidence[0].native_text_low_confidence);
+    assert_eq!(receipt.unit_evidence[0].visual_coverage, VisualCoverage::EmbeddedPictureVision);
+    assert_eq!(receipt.unit_evidence[0].evidence_limitation, None);
+    assert_eq!(receipt.unit_evidence[1].visual_coverage, VisualCoverage::None);
+}
+
+#[tokio::test]
+async fn full_page_reading_replaces_low_confidence_native_text() {
+    let gateway = CountingTextVisionGateway { calls: AtomicUsize::new(0) };
+    let provider =
+        ProviderModelSelection { provider_kind: "openai".into(), model_name: "vision".into() };
+    let mut native = native_visual_fixture(true);
+    native.visual_inputs[0].source_unit = 1;
+    let mut native = with_native_text(native, 1, ocr_noise_text());
+    let receipt = recognize_native_visuals(
+        &mut native,
+        UploadFileKind::Pdf,
+        visual_input(&gateway, Some(&provider)),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(native.units[0].content, "Counted OCR text");
+    assert!(
+        !native.units[0].content.contains("abCD4efGH"),
+        "the noisy native layer is not kept beside the reading"
+    );
+    assert_eq!(native.units[0].tables[0]["cells"][0], "keep");
+    let evidence = &receipt.unit_evidence[0];
+    assert!(evidence.native_text_low_confidence);
+    assert_eq!(evidence.visual_coverage, VisualCoverage::FullPageVision);
+    assert_eq!(evidence.evidence_limitation, None);
+}
+
+#[tokio::test]
+async fn unreadable_full_page_keeps_native_text_and_marks_the_limitation() {
+    let gateway = NoTextVisionGateway;
+    let provider =
+        ProviderModelSelection { provider_kind: "openai".into(), model_name: "vision".into() };
+    let mut native = native_visual_fixture(true);
+    native.visual_inputs[0].source_unit = 1;
+    let mut native = with_native_text(native, 1, ocr_noise_text());
+    let receipt = recognize_native_visuals(
+        &mut native,
+        UploadFileKind::Pdf,
+        visual_input(&gateway, Some(&provider)),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(native.units[0].content, ocr_noise_text());
+    let evidence = &receipt.unit_evidence[0];
+    assert_eq!(evidence.visual_coverage, VisualCoverage::FullPageVision);
+    assert_eq!(
+        evidence.evidence_limitation,
+        Some(LOW_CONFIDENCE_WITHOUT_VISUAL_READING),
+        "a reading that produced no text leaves the evidence unverified"
+    );
+}
+
+#[tokio::test]
+async fn page_relations_are_inferred_structure_not_source_text() {
+    let gateway = RelationVisionGateway;
+    let provider =
+        ProviderModelSelection { provider_kind: "openai".into(), model_name: "vision".into() };
+    let mut native = native_visual_fixture(true);
+    let receipt = recognize_native_visuals(
+        &mut native,
+        UploadFileKind::Pdf,
+        visual_input(&gateway, Some(&provider)),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(native.units[1].content, "Sales and customers are drawn as separate boxes");
+    assert!(!native.content.contains("references"), "an interpreted relation is not source text");
+    assert_eq!(receipt.inferred_visual_structure.len(), 1);
+    let inferred = &receipt.inferred_visual_structure[0];
+    assert!(inferred.inferred);
+    assert_eq!(inferred.source_unit, 2);
+    assert_eq!(inferred.relations.len(), 1);
+    assert_eq!(
+        Some(inferred.prompt_sha256.as_str()),
+        receipt.outcomes[0]["prompt_sha256"].as_str(),
+        "the inferred record carries the provenance of the same reading"
+    );
+
+    let mut output = xberg::project_native(
+        native,
+        xberg::XbergSource {
+            file_name: Some("diagram.pdf"),
+            mime_type: Some("application/pdf"),
+            source_format: "pdf",
+        },
+    )
+    .unwrap();
+    receipt.apply(&mut output);
+    assert_eq!(
+        output.source_map["inferred_visual_structure"][0]["inferred"],
+        serde_json::json!(true)
+    );
+    assert!(!output.content_text.contains("references"));
 }
 
 struct OutcomeGateway {
@@ -2116,6 +2385,7 @@ async fn no_text_for_an_image_only_document_fails_with_its_usage_receipt() {
     let policy = LibraryRecognitionPolicy::default();
     let error = build_runtime_file_extraction_plan(FileExtractionRequest {
         max_output_tokens_override: None,
+        vision_ledger: None,
         vision_dispatch: None,
         cancellation_token: None,
         gateway: &gateway,

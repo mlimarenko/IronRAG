@@ -9,40 +9,6 @@ fn incomplete_grounded_follow_up_state_stays_required_after_repeated_incomplete_
 }
 
 #[test]
-fn incomplete_grounded_follow_up_requires_grounding_evidence() {
-    assert!(!tool_result_satisfies_incomplete_grounded_follow_up(
-        "list_documents",
-        false,
-        false,
-        Some("document names only"),
-    ));
-    assert!(!tool_result_satisfies_incomplete_grounded_follow_up(
-        SEARCH_DOCUMENTS_TOOL_NAME,
-        false,
-        false,
-        Some("   "),
-    ));
-    assert!(tool_result_satisfies_incomplete_grounded_follow_up(
-        SEARCH_DOCUMENTS_TOOL_NAME,
-        false,
-        false,
-        Some("content evidence"),
-    ));
-    assert!(tool_result_satisfies_incomplete_grounded_follow_up(
-        GROUNDED_ANSWER_TOOL_NAME,
-        false,
-        true,
-        None,
-    ));
-    assert!(!tool_result_satisfies_incomplete_grounded_follow_up(
-        GROUNDED_ANSWER_TOOL_NAME,
-        false,
-        false,
-        Some("clarification without final evidence"),
-    ));
-}
-
-#[test]
 fn final_answer_never_splices_raw_user_fragments_into_grounded_text() {
     let answer = "The verified evidence does not support that claim.".to_string();
 

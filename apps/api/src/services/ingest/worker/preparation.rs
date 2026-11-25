@@ -2,7 +2,6 @@ use std::time::Instant;
 
 use anyhow::Context;
 use sha2::{Digest, Sha256};
-use tracing::warn;
 use uuid::Uuid;
 
 use crate::{
@@ -29,6 +28,7 @@ pub(super) struct PreparedContent {
     pub(super) revision: crate::infra::knowledge_rows::KnowledgeRevisionRow,
 }
 
+#[cfg(test)]
 pub(super) fn vision_billing_usage_items(
     usage_json: &serde_json::Value,
 ) -> Result<Vec<crate::shared::extraction::image::VisionCallReceipt>, serde_json::Error> {
@@ -126,6 +126,10 @@ async fn record_extract_content_failure(
     if matches!(extract_outcome, IngestAttemptMutationOutcome::AuthorityLost) {
         return IngestAttemptMutationOutcome::AuthorityLost;
     }
+    let mut details = serde_json::json!({ "failureCode": error.failure_code });
+    if let Some(provider_call_id) = error.provider_call_id {
+        details["providerCallId"] = serde_json::json!(provider_call_id);
+    }
     if let Err(event_error) = state
         .application_services
         .ingest
@@ -136,7 +140,7 @@ async fn record_extract_content_failure(
                 stage_name: INGEST_STAGE_EXTRACT_CONTENT.to_string(),
                 stage_state: "failed".to_string(),
                 message: Some(error.to_string()),
-                details_json: serde_json::json!({ "failureCode": error.failure_code }),
+                details_json: details,
                 provider_kind: None,
                 model_name: None,
                 prompt_tokens: None,
@@ -582,37 +586,6 @@ async fn resolve_revision_content(
                 return Err(anyhow::Error::new(JobLeaseLost { job_id: context.job.id }));
             }
             Err(anyhow::Error::new(error))
-        }
-    }
-}
-
-/// Capture each returned raw call once, before artifact publication or failure conversion.
-/// Resumed artifacts carry historical usage for reporting, never new billing.
-pub(super) async fn capture_vision_call_receipts(
-    state: &AppState,
-    authority: IngestRevisionWriteAuthority,
-    calls: &[crate::shared::extraction::image::VisionCallReceipt],
-) {
-    for call in calls {
-        if let Err(error) = state
-            .application_services
-            .billing
-            .capture_ingest_attempt(
-                state,
-                crate::services::ops::billing::CaptureIngestAttemptBillingCommand {
-                    workspace_id: authority.workspace_id,
-                    library_id: authority.library_id,
-                    attempt_id: authority.attempt_id,
-                    binding_id: None,
-                    provider_kind: call.provider_kind.clone(),
-                    model_name: call.model_name.clone(),
-                    call_kind: "vision_extract".to_owned(),
-                    usage_json: call.usage_json.clone(),
-                },
-            )
-            .await
-        {
-            warn!(attempt_id = %authority.attempt_id, ?error, "document-understanding billing capture failed");
         }
     }
 }

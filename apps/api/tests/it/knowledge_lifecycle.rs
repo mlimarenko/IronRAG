@@ -3261,6 +3261,7 @@ async fn vector_sweep_preserves_leased_replacement_after_preflight_with_retained
                     content_source_kind: "replace".to_owned(), storage_key: Some(storage_key),
                     replacement, visibility_intent_id: None, base_revision_id: None,
                 }),
+                enrichment_scope: None,
             }, None,
         ).await?.into_bundle();
         let c = admitted.revision.as_ref().context("C admission revision")?;

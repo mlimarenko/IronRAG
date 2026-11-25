@@ -1,5 +1,7 @@
 //! Document lifecycle and ingestion contracts.
 
+use std::collections::BTreeMap;
+
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -573,14 +575,48 @@ pub enum DocumentStatus {
     /// the dashboard.
     Canceled,
     /// The document was admitted with no content — no ingest job was
-    /// ever created, no revision is readable, and no mutation is
-    /// actively running. Distinct from `Queued` — nothing is waiting
-    /// for a worker and nothing will move without a new mutation
-    /// (e.g. a follow-up revision upload) supplying content.
+    /// ever created, no revision is readable, no mutation is
+    /// actively running, and no publication commitment is pending.
+    /// Distinct from `Queued` — nothing is waiting for a worker and
+    /// nothing will move without a new mutation (e.g. a follow-up
+    /// revision upload) supplying content.
     Empty,
+    /// The newest ingest job is held: an operator paused it, no worker
+    /// will pick it up, and no attempt is running. Distinct from
+    /// `Queued` — queued work waits for a worker on its own, paused
+    /// work waits for an explicit resume. A readable revision wins
+    /// over this bucket, so it only describes documents without
+    /// published content right now.
+    Paused,
+    /// A publication commitment was accepted — the document head holds
+    /// a visibility intent — and no current readable revision exists
+    /// yet. This is the canonical `suppressed` fact of
+    /// `ContentDocumentReadSnapshot`, not a second read model: the
+    /// connector owns the intent's phase in its own journal, and the
+    /// catalog must not present an absent ingest job as running work.
+    /// Distinct from `Empty`, which names a document with no pending
+    /// commitment at all. Never readable: no source access, no search
+    /// hits, no graph coverage.
+    PendingMaterialization,
 }
 
 impl DocumentStatus {
+    /// Every canonical operational bucket in one order, so filter schemas,
+    /// descriptors and tests read the vocabulary from its owner instead of
+    /// keeping a parallel string table. A new variant must be added here and
+    /// to `as_str`; `LibraryDocumentMetrics::status_counts` is exhaustive and
+    /// fails to compile until it covers the variant too.
+    pub const ALL: [Self; 8] = [
+        Self::Ready,
+        Self::Processing,
+        Self::Queued,
+        Self::Paused,
+        Self::Failed,
+        Self::Canceled,
+        Self::PendingMaterialization,
+        Self::Empty,
+    ];
+
     #[must_use]
     /// Returns the stable snake-case value used by storage and transport layers.
     pub const fn as_str(self) -> &'static str {
@@ -591,6 +627,8 @@ impl DocumentStatus {
             Self::Failed => "failed",
             Self::Canceled => "canceled",
             Self::Empty => "empty",
+            Self::Paused => "paused",
+            Self::PendingMaterialization => "pending_materialization",
         }
     }
 }
@@ -645,10 +683,26 @@ pub struct DocumentSummary {
 /// `/knowledge/libraries/{id}/summary`) MUST read from this shape.
 ///
 /// Invariants enforced by the shared aggregator:
-///   * `total == ready + processing + queued + failed + canceled + empty`
-///   * `graph_ready + graph_sparse == ready` (graph readiness is a
-///     split of the ready bucket; it does not overlap with processing
-///     / queued / failed / canceled).
+///
+///   * Every document has exactly one operational bucket. The total equals
+///     `ready + processing + queued + paused + failed + canceled + pending_materialization + empty`.
+///   * `graph_ready + graph_sparse <= ready`. Both graph numbers describe the
+///     current revision's channel state: `graph_ready` is a readable-and-ready
+///     document with a complete graph (`graph_state = 'ready'`) whose active
+///     projection carries a node with evidence from that exact revision, and
+///     `graph_sparse` is a graph-capable document without such full coverage —
+///     a `graph_degraded` graph (with or without a node) or a complete graph the
+///     projection does not cover. The two never overlap. A ready document whose
+///     current revision has no graph capability yet — vectors still pending or
+///     failed, graph not extracted — is neither number; it is not a gap and must
+///     never be produced by complementary arithmetic. The document-list `graph
+///     gap` selector is the broader `ready - graph_ready` deficit, which does
+///     include those still-enriching documents.
+///   * `ready <= readable <= total`. `readable` is a separate fact — readable
+///     text exists in the current revision — and is not an operational status,
+///     a graph-coverage number, or the configured `ingestionReadiness.ready`
+///     binding/config flag. Optional enrichment may still be pending or
+///     degraded behind it.
 ///
 /// `in_flight` is intentionally NOT a field on this struct — it is a
 /// derived value `processing + queued`. Adding it would invite the
@@ -658,25 +712,74 @@ pub struct DocumentSummary {
 pub struct LibraryDocumentMetrics {
     /// Sum of all mutually exclusive lifecycle buckets.
     pub total: i64,
-    /// Successfully ingested documents.
+    /// Documents whose current readable revision is published and whose
+    /// latest work carries no blocking failure: the ingestable population.
     pub ready: i64,
     /// Documents with an active worker attempt.
     pub processing: i64,
     /// Documents waiting for a worker attempt.
     pub queued: i64,
+    /// Documents whose newest work is held by an operator pause — not
+    /// waiting for a worker and not running. Distinct from `queued`.
+    pub paused: i64,
     /// Documents whose current attempt failed.
     pub failed: i64,
     /// Documents whose current attempt was canceled or superseded.
     pub canceled: i64,
-    /// Documents with no content and no ingest work pending — admitted
-    /// with no revision, no readable revision, and no active mutation.
+    /// Documents with an accepted publication commitment (visibility
+    /// intent) and no current readable revision yet. Connector phase is
+    /// owned by the connector journal, so this bucket never claims a
+    /// running ingest.
+    pub pending_materialization: i64,
+    /// Documents with no content, no work pending and no pending
+    /// publication commitment — admitted with no revision, no readable
+    /// revision, and no active mutation.
     pub empty: i64,
-    /// Ready documents with complete graph materialization.
+    /// Ready documents with full graph readiness (`vector_state = 'ready'` and
+    /// `graph_state = 'ready'`) whose active projection carries a document node
+    /// with evidence from the exact current readable revision. A
+    /// `graph_degraded` revision never counts here, even with a node.
     pub graph_ready: i64,
-    /// Ready documents with sparse graph materialization.
+    /// Ready documents whose graph capability is partial or whose complete
+    /// graph the projection does not cover — disjoint from `graph_ready`. A
+    /// `graph_degraded` revision is sparse even with a projection node; never
+    /// `ready - graph_ready`, which additionally names documents still waiting
+    /// for capability.
     pub graph_sparse: i64,
+    /// Documents with a current readable revision, whatever their
+    /// operational bucket. Presence of readable content is observed
+    /// independently of status, graph coverage and binding readiness, so a
+    /// failed or held re-ingest never hides material a reader can still use.
+    pub readable: i64,
     /// Time at which the aggregate was recomputed.
     pub recomputed_at: DateTime<Utc>,
+}
+
+impl LibraryDocumentMetrics {
+    /// Canonical per-status counts keyed by `DocumentStatus::as_str`, with
+    /// every bucket present — zeros included — so a descriptor or summary
+    /// never has to invent a key or drop an unexpressible document. The
+    /// values sum to `total` by the struct invariant; `readable`,
+    /// `graph_ready` and `graph_sparse` are deliberately absent because they
+    /// describe content and coverage, not an operational bucket.
+    #[must_use]
+    pub fn status_counts(&self) -> BTreeMap<String, i64> {
+        let mut counts = BTreeMap::new();
+        for status in DocumentStatus::ALL {
+            let count = match status {
+                DocumentStatus::Ready => self.ready,
+                DocumentStatus::Processing => self.processing,
+                DocumentStatus::Queued => self.queued,
+                DocumentStatus::Paused => self.paused,
+                DocumentStatus::Failed => self.failed,
+                DocumentStatus::Canceled => self.canceled,
+                DocumentStatus::PendingMaterialization => self.pending_materialization,
+                DocumentStatus::Empty => self.empty,
+            };
+            counts.insert(status.as_str().to_string(), count);
+        }
+        counts
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]

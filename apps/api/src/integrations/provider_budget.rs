@@ -294,6 +294,11 @@ impl ProviderBudgetError {
                 crate::shared::provider_http::ProviderDispatchRefusal::CredentialMismatch => {
                     "dispatch_credential_mismatch"
                 }
+                crate::shared::provider_http::ProviderDispatchRefusal::Caller => "dispatch_caller",
+                crate::shared::provider_http::ProviderDispatchRefusal::Attribution => {
+                    "dispatch_attribution"
+                }
+                crate::shared::provider_http::ProviderDispatchRefusal::Busy => "dispatch_busy",
                 crate::shared::provider_http::ProviderDispatchRefusal::UninspectableBody => {
                     "dispatch_uninspectable_body"
                 }

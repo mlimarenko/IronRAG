@@ -12,6 +12,7 @@ mod consolidation;
 mod context;
 mod document_target;
 mod embed;
+pub(crate) use embed::operational_provider_failure;
 mod endpoint_answer;
 #[cfg(test)]
 mod endpoint_chunk_answer;
@@ -185,10 +186,11 @@ use technical_literals::technical_literal_focus_keyword_segments;
 use technical_literals::technical_literal_focus_keywords;
 pub(crate) use types::{
     AnswerGenerationStage, AnswerVerificationStage, AuthoritativeAnswerEvidence,
-    PreparedAnswerQueryResult, QueryChunkReferenceSnapshot, QueryGraphIndex, RetrievalBundle,
-    RuntimeAnswerQueryFailure, RuntimeAnswerQueryResult, RuntimeAnswerVerification,
-    RuntimeChunkScoreKind, RuntimeMatchedChunk, RuntimeMatchedEntity, RuntimeMatchedRelationship,
-    RuntimeStructuredQueryResult, SemanticRerankExecutionContext,
+    PROTECTED_STATEMENT_MAX_CHARS, PreparedAnswerQueryResult, QueryChunkReferenceSnapshot,
+    QueryGraphIndex, RetrievalBundle, RuntimeAnswerQueryFailure, RuntimeAnswerQueryResult,
+    RuntimeAnswerVerification, RuntimeChunkScoreKind, RuntimeMatchedChunk, RuntimeMatchedEntity,
+    RuntimeMatchedRelationship, RuntimeStructuredQueryResult, SelectedGraphContextLine,
+    SemanticRerankExecutionContext, applicable_preserved_source_spans, protected_statement,
 };
 #[cfg(test)]
 pub(crate) use types::{
@@ -205,7 +207,10 @@ pub(crate) use verification::{
 pub(crate) use verification::{
     attach_query_answer_outcome, enrich_query_assembly_diagnostics, enrich_query_candidate_summary,
 };
-pub(crate) use verification_policy::{AnswerVisibilityKind, finalize_answer_visibility};
+pub(crate) use verification_policy::{
+    AnswerVisibilityKind, FinalizedAnswerVisibility, append_evidence_reproduction_warning,
+    finalize_answer_visibility,
+};
 
 /// HyDE passage generation timeout. Increase for slow LLM providers.
 const HYDE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);

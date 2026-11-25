@@ -92,6 +92,37 @@ fn variant_coverage_warning_routes_single_shot_to_agent_path() {
 }
 
 #[test]
+fn verifier_rejects_navigation_path_and_accepts_selected_source_path() {
+    let mut prepared = prepared_for_single_shot(sample_ir(0.8, None));
+    prepared.answer_context = "Question: Where is /etc/prompt-only.conf?".to_string();
+    prepared.structured.retrieved_documents[0].preview_excerpt =
+        "The selected source specifies /etc/real-agent.conf.".to_string();
+    let evidence = super::super::AuthoritativeAnswerEvidence {
+        bundle: None,
+        chunk_rows: Vec::new(),
+        structured_blocks: Vec::new(),
+        technical_facts: Vec::new(),
+    };
+    let grounding =
+        selected_runtime_grounding_evidence(&prepared, AssistantGroundingEvidence::default());
+    let verify = |answer| {
+        verify_answer_against_authoritative_evidence(AnswerVerificationRequest {
+            question: "Where is /etc/prompt-only.conf?",
+            answer,
+            intent_profile: &prepared.structured.intent_profile,
+            evidence: &evidence,
+            chunks: &[],
+            assistant_grounding: &grounding,
+        })
+    };
+
+    let unsupported = verify("Use `/etc/prompt-only.conf`.");
+    assert!(unsupported.unsupported_literals.iter().any(|value| value == "/etc/prompt-only.conf"));
+    let supported = verify("Use `/etc/real-agent.conf`.");
+    assert!(supported.unsupported_literals.is_empty(), "{:?}", supported.unsupported_literals);
+}
+
+#[test]
 fn fast_path_verifier_keeps_selected_runtime_grounding_without_attesting_prose() {
     let prepared = prepared_for_single_shot(sample_ir(0.8, None));
 
@@ -109,7 +140,6 @@ fn fast_path_verifier_keeps_selected_runtime_grounding_without_attesting_prose()
             technical_facts: Vec::new(),
         },
         chunks: &chunks,
-        prompt_context: &prepared.answer_context,
         assistant_grounding: &grounding,
     });
 
@@ -164,7 +194,6 @@ fn setup_configuration_builder_verifies_literals_without_attesting_label_prose()
             technical_facts: Vec::new(),
         },
         chunks: &chunks,
-        prompt_context: &prepared.answer_context,
         assistant_grounding: &grounding,
     });
 

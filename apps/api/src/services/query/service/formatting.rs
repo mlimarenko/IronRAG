@@ -494,6 +494,7 @@ pub(crate) fn map_chunk_references(
         .map(|reference| QueryChunkReference {
             execution_id,
             chunk_id: reference.chunk_id,
+            revision_id: None,
             rank: reference.rank,
             score: reference.score,
             // Filled in at display time from the chunk rows themselves; the

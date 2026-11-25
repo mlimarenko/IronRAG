@@ -367,6 +367,7 @@ fn chunk_references(seed: u128, execution_id: Uuid, count: usize) -> Vec<Assista
         .map(|index| AssistantChunkReference {
             execution_id,
             chunk_id: deterministic_id(seed, offset(100, index)),
+            revision_id: None,
             rank: rank(index),
             score: score(index),
             document_id: None,

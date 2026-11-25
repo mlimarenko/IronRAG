@@ -51,14 +51,15 @@ pub(crate) fn map_graph_runtime_execution_error(
 
 pub(crate) fn graph_extraction_execution_error(
     request: &GraphExtractionRequest,
-    message: impl Into<String>,
+    message: impl Into<Box<str>>,
     provider_failure: Option<RuntimeProviderFailureDetail>,
     recovery_summary: ExtractionRecoverySummary,
     recovery_attempts: Vec<GraphExtractionRecoveryRecord>,
 ) -> GraphExtractionExecutionError {
     GraphExtractionExecutionError {
+        provider_call_id: None,
         message: message.into(),
-        request_shape_key: format!("{GRAPH_EXTRACTION_VERSION}:runtime"),
+        request_shape_key: format!("{GRAPH_EXTRACTION_VERSION}:runtime").into(),
         request_size_bytes: request.chunk.content.len(),
         provider_failure: provider_failure.map(Box::new),
         provider_admission_error: None,
@@ -75,11 +76,12 @@ pub(crate) fn graph_extraction_execution_error(
 
 pub(crate) fn graph_extraction_cancelled_error(
     request: &GraphExtractionRequest,
-    request_shape_key: impl Into<String>,
+    request_shape_key: impl Into<Box<str>>,
     request_size_bytes: usize,
 ) -> GraphExtractionExecutionError {
     GraphExtractionExecutionError {
-        message: crate::services::ingest::cancellation::StageError::Cancelled.to_string(),
+        provider_call_id: None,
+        message: crate::services::ingest::cancellation::StageError::Cancelled.to_string().into(),
         request_shape_key: request_shape_key.into(),
         request_size_bytes,
         provider_failure: None,

@@ -1,3 +1,5 @@
+use super::super::source_context::overview_evidence_anchor_ranks;
+use super::KnowledgeDocumentRow;
 use super::{
     BTreeSet, CONTENT_ANCHOR_CONTEXT_RESERVATION_LIMIT,
     DOCUMENT_EVIDENCE_CONTEXT_RESERVATION_LIMIT, EXACT_LITERAL_CONTEXT_RESERVATION_LIMIT, HashMap,
@@ -34,6 +36,7 @@ pub(crate) fn truncate_bundle(
         query_ir,
         demoted_document_ids,
         &HashMap::new(),
+        &HashMap::new(),
     );
 }
 
@@ -43,6 +46,7 @@ pub(crate) fn truncate_bundle_with_semantic_chunk_ranks(
     query_ir: Option<&QueryIR>,
     demoted_document_ids: &HashSet<Uuid>,
     semantic_chunk_ranks: &HashMap<Uuid, usize>,
+    document_index: &HashMap<Uuid, KnowledgeDocumentRow>,
 ) {
     bundle.entities.truncate(entity_context_top_k(top_k, query_ir));
     bundle.relationships.truncate(top_k);
@@ -52,6 +56,7 @@ pub(crate) fn truncate_bundle_with_semantic_chunk_ranks(
         query_ir,
         demoted_document_ids,
         semantic_chunk_ranks,
+        document_index,
     );
 }
 
@@ -93,6 +98,7 @@ pub(super) fn truncate_chunks_for_context(
         query_ir,
         demoted_document_ids,
         &HashMap::new(),
+        &HashMap::new(),
     );
 }
 
@@ -102,10 +108,18 @@ pub(super) fn truncate_chunks_for_context_with_semantic_ranks(
     query_ir: Option<&QueryIR>,
     demoted_document_ids: &HashSet<Uuid>,
     semantic_chunk_ranks: &HashMap<Uuid, usize>,
+    document_index: &HashMap<Uuid, KnowledgeDocumentRow>,
 ) {
     if chunks.len() <= top_k {
         return;
     }
+    let overview_anchors = query_ir
+        .filter(|_| top_k >= 2)
+        .map(|ir| overview_evidence_anchor_ranks(ir, chunks, document_index))
+        .unwrap_or_default()
+        .into_iter()
+        .map(|rank| (rank, chunks[rank].clone()))
+        .collect();
     let mut indexed = std::mem::take(chunks).into_iter().enumerate().collect::<Vec<_>>();
     // Attached-context documents (image attachments collapsed onto their parent
     // page) sink below every peer/primary chunk so they fill only the residual
@@ -159,6 +173,23 @@ pub(super) fn truncate_chunks_for_context_with_semantic_ranks(
     } else {
         indexed.iter().take(top_k).cloned().collect::<Vec<_>>()
     };
+    // Use a redundant passage, not the last representative of another document
+    // or a protected retrieval lane, to carry a budgeted overview into the prompt.
+    ensure_anchor_chunks_retained(
+        &mut selected,
+        overview_anchors,
+        top_k,
+        |selected, protected, _| {
+            selected.iter().rposition(|(_, chunk)| {
+                !protected.contains(&chunk.chunk_id)
+                    && chunk.score_kind.can_yield_overview_slot()
+                    && selected.iter().any(|(_, other)| {
+                        other.document_id == chunk.document_id && other.chunk_id != chunk.chunk_id
+                    })
+            })
+        },
+        |_| {},
+    );
     ensure_document_evidence_anchors_retained(&mut selected, reserved_document_evidence, top_k);
     if let Some(anchor) = reserved_anchor {
         ensure_setup_focus_anchor_retained(&mut selected, anchor, top_k);

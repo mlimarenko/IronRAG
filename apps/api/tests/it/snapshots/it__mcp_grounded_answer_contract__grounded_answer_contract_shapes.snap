@@ -1,5 +1,5 @@
 ---
-source: apps/api/tests/mcp_grounded_answer_contract.rs
+source: apps/api/tests/it/mcp_grounded_answer_contract.rs
 expression: shapes
 ---
 [
@@ -124,6 +124,7 @@ expression: shapes
       "repairPolicy",
       "responseProfile",
       "runtimeExecutionId",
+      "sequenceBudget",
       "workspaceId"
     ],
     "topLevelKeys": [
@@ -299,6 +300,7 @@ expression: shapes
       "repairPolicy",
       "responseProfile",
       "runtimeExecutionId",
+      "sequenceBudget",
       "workspaceId"
     ],
     "topLevelKeys": [
@@ -423,6 +425,7 @@ expression: shapes
       "repairPolicy",
       "responseProfile",
       "runtimeExecutionId",
+      "sequenceBudget",
       "workspaceId"
     ],
     "topLevelKeys": [
@@ -601,6 +604,7 @@ expression: shapes
       "repairPolicy",
       "responseProfile",
       "runtimeExecutionId",
+      "sequenceBudget",
       "workspaceId"
     ],
     "topLevelKeys": [
@@ -771,6 +775,7 @@ expression: shapes
       "repairPolicy",
       "responseProfile",
       "runtimeExecutionId",
+      "sequenceBudget",
       "workspaceId"
     ],
     "topLevelKeys": [
@@ -936,6 +941,7 @@ expression: shapes
       "repairPolicy",
       "responseProfile",
       "runtimeExecutionId",
+      "sequenceBudget",
       "workspaceId"
     ],
     "topLevelKeys": [

@@ -155,11 +155,18 @@ export function documentGridPage(
     empty: 0,
     failed: 0,
     processing: 0,
+    paused: 0,
+    pendingMaterialization: 0,
     queued: 0,
+    readable: 0,
     ready: 0,
     total: scoped.length,
   }
-  for (const row of scoped) statusCounts[row.status] += 1
+  for (const row of scoped) {
+    const key = row.status === 'pending_materialization' ? 'pendingMaterialization' : row.status
+    statusCounts[key] += 1
+    if (row.readableRevisionId) statusCounts.readable += 1
+  }
   return {
     items,
     snapshotAt,

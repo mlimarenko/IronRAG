@@ -2281,7 +2281,29 @@ async fn operational_list_preserves_unpublished_deleted_and_hidden_documents() -
                 }).await?;
             assert_eq!(counts.total, Some(page.rows.len() as i64));
             assert_eq!(counts.ready, Some(1));
-            assert_eq!(counts.empty, Some(if include_deleted { 3 } else { 2 }));
+            assert_eq!(
+                counts.pending_materialization,
+                Some(1),
+                "the outstanding visibility intent is a pending materialization, not an empty admission"
+            );
+            assert_eq!(
+                counts.empty,
+                Some(if include_deleted { 2 } else { 1 }),
+                "only a document with no publication commitment and no content is empty"
+            );
+            let bucket_sum = counts.ready.unwrap_or_default()
+                + counts.processing.unwrap_or_default()
+                + counts.queued.unwrap_or_default()
+                + counts.paused.unwrap_or_default()
+                + counts.failed.unwrap_or_default()
+                + counts.canceled.unwrap_or_default()
+                + counts.pending_materialization.unwrap_or_default()
+                + counts.empty.unwrap_or_default();
+            assert_eq!(
+                Some(bucket_sum),
+                counts.total,
+                "the canonical buckets must partition the reported total"
+            );
         }
         for secret in ["mutable-empty-secret", "mutable-hidden-secret"] {
             assert!(grid_page(&pool, fixture.library_id, snapshot, GridPageArgs { search: Some(secret), ..Default::default() }).await?.rows.is_empty());
@@ -2443,6 +2465,7 @@ async fn revision_admission_import_is_denied_by_intent_then_normal_replacement_s
                 content_source_kind: "replace".to_owned(), replacement: replacement.clone(), visibility_intent_id: Some(intent),
                 base_revision_id: None, storage_key: None,
             }), parent_async_operation_id: None, priority: TEST_INGEST_PRIORITY,
+            enrichment_scope: None,
         }, None).await?.into_bundle();
         let revision_id = admitted.revision.context("replacement revision")?.id;
         let item_id = admitted.item.context("replacement item")?.id;
@@ -2723,7 +2746,7 @@ async fn grid_page(
 }
 
 /// The consolidated list read's scope facts for one filter scope: rollup
-/// health, the whole-scope NULL-cost probe and the row/status counts, read in
+/// health, the whole-scope NULL-cost probe and the status counts, read in
 /// the same REPEATABLE READ snapshot the page would be. Tests use it where
 /// they do not need the rows.
 async fn grid_scope_read(
@@ -3173,6 +3196,160 @@ async fn document_page_scans_billing_rollups_once_before_pagination() -> anyhow:
     result
 }
 
+/// The document grid carries no coverage field, so a partially measured sum must
+/// never be shown as a total: an observed charge next to an unresolved or
+/// unpriced call stays NULL, while a genuinely priced zero is still a total.
+#[tokio::test]
+#[ignore = "requires local postgres service"]
+async fn grid_cost_withholds_a_partial_charge_and_keeps_a_priced_zero() -> anyhow::Result<()> {
+    use content_document_list_repository::{
+        DocumentFacetColumn, DocumentListFilters, DocumentListSearchRanges, FilterValues,
+    };
+    let settings = Settings::from_env()?;
+    let (pool, temp_database) = connect_postgres(&settings).await?;
+    let fixture = ContentRepositoryFixture::create(&pool).await?;
+    let result = async {
+        let snapshot = Utc::now();
+        let finish = snapshot - chrono::Duration::minutes(1);
+
+        // One observed charge plus an unresolved/unpriced call: the stored sum is
+        // a lower bound, and this DTO cannot say so.
+        let partial_id = seed_grid_document(
+            &pool,
+            &fixture,
+            "partial-cost",
+            "partial-cost.txt",
+            Some("text/plain"),
+            10,
+        )
+        .await?;
+        let partial_job =
+            seed_grid_attempt(&pool, &fixture, partial_id, finish, Some(finish)).await?;
+        seed_grid_cost_observation(
+            &pool,
+            &fixture,
+            partial_job,
+            partial_id,
+            GridCostObservation {
+                currency: "USD",
+                total: 5,
+                provider_call_count: 1,
+                unpriced_provider_call_count: 1,
+            },
+        )
+        .await?;
+
+        // Every observed call priced, at zero: a genuine measured zero.
+        let priced_zero_id = seed_grid_document(
+            &pool,
+            &fixture,
+            "priced-zero",
+            "priced-zero.txt",
+            Some("text/plain"),
+            10,
+        )
+        .await?;
+        let priced_zero_job =
+            seed_grid_attempt(&pool, &fixture, priced_zero_id, finish, Some(finish)).await?;
+        seed_grid_cost_observation(
+            &pool,
+            &fixture,
+            priced_zero_job,
+            priced_zero_id,
+            GridCostObservation {
+                currency: "USD",
+                total: 0,
+                provider_call_count: 2,
+                unpriced_provider_call_count: 0,
+            },
+        )
+        .await?;
+
+        let page = grid_page(&pool, fixture.library_id, snapshot, GridPageArgs::default()).await?;
+        let partial = page.rows.iter().find(|row| row.id == partial_id).expect("partial-cost row");
+        assert_eq!(
+            partial.cost_total, None,
+            "a partially measured sum must not be presented as a total"
+        );
+        assert_eq!(partial.cost_currency_code, None);
+        let priced_zero =
+            page.rows.iter().find(|row| row.id == priced_zero_id).expect("priced-zero row");
+        assert_eq!(
+            priced_zero.cost_total,
+            Some(rust_decimal::Decimal::ZERO),
+            "a fully priced zero stays a measured total"
+        );
+        assert_eq!(priced_zero.cost_currency_code.as_deref(), Some("USD"));
+
+        // Cost filter membership follows the displayed value: the withheld sum is
+        // not a numeric match, and only the explicit null bucket selects it.
+        let by_amount = DocumentListFilters {
+            cost: FilterValues {
+                present: true,
+                include_null: false,
+                values: vec![rust_decimal::Decimal::from(5)],
+            },
+            ..DocumentListFilters::default()
+        };
+        let matched = grid_page_scoped(
+            &pool,
+            fixture.library_id,
+            snapshot,
+            &by_amount,
+            &DocumentListSearchRanges::default(),
+            GridPageArgs::default(),
+        )
+        .await?;
+        assert!(
+            matched.rows.iter().all(|row| row.id != partial_id),
+            "a cost the grid does not show must not be filter-matchable by amount"
+        );
+        let by_null = DocumentListFilters {
+            cost: FilterValues { present: true, include_null: true, values: Vec::new() },
+            ..DocumentListFilters::default()
+        };
+        let null_matched = grid_page_scoped(
+            &pool,
+            fixture.library_id,
+            snapshot,
+            &by_null,
+            &DocumentListSearchRanges::default(),
+            GridPageArgs::default(),
+        )
+        .await?;
+        assert!(
+            null_matched.rows.iter().any(|row| row.id == partial_id),
+            "the withheld sum belongs to the null bucket, not to a numeric value"
+        );
+
+        // The cost facet advertises the same values as the grid.
+        let facet = grid_facet_page_with_ranges(
+            &pool,
+            &fixture,
+            snapshot,
+            DocumentFacetColumn::Cost,
+            &DocumentListSearchRanges::default(),
+            10,
+        )
+        .await?;
+        assert!(
+            facet.rows.iter().all(|row| row.value_decimal != Some(rust_decimal::Decimal::from(5))),
+            "the cost facet must not advertise a sum the grid withholds"
+        );
+        assert!(
+            facet.rows.iter().any(|row| row.value_decimal == Some(rust_decimal::Decimal::ZERO)),
+            "the fully priced zero stays a numeric facet value"
+        );
+        Ok(())
+    }
+    .await;
+
+    fixture.cleanup(&pool).await?;
+    pool.close().await;
+    temp_database.drop().await?;
+    result
+}
+
 #[tokio::test]
 #[ignore = "requires local postgres service"]
 async fn document_grid_accounting_sorts_keep_nulls_last_and_stable_keysets() -> anyhow::Result<()> {
@@ -3571,6 +3748,14 @@ async fn grid_facet_page_with_ranges(
     .map_err(Into::into)
 }
 
+/// One measured-cost observation for a derived execution-cost fixture row.
+struct GridCostObservation<'a> {
+    currency: &'a str,
+    total: i64,
+    provider_call_count: i32,
+    unpriced_provider_call_count: i32,
+}
+
 async fn seed_grid_cost(
     pool: &PgPool,
     fixture: &ContentRepositoryFixture,
@@ -3579,19 +3764,46 @@ async fn seed_grid_cost(
     currency: &str,
     total: i64,
 ) -> anyhow::Result<()> {
+    seed_grid_cost_observation(
+        pool,
+        fixture,
+        job_id,
+        document_id,
+        GridCostObservation {
+            currency,
+            total,
+            provider_call_count: 1,
+            unpriced_provider_call_count: 0,
+        },
+    )
+    .await
+}
+
+/// Seeds one derived execution-cost row with explicit settled and unpriced
+/// observation counts, so a test can describe a document whose pricing is
+/// incomplete or absent.
+async fn seed_grid_cost_observation(
+    pool: &PgPool,
+    fixture: &ContentRepositoryFixture,
+    job_id: Uuid,
+    document_id: Uuid,
+    observation: GridCostObservation<'_>,
+) -> anyhow::Result<()> {
     sqlx::query(
         "insert into billing_execution_cost
          (owning_execution_kind, owning_execution_id, workspace_id, library_id,
           knowledge_document_id, total_cost, currency_code, provider_call_count,
           unpriced_provider_call_count)
-         values ('ingest_attempt', $1, $2, $3, $4, $5, $6, 1, 0)",
+         values ('ingest_attempt', $1, $2, $3, $4, $5, $6, $7, $8)",
     )
     .bind(job_id)
     .bind(fixture.workspace_id)
     .bind(fixture.library_id)
     .bind(document_id)
-    .bind(rust_decimal::Decimal::from(total))
-    .bind(currency)
+    .bind(rust_decimal::Decimal::from(observation.total))
+    .bind(observation.currency)
+    .bind(observation.provider_call_count)
+    .bind(observation.unpriced_provider_call_count)
     .execute(pool)
     .await?;
     Ok(())
@@ -3784,8 +3996,8 @@ async fn cost_facet_guard_scans_full_scope_not_just_the_returned_page() -> anyho
             },
         )
         .await?
-        .has_null_cost;
-        assert!(!clean, "a single-currency scope must not report a null cost");
+        .has_mixed_currency_cost;
+        assert!(!clean, "a single-currency scope must not report a mixed-currency cost");
 
         // The first facet page would still look clean, yet one document is
         // multi-currency: the guard must catch it before pagination.
@@ -3835,7 +4047,7 @@ async fn cost_facet_guard_scans_full_scope_not_just_the_returned_page() -> anyho
             },
         )
         .await?
-        .has_null_cost;
+        .has_mixed_currency_cost;
         assert!(mixed, "a mixed-currency document anywhere in scope must be detected");
         // The library health alone does not catch a per-document mixed currency.
         let health = grid_scope_read(
@@ -3933,7 +4145,7 @@ async fn list_scope_health_is_observable_with_zero_rows() -> anyhow::Result<()> 
 
         let clean = grid_scope_read(&pool, empty_scope()).await?;
         assert!(!clean.rollup_dirty, "a clean library is not dirty");
-        assert_eq!(clean.row_count, 0, "the empty id filter matches no rows");
+        assert_eq!(clean.total, Some(0), "the empty id filter matches no rows");
 
         // Dirty the library rollup; the empty scope must still report it.
         sqlx::query(
@@ -3953,7 +4165,7 @@ async fn list_scope_health_is_observable_with_zero_rows() -> anyhow::Result<()> 
             dirty.rollup_dirty,
             "health must be observable through the same statement even with zero rows"
         );
-        assert_eq!(dirty.row_count, 0);
+        assert_eq!(dirty.total, Some(0));
 
         anyhow::Ok(())
     }
@@ -4036,7 +4248,8 @@ async fn list_scope_total_respects_cost_filter() -> anyhow::Result<()> {
         )
         .await?;
         assert_eq!(
-            read.scope.row_count, 3,
+            read.scope.total,
+            Some(3),
             "the scope total must honor the cost filter, not ignore it"
         );
         assert_eq!(read.page.rows.len(), 3, "the same filter narrows the rows");

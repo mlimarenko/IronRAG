@@ -119,6 +119,7 @@ fn search_responses_preserve_hit_order_and_nullability_for_unavailable_hits() ->
         query: "memory".to_string(),
         limit: 2,
         libraries: vec!["default/default-library".to_string()],
+        degradations: Vec::new(),
         hits: vec![
             McpDocumentHit {
                 document_id: readable_document_id,

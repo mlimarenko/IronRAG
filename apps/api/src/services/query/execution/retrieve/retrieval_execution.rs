@@ -1,7 +1,7 @@
 use super::{
     BTreeSet, ChunkRetrievalLaneOutcome, DOCUMENT_IDENTITY_CHUNKS_PER_DOCUMENT,
-    FOCUS_BROADEN_MIN_CHUNKS, FinalChunkShapingRequest, HashSet, InitialCompanionRequest,
-    LatestVersionDocument, MAX_CHUNKS_PER_DOCUMENT, MergedCompanionChunks,
+    DocumentChunkRetrievalOutcome, FOCUS_BROADEN_MIN_CHUNKS, FinalChunkShapingRequest, HashSet,
+    InitialCompanionRequest, LatestVersionDocument, MAX_CHUNKS_PER_DOCUMENT, MergedCompanionChunks,
     PostMergeCompanionRequest, PrimaryRetrievalRequest, QUERY_IR_FOCUS_CHUNK_CAP,
     RetrievalExecutionRequest, RuntimeChunkScoreKind, RuntimeMatchedChunk, Uuid,
     apply_final_chunk_shaping, build_lexical_queries, diversify_chunks_by_document,
@@ -13,7 +13,7 @@ use super::{
 
 pub(super) async fn retrieve_document_chunks_with_targets(
     request: RetrievalExecutionRequest<'_>,
-) -> anyhow::Result<Vec<RuntimeMatchedChunk>> {
+) -> anyhow::Result<DocumentChunkRetrievalOutcome> {
     let RetrievalExecutionRequest {
         state,
         library_id,
@@ -22,6 +22,7 @@ pub(super) async fn retrieve_document_chunks_with_targets(
         runtime_plan: plan,
         limit,
         question_embedding,
+        vector_readiness,
         vector_search_context,
         document_index,
         query_ir,
@@ -58,6 +59,7 @@ pub(super) async fn retrieve_document_chunks_with_targets(
                 library_id,
                 limit,
                 question_embedding,
+                vector_readiness,
                 vector_search_context,
                 document_index,
                 plan_keywords,
@@ -75,6 +77,7 @@ pub(super) async fn retrieve_document_chunks_with_targets(
         log_primary_retrieval_reuse(&lane_outcome);
     }
     log_chunk_fanout(&lane_outcome);
+    let degradations = lane_outcome.degradations.clone();
     let reusable_primary = lane_outcome.clone();
     let mut chunks = merge_chunks(
         lane_outcome.vector_hits,
@@ -198,6 +201,7 @@ pub(super) async fn retrieve_document_chunks_with_targets(
             runtime_plan: plan,
             limit,
             question_embedding,
+            vector_readiness,
             vector_search_context,
             document_index,
             query_ir,
@@ -208,7 +212,7 @@ pub(super) async fn retrieve_document_chunks_with_targets(
         .await;
     }
 
-    Ok(chunks)
+    Ok(DocumentChunkRetrievalOutcome { chunks, degradations })
 }
 
 /// Logs the reuse of a cached primary retrieval result for a focus-broaden replan.
@@ -285,16 +289,18 @@ pub(super) fn combine_lexical_query_results(
     per_query_results: Vec<anyhow::Result<Vec<RuntimeMatchedChunk>>>,
     lexical_query_count: usize,
     lexical_limit: usize,
-) -> anyhow::Result<Vec<RuntimeMatchedChunk>> {
+) -> anyhow::Result<(Vec<RuntimeMatchedChunk>, bool)> {
     let mut lexical_hits: Vec<RuntimeMatchedChunk> = Vec::new();
     let mut failed_query_count = 0usize;
-    let mut failures = Vec::new();
     for result in per_query_results {
         match result {
             Ok(query_hits) => {
                 lexical_hits = merge_chunks(lexical_hits, query_hits, lexical_limit);
             }
             Err(error) => {
+                if error.downcast_ref::<super::primary_lanes::LexicalStoreUnavailable>().is_none() {
+                    return Err(error);
+                }
                 failed_query_count += 1;
                 let summary = format!("{error:#}");
                 tracing::warn!(
@@ -306,12 +312,11 @@ pub(super) fn combine_lexical_query_results(
                     lexical_query_count,
                     "lexical chunk search query failed; continuing with other lexical queries"
                 );
-                failures.push(summary);
             }
         }
     }
     if lexical_query_count > 0 && failed_query_count == lexical_query_count {
-        anyhow::bail!("all lexical chunk search queries failed: {}", failures.join("; "));
+        return Err(super::primary_lanes::LexicalStoreUnavailable.into());
     }
     // Same rule one level down: surviving subqueries that matched nothing leave
     // the lane with no evidence, and a partial failure is the reason it is
@@ -319,9 +324,9 @@ pub(super) fn combine_lexical_query_results(
     // the lane-level evidence floor, which then cannot tell it apart from a
     // question that genuinely had no lexical match.
     if failed_query_count > 0 && lexical_hits.is_empty() {
-        anyhow::bail!("lexical chunk search degraded to no evidence: {}", failures.join("; "));
+        return Err(super::primary_lanes::LexicalStoreUnavailable.into());
     }
-    Ok(lexical_hits)
+    Ok((lexical_hits, failed_query_count > 0))
 }
 
 pub(super) fn append_query_ir_focus_hits(

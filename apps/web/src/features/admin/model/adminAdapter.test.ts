@@ -138,6 +138,8 @@ describe('mapAudit', () => {
         totalCost: '0.0123',
         currencyCode: 'USD',
         providerCallCount: 2,
+        unpricedProviderCallCount: 0,
+        costCoverage: 'complete',
       },
     } satisfies AuditEventResponse)
 
@@ -149,6 +151,8 @@ describe('mapAudit', () => {
       totalCost: '0.0123',
       currencyCode: 'USD',
       providerCallCount: 2,
+      unpricedProviderCallCount: 0,
+      costCoverage: 'complete',
     })
     expect(audit.actor).toBe('Operator One (operator.one)')
   })

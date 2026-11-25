@@ -1,3 +1,17 @@
+use std::collections::{BTreeMap, HashMap, HashSet};
+
+use ironrag_contracts::assistant::semantic_verification::{
+    SemanticClaimSupport, SemanticSourceEntry, SemanticSourceLocator, SemanticVerificationOutcome,
+    SemanticVerificationReport,
+};
+use uuid::Uuid;
+
+use crate::services::query::reference_selection::{
+    ReferenceSelectionCandidate, chunk_group_key, document_group_key, entity_group_key,
+    relation_group_key, revision_group_key, segment_group_key, select_reference_indices,
+};
+
+use super::super::super::resync_tool_result_text;
 use super::*;
 
 // --- grounded_answer contract payload / response construction --------
@@ -12,7 +26,6 @@ use super::*;
 // them at that path — the move keeps that public contract stable.
 
 pub(super) const GROUNDED_ANSWER_MUST_PRESERVE_SPAN_LIMIT: usize = 128;
-pub(super) const GROUNDED_ANSWER_MUST_PRESERVE_SPAN_MAX_CHARS: usize = 240;
 pub(super) const GROUNDED_ANSWER_GRAPH_PRESERVE_SPAN_LIMIT: usize = 24;
 pub(super) const GROUNDED_ANSWER_GRAPH_PRESERVE_MAX_RANK: i32 = 32;
 
@@ -86,9 +99,11 @@ pub fn grounded_answer_contract_payload_for_query_ir(
         compact_reference_limit,
         &completion,
     );
+    let previous_content = result.structured_content.clone();
     if let Some(structured_content) = result.structured_content.as_object_mut() {
         structured_content.insert("queryLanguage".to_string(), json!(query_ir.language));
     }
+    resync_tool_result_text(&mut result, &previous_content);
     json!(result)
 }
 
@@ -160,7 +175,7 @@ fn grounded_answer_structured_content(
         &execution_detail.execution.lifecycle_state,
         execution_detail.execution.failure_code.clone(),
     );
-    match response_profile {
+    let mut content = match response_profile {
         McpGroundedAnswerResponseProfile::Full => {
             grounded_answer_full_structured_content(answer_text, execution_detail, &envelope)
         }
@@ -172,7 +187,9 @@ fn grounded_answer_structured_content(
                 .clamp(1, MCP_COMPACT_MAX_REFERENCES),
             &envelope,
         ),
-    }
+    };
+    content["sequenceBudget"] = json!(envelope.sequence_budget);
+    content
 }
 
 fn grounded_answer_full_structured_content(
@@ -231,6 +248,8 @@ pub(super) const GROUNDED_ANSWER_COMPACT_PRESERVE_SPAN_LIMIT: usize = 16;
 pub(super) const GROUNDED_ANSWER_COMPACT_CANDIDATE_LIMIT: usize = 8;
 pub(super) const GROUNDED_ANSWER_COMPACT_TEXT_MAX_CHARS: usize = 240;
 
+const GROUNDED_ANSWER_COMPACT_REFERENCE_PATH_LIMIT: usize = 8;
+
 fn grounded_answer_compact_structured_content(
     answer_text: &str,
     execution_detail: &ironrag_contracts::assistant::AssistantExecutionDetail,
@@ -238,8 +257,7 @@ fn grounded_answer_compact_structured_content(
     envelope: &GroundedAnswerCompletionEnvelope,
 ) -> Value {
     let clarification = &execution_detail.clarification;
-    let (total_reference_count, references) =
-        grounded_answer_compact_references(execution_detail, reference_limit);
+    let reference_selection = grounded_answer_compact_references(execution_detail, reference_limit);
     let warning_count = execution_detail.verification_warnings.len();
     let warnings = execution_detail
         .verification_warnings
@@ -284,10 +302,11 @@ fn grounded_answer_compact_structured_content(
         },
         "warnings": warnings,
         "referenceSummary": {
-            "totalCount": total_reference_count,
-            "returnedCount": references.len(),
-            "truncated": total_reference_count > references.len(),
-            "references": references,
+            "totalCount": reference_selection.total_count,
+            "returnedCount": reference_selection.references.len(),
+            "truncated": reference_selection.total_count > reference_selection.references.len(),
+            "attribution": reference_selection.attribution,
+            "references": reference_selection.references,
         },
         "preserveSpanSummary": {
             "totalCount": preserve_span_count,
@@ -322,33 +341,231 @@ fn grounded_answer_compact_structured_content(
 fn grounded_answer_compact_references(
     execution_detail: &ironrag_contracts::assistant::AssistantExecutionDetail,
     limit: usize,
-) -> (usize, Vec<Value>) {
-    let total_count = execution_detail
-        .chunk_references
-        .len()
-        .saturating_add(execution_detail.prepared_segment_references.len())
-        .saturating_add(execution_detail.technical_fact_references.len())
-        .saturating_add(execution_detail.entity_references.len())
-        .saturating_add(execution_detail.relation_references.len());
-    let mut ranked = Vec::with_capacity(total_count.min(limit.saturating_mul(2)));
+) -> CompactReferenceSelection {
+    let report = execution_detail.semantic_verification.as_ref();
+    let revision_documents = grounded_answer_compact_revision_documents(execution_detail);
+    let mut candidates =
+        grounded_answer_compact_reference_candidates(execution_detail, &revision_documents);
+    let durable_count = candidates.len();
 
-    ranked.extend(execution_detail.chunk_references.iter().map(|reference| {
-        (
-            reference.rank,
-            0_u8,
-            json!({
+    let source_lookup: HashMap<&str, &SemanticSourceEntry> = report
+        .map(|report| {
+            report.sources.iter().map(|source| (source.source_id.as_str(), source)).collect()
+        })
+        .unwrap_or_default();
+    let mut identity_index: HashMap<CompactReferenceIdentity, usize> = HashMap::new();
+    for (index, candidate) in candidates.iter().enumerate() {
+        if let Some(identity) = candidate.identity {
+            identity_index.entry(identity).or_insert(index);
+        }
+    }
+    let mut projected_sources: HashMap<String, usize> = HashMap::new();
+    let mut linked_units: Vec<Vec<usize>> = Vec::new();
+
+    if let Some(report) = report
+        && let SemanticVerificationOutcome::Completed { assessment } = &report.outcome
+    {
+        for unit in &assessment.units {
+            if unit.support == SemanticClaimSupport::NoFactualClaims {
+                continue;
+            }
+            let mut unit_candidates = Vec::new();
+            let mut unit_seen = HashSet::new();
+            for evidence in &unit.evidence {
+                let Some(source) = source_lookup.get(evidence.source_id.as_str()).copied() else {
+                    continue;
+                };
+                let resolved = match &source.locator {
+                    SemanticSourceLocator::Chunk { chunk_id } => {
+                        identity_index.get(&CompactReferenceIdentity::Chunk(*chunk_id)).copied()
+                    }
+                    SemanticSourceLocator::Segment { segment_id } => {
+                        identity_index.get(&CompactReferenceIdentity::Segment(*segment_id)).copied()
+                    }
+                    SemanticSourceLocator::DocumentSlice { .. } => None,
+                };
+                let index = match resolved {
+                    Some(index) => index,
+                    None => match projected_sources.get(&source.source_id) {
+                        Some(&index) => index,
+                        None => {
+                            let index = candidates.len();
+                            candidates.push(grounded_answer_compact_source_candidate(
+                                source,
+                                &evidence.quote,
+                            ));
+                            projected_sources.insert(source.source_id.clone(), index);
+                            index
+                        }
+                    },
+                };
+                if !candidates[index].claim_unit_ids.iter().any(|unit_id| unit_id == &unit.unit_id)
+                {
+                    candidates[index].claim_unit_ids.push(unit.unit_id.clone());
+                }
+                if !candidates[index]
+                    .source_ids
+                    .iter()
+                    .any(|source_id| source_id == &source.source_id)
+                {
+                    candidates[index].source_ids.push(source.source_id.clone());
+                }
+                let trimmed_quote = evidence.quote.trim();
+                if !trimmed_quote.is_empty()
+                    && !candidates[index].evidence_quotes.iter().any(|quote| quote == trimmed_quote)
+                {
+                    candidates[index].evidence_quotes.push(trimmed_quote.to_string());
+                }
+                if unit_seen.insert(index) {
+                    unit_candidates.push(index);
+                }
+            }
+            linked_units.push(unit_candidates);
+        }
+    }
+
+    let claim_unit_count = linked_units.len();
+    let selection_candidates = candidates
+        .iter()
+        .map(|candidate| ReferenceSelectionCandidate {
+            rank: candidate.rank,
+            kind_order: candidate.kind_order,
+            group: candidate.group.clone(),
+            document_backed: candidate.document_backed,
+        })
+        .collect::<Vec<_>>();
+    let selection = select_reference_indices(&selection_candidates, &linked_units, limit);
+    let selected = selection.indices;
+    let attributed_unit_count = selection.attributed_unit_count;
+
+    let references = selected
+        .iter()
+        .map(|&index| {
+            let candidate = &candidates[index];
+            let mut value = candidate.value.clone();
+            if let Some(object) = value.as_object_mut() {
+                if !candidate.claim_unit_ids.is_empty() {
+                    object.insert("claimUnitIds".to_string(), json!(candidate.claim_unit_ids));
+                }
+                if !candidate.source_ids.is_empty() {
+                    object.insert("sourceIds".to_string(), json!(candidate.source_ids));
+                }
+                if !candidate.evidence_quotes.is_empty() {
+                    let supporting_excerpt =
+                        grounded_answer_compact_text(&candidate.evidence_quotes.join(" "));
+                    object.insert("excerpt".to_string(), json!(supporting_excerpt));
+                }
+            }
+            value
+        })
+        .collect::<Vec<_>>();
+    let total_count = durable_count.saturating_add(projected_sources.len());
+    let attribution = grounded_answer_compact_attribution(
+        report,
+        claim_unit_count,
+        attributed_unit_count,
+        projected_sources.len(),
+    );
+    CompactReferenceSelection { total_count, references, attribution }
+}
+
+struct CompactReferenceSelection {
+    total_count: usize,
+    references: Vec<Value>,
+    attribution: Value,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum CompactReferenceIdentity {
+    Chunk(Uuid),
+    Segment(Uuid),
+}
+
+struct CompactReferenceCandidate {
+    rank: i32,
+    kind_order: u8,
+    group: String,
+    document_backed: bool,
+    identity: Option<CompactReferenceIdentity>,
+    claim_unit_ids: Vec<String>,
+    source_ids: Vec<String>,
+    evidence_quotes: Vec<String>,
+    value: Value,
+}
+
+fn grounded_answer_compact_revision_documents(
+    execution_detail: &ironrag_contracts::assistant::AssistantExecutionDetail,
+) -> BTreeMap<Uuid, (Option<Uuid>, Option<String>)> {
+    let mut documents = BTreeMap::new();
+    for reference in &execution_detail.prepared_segment_references {
+        let entry = documents.entry(reference.revision_id).or_insert((None, None));
+        if entry.0.is_none() {
+            entry.0 = reference.document_id;
+        }
+        if entry.1.is_none() {
+            entry.1 = reference.document_title.clone();
+        }
+    }
+    if let Some(report) = execution_detail.semantic_verification.as_ref() {
+        for source in &report.sources {
+            let entry = documents.entry(source.document_revision_id).or_insert((None, None));
+            if entry.0.is_none() {
+                entry.0 = Some(source.document_id);
+            }
+        }
+    }
+    documents
+}
+
+fn grounded_answer_compact_reference_candidates(
+    execution_detail: &ironrag_contracts::assistant::AssistantExecutionDetail,
+    revision_documents: &BTreeMap<Uuid, (Option<Uuid>, Option<String>)>,
+) -> Vec<CompactReferenceCandidate> {
+    let mut candidates = Vec::new();
+
+    candidates.extend(execution_detail.chunk_references.iter().map(|reference| {
+        CompactReferenceCandidate {
+            rank: reference.rank,
+            kind_order: 0,
+            group: reference
+                .document_id
+                .map(document_group_key)
+                .unwrap_or_else(|| chunk_group_key(reference.chunk_id)),
+            document_backed: true,
+            identity: Some(CompactReferenceIdentity::Chunk(reference.chunk_id)),
+            claim_unit_ids: Vec::new(),
+            source_ids: Vec::new(),
+            evidence_quotes: Vec::new(),
+            value: json!({
                 "kind": "chunk",
                 "chunkId": reference.chunk_id,
+                "documentId": reference.document_id,
+                "documentTitle": reference
+                    .document_title
+                    .as_deref()
+                    .map(grounded_answer_compact_text),
+                "revisionId": reference.revision_id,
+                "sectionPath": grounded_answer_compact_path(&reference.section_path),
+                "excerpt": reference.excerpt.as_deref().map(grounded_answer_compact_text),
                 "rank": reference.rank,
                 "score": reference.score,
             }),
-        )
+        }
     }));
-    ranked.extend(execution_detail.prepared_segment_references.iter().map(|reference| {
-        (
-            reference.rank,
-            1_u8,
-            json!({
+    candidates.extend(execution_detail.prepared_segment_references.iter().map(|reference| {
+        CompactReferenceCandidate {
+            rank: reference.rank,
+            kind_order: 1,
+            group: reference
+                .document_id
+                .map(document_group_key)
+                .unwrap_or_else(|| segment_group_key(reference.segment_id)),
+            document_backed: true,
+            identity: Some(CompactReferenceIdentity::Segment(reference.segment_id)),
+            claim_unit_ids: Vec::new(),
+            source_ids: Vec::new(),
+            evidence_quotes: Vec::new(),
+            value: json!({
                 "kind": "prepared_segment",
                 "segmentId": reference.segment_id,
                 "revisionId": reference.revision_id,
@@ -358,31 +575,50 @@ fn grounded_answer_compact_references(
                     .as_deref()
                     .map(grounded_answer_compact_text),
                 "blockKind": reference.block_kind,
+                "sectionPath": grounded_answer_compact_path(&reference.section_path),
+                "headingTrail": grounded_answer_compact_path(&reference.heading_trail),
                 "rank": reference.rank,
                 "score": reference.score,
             }),
-        )
+        }
     }));
-    ranked.extend(execution_detail.technical_fact_references.iter().map(|reference| {
-        (
-            reference.rank,
-            2_u8,
-            json!({
+    candidates.extend(execution_detail.technical_fact_references.iter().map(|reference| {
+        let document = revision_documents.get(&reference.revision_id);
+        CompactReferenceCandidate {
+            rank: reference.rank,
+            kind_order: 2,
+            group: revision_group_key(reference.revision_id),
+            document_backed: false,
+            identity: None,
+            claim_unit_ids: Vec::new(),
+            source_ids: Vec::new(),
+            evidence_quotes: Vec::new(),
+            value: json!({
                 "kind": "technical_fact",
                 "factId": reference.fact_id,
                 "revisionId": reference.revision_id,
+                "documentId": document.and_then(|(document_id, _)| *document_id),
+                "documentTitle": document
+                    .and_then(|(_, title)| title.as_deref())
+                    .map(grounded_answer_compact_text),
                 "factKind": reference.fact_kind,
                 "displayValue": grounded_answer_compact_text(&reference.display_value),
                 "rank": reference.rank,
                 "score": reference.score,
             }),
-        )
+        }
     }));
-    ranked.extend(execution_detail.entity_references.iter().map(|reference| {
-        (
-            reference.rank,
-            3_u8,
-            json!({
+    candidates.extend(execution_detail.entity_references.iter().map(|reference| {
+        CompactReferenceCandidate {
+            rank: reference.rank,
+            kind_order: 3,
+            group: entity_group_key(reference.node_id),
+            document_backed: false,
+            identity: None,
+            claim_unit_ids: Vec::new(),
+            source_ids: Vec::new(),
+            evidence_quotes: Vec::new(),
+            value: json!({
                 "kind": "entity",
                 "nodeId": reference.node_id,
                 "label": grounded_answer_compact_text(&reference.label),
@@ -390,13 +626,19 @@ fn grounded_answer_compact_references(
                 "rank": reference.rank,
                 "score": reference.score,
             }),
-        )
+        }
     }));
-    ranked.extend(execution_detail.relation_references.iter().map(|reference| {
-        (
-            reference.rank,
-            4_u8,
-            json!({
+    candidates.extend(execution_detail.relation_references.iter().map(|reference| {
+        CompactReferenceCandidate {
+            rank: reference.rank,
+            kind_order: 4,
+            group: relation_group_key(reference.edge_id),
+            document_backed: false,
+            identity: None,
+            claim_unit_ids: Vec::new(),
+            source_ids: Vec::new(),
+            evidence_quotes: Vec::new(),
+            value: json!({
                 "kind": "relation",
                 "edgeId": reference.edge_id,
                 "predicate": grounded_answer_compact_text(&reference.predicate),
@@ -407,11 +649,71 @@ fn grounded_answer_compact_references(
                 "rank": reference.rank,
                 "score": reference.score,
             }),
-        )
+        }
     }));
-    ranked.sort_by_key(|(rank, kind_order, _)| (*rank, *kind_order));
+    candidates
+}
 
-    (total_count, ranked.into_iter().take(limit).map(|(_, _, reference)| reference).collect())
+fn grounded_answer_compact_source_candidate(
+    source: &SemanticSourceEntry,
+    quote: &str,
+) -> CompactReferenceCandidate {
+    CompactReferenceCandidate {
+        rank: i32::MAX,
+        kind_order: 1,
+        group: format!("document:{}", source.document_id),
+        document_backed: true,
+        identity: None,
+        claim_unit_ids: Vec::new(),
+        source_ids: Vec::new(),
+        evidence_quotes: Vec::new(),
+        value: json!({
+            "kind": "document_source",
+            "sourceId": source.source_id,
+            "documentId": source.document_id,
+            "revisionId": source.document_revision_id,
+            "locator": source.locator,
+            "scope": source.scope,
+            "excerpt": grounded_answer_compact_text(quote),
+        }),
+    }
+}
+
+fn grounded_answer_compact_attribution(
+    report: Option<&SemanticVerificationReport>,
+    claim_unit_count: usize,
+    attributed_unit_count: usize,
+    projected_source_count: usize,
+) -> Value {
+    let (basis, status, semantic_reason) = match report.map(|report| &report.outcome) {
+        Some(SemanticVerificationOutcome::Completed { .. }) => {
+            ("semantic_verification", "completed", None)
+        }
+        Some(SemanticVerificationOutcome::NotRun { reason }) => {
+            ("ranked_retrieval", "not_run", Some(json!(reason)))
+        }
+        Some(SemanticVerificationOutcome::Failed { code }) => {
+            ("ranked_retrieval", "failed", Some(json!(code)))
+        }
+        None => ("ranked_retrieval", "absent", None),
+    };
+    json!({
+        "basis": basis,
+        "claimSupportAvailable": basis == "semantic_verification",
+        "claimUnitCount": claim_unit_count,
+        "attributedUnitCount": attributed_unit_count,
+        "unattributedUnitCount": claim_unit_count.saturating_sub(attributed_unit_count),
+        "projectedSourceCount": projected_source_count,
+        "semanticStatus": status,
+        "semanticReason": semantic_reason,
+    })
+}
+
+fn grounded_answer_compact_path(path: &[String]) -> Vec<String> {
+    path.iter()
+        .take(GROUNDED_ANSWER_COMPACT_REFERENCE_PATH_LIMIT)
+        .map(|value| grounded_answer_compact_text(value))
+        .collect()
 }
 
 pub(super) fn grounded_answer_compact_text(value: &str) -> String {
@@ -423,3 +725,7 @@ pub(super) fn grounded_answer_compact_text(value: &str) -> String {
     }
     compact
 }
+
+#[cfg(test)]
+#[path = "payload_tests.rs"]
+mod payload_tests;

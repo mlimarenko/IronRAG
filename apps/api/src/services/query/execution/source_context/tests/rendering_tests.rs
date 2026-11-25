@@ -30,7 +30,7 @@ fn companion_prose_conditions_survive_bounded_context_assembly() {
             2_048,
         );
 
-        assert_eq!(mapped.source_text, window);
+        assert_eq!(mapped.source_text, core);
         assert_eq!(
             (mapped.chunk_id, mapped.document_id, mapped.revision_id),
             (chunk_id, document_id, revision_id)
@@ -42,9 +42,9 @@ fn companion_prose_conditions_survive_bounded_context_assembly() {
             crate::services::query::execution::RuntimeChunkScoreKind::SourceContext
         );
         assert_eq!(mapped.score, Some(0.6));
-        for text in [before, core, after] {
-            assert!(context.contains(text), "Missing {text}: {context}");
-            assert_eq!(mapped.source_text.matches(text).count(), 1);
+        assert!(context.contains(core), "Missing {core}: {context}");
+        for neighbor in [before, after] {
+            assert!(!context.contains(neighbor), "Neighbor window leaked ({neighbor}): {context}");
         }
         assert!(context.len() <= 2_048);
     }
@@ -92,7 +92,7 @@ fn map_companion_chunk_preserves_paths_lost_from_window_text() {
 }
 
 #[test]
-fn map_companion_chunk_merges_structured_literals_from_window_and_content() {
+fn map_companion_chunk_keeps_own_structured_literals_without_neighbor_window() {
     let document_id = Uuid::now_v7();
     let revision_id = Uuid::now_v7();
     let document_index = HashMap::from([(document_id, document_row(document_id, revision_id))]);
@@ -113,10 +113,10 @@ fn map_companion_chunk_merges_structured_literals_from_window_and_content() {
 
     assert!(mapped.source_text.contains("[Main]"));
     assert!(mapped.source_text.contains("alphaMode = strict"));
-    assert!(mapped.source_text.contains("samplectl reload alpha-plugin"));
+    assert!(!mapped.source_text.contains("samplectl reload alpha-plugin"));
     assert!(mapped.excerpt.contains("[Main]"));
     assert!(mapped.excerpt.contains("alphaMode = strict"));
-    assert!(mapped.excerpt.contains("samplectl reload alpha-plugin"));
+    assert!(!mapped.excerpt.contains("samplectl reload alpha-plugin"));
 }
 
 #[test]

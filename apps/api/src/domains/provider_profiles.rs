@@ -659,6 +659,138 @@ pub struct ProviderProfile {
     pub ui_hints: serde_json::Value,
 }
 
+/// The one admitted caller-binding format this build interprets.
+pub const CALLER_BINDING_FORMAT_VERSION: u32 = 1;
+
+/// One caller the financial admission admits by exact native key.
+///
+/// Every variant names a value the request already authenticated: the server
+/// session digest, the browser session row, or the mutation origin recorded by
+/// the admitting request. No variant carries a wire token, a header, a secret
+/// or a principal-only key that a shared credential could present.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum AdmittedCaller {
+    /// SHA-256 of the issued MCP session identifier, lowercase hex.
+    McpSession { fingerprint_hex: String },
+    /// The browser `iam_session` row this request authenticated with.
+    IamSession { session_id: uuid::Uuid },
+    /// The mutation the paid work belongs to, and the principal that admitted it.
+    MutationOrigin { mutation_id: uuid::Uuid, principal_id: uuid::Uuid },
+}
+
+impl AdmittedCaller {
+    /// Exact-key membership. There is no principal, workspace or prefix match.
+    fn admits(&self, caller: &crate::shared::provider_http::DispatchCaller) -> bool {
+        use crate::shared::provider_http::DispatchCaller;
+        match (self, caller) {
+            (Self::McpSession { fingerprint_hex }, DispatchCaller::McpSession(digest)) => {
+                fingerprint_hex == &hex::encode(digest)
+            }
+            (Self::IamSession { session_id }, DispatchCaller::IamSession(caller_session)) => {
+                session_id == caller_session
+            }
+            (
+                Self::MutationOrigin { mutation_id, principal_id },
+                DispatchCaller::MutationOrigin {
+                    mutation_id: caller_mutation,
+                    principal_id: caller_principal,
+                },
+            ) => mutation_id == caller_mutation && principal_id == caller_principal,
+            (
+                Self::McpSession { .. } | Self::IamSession { .. } | Self::MutationOrigin { .. },
+                DispatchCaller::Unattributed,
+            ) => false,
+            (
+                Self::McpSession { .. },
+                DispatchCaller::IamSession(_) | DispatchCaller::MutationOrigin { .. },
+            )
+            | (
+                Self::IamSession { .. },
+                DispatchCaller::McpSession(_) | DispatchCaller::MutationOrigin { .. },
+            )
+            | (
+                Self::MutationOrigin { .. },
+                DispatchCaller::McpSession(_) | DispatchCaller::IamSession(_),
+            ) => false,
+        }
+    }
+
+    fn validate(&self) -> Result<(), &'static str> {
+        match self {
+            Self::McpSession { fingerprint_hex } => {
+                if fingerprint_hex.len() != 64
+                    || !fingerprint_hex
+                        .bytes()
+                        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+                {
+                    return Err("invalid mcp session fingerprint");
+                }
+            }
+            Self::IamSession { session_id } => {
+                if session_id.is_nil() {
+                    return Err("invalid caller iam session");
+                }
+            }
+            Self::MutationOrigin { mutation_id, principal_id } => {
+                if mutation_id.is_nil() || principal_id.is_nil() {
+                    return Err("invalid caller mutation origin");
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+/// The caller set a grant admits, versioned so a rotation is ordered.
+///
+/// The list is deliberately not part of [`FinancialAdmission::immutable_fingerprint`]:
+/// only the requirement that a binding exists is fingerprinted, because the
+/// admitted sessions rotate while the funded policy must not.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CallerBinding {
+    pub format_version: u32,
+    /// Monotonic per-scope version. A successor is exactly one higher.
+    pub generation: u64,
+    pub callers: Vec<AdmittedCaller>,
+}
+
+impl CallerBinding {
+    /// Whether `caller` may reserve an attempt under this binding.
+    #[must_use]
+    pub(crate) fn admits(&self, caller: &crate::shared::provider_http::DispatchCaller) -> bool {
+        self.format_version == CALLER_BINDING_FORMAT_VERSION
+            && self.callers.iter().any(|admitted| admitted.admits(caller))
+    }
+
+    fn validate(&self) -> Result<(), &'static str> {
+        if self.format_version != CALLER_BINDING_FORMAT_VERSION {
+            return Err("unsupported caller binding format");
+        }
+        if self.generation == 0 {
+            return Err("invalid caller binding generation");
+        }
+        if self.callers.is_empty() {
+            return Err("empty caller binding");
+        }
+        self.callers.iter().try_for_each(AdmittedCaller::validate)
+    }
+}
+
+/// The stable part of a caller binding that the policy hash covers.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CallerBindingRequirement {
+    caller_binding: CallerBindingFormat,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CallerBindingFormat {
+    format_version: u32,
+}
+
 /// A non-replenishing grant. Monetary amounts use integer millionths of USD.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -673,6 +805,10 @@ pub struct FinancialAdmission {
     pub global_limit: u64,
     pub global_consumed: u64,
     pub models: BTreeMap<String, FinancialModelAllowance>,
+    /// Absent only on grants written before the caller fence existed. A
+    /// `prepared` or `active` grant never omits it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub caller_binding: Option<CallerBinding>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub history: Vec<FinancialAdmissionArchive>,
 }
@@ -691,6 +827,8 @@ pub struct FinancialAdmissionArchive {
     pub global_limit: u64,
     pub global_consumed: u64,
     pub models: BTreeMap<String, FinancialModelAllowance>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub caller_binding: Option<CallerBinding>,
 }
 
 impl From<FinancialAdmission> for FinancialAdmissionArchive {
@@ -706,6 +844,7 @@ impl From<FinancialAdmission> for FinancialAdmissionArchive {
             global_limit: value.global_limit,
             global_consumed: value.global_consumed,
             models: value.models,
+            caller_binding: value.caller_binding,
         }
     }
 }
@@ -723,6 +862,7 @@ impl From<FinancialAdmissionArchive> for FinancialAdmission {
             global_limit: value.global_limit,
             global_consumed: value.global_consumed,
             models: value.models,
+            caller_binding: value.caller_binding,
             history: Vec::new(),
         }
     }
@@ -745,6 +885,38 @@ pub struct FinancialModelAllowance {
     pub attempt_microusd: u64,
     pub limit: u64,
     pub consumed: u64,
+}
+
+/// Optional image admission for one Chat envelope.
+///
+/// The transport and formats are fixed, not configurable: only an inline
+/// `data:<mime>;base64,<payload>` URL whose MIME is `image/png` or
+/// `image/jpeg` is admitted. The five bounds are independent resource and
+/// validity guards; the send boundary enforces each one and refuses arithmetic
+/// overflow instead of saturating. They are not a billing bound: the financial
+/// unit stays the full attempt reservation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct FinancialChatMediaAdmission {
+    pub max_images: u32,
+    pub max_image_bytes_each: u64,
+    pub max_image_bytes_total: u64,
+    pub max_image_dimension_px: u32,
+    pub max_image_pixels_total: u64,
+}
+
+impl FinancialChatMediaAdmission {
+    fn validate(&self) -> Result<(), &'static str> {
+        if self.max_images == 0
+            || self.max_image_bytes_each == 0
+            || self.max_image_bytes_total == 0
+            || self.max_image_dimension_px == 0
+            || self.max_image_pixels_total == 0
+        {
+            return Err("invalid chat media envelope");
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
@@ -774,6 +946,11 @@ pub struct FinancialModelAllowance {
 /// Generation class: that encoding premise is NOT established and is not
 /// claimed. `maxInputTokens` there is the documented model maximum the
 /// reservation is taken at, not a proof of the provider's tokenization.
+///
+/// A Chat envelope with no `media` policy is text-only. With a policy it admits
+/// only bounded inline PNG/JPEG images inside `messages[].content`; each bound is
+/// enforced independently before dispatch and none of them changes the
+/// reservation unit.
 pub enum FinancialRequestEnvelope {
     Chat {
         allowed_service_tiers: Vec<String>,
@@ -782,6 +959,9 @@ pub enum FinancialRequestEnvelope {
         max_output_tokens: u64,
         /// Documented model input maximum the reservation is taken at.
         max_input_tokens: u64,
+        /// Absent is the text-only contract; present admits bounded inline images.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        media: Option<FinancialChatMediaAdmission>,
     },
     Embeddings {
         max_inputs: u64,
@@ -796,6 +976,9 @@ pub enum FinancialRequestEnvelope {
 
 impl FinancialAdmission {
     /// Apply a lifecycle change; the server constructs successor history.
+    ///
+    /// The admitted caller list is the one mutable member of an existing
+    /// grant, and it moves by exactly one `generation` per accepted update.
     pub(crate) fn transition(
         current: Option<Self>,
         mut desired: Self,
@@ -812,7 +995,15 @@ impl FinancialAdmission {
                 && desired.cutoff > now
         };
         match current {
-            None if fresh() && desired.history.is_empty() => Ok(desired),
+            None if fresh()
+                && desired.history.is_empty()
+                && desired
+                    .caller_binding
+                    .as_ref()
+                    .is_none_or(|binding| binding.generation == 1) =>
+            {
+                Ok(desired)
+            }
             None => Err("invalid initial financial admission"),
             Some(current) => {
                 current.validate()?;
@@ -821,6 +1012,11 @@ impl FinancialAdmission {
                         != Some(&current.policy_fingerprint)
                 {
                     return Err("invalid current financial admission");
+                }
+                // An admitted caller list is never dropped, including on close:
+                // the archive keeps the exact list that was in force.
+                if current.caller_binding.is_some() && desired.caller_binding.is_none() {
+                    return Err("invalid financial admission caller binding drop");
                 }
                 if current.state == FinancialAdmissionState::Closed
                     && desired.state == FinancialAdmissionState::Prepared
@@ -840,21 +1036,54 @@ impl FinancialAdmission {
                     } else if desired.history != current.history {
                         return Err("invalid financial admission history");
                     }
+                    let binding_rotated = desired.caller_binding != current.caller_binding;
                     let mut expected = current.clone();
                     expected.state = desired.state;
-                    if expected != desired
-                        || !matches!(
+                    if binding_rotated {
+                        expected.caller_binding = desired.caller_binding.clone();
+                    }
+                    // A prepared grant can be abandoned even after cutoff. The
+                    // archive must retain its original caller binding.
+                    let abandoned_preparation = current.state == FinancialAdmissionState::Prepared
+                        && desired.state == FinancialAdmissionState::Closed
+                        && !binding_rotated;
+                    let lifecycle_change = abandoned_preparation
+                        || matches!(
                             (current.state, desired.state),
                             (FinancialAdmissionState::Prepared, FinancialAdmissionState::Active)
                                 | (
                                     FinancialAdmissionState::Active,
                                     FinancialAdmissionState::Closed
                                 )
-                        )
+                        );
+                    // An admitted list moves on the same funded scope without
+                    // changing its lifecycle, so a rotation is an update in its
+                    // own right — but only while the grant is still admittable.
+                    let binding_only_update = binding_rotated
+                        && current.state == desired.state
+                        && matches!(
+                            current.state,
+                            FinancialAdmissionState::Prepared | FinancialAdmissionState::Active
+                        );
+                    if expected != desired
+                        || !(lifecycle_change || binding_only_update)
                         || (desired.state == FinancialAdmissionState::Active
                             && desired.cutoff <= now)
                     {
                         return Err("invalid financial admission transition");
+                    }
+                    if binding_rotated {
+                        // Compare-and-swap on the row already locked by the
+                        // caller: stale, omitted, equal and jumped generations
+                        // all fail, so two concurrent rotations cannot merge.
+                        let (Some(current_binding), Some(desired_binding)) =
+                            (current.caller_binding.as_ref(), desired.caller_binding.as_ref())
+                        else {
+                            return Err("invalid financial admission caller binding");
+                        };
+                        if desired_binding.generation != current_binding.generation + 1 {
+                            return Err("stale financial admission caller binding");
+                        }
                     }
                     Ok(desired)
                 }
@@ -863,6 +1092,11 @@ impl FinancialAdmission {
     }
 
     /// SHA-256 of the versioned immutable policy, excluding lifecycle and counters.
+    ///
+    /// The admitted caller *requirement* is hashed, the volatile caller list is
+    /// not: a grant written before the caller fence keeps its exact
+    /// `financial-admission/1` bytes, and a fenced grant moves to
+    /// `financial-admission/2` with the supported format version.
     pub fn immutable_fingerprint(&self) -> Result<String, serde_json::Error> {
         use sha2::{Digest, Sha256};
         #[derive(Serialize)]
@@ -887,16 +1121,31 @@ impl FinancialAdmission {
                 )
             })
             .collect();
-        let bytes = serde_json::to_vec(&(
-            "financial-admission/1",
-            self.version,
-            self.provider_id,
-            self.scope_id,
-            self.cutoff,
-            self.grant_microusd,
-            self.global_limit,
-            models,
-        ))?;
+        let bytes = match &self.caller_binding {
+            None => serde_json::to_vec(&(
+                "financial-admission/1",
+                self.version,
+                self.provider_id,
+                self.scope_id,
+                self.cutoff,
+                self.grant_microusd,
+                self.global_limit,
+                models,
+            ))?,
+            Some(binding) => serde_json::to_vec(&(
+                "financial-admission/2",
+                self.version,
+                self.provider_id,
+                self.scope_id,
+                self.cutoff,
+                self.grant_microusd,
+                self.global_limit,
+                models,
+                CallerBindingRequirement {
+                    caller_binding: CallerBindingFormat { format_version: binding.format_version },
+                },
+            ))?,
+        };
         Ok(format!("sha256:{}", hex::encode(Sha256::digest(bytes))))
     }
 
@@ -923,6 +1172,18 @@ impl FinancialAdmission {
         {
             return Err("invalid financial admission identity or limit");
         }
+        match (&self.state, &self.caller_binding) {
+            (FinancialAdmissionState::Closed, None) => {}
+            (
+                FinancialAdmissionState::Closed
+                | FinancialAdmissionState::Prepared
+                | FinancialAdmissionState::Active,
+                Some(binding),
+            ) => binding.validate()?,
+            (FinancialAdmissionState::Prepared | FinancialAdmissionState::Active, None) => {
+                return Err("financial admission requires a caller binding");
+            }
+        }
         let mut liability = 0_u64;
         let mut consumed = 0_u64;
         for (model, allowance) in &self.models {
@@ -940,6 +1201,7 @@ impl FinancialAdmission {
                     max_input_bytes,
                     max_output_tokens,
                     max_input_tokens,
+                    media,
                 } => {
                     if allowed_service_tiers.is_empty()
                         || allowed_service_tiers
@@ -952,6 +1214,9 @@ impl FinancialAdmission {
                     }
                     if *max_input_tokens == 0 {
                         return Err("invalid chat input ceiling");
+                    }
+                    if let Some(media) = media {
+                        media.validate()?;
                     }
                 }
                 FinancialRequestEnvelope::Embeddings {
@@ -991,6 +1256,19 @@ impl FinancialAdmission {
 mod financial_admission_tests {
     use super::*;
 
+    const MCP_FINGERPRINT: &str =
+        "8c86e7520093f230c257b2d46bee6a6384bb8536aeefef90581dab2a7d0a5e3a";
+
+    fn binding(generation: u64) -> CallerBinding {
+        CallerBinding {
+            format_version: CALLER_BINDING_FORMAT_VERSION,
+            generation,
+            callers: vec![AdmittedCaller::McpSession {
+                fingerprint_hex: MCP_FINGERPRINT.to_owned(),
+            }],
+        }
+    }
+
     fn policy() -> FinancialAdmission {
         FinancialAdmission {
             version: 1,
@@ -1003,6 +1281,7 @@ mod financial_admission_tests {
             global_limit: 2,
             global_consumed: 0,
             history: Vec::new(),
+            caller_binding: Some(binding(1)),
             models: BTreeMap::from([(
                 "fixture-model".to_owned(),
                 FinancialModelAllowance {
@@ -1012,6 +1291,7 @@ mod financial_admission_tests {
                         max_input_bytes: 100,
                         max_output_tokens: 10,
                         max_input_tokens: 90,
+                        media: None,
                     },
                     attempt_microusd: 50,
                     limit: 2,
@@ -1116,6 +1396,69 @@ mod financial_admission_tests {
         closed.state = FinancialAdmissionState::Closed;
         assert!(FinancialAdmission::transition(Some(active), closed.clone(), now).is_ok());
         assert!(FinancialAdmission::transition(Some(closed), prepared, now).is_err());
+    }
+
+    #[test]
+    fn prepared_admission_can_be_closed_without_activation_before_or_after_cutoff() {
+        let mut predecessor = fixed_policy();
+        predecessor.state = FinancialAdmissionState::Closed;
+        predecessor.global_consumed = 1;
+        predecessor.models.get_mut("fixture-model").expect("allowance").consumed = 1;
+        predecessor.policy_fingerprint = predecessor.immutable_fingerprint().expect("fingerprint");
+
+        let now = predecessor.cutoff;
+        let mut draft = fixed_policy();
+        draft.scope_id = uuid::Uuid::from_u128(3);
+        draft.cutoff = now + chrono::Duration::hours(1);
+        draft.policy_fingerprint = draft.immutable_fingerprint().expect("fingerprint");
+        let prepared = FinancialAdmission::transition(Some(predecessor), draft, now)
+            .expect("prepare the successor");
+        let mut closed = prepared.clone();
+        closed.state = FinancialAdmissionState::Closed;
+
+        for clock in [now, prepared.cutoff, prepared.cutoff + chrono::Duration::seconds(1)] {
+            let mut close_request = closed.clone();
+            close_request.history.clear();
+            assert_eq!(
+                FinancialAdmission::transition(Some(prepared.clone()), close_request, clock)
+                    .expect("close without opening dispatch"),
+                closed,
+            );
+        }
+
+        let mut expired_activation = prepared.clone();
+        expired_activation.state = FinancialAdmissionState::Active;
+        assert!(
+            FinancialAdmission::transition(
+                Some(prepared.clone()),
+                expired_activation,
+                prepared.cutoff
+            )
+            .is_err()
+        );
+
+        let mut rotated_close = closed.clone();
+        let binding = rotated_close.caller_binding.as_mut().expect("binding");
+        binding.generation += 1;
+        binding.callers = vec![AdmittedCaller::IamSession { session_id: uuid::Uuid::from_u128(9) }];
+        assert!(
+            FinancialAdmission::transition(Some(prepared.clone()), rotated_close, now).is_err()
+        );
+
+        let mut edited_counters = closed.clone();
+        edited_counters.global_consumed = 1;
+        edited_counters.models.get_mut("fixture-model").expect("allowance").consumed = 1;
+        assert!(FinancialAdmission::transition(Some(prepared), edited_counters, now).is_err());
+
+        let mut successor = fixed_policy();
+        successor.scope_id = uuid::Uuid::from_u128(4);
+        successor.cutoff = closed.cutoff + chrono::Duration::hours(1);
+        successor.policy_fingerprint = successor.immutable_fingerprint().expect("fingerprint");
+        let mut expected_history = closed.history.clone();
+        expected_history.push(closed.clone().into());
+        let successor = FinancialAdmission::transition(Some(closed), successor, now)
+            .expect("prepare from the closed candidate");
+        assert_eq!(successor.history, expected_history);
     }
 
     #[test]
@@ -1261,6 +1604,392 @@ mod financial_admission_tests {
         assert_eq!(value.immutable_fingerprint().unwrap(), original);
         value.models.get_mut("fixture-model").unwrap().limit = 1;
         assert_ne!(value.immutable_fingerprint().unwrap(), original);
+    }
+
+    fn text_envelope() -> FinancialRequestEnvelope {
+        FinancialRequestEnvelope::Chat {
+            allowed_service_tiers: vec!["default".to_owned(), "flex".to_owned()],
+            max_input_bytes: 100,
+            max_output_tokens: 10,
+            max_input_tokens: 90,
+            media: None,
+        }
+    }
+
+    fn media_policy() -> FinancialChatMediaAdmission {
+        FinancialChatMediaAdmission {
+            max_images: 2,
+            max_image_bytes_each: 1_000,
+            max_image_bytes_total: 1_500,
+            max_image_dimension_px: 4_096,
+            max_image_pixels_total: 1_000_000,
+        }
+    }
+
+    /// Deterministic policy whose bytes and fingerprint never depend on a run.
+    fn fixed_policy() -> FinancialAdmission {
+        FinancialAdmission {
+            version: 1,
+            provider_id: uuid::Uuid::from_u128(1),
+            scope_id: uuid::Uuid::from_u128(2),
+            policy_fingerprint: "fixture".to_owned(),
+            cutoff: chrono::DateTime::from_timestamp(0, 0).expect("epoch"),
+            state: FinancialAdmissionState::Prepared,
+            grant_microusd: 100,
+            global_limit: 2,
+            global_consumed: 0,
+            models: BTreeMap::from([(
+                "fixture-model".to_owned(),
+                FinancialModelAllowance {
+                    endpoint: "https://example.test/chat/completions".to_owned(),
+                    envelope: text_envelope(),
+                    attempt_microusd: 50,
+                    limit: 2,
+                    consumed: 0,
+                },
+            )]),
+            history: Vec::new(),
+            caller_binding: Some(CallerBinding {
+                format_version: CALLER_BINDING_FORMAT_VERSION,
+                generation: 1,
+                callers: vec![AdmittedCaller::McpSession {
+                    fingerprint_hex: MCP_FINGERPRINT.to_owned(),
+                }],
+            }),
+        }
+    }
+
+    fn with_media(
+        admission: &mut FinancialAdmission,
+        mutate: impl FnOnce(&mut FinancialChatMediaAdmission),
+    ) {
+        let FinancialRequestEnvelope::Chat { media, .. } =
+            &mut admission.models.get_mut("fixture-model").expect("allowance").envelope
+        else {
+            panic!("fixture must be a chat envelope");
+        };
+        mutate(media.get_or_insert_with(media_policy));
+    }
+
+    #[test]
+    fn historical_text_only_chat_policy_keeps_its_recorded_fingerprint_bytes() {
+        use sha2::{Digest, Sha256};
+        // Exactly the tuple bytes this fingerprint hashed before the optional
+        // media policy and the caller binding existed: same members, same
+        // order, no `media` or `callerBinding` key. A grant stored without a
+        // binding therefore keeps the fingerprint it already had.
+        const HISTORICAL: &str = r#"["financial-admission/1",1,"00000000-0000-0000-0000-000000000001","00000000-0000-0000-0000-000000000002","1970-01-01T00:00:00Z",100,2,{"fixture-model":{"endpoint":"https://example.test/chat/completions","envelope":{"kind":"chat","allowed_service_tiers":["default","flex"],"max_input_bytes":100,"max_output_tokens":10,"max_input_tokens":90},"attempt_microusd":50,"limit":2}}]"#;
+        let historical = format!("sha256:{}", hex::encode(Sha256::digest(HISTORICAL)));
+        let mut legacy = fixed_policy();
+        legacy.caller_binding = None;
+        assert_eq!(legacy.immutable_fingerprint().expect("fingerprint"), historical);
+        // A fenced grant hashes the stable requirement instead, in the next
+        // version of the same tuple, so a rotation cannot silently widen it.
+        assert_ne!(fixed_policy().immutable_fingerprint().expect("fingerprint"), historical);
+    }
+
+    #[test]
+    fn fenced_policy_hashes_only_the_caller_requirement_in_the_second_domain() {
+        use sha2::{Digest, Sha256};
+        // The fenced tuple: the same members in the same order, the next
+        // version literal, and one stable requirement — no ids, no generation.
+        const FENCED: &str = r#"["financial-admission/2",1,"00000000-0000-0000-0000-000000000001","00000000-0000-0000-0000-000000000002","1970-01-01T00:00:00Z",100,2,{"fixture-model":{"endpoint":"https://example.test/chat/completions","envelope":{"kind":"chat","allowed_service_tiers":["default","flex"],"max_input_bytes":100,"max_output_tokens":10,"max_input_tokens":90},"attempt_microusd":50,"limit":2}},{"callerBinding":{"formatVersion":1}}]"#;
+        assert_eq!(
+            fixed_policy().immutable_fingerprint().expect("fingerprint"),
+            format!("sha256:{}", hex::encode(Sha256::digest(FENCED))),
+        );
+    }
+
+    #[test]
+    fn caller_binding_requirement_is_fingerprinted_but_the_list_is_not() {
+        let base = fixed_policy();
+        let mut rotated = base.clone();
+        rotated.caller_binding = Some(binding(7));
+        assert_eq!(
+            rotated.immutable_fingerprint().expect("fingerprint"),
+            base.immutable_fingerprint().expect("fingerprint"),
+            "the admitted list and its generation are saveable, not policy bytes",
+        );
+
+        let mut unfenced = base.clone();
+        unfenced.caller_binding = None;
+        assert_ne!(
+            unfenced.immutable_fingerprint().expect("fingerprint"),
+            base.immutable_fingerprint().expect("fingerprint"),
+            "requiring a caller binding is part of the immutable policy",
+        );
+
+        let mut future_format = base.clone();
+        future_format.caller_binding = Some(CallerBinding {
+            format_version: CALLER_BINDING_FORMAT_VERSION + 1,
+            generation: 1,
+            callers: vec![AdmittedCaller::IamSession { session_id: uuid::Uuid::from_u128(9) }],
+        });
+        assert!(future_format.validate().is_err(), "an unknown format is not admitted");
+    }
+
+    #[test]
+    fn admissible_states_require_a_supported_non_empty_binding() {
+        let mut missing = fixed_policy();
+        missing.caller_binding = None;
+        assert!(missing.validate().is_err());
+        for state in [FinancialAdmissionState::Prepared, FinancialAdmissionState::Active] {
+            let mut missing = fixed_policy();
+            missing.state = state;
+            missing.caller_binding = None;
+            assert!(missing.validate().is_err(), "{state:?} must not omit the caller binding");
+        }
+
+        let mut empty = fixed_policy();
+        empty.caller_binding = Some(CallerBinding {
+            format_version: CALLER_BINDING_FORMAT_VERSION,
+            generation: 1,
+            callers: Vec::new(),
+        });
+        assert!(empty.validate().is_err());
+
+        let mut zero_generation = fixed_policy();
+        zero_generation.caller_binding = Some(binding(0));
+        assert!(zero_generation.validate().is_err());
+
+        let mut unknown_format = fixed_policy();
+        unknown_format.caller_binding = Some(CallerBinding {
+            format_version: CALLER_BINDING_FORMAT_VERSION + 1,
+            generation: 1,
+            callers: vec![AdmittedCaller::IamSession { session_id: uuid::Uuid::from_u128(9) }],
+        });
+        assert!(unknown_format.validate().is_err());
+
+        let mut short_fingerprint = fixed_policy();
+        short_fingerprint.caller_binding = Some(CallerBinding {
+            format_version: CALLER_BINDING_FORMAT_VERSION,
+            generation: 1,
+            callers: vec![AdmittedCaller::McpSession { fingerprint_hex: "ab".repeat(31) }],
+        });
+        assert!(short_fingerprint.validate().is_err());
+
+        let mut closed = fixed_policy();
+        closed.state = FinancialAdmissionState::Closed;
+        closed.caller_binding = None;
+        assert!(closed.validate().is_ok(), "a closed legacy grant may precede the fence");
+    }
+
+    #[test]
+    fn caller_admission_is_exact_key_membership_by_caller_kind() {
+        let binding = binding(1);
+        let admitted = crate::shared::provider_http::DispatchCaller::McpSession(
+            hex::decode(MCP_FINGERPRINT).expect("hex").try_into().expect("32 bytes"),
+        );
+        assert!(binding.admits(&admitted));
+        let mut foreign = admitted;
+        if let crate::shared::provider_http::DispatchCaller::McpSession(digest) = &mut foreign {
+            digest[0] ^= 0xff;
+        }
+        assert!(!binding.admits(&foreign), "a different session of the same token is foreign");
+        assert!(
+            !binding.admits(&crate::shared::provider_http::DispatchCaller::IamSession(
+                uuid::Uuid::from_u128(9)
+            )),
+            "a caller of another kind is never admitted by an MCP entry",
+        );
+        assert!(!binding.admits(&crate::shared::provider_http::DispatchCaller::Unattributed));
+    }
+
+    #[test]
+    fn caller_binding_rotation_is_a_generation_cas() {
+        let now = chrono::Utc::now();
+        let mut prepared = policy();
+        prepared.cutoff = now + chrono::Duration::hours(1);
+        prepared.policy_fingerprint = prepared.immutable_fingerprint().expect("fingerprint");
+
+        let mut rotated = prepared.clone();
+        rotated.caller_binding = Some(binding(2));
+        assert!(
+            FinancialAdmission::transition(Some(prepared.clone()), rotated.clone(), now).is_ok(),
+            "a rotation to the next generation on the same funded scope is admitted",
+        );
+
+        let mut stale = prepared.clone();
+        stale.caller_binding = Some(binding(1));
+        stale.caller_binding.as_mut().expect("binding").callers =
+            vec![AdmittedCaller::IamSession { session_id: uuid::Uuid::from_u128(9) }];
+        assert!(
+            FinancialAdmission::transition(Some(prepared.clone()), stale, now).is_err(),
+            "a changed list at the same generation is a stale write",
+        );
+
+        let mut jumped = prepared.clone();
+        jumped.caller_binding = Some(binding(3));
+        assert!(FinancialAdmission::transition(Some(prepared.clone()), jumped, now).is_err());
+
+        let mut omitted = prepared.clone();
+        omitted.caller_binding = None;
+        assert!(
+            FinancialAdmission::transition(Some(prepared.clone()), omitted, now).is_err(),
+            "an active grant is never silently stripped of its fence",
+        );
+
+        let mut initial_rotation = prepared.clone();
+        initial_rotation.caller_binding = Some(binding(2));
+        assert!(
+            FinancialAdmission::transition(None, initial_rotation, now).is_err(),
+            "a new grant starts at generation 1",
+        );
+    }
+
+    #[test]
+    fn closed_grant_archives_the_binding_it_was_closed_under() {
+        let now = chrono::Utc::now();
+        let mut prepared = policy();
+        prepared.cutoff = now + chrono::Duration::hours(1);
+        prepared.policy_fingerprint = prepared.immutable_fingerprint().expect("fingerprint");
+        let mut active = prepared.clone();
+        active.state = FinancialAdmissionState::Active;
+        let active = FinancialAdmission::transition(Some(prepared), active, now).expect("active");
+        let mut closed = active.clone();
+        closed.state = FinancialAdmissionState::Closed;
+        let closed = FinancialAdmission::transition(Some(active), closed, now).expect("closed");
+        assert_eq!(
+            closed.caller_binding,
+            Some(binding(1)),
+            "the exact list stays readable on the closed grant",
+        );
+        let mut successor = fixed_policy();
+        successor.provider_id = closed.provider_id;
+        successor.scope_id = uuid::Uuid::from_u128(3);
+        successor.cutoff = now + chrono::Duration::hours(2);
+        successor.policy_fingerprint = successor.immutable_fingerprint().expect("fingerprint");
+        let successor = FinancialAdmission::transition(Some(closed.clone()), successor, now)
+            .expect("successor");
+        assert_eq!(
+            successor.history,
+            vec![FinancialAdmissionArchive::from(closed)],
+            "the closed archive keeps the binding it was closed under",
+        );
+    }
+
+    #[test]
+    fn absent_media_policy_adds_no_serialized_field() {
+        let envelope = text_envelope();
+        assert_eq!(
+            serde_json::to_string(&envelope).expect("serialize"),
+            r#"{"kind":"chat","allowed_service_tiers":["default","flex"],"max_input_bytes":100,"max_output_tokens":10,"max_input_tokens":90}"#,
+        );
+        let roundtrip: FinancialRequestEnvelope =
+            serde_json::from_str(&serde_json::to_string(&envelope).expect("serialize"))
+                .expect("parse");
+        assert_eq!(roundtrip, envelope);
+    }
+
+    #[test]
+    fn chat_media_policy_serializes_only_when_present_and_roundtrips() {
+        let mut envelope = text_envelope();
+        let FinancialRequestEnvelope::Chat { media, .. } = &mut envelope else {
+            panic!("fixture must be a chat envelope");
+        };
+        *media = Some(media_policy());
+        let value = serde_json::to_value(&envelope).expect("serialize");
+        assert_eq!(
+            value["media"],
+            serde_json::json!({
+                "maxImages": 2,
+                "maxImageBytesEach": 1_000,
+                "maxImageBytesTotal": 1_500,
+                "maxImageDimensionPx": 4_096,
+                "maxImagePixelsTotal": 1_000_000,
+            })
+        );
+        let roundtrip: FinancialRequestEnvelope = serde_json::from_value(value).expect("parse");
+        assert_eq!(roundtrip, envelope);
+    }
+
+    #[test]
+    fn chat_media_policy_validation_rejects_zero_bounds_and_keeps_ceilings_independent() {
+        let mut admission = fixed_policy();
+        with_media(&mut admission, |_| {});
+        assert!(admission.validate().is_ok());
+        // Dimension and pixel ceilings are independent: a dimension square
+        // above the pixel ceiling is still a valid policy.
+        let mut independent = fixed_policy();
+        with_media(&mut independent, |media| {
+            media.max_image_dimension_px = 10;
+            media.max_image_pixels_total = 9;
+        });
+        assert!(independent.validate().is_ok());
+
+        let invalid: [fn(&mut FinancialChatMediaAdmission); 5] = [
+            |media| media.max_images = 0,
+            |media| media.max_image_bytes_each = 0,
+            |media| media.max_image_bytes_total = 0,
+            |media| media.max_image_dimension_px = 0,
+            |media| media.max_image_pixels_total = 0,
+        ];
+        for mutate in invalid {
+            let mut admission = fixed_policy();
+            with_media(&mut admission, mutate);
+            assert!(admission.validate().is_err(), "a zero media bound must be refused");
+        }
+    }
+
+    #[test]
+    fn closed_history_keeps_text_only_policy_bytes_without_media() {
+        let now = chrono::Utc::now();
+        let mut old = fixed_policy();
+        old.state = FinancialAdmissionState::Closed;
+        old.cutoff = now + chrono::Duration::hours(1);
+        old.policy_fingerprint = old.immutable_fingerprint().expect("fingerprint");
+        let old_fingerprint = old.policy_fingerprint.clone();
+        let archived = FinancialAdmissionArchive::from(old.clone());
+        let archived_json = serde_json::to_value(&archived).expect("serialize");
+        assert!(
+            archived_json["models"]["fixture-model"]["envelope"].get("media").is_none(),
+            "a closed text-only policy must not gain a serialized media field"
+        );
+        let mut desired = fixed_policy();
+        desired.scope_id = uuid::Uuid::from_u128(3);
+        desired.cutoff = now + chrono::Duration::hours(2);
+        desired.policy_fingerprint = desired.immutable_fingerprint().expect("fingerprint");
+        let stored = FinancialAdmission::transition(Some(old), desired, now).expect("successor");
+        assert_eq!(stored.history, vec![archived]);
+        assert_eq!(stored.history[0].policy_fingerprint, old_fingerprint);
+        assert_eq!(
+            serde_json::to_value(&stored.history[0]).expect("serialize")["models"]["fixture-model"]
+                ["envelope"],
+            serde_json::json!({
+                "kind": "chat",
+                "allowed_service_tiers": ["default", "flex"],
+                "max_input_bytes": 100,
+                "max_output_tokens": 10,
+                "max_input_tokens": 90,
+            })
+        );
+    }
+    /// The exact record a pre-fence deployment left behind. It must keep both
+    /// its stored bytes and its recorded fingerprint: the caller requirement is
+    /// added only to grants that carry one.
+    #[test]
+    fn legacy_closed_grant_without_binding_keeps_its_stored_bytes_and_fingerprint() {
+        const STORED: &str = r#"{"state":"closed","cutoff":"2026-11-14T04:06:28Z","models":{"gpt-6-luna":{"limit":200,"consumed":54,"endpoint":"https://api.openai.com/v1/chat/completions","envelope":{"kind":"chat","max_input_bytes":131072,"max_input_tokens":131072,"max_output_tokens":128000,"allowed_service_tiers":["default","flex"]},"attemptMicrousd":115938},"text-embedding-3-large":{"limit":32,"consumed":32,"endpoint":"https://api.openai.com/v1/embeddings","envelope":{"kind":"embeddings","max_inputs":2048,"max_input_tokens":300000,"max_input_bytes_each":32768,"max_input_bytes_total":1048576},"attemptMicrousd":42900}},"history":[{"state":"closed","cutoff":"2026-11-12T00:00:00Z","models":{"gpt-6-luna":{"limit":22,"consumed":22,"endpoint":"https://api.openai.com/v1/chat/completions","envelope":{"kind":"chat","max_input_bytes":1048576,"max_input_tokens":922000,"max_output_tokens":128000,"allowed_service_tiers":["default","flex"]},"attemptMicrousd":815540},"text-embedding-3-large":{"limit":30,"consumed":10,"endpoint":"https://api.openai.com/v1/embeddings","envelope":{"kind":"embeddings","max_inputs":2048,"max_input_tokens":300000,"max_input_bytes_each":32768,"max_input_bytes_total":1048576},"attemptMicrousd":42900}},"scopeId":"a53a46d6-84fc-403d-976c-e1659582cfd0","version":1,"providerId":"b65ec048-af9e-5311-90c4-21f1e48648a6","globalLimit":52,"grantMicrousd":20000000,"globalConsumed":32,"policyFingerprint":"sha256:4bad4c1910e3aa96f676265ecb7225597f125ebd4aa05211a914e6b9aedeadee"},{"state":"closed","cutoff":"2026-12-31T00:00:00Z","models":{"gpt-6-luna":{"limit":800,"consumed":612,"endpoint":"https://api.openai.com/v1/chat/completions","envelope":{"kind":"chat","max_input_bytes":131072,"max_input_tokens":131072,"max_output_tokens":128000,"allowed_service_tiers":["default","flex"]},"attemptMicrousd":115938},"text-embedding-3-large":{"limit":150,"consumed":150,"endpoint":"https://api.openai.com/v1/embeddings","envelope":{"kind":"embeddings","max_inputs":2048,"max_input_tokens":300000,"max_input_bytes_each":32768,"max_input_bytes_total":1048576},"attemptMicrousd":42900}},"scopeId":"d094208c-a31f-42e9-b896-e0678c7b4d35","version":1,"providerId":"b65ec048-af9e-5311-90c4-21f1e48648a6","globalLimit":950,"grantMicrousd":100000000,"globalConsumed":762,"policyFingerprint":"sha256:1e5d980ae385682f707cad4a5afcdfa4ac4b0803a4ac6f7af90b1585c21a2a35"}],"scopeId":"f7a4a166-48a0-45cb-a908-d7caa54ddf12","version":1,"providerId":"b65ec048-af9e-5311-90c4-21f1e48648a6","globalLimit":232,"grantMicrousd":25000000,"globalConsumed":86,"policyFingerprint":"sha256:8c86e7520093f230c257b2d46bee6a6384bb8536aeefef90581dab2a7d0a5e3a"}"#;
+        let stored: serde_json::Value = serde_json::from_str(STORED).expect("stored grant parses");
+        let admission: FinancialAdmission = serde_json::from_value(stored.clone())
+            .expect("stored grant is a typed financial admission");
+        assert_eq!(admission.state, FinancialAdmissionState::Closed);
+        assert!(admission.caller_binding.is_none(), "the legacy record has no caller binding");
+        assert!(admission.validate().is_ok(), "a closed pre-fence grant stays valid");
+        assert_eq!(
+            admission.immutable_fingerprint().expect("fingerprint"),
+            admission.policy_fingerprint,
+            "the recorded fingerprint still matches the serializer",
+        );
+        assert_eq!(
+            admission.policy_fingerprint,
+            "sha256:8c86e7520093f230c257b2d46bee6a6384bb8536aeefef90581dab2a7d0a5e3a",
+        );
+        assert_eq!(
+            serde_json::to_value(&admission).expect("serialize"),
+            stored,
+            "no caller-binding key is added to a grant that never had one",
+        );
     }
 }
 

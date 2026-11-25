@@ -15,6 +15,145 @@ use crate::domains::query_ir::{
 use super::*;
 
 #[test]
+fn sequence_budget_rejects_invalid_attempt_and_question_alias() {
+    assert!(prepare_grounded_answer_request(&json!({"query": "Q", "sequenceAttempt": 2})).is_err());
+    assert!(prepare_grounded_answer_request(&json!({"question": "Q"})).is_err());
+    assert_eq!(
+        prepare_grounded_answer_request(&json!({"query": "Q", "sequenceAttempt": 1}))
+            .expect("follow-up")
+            .sequence_attempt,
+        1
+    );
+}
+
+#[test]
+fn sequence_budget_exhausts_repair_without_changing_unverified_caveats() {
+    let mut detail = sample_execution_detail(ExecutionDetailIds::sequential(120));
+    detail.answer_disposition = AssistantAnswerDisposition::NonTerminal;
+    detail.verification_state = AssistantVerificationState::NotRun;
+    let body = "The historical version used `alpha`. The source does not establish a prohibition.";
+    let initial =
+        apply_grounded_answer_sequence_budget(grounded_answer_tool_result(body, &detail), 0);
+    let follow_up =
+        apply_grounded_answer_sequence_budget(grounded_answer_tool_result(body, &detail), 1);
+    assert_eq!(initial.structured_content["sequenceBudget"]["outcome"], json!("repair"));
+    assert_eq!(initial.structured_content["sequenceBudget"]["remainingCalls"], json!(1));
+    assert_eq!(
+        follow_up.structured_content["sequenceBudget"]["outcome"],
+        json!("insufficient_evidence")
+    );
+    assert_eq!(follow_up.structured_content["repairPolicy"]["required"], json!(false));
+    assert_eq!(follow_up.structured_content["finalAnswerReady"], json!(false));
+    assert_eq!(follow_up.structured_content["answerBody"], json!(body));
+    assert_eq!(
+        follow_up.structured_content["mustPreserveSpans"],
+        initial.structured_content["mustPreserveSpans"]
+    );
+    assert!(
+        GroundedAnswerCompletionEnvelope::from_structured_content(&follow_up.structured_content)
+            .is_ok()
+    );
+}
+
+#[test]
+fn sequence_budget_keeps_text_and_structured_surface_in_sync() {
+    let mut detail = sample_execution_detail(ExecutionDetailIds::sequential(1201));
+    detail.answer_disposition = AssistantAnswerDisposition::NonTerminal;
+    let body = "The historical version used `alpha`.";
+    let result =
+        apply_grounded_answer_sequence_budget(grounded_answer_tool_result(body, &detail), 1);
+    assert_eq!(result.structured_content["sequenceBudget"]["remainingCalls"], json!(0));
+    assert_eq!(visible_text_payload(&result, body), result.structured_content);
+    assert_eq!(
+        visible_text_payload(&result, body)["sequenceBudget"]["outcome"],
+        json!("insufficient_evidence")
+    );
+}
+
+#[test]
+fn query_language_reaches_both_result_representations() {
+    let detail = sample_execution_detail(ExecutionDetailIds::sequential(1202));
+    let body = "The source establishes this.";
+    let mut result = grounded_answer_tool_result(body, &detail);
+    attach_grounded_answer_query_language(&mut result, QueryLanguage::Ru);
+    assert_eq!(result.structured_content["queryLanguage"], json!("ru"));
+    assert_eq!(visible_text_payload(&result, body), result.structured_content);
+}
+
+/// The JSON payload a text-only client sees after the human message prefix.
+fn visible_text_payload(result: &McpToolResult, body: &str) -> Value {
+    let prefix = format!("{body}\n");
+    let payload = result.content[0]
+        .text
+        .strip_prefix(&prefix)
+        .expect("text block starts with the human answer body");
+    serde_json::from_str(payload).expect("text block appends the structured payload")
+}
+
+#[test]
+fn sequence_budget_distinguishes_transient_and_terminal_failures() {
+    let error = || {
+        tool_error_result(ApiError::service_unavailable(
+            "temporarily unavailable",
+            "query_provider_unavailable",
+        ))
+    };
+    let initial = apply_grounded_answer_sequence_budget(error(), 0);
+    let exhausted = apply_grounded_answer_sequence_budget(error(), 1);
+    assert_eq!(initial.structured_content["sequenceBudget"]["outcome"], json!("transient_retry"));
+    assert_eq!(initial.structured_content["retryable"], json!(true));
+    assert_eq!(
+        exhausted.structured_content["sequenceBudget"]["outcome"],
+        json!("terminal_failure")
+    );
+    assert_eq!(exhausted.structured_content["retryable"], json!(false));
+    assert!(exhausted.structured_content.get("retryAfterMs").is_none());
+    let terminal = apply_grounded_answer_sequence_budget(
+        tool_error_result(ApiError::invalid_mcp_tool_call("invalid")),
+        0,
+    );
+    assert_eq!(terminal.structured_content["sequenceBudget"]["remainingCalls"], json!(0));
+}
+
+#[test]
+fn sequence_budget_keeps_clarification_terminal() {
+    let mut detail = sample_execution_detail(ExecutionDetailIds::sequential(121));
+    detail.answer_disposition = AssistantAnswerDisposition::Clarification;
+    detail.clarification.required = true;
+    let result = apply_grounded_answer_sequence_budget(
+        grounded_answer_tool_result("Which version?", &detail),
+        0,
+    );
+    assert_eq!(result.structured_content["sequenceBudget"]["outcome"], json!("clarification"));
+    assert_eq!(result.structured_content["sequenceBudget"]["remainingCalls"], json!(0));
+}
+
+#[test]
+fn sequence_budget_keeps_confirmed_and_refusal_outcomes_distinct() {
+    let mut detail = sample_execution_detail(ExecutionDetailIds::sequential(122));
+    let confirmed = apply_grounded_answer_sequence_budget(
+        grounded_answer_tool_result("The source establishes this.", &detail),
+        0,
+    );
+    assert_eq!(
+        confirmed.structured_content["sequenceBudget"]["outcome"],
+        json!("confirmed_answer")
+    );
+    detail.answer_disposition = AssistantAnswerDisposition::SafeFallback;
+    detail.verification_state = AssistantVerificationState::InsufficientEvidence;
+    let refusal = apply_grounded_answer_sequence_budget(
+        grounded_answer_tool_result("The source does not establish this.", &detail),
+        0,
+    );
+    assert_eq!(
+        refusal.structured_content["sequenceBudget"]["outcome"],
+        json!("insufficient_evidence")
+    );
+    assert_eq!(refusal.structured_content["finalAnswerReady"], json!(false));
+    assert_eq!(refusal.structured_content["sequenceBudget"]["remainingCalls"], json!(0));
+}
+
+#[test]
 fn prepared_grounded_answer_preserves_normalized_history_and_response_policy() {
     let request = prepare_grounded_answer_request(&json!({
         "library": " workspace/library ",
@@ -304,7 +443,10 @@ fn grounded_answer_execution_errors_preserve_safe_retryable_failure_kinds() {
             "document projection is still updating; retry shortly",
         ),
         (
-            ApiError::ProviderFailure(format!("provider request failed: {private_context}")),
+            ApiError::service_unavailable(
+                format!("provider request failed: {private_context}"),
+                "query_provider_unavailable",
+            ),
             "query_provider_unavailable",
             "query provider is temporarily unavailable; retry shortly",
         ),
@@ -348,6 +490,64 @@ fn grounded_answer_execution_errors_preserve_safe_retryable_failure_kinds() {
 }
 
 #[test]
+fn grounded_provider_refusals_are_terminal_and_redacted() {
+    for kind in [
+        "query_provider_admission_refused",
+        "query_provider_allowance_exhausted",
+        "query_provider_quota_exhausted",
+        "query_provider_request_rejected",
+    ] {
+        let result = apply_grounded_answer_sequence_budget(
+            tool_error_result(sanitize_grounded_answer_execution_error(
+                ApiError::service_unavailable("private provider details", kind),
+            )),
+            0,
+        );
+        assert_eq!(result.structured_content["errorKind"], json!(kind));
+        assert_eq!(result.structured_content["retryable"], json!(false));
+        assert_eq!(
+            result.structured_content["sequenceBudget"]["outcome"],
+            json!("terminal_failure")
+        );
+        assert_eq!(result.structured_content["sequenceBudget"]["remainingCalls"], json!(0));
+        assert!(
+            !serde_json::to_string(&result)
+                .expect("serialize")
+                .contains("private provider details")
+        );
+    }
+    let untyped = tool_error_result(sanitize_grounded_answer_execution_error(
+        ApiError::ProviderFailure("private provider details".to_string()),
+    ));
+    assert_eq!(untyped.structured_content["errorKind"], json!("query_execution_failed"));
+    assert_eq!(untyped.structured_content["retryable"], json!(false));
+}
+
+#[test]
+fn grounded_state_conflict_is_terminal_and_redacted() {
+    let result = apply_grounded_answer_sequence_budget(
+        tool_error_result(sanitize_grounded_answer_execution_error(ApiError::service_unavailable(
+            "private integrity details",
+            "query_state_conflict",
+        ))),
+        0,
+    );
+    assert_eq!(result.structured_content["errorKind"], json!("query_state_conflict"));
+    assert_eq!(result.structured_content["retryable"], json!(false));
+    assert_eq!(result.structured_content["sequenceBudget"]["outcome"], json!("terminal_failure"));
+    assert_eq!(result.structured_content["sequenceBudget"]["remainingCalls"], json!(0));
+    assert!(
+        !serde_json::to_string(&result).expect("serialize").contains("private integrity details")
+    );
+
+    let ambiguous = tool_error_result(sanitize_grounded_answer_execution_error(
+        ApiError::Conflict("query execution did not complete".to_string()),
+    ));
+    assert_eq!(ambiguous.structured_content["errorKind"], json!("query_execution_failed"));
+    assert_eq!(ambiguous.structured_content["retryable"], json!(false));
+}
+
+#[test]
 fn grounded_answer_execution_error_ignores_misleading_untyped_text() {
     for error in [
         ApiError::Conflict("active query compile binding is not configured: opaque".to_string()),
@@ -380,16 +580,118 @@ fn structured_content_embeds_expected_assistant_execution_detail() {
     assert_eq!(structured_content["repairPolicy"]["maxAdditionalGroundedAnswerCalls"], json!(0));
     assert_eq!(
         structured_content["mustPreserveSpans"],
-        json!([
-            "/etc/alpha.ini",
-            "alphaKey = true",
-            "Synthetic API calls endpoint",
-            "Synthetic API",
-            "Synthetic API node",
-            "Synthetic contract"
-        ])
+        json!(["/etc/alpha.ini", "alphaKey = true"])
     );
     assert_execution_detail_reference_ids(execution_detail, &ids);
+}
+
+#[test]
+fn must_preserve_spans_requires_authorized_cited_source_match_and_question_relevance() {
+    use ironrag_contracts::assistant::semantic_verification::{
+        SEMANTIC_VERIFICATION_PROTOCOL_VERSION, SemanticAnswerUnit, SemanticAssessment,
+        SemanticByteSpan, SemanticClaimSupport, SemanticCompleteness, SemanticEvidenceLink,
+        SemanticEvidenceScope, SemanticResponseClassification, SemanticSourceEntry,
+        SemanticSourceLocator, SemanticUnitVerdict, SemanticVerificationOutcome,
+        SemanticVerificationReport,
+    };
+
+    let ids = ExecutionDetailIds::sequential(11);
+    let mut detail = sample_execution_detail(ids);
+    detail.execution.query_text =
+        "How does the visitor see the operator reply, and is automated email included?".to_string();
+    let source_text = "The visitor sees the operator reply in the same chat thread on the landing page. Automated email delivery is excluded from this change. Workspace permissions remain unchanged across regions.";
+    detail.relation_references = vec![
+        AssistantRelationReference {
+            execution_id: ids.execution_id,
+            edge_id: Uuid::from_u128(1001),
+            rank: 1,
+            score: 0.95,
+            predicate: "states".to_string(),
+            normalized_assertion: Some(
+                "The visitor sees the operator reply in the same chat thread on the landing page."
+                    .to_string(),
+            ),
+        },
+        AssistantRelationReference {
+            execution_id: ids.execution_id,
+            edge_id: Uuid::from_u128(1002),
+            rank: 2,
+            score: 0.90,
+            predicate: "states".to_string(),
+            normalized_assertion: Some(
+                "Automated email delivery is excluded from this change.".to_string(),
+            ),
+        },
+        AssistantRelationReference {
+            execution_id: ids.execution_id,
+            edge_id: Uuid::from_u128(1003),
+            rank: 3,
+            score: 0.85,
+            predicate: "mentions".to_string(),
+            normalized_assertion: Some("Document mentions extracted entity".to_string()),
+        },
+        AssistantRelationReference {
+            execution_id: ids.execution_id,
+            edge_id: Uuid::from_u128(1004),
+            rank: 4,
+            score: 0.80,
+            predicate: "states".to_string(),
+            normalized_assertion: Some(
+                "Workspace permissions remain unchanged across regions.".to_string(),
+            ),
+        },
+    ];
+    detail.semantic_verification = Some(SemanticVerificationReport {
+        protocol_version: SEMANTIC_VERIFICATION_PROTOCOL_VERSION,
+        question_sha256: "a".repeat(64),
+        checked_answer_sha256: "b".repeat(64),
+        visible_answer_sha256: Some("b".repeat(64)),
+        evidence_manifest_sha256: "c".repeat(64),
+        answer_units: vec![SemanticAnswerUnit {
+            unit_id: "u1".to_string(),
+            span: SemanticByteSpan { start: 0, end: 18 },
+            text: "Paraphrased reply.".to_string(),
+        }],
+        sources: vec![SemanticSourceEntry {
+            source_id: "s1".to_string(),
+            document_id: Uuid::from_u128(18),
+            document_revision_id: ids.revision_id,
+            locator: SemanticSourceLocator::Chunk { chunk_id: ids.chunk_id },
+            scope: SemanticEvidenceScope::SelectedExcerpt,
+            text_sha256: "d".repeat(64),
+            text: source_text.to_string(),
+        }],
+        elapsed_ms: 5,
+        provider_call_id: None,
+        preparation_limit: None,
+        outcome: SemanticVerificationOutcome::Completed {
+            assessment: SemanticAssessment {
+                claim_support: SemanticClaimSupport::Supported,
+                completeness: SemanticCompleteness::Complete,
+                missing_caveats: Vec::new(),
+                response_classification: SemanticResponseClassification::FactualAnswer,
+                units: vec![SemanticUnitVerdict {
+                    unit_id: "u1".to_string(),
+                    support: SemanticClaimSupport::Supported,
+                    asserts_document_absence: false,
+                    evidence: vec![SemanticEvidenceLink {
+                        source_id: "s1".to_string(),
+                        span: SemanticByteSpan { start: 0, end: source_text.len() },
+                        quote: source_text.to_string(),
+                    }],
+                }],
+            },
+        },
+    });
+
+    let payload = grounded_answer_tool_result("Paraphrased reply.", &detail);
+    assert_eq!(
+        payload.structured_content["mustPreserveSpans"],
+        json!([
+            "The visitor sees the operator reply in the same chat thread on the landing page.",
+            "Automated email delivery is excluded from this change."
+        ])
+    );
 }
 
 fn assert_execution_detail_reference_ids(
@@ -553,24 +855,39 @@ fn safe_fallback_is_terminal_without_becoming_factual_ready() {
 }
 
 #[test]
-fn finalizer_owned_factual_disposition_accepts_ordinary_prose_states() {
-    for state in
-        [AssistantVerificationState::NotRun, AssistantVerificationState::PartiallySupported]
-    {
-        let mut detail = sample_execution_detail(ExecutionDetailIds::sequential(63));
-        detail.verification_state = state;
-        detail.answer_disposition = AssistantAnswerDisposition::FactualReady;
+fn semantic_outcome_not_legacy_not_run_controls_factual_readiness() {
+    use ironrag_contracts::assistant::semantic_verification::{
+        SemanticAssessment, SemanticClaimSupport, SemanticCompleteness,
+        SemanticResponseClassification, SemanticVerificationOutcome,
+    };
+    let mut detail = sample_execution_detail(ExecutionDetailIds::sequential(63));
+    detail.verification_state = AssistantVerificationState::NotRun;
+    detail.answer_disposition = AssistantAnswerDisposition::NonTerminal;
+    let mut report = semantic_projection_report();
+    detail.semantic_verification = Some(report.clone());
+    let not_run = grounded_answer_tool_result("An answer.", &detail);
+    assert_eq!(not_run.structured_content["finalAnswerReady"], json!(false));
+    assert_eq!(not_run.structured_content["repairPolicy"]["required"], json!(true));
 
-        let payload = crate::interfaces::http::mcp::grounded_answer_contract_payload(
-            "A grounded prose explanation.",
-            &detail,
-        );
-        let structured = &payload["structuredContent"];
+    report.outcome = SemanticVerificationOutcome::Completed {
+        assessment: SemanticAssessment {
+            claim_support: SemanticClaimSupport::Supported,
+            completeness: SemanticCompleteness::Complete,
+            missing_caveats: vec![],
+            response_classification: SemanticResponseClassification::FactualAnswer,
+            units: vec![],
+        },
+    };
+    detail.semantic_verification = Some(report);
+    detail.answer_disposition = AssistantAnswerDisposition::FactualReady;
+    let completed = grounded_answer_tool_result("An answer.", &detail);
+    assert_eq!(completed.structured_content["finalAnswerReady"], json!(true));
 
-        assert_eq!(structured["finalAnswerReady"], json!(true));
-        assert_eq!(structured["repairPolicy"]["required"], json!(false));
-        assert_eq!(structured["readiness"]["answerDisposition"], json!("factual_ready"));
-    }
+    detail.answer_disposition = AssistantAnswerDisposition::SafeFallback;
+    detail.semantic_verification = Some(semantic_projection_report());
+    let fallback = grounded_answer_tool_result("No supported answer.", &detail);
+    assert_eq!(fallback.structured_content["repairPolicy"]["required"], json!(false));
+    assert_eq!(fallback.structured_content["finalAnswerReady"], json!(false));
 }
 
 #[test]
@@ -922,6 +1239,7 @@ fn compact_profile_bounds_large_reference_payloads() {
         .map(|index| AssistantChunkReference {
             execution_id: detail.execution.id,
             chunk_id: Uuid::from_u128(1_000 + index as u128),
+            revision_id: None,
             rank: index + 1,
             score: 1.0 / f64::from(index + 1),
             document_id: None,
@@ -1040,6 +1358,7 @@ fn sample_execution_detail(ids: ExecutionDetailIds) -> AssistantExecutionDetail 
         chunk_references: vec![AssistantChunkReference {
             execution_id,
             chunk_id,
+            revision_id: None,
             rank: 1,
             score: 0.91,
             document_id: None,

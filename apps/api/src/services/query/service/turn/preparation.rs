@@ -178,19 +178,42 @@ pub(super) async fn prior_agent_grounded_answer_context(
     conversation: &query_repository::QueryConversationRow,
     library: &CatalogLibrary,
     conversation_context: &ConversationRuntimeContext,
-) -> Vec<crate::integrations::llm::ChatMessage> {
+) -> PriorGroundedAnswerContext {
     if !should_replay_prior_grounded_answer_context(conversation_context) {
-        return Vec::new();
+        return PriorGroundedAnswerContext::default();
     }
-    match load_prior_grounded_answer_context_messages(state, conversation.id, library.id).await {
-        Ok(messages) => messages,
+    prior_replay_context(
+        conversation.id,
+        load_prior_grounded_answer_context(state, conversation.id, library.id).await,
+    )
+}
+
+/// Canonical result handling for the prior replay loader. Kept as a small seam
+/// so the error branch is testable without a live loader and the returned
+/// bounded state drives the real warning owner.
+pub(super) fn prior_replay_context(
+    conversation_id: Uuid,
+    result: Result<PriorGroundedAnswerContext, ApiError>,
+) -> PriorGroundedAnswerContext {
+    match result {
+        Ok(context) => context,
         Err(error) => {
             warn!(
                 error = %error,
-                conversation_id = %conversation.id,
+                conversation_id = %conversation_id,
                 "failed to build prior grounded-answer context replay; continuing with text history only"
             );
-            Vec::new()
+            replay_unavailable_context()
         }
+    }
+}
+
+/// Replay load failed after a currentness/authorization check. Keep the typed
+/// omission state so the final warning owner reports partial evidence; never
+/// fabricate a source or message body.
+pub(super) fn replay_unavailable_context() -> PriorGroundedAnswerContext {
+    PriorGroundedAnswerContext {
+        messages: Vec::new(),
+        manifest: AgentEvidenceManifest { sources: Vec::new(), selection_bounded: true },
     }
 }

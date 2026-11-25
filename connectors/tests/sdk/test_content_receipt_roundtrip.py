@@ -147,11 +147,15 @@ async def test_native_receipt_boundary_rejects_corrupt_lineage_without_cursor_ad
     client = _client(httpx.MockTransport(lambda request: httpx.Response(202, json=body)))
     store = StateStore(tmp_path / "invalid.sqlite")
     attempt = _submitting(store, False)
-    with pytest.raises((IronRagError, ValueError)):
+
+    async def submit_and_record() -> None:
         handle = await client.create_revision(
             UUID(int=3), mode="replace", markdown="safe", idempotency_key=attempt.payload_key
         )
         store.record_payload_receipt(attempt, handle)
+
+    with pytest.raises((IronRagError, ValueError)):
+        await submit_and_record()
     assert store.get("page", "1") is None
     assert store.materialization_attempts_for_document(str(UUID(int=3))) == [attempt]
     store.close()

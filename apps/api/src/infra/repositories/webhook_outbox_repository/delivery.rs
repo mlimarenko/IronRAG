@@ -1,6 +1,15 @@
 use super::*;
 
 /// Transaction-aware lifecycle outbox insert used by content-state writers.
+///
+/// Insertion is idempotent across retries of the same transition. The event
+/// identity is `(event_id, event_type, workspace_id, library_id,
+/// payload_json)`; `occurred_at` is the transition's own timestamp, and a
+/// retried transition legitimately produces a later one. A repeat therefore
+/// keeps the row and its already persisted `occurred_at` rather than
+/// re-dating it, while any difference in the identity fields is still a
+/// protocol error: one deterministic identity must never carry different
+/// event data.
 pub async fn enqueue_webhook_lifecycle_event_with_executor<'e, E>(
     executor: E,
     event: &WebhookEvent,
@@ -18,7 +27,6 @@ where
             on conflict (event_id) do update
             set event_id = excluded.event_id
             where webhook_lifecycle_outbox.event_type = excluded.event_type
-              and webhook_lifecycle_outbox.occurred_at = excluded.occurred_at
               and webhook_lifecycle_outbox.workspace_id = excluded.workspace_id
               and webhook_lifecycle_outbox.library_id = excluded.library_id
               and webhook_lifecycle_outbox.payload_json = excluded.payload_json

@@ -32,6 +32,7 @@ pub(crate) use readiness::{
 };
 pub(crate) use revision::PersistedRevisionSourceGuard;
 pub(crate) use revision::preparation_fence_text;
+pub use revision::{NativeRecognitionTarget, RuntimeExtractionUpload};
 
 use chunking::PendingChunkInsert;
 use internal::{InlineMutationContext, PrefetchedDocumentSummaryData};

@@ -23,7 +23,6 @@ use crate::{
         auth::AuthContext,
         authorization::{
             POLICY_DOCUMENTS_WRITE, POLICY_MCP_MEMORY_READ, authorize_document_permission,
-            load_library_and_authorize,
         },
         router_support::{ApiError, map_runtime_lifecycle_error},
     },

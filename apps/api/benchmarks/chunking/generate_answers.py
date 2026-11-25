@@ -5,17 +5,18 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
-import os
 import resource
 import time
 from pathlib import Path
 
-from semantic_boundaries import runtime_owner, sha256, write_new
+from semantic_boundaries import record_jsonl, runtime_owner, sha256, write_new
 
 MODEL_ID = "Qwen/Qwen3-0.6B"
 REVISION = "c1899de289a04d12100db370d81485cdf75e47ca"
 MAX_INPUT_TOKENS = 4096
 MAX_OUTPUT_TOKENS = 256
+REQUIRED_ROW_FIELDS = ("id", "queryId", "query", "armId")
+MAX_CONTEXTS = 10
 SYSTEM = (
     "Answer the question using only the supplied source excerpts. Preserve all applicable "
     "conditions, exceptions, units and values. If the excerpts do not support a part of the "
@@ -43,6 +44,24 @@ def checked_json(path: Path, expected: str, bound: int = 16 * 1024 * 1024) -> di
     return json.loads(path.read_text())
 
 
+def require_row_identity(row: dict) -> None:
+    for field in REQUIRED_ROW_FIELDS:
+        if not isinstance(row.get(field), str) or not row[field].strip():
+            raise ValueError("required answer identity or question missing")
+
+
+def require_literal_contexts(row: dict) -> None:
+    if len(row["contexts"]) > MAX_CONTEXTS:
+        raise ValueError("unpaired query or context bound failed")
+    for context in row["contexts"]:
+        if (
+            not context["text"].strip()
+            or hashlib.sha256(context["text"].encode()).hexdigest()
+            != context["textSha256"]
+        ):
+            raise ValueError("context literal identity failed")
+
+
 def validate_rows(data: dict) -> list[dict]:
     rows = data["cases"]
     if data["protocol"] != "irg256-answer-input/1" or not 1 <= len(rows) <= 64:
@@ -51,24 +70,16 @@ def validate_rows(data: dict) -> list[dict]:
     pairs = set()
     questions = {}
     for row in rows:
-        for field in ("id", "queryId", "query", "armId"):
-            if not isinstance(row.get(field), str) or not row[field].strip():
-                raise ValueError("required answer identity or question missing")
+        require_row_identity(row)
         pair = (row["queryId"], row["armId"])
         if row["id"] in seen or pair in pairs:
             raise ValueError("duplicate or empty answer case")
         seen.add(row["id"])
         pairs.add(pair)
         old = questions.setdefault(row["queryId"], row["query"])
-        if old != row["query"] or len(row["contexts"]) > 10:
+        if old != row["query"]:
             raise ValueError("unpaired query or context bound failed")
-        for context in row["contexts"]:
-            if (
-                not context["text"].strip()
-                or hashlib.sha256(context["text"].encode()).hexdigest()
-                != context["textSha256"]
-            ):
-                raise ValueError("context literal identity failed")
+        require_literal_contexts(row)
     return rows
 
 
@@ -77,13 +88,6 @@ def require_prompt_budget(token_count: int) -> None:
         raise ValueError(
             "final prompt exceeds token admission; no generation or clipping"
         )
-
-
-def record_jsonl(path: Path, value: dict) -> None:
-    with path.open("a", encoding="utf-8") as stream:
-        stream.write(json.dumps(value, ensure_ascii=False, allow_nan=False) + "\n")
-        stream.flush()
-        os.fsync(stream.fileno())
 
 
 def run(args: argparse.Namespace) -> None:

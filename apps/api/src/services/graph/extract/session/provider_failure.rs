@@ -162,7 +162,8 @@ fn terminal_graph_provider_failure(
         format!("graph extraction recovery attempt {provider_attempt_no} failed: {error:#}")
     };
     GraphExtractionFailureOutcome {
-        request_shape_key: prompt_plan.request_shape_key,
+        provider_call_id: None,
+        request_shape_key: prompt_plan.request_shape_key.into(),
         request_size_bytes: prompt_plan.request_size_bytes,
         error_message,
         provider_failure: provider_failure.map(Box::new),

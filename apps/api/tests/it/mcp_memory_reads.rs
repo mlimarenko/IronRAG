@@ -5,10 +5,15 @@ mod image_accounting;
 
 #[cfg(feature = "test-support")]
 use anyhow::Context;
-use axum::Router;
+use axum::{
+    Router,
+    body::Body,
+    http::{Request, StatusCode, header},
+};
 use chrono::Utc;
 use serde_json::{Value, json};
 use sqlx::postgres::PgPoolOptions;
+use tower::ServiceExt;
 use uuid::Uuid;
 
 use temp_postgres_database::TempPostgresDatabase;
@@ -17,6 +22,7 @@ use ironrag_backend::{
     app::{config::Settings, seed_clean_v1_ai_catalog, state::AppState},
     infra::repositories::{
         catalog_repository, content_document_repository, content_revision_repository,
+        query_repository, runtime_repository,
     },
     interfaces::http::router,
     services::knowledge::service::{
@@ -852,6 +858,246 @@ async fn web_ingest_documents_are_readable_through_mcp_read_document() -> anyhow
     .await;
 
     server.shutdown().await?;
+    fixture.cleanup().await?;
+    result
+}
+
+// `runtime_execution.owner_id` carries no foreign key, so a runtime row can
+// outlive the query execution, extraction attempt or revision that owns it.
+// That state is reachable in production and the read path has to answer it.
+async fn seed_runtime_execution(
+    fixture: &McpReadFixture,
+    owner_kind: &str,
+    task_kind: &str,
+    owner_id: Uuid,
+) -> anyhow::Result<Uuid> {
+    let runtime_execution_id = Uuid::now_v7();
+    runtime_repository::create_runtime_execution(
+        &fixture.state.persistence.postgres,
+        &runtime_repository::NewRuntimeExecution {
+            id: runtime_execution_id,
+            owner_kind,
+            owner_id,
+            task_kind,
+            surface_kind: "mcp",
+            contract_name: "runtime-execution-read",
+            contract_version: "test",
+            lifecycle_state: "completed",
+            active_stage: None,
+            turn_budget: 4,
+            turn_count: 1,
+            parallel_action_limit: 1,
+            failure_code: None,
+            failure_summary_redacted: None,
+            parent_execution_id: None,
+        },
+    )
+    .await
+    .context("failed to seed runtime execution")?;
+    Ok(runtime_execution_id)
+}
+
+/// The public answer for a runtime the caller cannot read: the same shape and
+/// wording a never-existing runtime id gets, carrying only that requested id.
+fn assert_public_runtime_not_found(
+    response: &Value,
+    runtime_execution_id: Uuid,
+) -> anyhow::Result<()> {
+    assert_eq!(response["result"]["isError"], json!(true), "runtime read must fail: {response}");
+    let payload = &response["result"]["structuredContent"];
+    assert_eq!(payload["errorKind"], json!("not_found"), "wrong error kind: {response}");
+    assert_eq!(
+        payload["message"],
+        json!(format!("not found: runtime_execution {runtime_execution_id} not found")),
+        "runtime read did not answer for the requested runtime: {response}"
+    );
+    let serialized = response.to_string();
+    for leaked in ["query_execution", "graph_extraction", "knowledge_revision", "library"] {
+        assert!(
+            !serialized.contains(leaked),
+            "runtime read leaked the owner contract `{leaked}`: {serialized}"
+        );
+    }
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires local postgres and redis services"]
+async fn runtime_reads_with_a_missing_owner_row_match_a_missing_runtime() -> anyhow::Result<()> {
+    let settings = Settings::from_env().context("failed to load settings for runtime read test")?;
+    let fixture = Box::pin(McpReadFixture::create(settings)).await?;
+
+    let result = async {
+        let token = fixture.bearer_token(&["query:run"], "runtime-read-orphan").await?;
+        let missing_runtime_id = Uuid::now_v7();
+
+        for tool_name in ["get_runtime_execution", "get_runtime_execution_trace"] {
+            let missing = fixture
+                .mcp_tool_call(
+                    &token,
+                    tool_name,
+                    json!({ "runtimeExecutionId": missing_runtime_id }),
+                )
+                .await?;
+            assert_public_runtime_not_found(&missing, missing_runtime_id)?;
+
+            // One owner kind per resolution branch: the query-execution lookup,
+            // the graph-extraction lookup, and the knowledge-revision lookup.
+            for (owner_kind, task_kind, owner_contract) in [
+                ("query_execution", "query_answer", "query_execution"),
+                ("graph_extraction_attempt", "graph_extract", "graph_extraction"),
+                ("structured_preparation", "structured_prepare", "knowledge_revision"),
+                ("technical_fact_extraction", "technical_fact_extract", "knowledge_revision"),
+            ] {
+                let owner_id = Uuid::now_v7();
+                let runtime_execution_id =
+                    seed_runtime_execution(&fixture, owner_kind, task_kind, owner_id).await?;
+                let orphaned = fixture
+                    .mcp_tool_call(
+                        &token,
+                        tool_name,
+                        json!({ "runtimeExecutionId": runtime_execution_id }),
+                    )
+                    .await?;
+                assert_public_runtime_not_found(&orphaned, runtime_execution_id)?;
+                let serialized = orphaned.to_string();
+                for leaked in [owner_id.to_string(), owner_contract.to_string()] {
+                    assert!(
+                        !serialized.contains(&leaked),
+                        "runtime read with a missing {owner_kind} owner leaked `{leaked}`: {serialized}"
+                    );
+                }
+            }
+        }
+
+        Ok(())
+    }
+    .await;
+
+    fixture.cleanup().await?;
+    result
+}
+
+#[tokio::test]
+#[ignore = "requires local postgres and redis services"]
+async fn runtime_reads_with_a_live_owner_keep_reading_and_keep_authorizing() -> anyhow::Result<()> {
+    let settings = Settings::from_env().context("failed to load settings for runtime read test")?;
+    let fixture = Box::pin(McpReadFixture::create(settings)).await?;
+
+    let result = async {
+        let pg = &fixture.state.persistence.postgres;
+        let conversation = query_repository::create_conversation(
+            pg,
+            &query_repository::NewQueryConversation {
+                workspace_id: fixture.workspace_id,
+                library_id: fixture.library_id,
+                created_by_principal_id: None,
+                title: Some("runtime read fixture"),
+                conversation_state: "active",
+                request_surface: "mcp",
+            },
+            32,
+        )
+        .await
+        .context("failed to create runtime read conversation")?;
+        let execution_id = Uuid::now_v7();
+        let runtime_execution_id =
+            seed_runtime_execution(&fixture, "query_execution", "query_answer", execution_id)
+                .await?;
+        query_repository::create_execution(
+            pg,
+            &query_repository::NewQueryExecution {
+                execution_id,
+                context_bundle_id: Uuid::now_v7(),
+                workspace_id: fixture.workspace_id,
+                library_id: fixture.library_id,
+                conversation_id: conversation.id,
+                request_turn_id: None,
+                response_turn_id: None,
+                binding_id: None,
+                runtime_execution_id,
+                query_text: "runtime read fixture",
+                failure_code: None,
+            },
+        )
+        .await
+        .context("failed to create runtime read execution")?;
+
+        let reader = fixture.bearer_token(&["query:run"], "runtime-read-authorised").await?;
+        for tool_name in ["get_runtime_execution", "get_runtime_execution_trace"] {
+            let response = fixture
+                .mcp_tool_call(
+                    &reader,
+                    tool_name,
+                    json!({ "runtimeExecutionId": runtime_execution_id }),
+                )
+                .await?;
+            assert_eq!(
+                response["result"]["isError"],
+                json!(false),
+                "{tool_name} failed for a live owner: {response}"
+            );
+            let structured = &response["result"]["structuredContent"];
+            let summary = if tool_name == "get_runtime_execution_trace" {
+                &structured["execution"]
+            } else {
+                structured
+            };
+            assert_eq!(summary["runtimeExecutionId"], json!(runtime_execution_id));
+            assert_eq!(summary["ownerKind"], json!("query_execution"));
+        }
+
+        // Two fail-closed layers guard the same read. The answer surface only
+        // offers the tool to a principal holding a document-memory grant, so a
+        // token with no grants is rejected there before dispatch. The canonical
+        // loader's own authorization is then exercised over the REST route,
+        // which has no tool-visibility filter in front of it.
+        let outsider = fixture.bearer_token(&[], "runtime-read-without-grants").await?;
+        let denied = fixture
+            .mcp_tool_call(
+                &outsider,
+                "get_runtime_execution",
+                json!({ "runtimeExecutionId": runtime_execution_id }),
+            )
+            .await?;
+        assert_eq!(
+            denied["result"]["isError"],
+            json!(true),
+            "an unprivileged token read a runtime: {denied}"
+        );
+        assert_eq!(
+            denied["result"]["structuredContent"]["errorKind"],
+            json!("invalid_mcp_tool_call"),
+            "the answer surface stopped refusing an unprivileged token: {denied}"
+        );
+        assert!(
+            !denied.to_string().contains(&execution_id.to_string()),
+            "the surface refusal carried the owner identity: {denied}"
+        );
+
+        let response = Router::new()
+            .nest("/v1", router())
+            .with_state(fixture.state.clone())
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(format!("/v1/runtime/executions/{runtime_execution_id}"))
+                    .header(header::AUTHORIZATION, format!("Bearer {outsider}"))
+                    .body(Body::empty())
+                    .context("failed to build the runtime read request")?,
+            )
+            .await
+            .context("runtime read request failed")?;
+        assert_eq!(
+            response.status(),
+            StatusCode::UNAUTHORIZED,
+            "authorization after a successful owner resolution changed for the REST read"
+        );
+
+        Ok(())
+    }
+    .await;
+
     fixture.cleanup().await?;
     result
 }

@@ -54,6 +54,79 @@ pub const INGEST_STAGE_WEBHOOK_DELIVERY: &str = "webhook_delivery";
 pub(crate) const QUEUE_STALE_LEASE_SECONDS: i64 = 60;
 const INLINE_QUEUE_LEASE_OWNER: &str = "inline";
 
+/// Parse the plan a persisted mutation identity recorded.
+///
+/// A missing identity, or an identity without `enrichmentScope`, is the plan
+/// every pre-existing mutation has: `Full`. A present but unknown value is an
+/// error, never a silent `Full`, because guessing full would run paid summary
+/// and graph work for a request that asked for the bounded plan.
+pub(crate) fn enrichment_scope_from_identity(
+    identity: Option<&serde_json::Value>,
+) -> anyhow::Result<crate::domains::content::EnrichmentScope> {
+    use crate::domains::content::EnrichmentScope;
+    let Some(identity) = identity else {
+        return Ok(EnrichmentScope::Full);
+    };
+    let Some(value) = identity.get("enrichmentScope") else {
+        return Ok(EnrichmentScope::Full);
+    };
+    serde_json::from_value::<EnrichmentScope>(value.clone()).map_err(|error| {
+        anyhow::anyhow!("persisted enrichment scope is not an admitted plan: {error}")
+    })
+}
+
+/// The enrichment scope the admitted mutation asked for.
+///
+/// The plan is read from the persisted `content_mutation.request_identity`, the
+/// same object that owns replay and idempotency, so a resumed or replayed job
+/// executes exactly the plan its request fingerprint was computed from. A read
+/// failure, a missing mutation row for a job that names one, or an unparsable
+/// scope is a terminal stage error: it must never fall back to the paid plan.
+pub(crate) async fn recorded_enrichment_scope(
+    state: &AppState,
+    job: &ingest_repository::IngestJobRow,
+) -> anyhow::Result<crate::domains::content::EnrichmentScope> {
+    use crate::domains::content::EnrichmentScope;
+    let Some(mutation_id) = job.mutation_id else {
+        return Ok(EnrichmentScope::Full);
+    };
+    let identity: Option<serde_json::Value> =
+        sqlx::query_scalar("select request_identity from content_mutation where id = $1")
+            .bind(mutation_id)
+            .fetch_optional(&state.persistence.postgres)
+            .await?;
+    let Some(identity) = identity else {
+        anyhow::bail!("ingest job names mutation {mutation_id} with no stored request identity");
+    };
+    enrichment_scope_from_identity(Some(&identity))
+}
+
+/// The caller a queued job is dispatched for, from the record that admitted it.
+///
+/// `ingest_job.mutation_id` names a `content_mutation` row whose
+/// `requested_by_principal_id` is the principal the admitting request proved.
+/// A missing mutation id, missing row or NULL origin is `Unattributed`, never a
+/// worker identity, so a fenced grant refuses the paid step.
+pub(crate) async fn recorded_job_caller(
+    state: &AppState,
+    job: &ingest_repository::IngestJobRow,
+) -> crate::shared::provider_http::DispatchCaller {
+    use crate::shared::provider_http::DispatchCaller;
+    let Some(mutation_id) = job.mutation_id else {
+        return DispatchCaller::Unattributed;
+    };
+    let Ok(Some(mutation)) =
+        crate::infra::repositories::content_mutation_repository::get_mutation_by_id(
+            &state.persistence.postgres,
+            mutation_id,
+        )
+        .await
+    else {
+        return DispatchCaller::Unattributed;
+    };
+    DispatchCaller::mutation_origin(mutation_id, mutation.requested_by_principal_id)
+}
+
 #[derive(Debug, Clone)]
 pub struct AdmitIngestJobCommand {
     pub workspace_id: Uuid,
@@ -287,4 +360,38 @@ async fn update_linked_async_operation(
             .await?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod enrichment_scope_plan_tests {
+    use super::enrichment_scope_from_identity;
+    use crate::domains::content::EnrichmentScope;
+
+    #[test]
+    fn an_absent_plan_is_full() {
+        assert_eq!(enrichment_scope_from_identity(None).expect("legacy"), EnrichmentScope::Full);
+        assert_eq!(
+            enrichment_scope_from_identity(Some(&serde_json::json!({"workspaceId": "x"})))
+                .expect("legacy"),
+            EnrichmentScope::Full,
+        );
+    }
+
+    #[test]
+    fn a_recorded_plan_is_executed_and_an_unknown_one_is_terminal() {
+        assert_eq!(
+            enrichment_scope_from_identity(Some(
+                &serde_json::json!({"enrichmentScope": "text_and_embedding"})
+            ))
+            .expect("bounded plan"),
+            EnrichmentScope::TextAndEmbedding,
+        );
+        assert!(
+            enrichment_scope_from_identity(Some(
+                &serde_json::json!({"enrichmentScope": "everything"})
+            ))
+            .is_err(),
+            "an unknown stored plan must fail the stage, never run the paid one",
+        );
+    }
 }

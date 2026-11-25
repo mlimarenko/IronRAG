@@ -66,10 +66,59 @@ pub(crate) struct QuestionEmbeddingResult {
     pub(crate) embedding_profile_key: String,
 }
 
+#[derive(Debug, thiserror::Error)]
+#[error("query embedding provider unavailable")]
+pub(super) struct EmbeddingProviderUnavailable;
+
+#[derive(Debug, thiserror::Error)]
+#[error("failed to terminalize query embedding provider reservation")]
+pub(super) struct EmbeddingReservationFailure;
+
+pub(crate) fn operational_provider_failure(error: &anyhow::Error) -> bool {
+    use crate::integrations::retry::ProviderCallError;
+    if let Some(provider_error) = error.downcast_ref::<ProviderCallError>()
+        && crate::shared::provider_failure::ProviderFailure::from(provider_error).is_refusal()
+    {
+        return false;
+    }
+    match error.downcast_ref::<ProviderCallError>() {
+        Some(ProviderCallError::Transport { .. } | ProviderCallError::Timeout { .. }) => true,
+        Some(ProviderCallError::HttpStatus { status, quota_exhausted: false, .. }) => {
+            status.is_server_error() || status.as_u16() == 429
+        }
+        _ => false,
+    }
+}
+
 fn missing_embedding_binding_error() -> QueryServiceError {
     QueryServiceError::BindingNotConfigured {
         message: "active embed_chunk binding is not configured for this library".to_string(),
     }
+}
+
+/// Looks up the cached query embedding and revalidates it against the proven
+/// dimensions; a mismatching cached vector is evicted.
+async fn validated_cached_embedding(
+    state: &AppState,
+    library_id: uuid::Uuid,
+    cache_key: EmbeddingCacheKey,
+    vector_search_context: &RuntimeVectorSearchContext,
+    model_name: &str,
+) -> anyhow::Result<Option<Vec<f32>>> {
+    let Some(cached_embedding) =
+        EMBEDDING_CACHE.lock().ok().and_then(|cache| cache.get(&cache_key).cloned())
+    else {
+        return Ok(None);
+    };
+    let _vector_guard =
+        state.application_services.search.vector_plane_read_guard(state, library_id).await?;
+    validate_cached_embedding_dimensions(
+        cache_key,
+        vector_search_context.dimensions,
+        &cached_embedding,
+        format!("cached runtime query {model_name}"),
+    )?;
+    Ok(Some(cached_embedding))
 }
 
 fn validate_cached_embedding_dimensions(
@@ -87,6 +136,28 @@ fn validate_cached_embedding_dimensions(
         return Err(error);
     }
     Ok(())
+}
+
+/// Terminalizes a failed paid query-embedding call and maps it to the typed
+/// failure the caller reports.
+async fn map_embedding_call_failure(
+    mut provider_call: ProviderCallReservation,
+    error: anyhow::Error,
+) -> anyhow::Error {
+    let provider_call_id = provider_call.provider_call_id();
+    if let Err(billing_error) = provider_call.fail().await {
+        log_embedding_reservation_failure(provider_call_id, &billing_error);
+        return EmbeddingReservationFailure.into();
+    }
+    if operational_provider_failure(&error) {
+        log_query_embedding_provider_unavailable();
+        return EmbeddingProviderUnavailable.into();
+    }
+    error.context("failed to embed runtime query")
+}
+
+fn log_query_embedding_provider_unavailable() {
+    tracing::warn!("query embedding provider unavailable");
 }
 
 /// Logs a query-embedding provider-call reservation that could not be terminalized.
@@ -125,17 +196,15 @@ pub(super) async fn embed_question(
     )?;
     let cache_key = embedding_cache_key(&trimmed_input, &embedding_binding);
 
-    let cached_embedding =
-        EMBEDDING_CACHE.lock().ok().and_then(|cache| cache.get(&cache_key).cloned());
-    if let Some(cached_embedding) = cached_embedding {
-        let _vector_guard =
-            state.application_services.search.vector_plane_read_guard(state, library_id).await?;
-        validate_cached_embedding_dimensions(
-            cache_key,
-            vector_search_context.dimensions,
-            &cached_embedding,
-            format!("cached runtime query {}", embedding_binding.model_name),
-        )?;
+    let cached_embedding = validated_cached_embedding(
+        state,
+        library_id,
+        cache_key,
+        vector_search_context,
+        &embedding_binding.model_name,
+    )
+    .await?;
+    if let Some(embedding) = cached_embedding {
         crate::services::query::turn_spans::record_span(
             "embed.question.cache_hit",
             "llm",
@@ -143,7 +212,7 @@ pub(super) async fn embed_question(
             None,
             None,
         );
-        return Ok(QuestionEmbeddingResult { embedding: cached_embedding, embedding_profile_key });
+        return Ok(QuestionEmbeddingResult { embedding, embedding_profile_key });
     }
 
     let mut provider_call = ProviderCallReservation::reserve(
@@ -155,9 +224,8 @@ pub(super) async fn embed_question(
     )
     .await
     .context("failed to reserve query embedding provider call")?;
-    let response = match crate::observability::with_provider_call_id(
-        provider_call.provider_call_id(),
-        state.llm_gateway.embed(EmbeddingRequest {
+    let response = match provider_call
+        .scoped(state.llm_gateway.embed(EmbeddingRequest {
             provider_kind: embedding_binding.provider_kind.clone(),
             model_name: embedding_binding.model_name.clone(),
             input: trimmed_input,
@@ -165,16 +233,12 @@ pub(super) async fn embed_question(
             base_url_override: embedding_binding.provider_base_url.clone(),
             extra_parameters_json: embedding_binding.extra_parameters_json.clone(),
             dispatch: Some(embedding_binding.dispatch_authority()),
-        }),
-    )
-    .await
+        }))
+        .await
     {
         Ok(response) => response,
         Err(error) => {
-            if let Err(billing_error) = provider_call.fail().await {
-                log_embedding_reservation_failure(provider_call.provider_call_id(), &billing_error);
-            }
-            return Err(error).context("failed to embed runtime query");
+            return Err(map_embedding_call_failure(provider_call, error).await);
         }
     };
     provider_call
@@ -218,6 +282,20 @@ mod tests {
 
     use super::*;
     use crate::services::ai_catalog_service::EmbeddingDimensions;
+
+    #[test]
+    fn embedding_degradation_excludes_dispatch_admission_and_untyped_errors() {
+        use crate::integrations::{provider_budget::ProviderBudgetError, retry::ProviderCallError};
+        assert!(operational_provider_failure(&anyhow::Error::new(ProviderCallError::timeout(
+            "embedding"
+        ))));
+        assert!(!operational_provider_failure(&anyhow::Error::new(ProviderCallError::admission(
+            ProviderBudgetError::Dispatch(
+                crate::shared::provider_http::ProviderDispatchRefusal::Authority,
+            )
+        ))));
+        assert!(!operational_provider_failure(&anyhow::anyhow!("provider timeout")));
+    }
 
     fn binding() -> ResolvedRuntimeBinding {
         ResolvedRuntimeBinding {

@@ -19,6 +19,7 @@ DECLARE
     payload_identity jsonb;
     admission_identity jsonb;
     visible integer;
+    channel_mismatch integer;
     published_filename text;
 BEGIN
     IF to_regtype('public.admission_visibility_policy') IS NOT NULL
@@ -58,9 +59,13 @@ BEGIN
             ('pruned publication history', '"replacement.txt"'::jsonb, true),
             ('text not readable', '"replacement.txt"'::jsonb, false),
             ('missing text timestamp', '"replacement.txt"'::jsonb, false),
-            ('vector not ready', '"replacement.txt"'::jsonb, false),
-            ('missing vector timestamp', '"replacement.txt"'::jsonb, false),
-            ('graph not ready', '"replacement.txt"'::jsonb, false)
+            -- Text-readable publication owns visibility. Vector and graph
+            -- readiness are enrichment of the same readable revision, reported
+            -- on its published row and gated by the query lanes, so these three
+            -- stay visible instead of hiding text that is already readable.
+            ('vector not ready', '"replacement.txt"'::jsonb, true),
+            ('missing vector timestamp', '"replacement.txt"'::jsonb, true),
+            ('graph not ready', '"replacement.txt"'::jsonb, true)
         ) AS cases(name, filename, expected)
     LOOP
         document := uuidv7(); revision := uuidv7();
@@ -146,6 +151,41 @@ BEGIN
         SELECT source_file_name INTO published_filename FROM content_current_revision WHERE document_id = document;
         IF scenario.expected AND published_filename IS DISTINCT FROM 'replacement.txt' THEN
             RAISE EXCEPTION 'published filename must come from immutable payload, got %', published_filename;
+        END IF;
+        IF scenario.expected THEN
+            -- Readiness channels belong to the published revision itself: the
+            -- view reports them exactly as recorded and never claims enrichment
+            -- the revision does not have.
+            SELECT count(*) INTO channel_mismatch
+                FROM content_current_revision c
+                JOIN knowledge_revision k ON k.revision_id = c.revision_id
+                WHERE c.document_id = document
+                  AND (c.vector_state IS DISTINCT FROM k.vector_state
+                    OR c.vector_ready_at IS DISTINCT FROM k.vector_ready_at
+                    OR c.graph_state IS DISTINCT FROM k.graph_state
+                    OR c.graph_ready_at IS DISTINCT FROM k.graph_ready_at);
+            IF channel_mismatch <> 0 THEN
+                RAISE EXCEPTION 'published row must report its own readiness channels: %', scenario.name;
+            END IF;
+            IF scenario.name = 'vector not ready' THEN
+                SELECT count(*) INTO channel_mismatch FROM content_current_revision
+                    WHERE document_id = document AND vector_state = 'accepted' AND vector_ready_at IS NOT NULL;
+                IF channel_mismatch <> 1 THEN
+                    RAISE EXCEPTION 'text-readable publication must expose the not-ready vector channel: %', scenario.name;
+                END IF;
+            ELSIF scenario.name = 'missing vector timestamp' THEN
+                SELECT count(*) INTO channel_mismatch FROM content_current_revision
+                    WHERE document_id = document AND vector_state = 'ready' AND vector_ready_at IS NULL;
+                IF channel_mismatch <> 1 THEN
+                    RAISE EXCEPTION 'text-readable publication must expose the timestamp-less vector channel: %', scenario.name;
+                END IF;
+            ELSIF scenario.name = 'graph not ready' THEN
+                SELECT count(*) INTO channel_mismatch FROM content_current_revision
+                    WHERE document_id = document AND graph_state = 'accepted';
+                IF channel_mismatch <> 1 THEN
+                    RAISE EXCEPTION 'text-readable publication must expose the not-ready graph channel: %', scenario.name;
+                END IF;
+            END IF;
         END IF;
         UPDATE content_document SET source_file_name = 'renamed-after-bound-READY.txt' WHERE id = document;
         SELECT count(*) INTO visible FROM content_current_revision WHERE document_id = document;

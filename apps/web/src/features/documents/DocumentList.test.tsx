@@ -276,6 +276,35 @@ describe('DocumentList pagination summary', () => {
     await i18n.changeLanguage('en')
   })
 
+  it('offers localized paused and pending-content status filters with scoped counts', () => {
+    renderList({
+      documents: stubDocuments({
+        items: [
+          buildDocument({ status: 'paused' }),
+          buildDocument({ id: 'doc-2', status: 'pending_materialization' }),
+        ],
+        filteredTotal: 2,
+        pagination: stubPagination(),
+        statusCounts: {
+          total: 2,
+          readable: 0,
+          ready: 0,
+          queued: 0,
+          processing: 0,
+          paused: 1,
+          pendingMaterialization: 1,
+          canceled: 0,
+          failed: 0,
+          empty: 0,
+        },
+      }),
+      list: stubList(),
+      url: stubUrl('all'),
+    })
+    expect(screen.getByRole('button', { name: 'Paused · 1' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Awaiting content · 1' })).toBeInTheDocument()
+  })
+
   it('does not present the old scope count under a pending new search', () => {
     renderList({
       documents: {
@@ -285,8 +314,11 @@ describe('DocumentList pagination summary', () => {
           pagination: stubPagination(),
           statusCounts: {
             total: 21,
+            readable: 21,
             ready: 21,
             queued: 0,
+            paused: 0,
+            pendingMaterialization: 0,
             processing: 0,
             canceled: 0,
             failed: 0,

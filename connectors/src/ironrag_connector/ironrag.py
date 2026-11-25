@@ -125,6 +125,20 @@ _EMPTY_REVISION_PROVENANCE = RevisionProvenance()
 
 
 @dataclass(frozen=True, slots=True)
+class RevisionFile:
+    """The file a replacement describes: its declared identity and, when
+    uploaded, the exact bytes sent as multipart content.
+
+    ``data`` stays optional because a markdown replace may still declare the
+    name and media type of the file the revision is expected to read as.
+    """
+
+    name: str | None = None
+    mime_type: str | None = None
+    data: bytes | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class _CatalogPage:
     """One ``{items, totalCount, offset, limit}`` catalog page.
 
@@ -278,6 +292,90 @@ def _validate_exact_document_identity(
         )
 
 
+class IngestJob(BaseModel):
+    """The canonical per-job ingest record, as the server serializes it.
+
+    ``IngestJobResponse`` keeps this nested record in snake_case; only the
+    envelope keys are camelCase. The job's own ``queue_state`` is the executed
+    state — it is not a document readiness claim.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    id: UUID
+    workspace_id: UUID
+    library_id: UUID
+    job_kind: str
+    queue_state: str
+    priority: int
+    mutation_id: UUID | None = None
+    connector_id: UUID | None = None
+    async_operation_id: UUID | None = None
+    knowledge_document_id: UUID | None = None
+    knowledge_revision_id: UUID | None = None
+    dedupe_key: str | None = None
+    queued_at: datetime
+    available_at: datetime
+    completed_at: datetime | None = None
+
+
+class IngestAttempt(BaseModel):
+    """The latest attempt the server reports with one job (snake_case wire).
+
+    A failed attempt is where a retryable pipeline stop or a financial/caller
+    refusal is recorded, so its codes travel with the executed job.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    id: UUID
+    job_id: UUID
+    attempt_number: int
+    attempt_state: str
+    current_stage: str | None = None
+    failure_class: str | None = None
+    failure_code: str | None = None
+    failure_message: str | None = None
+    progress_percent: int = 0
+    retryable: bool = False
+    started_at: datetime | None = None
+    finished_at: datetime | None = None
+
+
+class IngestReadiness(BaseModel):
+    """Server-reported readiness of the job's document and revision."""
+
+    model_config = ConfigDict(populate_by_name=True, extra="ignore")
+
+    knowledge_document_id: UUID | None = Field(default=None, alias="knowledgeDocumentId")
+    knowledge_revision_id: UUID | None = Field(default=None, alias="knowledgeRevisionId")
+    text_state: str | None = Field(default=None, alias="textState")
+    vector_state: str | None = Field(default=None, alias="vectorState")
+    graph_state: str | None = Field(default=None, alias="graphState")
+    text_ready: bool = Field(alias="textReady")
+    vector_ready: bool = Field(alias="vectorReady")
+    graph_ready: bool = Field(alias="graphReady")
+
+
+class IngestJobExecution(BaseModel):
+    """The executed job's own record — the endpoint's only response.
+
+    ``POST /v1/ops/ingest-queue/jobs/{jobId}/execute`` runs the job under the
+    origin recorded at admission and answers with this job, never with the
+    privileged global queue. A 200 means the server completed the control
+    request and reported this job; ``job.queue_state``, ``latest_attempt`` and
+    ``readiness`` are what the server says actually happened. The client never
+    turns that into a publication claim: the operation, job and document reads
+    own the published head and cost.
+    """
+
+    model_config = ConfigDict(populate_by_name=True, extra="ignore")
+
+    job: IngestJob
+    readiness: IngestReadiness
+    latest_attempt: IngestAttempt | None = Field(default=None, alias="latestAttempt")
+
+
 class OperationStatusValue(StrEnum):
     """Canonical ``ops_async_operation.status`` values (server-authoritative)."""
 
@@ -361,6 +459,8 @@ class OperationHandle(BaseModel):
     document_id: UUID | None = None
     visibility_intent_id: UUID | None = None
     mutation_item_id: UUID | None = None
+    mutation_id: UUID | None = None
+    job_id: UUID | None = None
     result_revision_id: UUID | None = None
     result_checksum: str | None = None
     request_fingerprint: str | None = None
@@ -646,6 +746,24 @@ def _parse_document_page(response: httpx.Response) -> DocumentPage:
         raise IronRagError("IronRAG returned a malformed document collection page") from exc
 
 
+def _validated_job_id(job_id: UUID | str) -> UUID:
+    """Require one job UUID before a request is built from it."""
+    if isinstance(job_id, UUID):
+        return job_id
+    try:
+        return UUID(job_id)
+    except (TypeError, ValueError) as exc:
+        raise IronRagError(f"ingest job id must be a single UUID, got {job_id!r}") from exc
+
+
+def _parse_ingest_job(response: httpx.Response) -> IngestJobExecution:
+    """Parse the 2xx per-job execute response without inventing a record."""
+    try:
+        return IngestJobExecution.model_validate(response.json())
+    except ValueError as exc:
+        raise IronRagError("IronRAG returned a malformed executed ingest job") from exc
+
+
 def _next_document_cursor(page: DocumentPage, seen: set[str]) -> str | None:
     """Accept only a null terminator or a previously unseen non-empty cursor."""
     cursor = page.next_cursor
@@ -739,7 +857,15 @@ def _receipt_from_response(body: Mapping[str, Any]) -> dict[str, Any]:
             or not fingerprint
         ):
             raise ValueError("missing payload lineage")
+        # The admission detail always carries the mutation identity. A missing,
+        # non-mapping or id-less mutation is a malformed receipt: refuse it
+        # rather than admitting a payload without its authoritative owner.
+        mutation_identity = body.get("mutation")
+        if not isinstance(mutation_identity, Mapping) or "id" not in mutation_identity:
+            raise IronRagError("IronRAG admission returned no mutation identity")
         return {
+            "mutation_id": UUID(str(mutation_identity["id"])),
+            "job_id": _optional_uuid(body.get("jobId")),
             "visibility_intent_id": _optional_uuid(body["visibilityIntentId"]),
             "mutation_item_id": UUID(str(item["id"])),
             "document_id": UUID(str(item["document_id"])),
@@ -1189,6 +1315,7 @@ class IronRagClient:
         title: str | None = None,
         document_hint: str | None = None,
         parent_external_key: str | None = None,
+        enrichment_scope: str | None = None,
     ) -> DocumentResource:
         """Create a document. Content-negotiated: passing ``file_bytes``
         sends a multipart upload; omitting it sends a JSON metadata-only
@@ -1225,6 +1352,8 @@ class IronRagClient:
                 data["document_hint"] = document_hint
             if parent_external_key is not None:
                 data["parent_external_key"] = parent_external_key
+            if enrichment_scope is not None:
+                data["enrichment_scope"] = enrichment_scope
             response = await self._client.post(
                 f"/v1/content/libraries/{library_id}/documents",
                 data=data,
@@ -1238,6 +1367,8 @@ class IronRagClient:
                 json_body["documentHint"] = document_hint
             if parent_external_key is not None:
                 json_body["parentExternalKey"] = parent_external_key
+            if enrichment_scope is not None:
+                json_body["enrichmentScope"] = enrichment_scope
             response = await self._client.post(
                 f"/v1/content/libraries/{library_id}/documents",
                 json=json_body,
@@ -1277,25 +1408,29 @@ class IronRagClient:
         mode: Literal["append", "replace"],
         markdown: str | None = None,
         appended_text: str | None = None,
-        file_bytes: bytes | None = None,
-        file_name: str | None = None,
-        mime_type: str | None = None,
+        file: RevisionFile | None = None,
         idempotency_key: str,
         visibility_intent_id: UUID | str | None = None,
         base_revision_id: UUID | str | None = None,
         title: str | None = None,
         provenance: RevisionProvenance = _EMPTY_REVISION_PROVENANCE,
         document_hint: str | None = None,
+        enrichment_scope: str | None = None,
     ) -> OperationHandle:
         """Create a new revision. Content-negotiated, mirroring
-        :meth:`create_document`: ``file_bytes`` sends a multipart file
-        replace; otherwise a JSON ``{mode, appendedText|markdown}`` body.
+        :meth:`create_document`: ``file`` carrying ``data`` sends a multipart
+        file replace; otherwise a JSON ``{mode, appendedText|markdown}`` body.
         Always asynchronous -- returns an :class:`OperationHandle` to poll
         via :meth:`wait_for_operation`.
         """
         if mode == "append" and base_revision_id is None:
             raise ValueError("base_revision_id is required when mode='append'")
-        if file_bytes is not None and mode != "replace":
+        if enrichment_scope is not None and mode == "append":
+            raise ValueError(
+                "enrichment_scope is not accepted by mode='append': the inline append "
+                "executor always runs full enrichment"
+            )
+        if file is not None and file.data is not None and mode != "replace":
             raise ValueError("file replacement requires mode='replace'")
         await self.ensure_visibility_contract()
         metadata = {
@@ -1309,14 +1444,16 @@ class IronRagClient:
             document_id=str(document_id),
             mode=mode,
         )
-        if file_bytes is not None:
-            if not file_name or not mime_type:
+        if file is not None and file.data is not None:
+            if not file.name or not file.mime_type:
                 raise ValueError("file_name and mime_type are required when file_bytes is set")
-            files = {"file": (file_name, file_bytes, mime_type)}
+            files = {"file": (file.name, file.data, file.mime_type)}
             data = {"idempotency_key": idempotency_key}
             data.update({key: value for key, value in metadata.items() if value is not None})
             if visibility_intent_id is not None:
                 data["visibility_intent_id"] = str(UUID(str(visibility_intent_id)))
+            if enrichment_scope is not None:
+                data["enrichment_scope"] = enrichment_scope
             response = await self._client.post(
                 f"/v1/content/documents/{document_id}/revisions",
                 data=data,
@@ -1340,12 +1477,14 @@ class IronRagClient:
                         "languageCode": provenance.language_code,
                         "sourceUri": provenance.source_uri,
                         "documentHint": document_hint,
-                        "fileName": file_name,
-                        "mimeType": mime_type,
+                        "fileName": file.name if file is not None else None,
+                        "mimeType": file.mime_type if file is not None else None,
                     }
                 )
             if visibility_intent_id is not None:
                 json_body["visibilityIntentId"] = str(UUID(str(visibility_intent_id)))
+            if enrichment_scope is not None:
+                json_body["enrichmentScope"] = enrichment_scope
             response = await self._client.post(
                 f"/v1/content/documents/{document_id}/revisions",
                 json=json_body,
@@ -1404,6 +1543,40 @@ class IronRagClient:
         return OperationHandle(operation_id=operation_id)
 
     # -- async operations -----------------------------------------------------
+
+    async def execute_ingest_queue_job(self, job_id: UUID | str) -> IngestJobExecution:
+        """Execute exactly one already-admitted, queued ingest job.
+
+        ``POST /v1/ops/ingest-queue/jobs/{jobId}/execute`` runs only the named
+        job under the mutation origin recorded at admission and answers with
+        that job's own record: its state, latest attempt and readiness.
+        Exactly one request is sent: it never dequeues, retries or
+        fans out, and a typed problem response propagates instead of a second
+        attempt.
+
+        The response is validated against the requested identity. See
+        :class:`IngestJobExecution`: a 200 is the server's report for this job,
+        not a client-side publication claim.
+
+        The request carries ``execute_ingest_job_timeout_seconds`` instead of
+        the ordinary ``request_timeout_seconds``: the server runs the whole
+        ingest pipeline inside this call, and a real Full ingest outlasts the
+        general budget.
+        """
+        resolved = _validated_job_id(job_id)
+        response = await self._client.post(
+            f"/v1/ops/ingest-queue/jobs/{resolved}/execute",
+            timeout=self._settings.execute_ingest_job_timeout_seconds,
+        )
+        if response.status_code >= 400:
+            _raise_for_problem(response)
+        execution = _parse_ingest_job(response)
+        if execution.job.id != resolved:
+            raise IronRagError(
+                "IronRAG execute returned a different ingest job: "
+                f"requested={resolved}, returned={execution.job.id}"
+            )
+        return execution
 
     async def get_operation(self, operation_id: UUID | str) -> OperationStatus:
         response = await self._client.get(f"/v1/ops/operations/{operation_id}")

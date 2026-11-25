@@ -1,6 +1,25 @@
 use super::*;
 
 #[test]
+fn unverified_evidence_ledger_keeps_historical_and_absence_caveats_with_source() {
+    let payload = serde_json::json!({
+        "structuredContent": {
+            "answerBody": "The historical source used `alpha`; it does not establish a prohibition.",
+            "mustPreserveSpans": ["alpha"],
+            "referenceSummary": {"references": [{"documentTitle": "Historical policy"}]},
+            "verifier": {"state": "not_run"}
+        }
+    });
+    let entry = GroundedAnswerEvidenceEntry::from_result(1, &payload, None).expect("entry");
+    let mut message = String::new();
+    entry.push_to_message(&mut message);
+    assert!(message.contains("historical source used `alpha`"));
+    assert!(message.contains("does not establish a prohibition"));
+    assert!(message.contains("Historical policy"));
+    assert!(!entry.final_answer_ready);
+}
+
+#[test]
 fn grounded_answer_evidence_ledger_retains_partial_and_repair_entries() {
     let mut ledger = GroundedAnswerEvidenceLedger::default();
     let partial = grounded_answer_ledger_outcome(serde_json::json!({

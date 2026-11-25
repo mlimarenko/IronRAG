@@ -14,6 +14,13 @@ use crate::{
     },
     integrations::llm::ChatMessage,
     interfaces::http::router_support::ApiError,
+    services::query::{
+        assistant_grounding::AgentEvidenceManifest,
+        execution::semantic_verification::{
+            EvidenceAdmission, EvidenceBudget, admitted_source_from_chunk_row,
+            agent_source_evidence_bytes,
+        },
+    },
 };
 
 use super::{
@@ -32,9 +39,6 @@ const DENSE_HISTORY_LITERAL_PREFIX: &str = "ir.memory.literals.v1:";
 const HISTORY_COMPACT_LITERAL_MEMORY_CONTEXT_PREFIX: &str = "ir.context.compact-literal-memory.v1:";
 const PRIOR_GROUNDED_REPLAY_EXECUTION_LIMIT: usize = 2;
 const PRIOR_GROUNDED_REPLAY_CHUNKS_PER_EXECUTION: usize = 4;
-const PRIOR_GROUNDED_REPLAY_CHUNK_CHARS: usize = 520;
-const PRIOR_GROUNDED_REPLAY_TOTAL_CHARS: usize = 3_200;
-const PRIOR_GROUNDED_REPLAY_MIN_REMAINING_CHARS: usize = 320;
 
 impl QueryService {
     pub async fn list_conversations(
@@ -436,6 +440,14 @@ fn log_prior_replay_bundle_lookup_failed<E: std::fmt::Debug>(execution_id: Uuid,
     );
 }
 
+fn log_prior_replay_evidence_stale(execution_id: Uuid) {
+    tracing::warn!(execution_id = %execution_id, "prior grounded evidence is no longer current");
+}
+
+fn log_prior_replay_currentness_uncheckable<E: std::fmt::Display>(execution_id: Uuid, error: &E) {
+    tracing::warn!(execution_id = %execution_id, %error, "prior grounded evidence currentness could not be checked");
+}
+
 fn log_prior_replay_chunk_hydration_failed<E: std::fmt::Debug>(
     execution_id: Uuid,
     chunk_count: usize,
@@ -449,11 +461,17 @@ fn log_prior_replay_chunk_hydration_failed<E: std::fmt::Debug>(
     );
 }
 
-pub(crate) async fn load_prior_grounded_answer_context_messages(
+#[derive(Default)]
+pub(crate) struct PriorGroundedAnswerContext {
+    pub(crate) messages: Vec<ChatMessage>,
+    pub(crate) manifest: AgentEvidenceManifest,
+}
+
+pub(crate) async fn load_prior_grounded_answer_context(
     state: &AppState,
     conversation_id: Uuid,
     library_id: Uuid,
-) -> Result<Vec<ChatMessage>, ApiError> {
+) -> Result<PriorGroundedAnswerContext, ApiError> {
     let executions = query_repository::list_executions_by_conversation(
         &state.persistence.postgres,
         conversation_id,
@@ -466,61 +484,156 @@ pub(crate) async fn load_prior_grounded_answer_context_messages(
         PRIOR_GROUNDED_REPLAY_EXECUTION_LIMIT,
     );
 
-    let mut messages = Vec::new();
-    let mut seen_chunk_ids = HashSet::new();
-    let mut remaining_chars = PRIOR_GROUNDED_REPLAY_TOTAL_CHARS;
+    let mut replay = PriorReplayAccumulator::default();
     for execution in selected {
-        if remaining_chars < PRIOR_GROUNDED_REPLAY_MIN_REMAINING_CHARS {
-            break;
+        replay.replay_execution(state, library_id, &execution).await;
+    }
+
+    Ok(PriorGroundedAnswerContext { messages: replay.messages, manifest: replay.manifest })
+}
+
+/// Accumulated prior-replay state: the replayed messages, the manifest they feed,
+/// the chunk ids already covered and the one budget shared with later tool reads.
+#[derive(Default)]
+struct PriorReplayAccumulator {
+    messages: Vec<ChatMessage>,
+    manifest: AgentEvidenceManifest,
+    seen_chunk_ids: HashSet<Uuid>,
+    budget: EvidenceBudget,
+}
+
+impl PriorReplayAccumulator {
+    /// Replays one still-current execution. A stale or unreadable execution is
+    /// skipped instead of failing the whole replay.
+    async fn replay_execution(
+        &mut self,
+        state: &AppState,
+        library_id: Uuid,
+        execution: &query_repository::QueryExecutionRow,
+    ) {
+        if !prior_execution_sources_are_current(state, library_id, execution).await {
+            return;
         }
-        let bundle = match state
-            .context_store
-            .get_bundle_reference_set_by_query_execution(execution.id)
-            .await
-        {
-            Ok(Some(bundle)) => bundle,
-            Ok(None) => continue,
-            Err(error) => {
-                log_prior_replay_bundle_lookup_failed(execution.id, &error);
-                continue;
-            }
+        let Some(bundle) = load_prior_replay_bundle(state, execution.id).await else {
+            return;
         };
-        let candidate_refs = bundle
-            .chunk_references
-            .iter()
-            .filter(|reference| !seen_chunk_ids.contains(&reference.chunk_id))
-            .take(PRIOR_GROUNDED_REPLAY_CHUNKS_PER_EXECUTION)
-            .cloned()
-            .collect::<Vec<_>>();
+        let (candidate_refs, candidate_cap_dropped) =
+            prior_replay_candidate_refs(&bundle.chunk_references, &self.seen_chunk_ids);
         if candidate_refs.is_empty() {
-            continue;
+            return;
         }
-        let chunk_ids =
-            candidate_refs.iter().map(|reference| reference.chunk_id).collect::<Vec<_>>();
-        let chunk_rows = match state.document_store.list_chunks_by_ids(&chunk_ids).await {
-            Ok(rows) => rows,
-            Err(error) => {
-                log_prior_replay_chunk_hydration_failed(execution.id, chunk_ids.len(), &error);
-                continue;
-            }
+        let Some(chunk_rows) =
+            load_prior_replay_chunk_rows(state, execution.id, &candidate_refs).await
+        else {
+            return;
         };
-        if let Some(replay) = build_prior_grounded_answer_context_messages(
+        let replay = build_prior_grounded_answer_context(
             library_id,
             execution.id,
             &execution.query_text,
             &candidate_refs,
             &chunk_rows,
-            remaining_chars,
-        ) {
-            for chunk_id in replay.chunk_ids {
-                seen_chunk_ids.insert(chunk_id);
+            &mut self.budget,
+        );
+        match replay {
+            Some(replay) => self.record(replay, candidate_cap_dropped),
+            None => {
+                if candidate_cap_dropped {
+                    self.manifest.selection_bounded = true;
+                }
             }
-            remaining_chars = remaining_chars.saturating_sub(replay.char_count);
-            messages.extend(replay.messages);
         }
     }
 
-    Ok(messages)
+    /// Folds one replay into the accumulator without duplicating a source the
+    /// earlier executions already contributed.
+    fn record(&mut self, replay: PriorGroundedAnswerReplay, candidate_cap_dropped: bool) {
+        let PriorGroundedAnswerReplay { messages, manifest } = replay;
+        for source in &manifest.sources {
+            self.seen_chunk_ids.insert(source.chunk_id);
+        }
+        self.manifest.selection_bounded |= manifest.selection_bounded || candidate_cap_dropped;
+        for source in manifest.sources {
+            self.manifest.push_source(source);
+        }
+        self.messages.extend(messages);
+    }
+}
+
+/// True when the execution's persisted sources are still current for this
+/// library. Both a stale and an unreadable answer skip the execution.
+async fn prior_execution_sources_are_current(
+    state: &AppState,
+    library_id: Uuid,
+    execution: &query_repository::QueryExecutionRow,
+) -> bool {
+    match crate::infra::repositories::query_result_cache_repository::execution_sources_are_current(
+        &state.persistence.postgres,
+        execution.id,
+        execution.workspace_id,
+        library_id,
+    )
+    .await
+    {
+        Ok(true) => true,
+        Ok(false) => {
+            log_prior_replay_evidence_stale(execution.id);
+            false
+        }
+        Err(error) => {
+            log_prior_replay_currentness_uncheckable(execution.id, &error);
+            false
+        }
+    }
+}
+
+/// Reads the persisted reference bundle of one execution, or logs why it cannot
+/// be replayed.
+async fn load_prior_replay_bundle(
+    state: &AppState,
+    execution_id: Uuid,
+) -> Option<crate::infra::knowledge_rows::KnowledgeContextBundleReferenceSetRow> {
+    match state.context_store.get_bundle_reference_set_by_query_execution(execution_id).await {
+        Ok(bundle) => bundle,
+        Err(error) => {
+            log_prior_replay_bundle_lookup_failed(execution_id, &error);
+            None
+        }
+    }
+}
+
+/// Hydrates the candidate chunk rows of one replay, or logs the skipped read.
+async fn load_prior_replay_chunk_rows(
+    state: &AppState,
+    execution_id: Uuid,
+    references: &[KnowledgeBundleChunkReferenceRow],
+) -> Option<Vec<KnowledgeChunkRow>> {
+    let chunk_ids = references.iter().map(|reference| reference.chunk_id).collect::<Vec<_>>();
+    match state.document_store.list_chunks_by_ids(&chunk_ids).await {
+        Ok(rows) => Some(rows),
+        Err(error) => {
+            log_prior_replay_chunk_hydration_failed(execution_id, chunk_ids.len(), &error);
+            None
+        }
+    }
+}
+
+/// Picks the per-execution replay references and reports whether the candidate
+/// cap itself dropped eligible references. A capped drop must surface as
+/// `selection_bounded`, not as a silent omission.
+pub(crate) fn prior_replay_candidate_refs(
+    references: &[KnowledgeBundleChunkReferenceRow],
+    seen_chunk_ids: &HashSet<Uuid>,
+) -> (Vec<KnowledgeBundleChunkReferenceRow>, bool) {
+    let eligible = references
+        .iter()
+        .filter(|reference| !seen_chunk_ids.contains(&reference.chunk_id))
+        .collect::<Vec<_>>();
+    let cap_dropped = eligible.len() > PRIOR_GROUNDED_REPLAY_CHUNKS_PER_EXECUTION;
+    (
+        eligible.into_iter().take(PRIOR_GROUNDED_REPLAY_CHUNKS_PER_EXECUTION).cloned().collect(),
+        cap_dropped,
+    )
 }
 
 pub(crate) fn select_prior_grounded_answer_replay_executions(
@@ -542,25 +655,25 @@ pub(crate) fn select_prior_grounded_answer_replay_executions(
 #[derive(Debug)]
 pub(crate) struct PriorGroundedAnswerReplay {
     pub(crate) messages: Vec<ChatMessage>,
-    pub(crate) chunk_ids: Vec<Uuid>,
-    pub(crate) char_count: usize,
+    pub(crate) manifest: AgentEvidenceManifest,
 }
 
-pub(crate) fn build_prior_grounded_answer_context_messages(
+pub(crate) fn build_prior_grounded_answer_context(
     library_id: Uuid,
     execution_id: Uuid,
     query_text: &str,
     chunk_references: &[KnowledgeBundleChunkReferenceRow],
     chunk_rows: &[KnowledgeChunkRow],
-    max_chars: usize,
+    budget: &mut EvidenceBudget,
 ) -> Option<PriorGroundedAnswerReplay> {
     let rows_by_id = chunk_rows
         .iter()
         .map(|row| (row.chunk_id, row))
         .collect::<HashMap<Uuid, &KnowledgeChunkRow>>();
-    let mut chunk_ids = Vec::new();
+    let mut sources = Vec::new();
+    let mut selection_bounded = false;
     let mut lines =
-        Vec::with_capacity(PRIOR_GROUNDED_REPLAY_CHUNKS_PER_EXECUTION.saturating_add(5));
+        Vec::with_capacity(PRIOR_GROUNDED_REPLAY_CHUNKS_PER_EXECUTION.saturating_add(6));
     lines.push("Earlier grounded answer evidence from this conversation.".to_string());
     lines.push(
         "Use this only to preserve follow-up continuity; call tools again when the current question needs fresh retrieval."
@@ -578,7 +691,8 @@ pub(crate) fn build_prior_grounded_answer_context_messages(
     });
 
     for reference in sorted_references {
-        if chunk_ids.len() >= PRIOR_GROUNDED_REPLAY_CHUNKS_PER_EXECUTION {
+        if sources.len() >= PRIOR_GROUNDED_REPLAY_CHUNKS_PER_EXECUTION {
+            selection_bounded = true;
             break;
         }
         let Some(row) = rows_by_id.get(&reference.chunk_id).copied() else {
@@ -587,35 +701,47 @@ pub(crate) fn build_prior_grounded_answer_context_messages(
         if row.library_id != library_id {
             continue;
         }
-        let section = render_chunk_section_label(row);
-        let snippet =
-            compact_conversation_turn_text(&row.content_text, PRIOR_GROUNDED_REPLAY_CHUNK_CHARS);
-        if snippet.is_empty() {
+        let source = admitted_source_from_chunk_row(row);
+        if source.text.trim().is_empty() {
             continue;
         }
+        match budget.try_admit_chunk(source.chunk_id, agent_source_evidence_bytes(&source.text)) {
+            EvidenceAdmission::Retained => {}
+            EvidenceAdmission::Duplicate => continue,
+            EvidenceAdmission::OverBudget => {
+                selection_bounded = true;
+                continue;
+            }
+        }
+        let section = render_chunk_section_label(row);
         lines.push(format!(
-            "- chunkId: {}; documentId: {}; revisionId: {}; rank: {}; score: {:.4}; section: {}",
-            row.chunk_id,
-            row.document_id,
-            row.revision_id,
+            "- chunkId: {}; documentId: {}; revisionId: {}; rank: {}; score: {:.4}; section: {}; text:",
+            source.chunk_id,
+            source.document_id,
+            source.document_revision_id,
             reference.rank,
             reference.score,
             section
         ));
-        lines.push(format!("  snippet: {snippet}"));
-        chunk_ids.push(row.chunk_id);
+        // Canonical admitted text, never a compacted/truncated rendering that
+        // the verifier could not resolve back to the same source bytes.
+        lines.push(source.text.clone());
+        sources.push(source);
     }
-    if chunk_ids.is_empty() {
+    if sources.is_empty() && !selection_bounded {
         return None;
     }
 
-    let content = compact_conversation_turn_text(&lines.join("\n"), max_chars);
-    if content.is_empty() {
-        return None;
-    }
-    let messages = vec![ChatMessage::system(content.clone())];
+    // An empty typed replay with `selection_bounded` is meaningful: the shared
+    // budget or the candidate cap omitted every eligible source, and the caller
+    // must still expose the omission. No header-only or fake source text.
+    let messages =
+        if sources.is_empty() { Vec::new() } else { vec![ChatMessage::system(lines.join("\n"))] };
 
-    Some(PriorGroundedAnswerReplay { messages, chunk_ids, char_count: content.chars().count() })
+    Some(PriorGroundedAnswerReplay {
+        messages,
+        manifest: AgentEvidenceManifest { sources, selection_bounded },
+    })
 }
 
 fn render_chunk_section_label(row: &KnowledgeChunkRow) -> String {

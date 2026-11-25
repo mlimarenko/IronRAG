@@ -36,7 +36,6 @@ use crate::{
             INGEST_STAGE_EXTRACT_GRAPH, INGEST_STAGE_EXTRACT_TECHNICAL_FACTS,
             INGEST_STAGE_PREPARE_STRUCTURE, RecordStageEventCommand,
         },
-        ops::billing::CaptureIngestAttemptBillingCommand,
         query::vector_dimensions::{
             ensure_active_embedding_profile_key, invalidate_library_embedding_profile_inventory,
         },
@@ -66,9 +65,16 @@ struct InlineAttemptHeartbeatGuard {
     running: Arc<AtomicBool>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum InlineContentPipelineOutcome {
     Applied,
+    /// The base mutation is durably applied and the document is readable, but
+    /// optional enrichment failed operationally. The caller returns the
+    /// canonical applied admission while the failed channel state stays visible.
+    AppliedWithEnrichmentFailure {
+        failure_code: &'static str,
+        failure_message: String,
+    },
     AuthorityLost,
 }
 
@@ -224,6 +230,7 @@ impl ContentService {
                         storage_key: Some(storage_key),
                     }),
                     parent_external_key: command.parent_external_key,
+                    enrichment_scope: command.enrichment_scope,
                 },
                 Some(&command.file_bytes),
             )
@@ -390,6 +397,10 @@ impl ContentService {
                         storage_key: Some(storage_key),
                     }),
                     parent_async_operation_id: None,
+                    // Append materializes inline; the inline executor runs the
+                    // summary and graph stages unconditionally, so an append
+                    // never carries a bounded plan (the HTTP boundary refuses it).
+                    enrichment_scope: None,
                 },
             )
             .await?;
@@ -477,6 +488,7 @@ impl ContentService {
                         storage_key: Some(storage_key),
                     }),
                     parent_async_operation_id: None,
+                    enrichment_scope: command.enrichment_scope,
                 },
             )
             .await?;

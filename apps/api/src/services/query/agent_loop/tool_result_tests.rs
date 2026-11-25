@@ -1,4 +1,35 @@
 use super::*;
+use crate::services::query::assistant_grounding::AgentEvidenceManifest;
+use crate::services::query::execution::semantic_verification::{EvidenceAdmission, EvidenceBudget};
+use ironrag_contracts::assistant::semantic_verification::{
+    SEMANTIC_VERIFICATION_PROTOCOL_VERSION, SemanticEvidenceScope, SemanticNotRunReason,
+    SemanticSourceEntry, SemanticSourceLocator, SemanticVerificationOutcome,
+    SemanticVerificationReport,
+};
+
+fn child_report(locator: SemanticSourceLocator, text_bytes: usize) -> SemanticVerificationReport {
+    SemanticVerificationReport {
+        protocol_version: SEMANTIC_VERIFICATION_PROTOCOL_VERSION,
+        question_sha256: "a".repeat(64),
+        checked_answer_sha256: "b".repeat(64),
+        visible_answer_sha256: None,
+        evidence_manifest_sha256: "c".repeat(64),
+        answer_units: Vec::new(),
+        sources: vec![SemanticSourceEntry {
+            source_id: "s1".to_string(),
+            document_id: Uuid::from_u128(1),
+            document_revision_id: Uuid::from_u128(2),
+            locator,
+            scope: SemanticEvidenceScope::SelectedExcerpt,
+            text_sha256: "d".repeat(64),
+            text: "x".repeat(text_bytes),
+        }],
+        elapsed_ms: 1,
+        provider_call_id: None,
+        preparation_limit: None,
+        outcome: SemanticVerificationOutcome::NotRun { reason: SemanticNotRunReason::NoEvidence },
+    }
+}
 
 fn native_document_read_result(
     content: &str,
@@ -54,11 +85,412 @@ fn native_document_read_identity_and_exact_text_survive_debug_compaction_and_rep
     let replay = replayed_tool_execution_outcome(*payload);
     assert!(replay.is_replay);
     let mut grounding = AssistantGroundingEvidence::default();
-    retain_document_read_reference(&mut grounding, outcome.document_reference.as_deref());
-    retain_document_read_reference(&mut grounding, replay.document_reference.as_deref());
+    let mut budget =
+        crate::services::query::execution::semantic_verification::EvidenceBudget::new();
+    assert!(retain_document_read_reference(
+        &mut grounding,
+        &mut budget,
+        outcome.document_reference.as_deref()
+    ));
+    assert!(retain_document_read_reference(
+        &mut grounding,
+        &mut budget,
+        replay.document_reference.as_deref()
+    ));
     assert_eq!(grounding.document_references.len(), 1);
     assert_eq!(grounding.document_references[0].excerpt, text);
     assert_eq!(grounding.document_references[0].rank, 1);
+}
+
+#[test]
+fn child_report_sources_are_all_or_nothing_against_the_shared_budget() {
+    let mut budget = EvidenceBudget::new();
+    let manifest = AgentEvidenceManifest::default();
+    assert_eq!(budget.try_admit_chunk(Uuid::from_u128(10), 16_000), EvidenceAdmission::Retained);
+    let before = budget.measurement();
+    let mut trial_budget = budget.clone();
+    let mut trial_manifest = manifest.clone();
+    assert_eq!(
+        super::iteration::admit_child_report_sources(
+            &mut trial_budget,
+            &mut trial_manifest,
+            &child_report(SemanticSourceLocator::Chunk { chunk_id: Uuid::from_u128(11) }, 8_000),
+        ),
+        ChildReportAdmission::InadmissiblePresentation,
+        "the parent byte budget is a presentation limit, not corrupt child data"
+    );
+    assert_eq!(budget.measurement(), before);
+    assert!(trial_manifest.sources.is_empty());
+    assert!(manifest.sources.is_empty());
+
+    assert_eq!(
+        super::iteration::admit_child_report_sources(
+            &mut trial_budget,
+            &mut trial_manifest,
+            &child_report(SemanticSourceLocator::Segment { segment_id: Uuid::from_u128(12) }, 10),
+        ),
+        ChildReportAdmission::InadmissiblePresentation,
+        "a segment source cannot be shown, and must never be skipped and shown anyway"
+    );
+
+    assert_eq!(
+        super::iteration::admit_child_report_sources(
+            &mut trial_budget,
+            &mut trial_manifest,
+            &child_report(SemanticSourceLocator::Chunk { chunk_id: Uuid::from_u128(13) }, 1_000),
+        ),
+        ChildReportAdmission::Admitted
+    );
+    assert!(trial_manifest.sources.iter().any(|source| source.chunk_id == Uuid::from_u128(13)));
+    assert!(trial_budget.measurement().evidence_utf8_bytes > 16_000);
+
+    // A refused child outcome must replace its full answer payload with the
+    // omission marker before the next model-visible transcript is built.
+    let mut child_outcome = super::test_support::synthetic_success_outcome();
+    child_outcome.message_content = "child-answer-payload".to_string();
+    assert!(!admitted_tool_message(&child_outcome, false).contains("child-answer-payload"));
+    child_outcome.is_error = true;
+    assert!(!admitted_tool_message(&child_outcome, false).contains("child-answer-payload"));
+}
+
+const PROBE_QUESTION: &str = "Куда уходит ответ сотрудника?";
+
+/// One observed `grounded_answer` call plus the probe it did or did not
+/// authorize.
+struct GroundedCallObservation {
+    state: super::state_machine::McpAgentLoopState,
+    observed: ObservedAgentToolOutcomes,
+    before_budget:
+        crate::services::query::execution::semantic_verification::SelectedEvidenceMeasurement,
+    probe: Option<ChatToolCall>,
+}
+
+fn observe_grounded_call(
+    child_admission: ChildEvidenceAdmission,
+    grounded_answer_completed: bool,
+    is_error: bool,
+    child_query_execution_ids: Vec<Uuid>,
+) -> GroundedCallObservation {
+    let mut state = super::state_machine::McpAgentLoopState::for_tests();
+    let mut observed = ObservedAgentToolOutcomes {
+        response_tool_calls: Vec::new(),
+        child_runtime_execution_ids: Vec::new(),
+        child_query_execution_ids: Vec::new(),
+        iteration_made_progress: false,
+    };
+    let call = ChatToolCall {
+        id: "call-1".to_string(),
+        name: GROUNDED_ANSWER_TOOL_NAME.to_string(),
+        arguments_json: "{}".to_string(),
+    };
+    let mut outcome = super::test_support::synthetic_success_outcome();
+    outcome.child_query_execution_ids = child_query_execution_ids;
+    outcome.message_content = "child secret payload".to_string();
+    outcome.source_texts = vec!["child secret payload".to_string()];
+    outcome.grounded_answer_completed = grounded_answer_completed;
+    outcome.grounded_answer_needs_follow_up = true;
+    outcome.grounded_answer_repair_reason =
+        Some(GroundedAnswerRepairReason::VerificationIncomplete);
+    outcome.grounded_answer_language = QueryLanguage::Ru;
+    outcome.is_error = is_error;
+    let before_budget = state.evidence_budget.measurement();
+    observe_agent_tool_outcome(
+        "request-1",
+        Uuid::from_u128(9),
+        &mut state,
+        ObservedToolCall {
+            iteration: 1,
+            focused_follow_up_iteration: false,
+            call: &call,
+            outcome: &outcome,
+            child_admission,
+        },
+        &mut observed,
+    );
+    let probe = state
+        .focused_grounded_follow_up
+        .requires_resolution()
+        .then(|| state.focused_grounded_follow_up.take_call(PROBE_QUESTION, 8))
+        .flatten();
+    GroundedCallObservation { state, observed, before_budget, probe }
+}
+
+/// Accepted and presentation-only child evidence both owe the one repair their
+/// valid envelope authorized: one probe, frozen question, `sequenceAttempt=1`.
+#[test]
+fn accepted_and_presentation_only_children_schedule_one_repair_probe() {
+    let child_id = Uuid::from_u128(60);
+    for admission in [
+        ChildEvidenceAdmission::Admitted,
+        ChildEvidenceAdmission::Refused(ChildEvidenceRefusal::InadmissibleSources),
+    ] {
+        let GroundedCallObservation { mut state, observed, before_budget, probe } =
+            observe_grounded_call(admission, true, false, vec![child_id]);
+        let probe = probe.as_ref().expect("authorized repair probe");
+        assert_eq!(probe.name, GROUNDED_ANSWER_TOOL_NAME);
+        let mut arguments: Value =
+            serde_json::from_str(&probe.arguments_json).expect("repair arguments JSON");
+        assert_eq!(arguments["query"], serde_json::json!(PROBE_QUESTION));
+        assert_eq!(arguments["responseProfile"], serde_json::json!("compact"));
+        normalize_agent_tool_argument_types(GROUNDED_ANSWER_TOOL_NAME, &mut arguments);
+        apply_agent_tool_argument_defaults_with_context(
+            GROUNDED_ANSWER_TOOL_NAME,
+            &mut arguments,
+            AgentToolArgumentContext {
+                user_question: PROBE_QUESTION,
+                contextual_follow_up: false,
+                grounded_top_k: 8,
+                library_ref: "workspace-a/library-b",
+                grounded_answer_tool_history: &[],
+            },
+        );
+        assert_eq!(arguments["sequenceAttempt"], serde_json::json!(1));
+        assert!(arguments.get(RUNTIME_REPAIR_ARGUMENT_FIELD).is_none());
+        assert!(
+            state.focused_grounded_follow_up.take_call(PROBE_QUESTION, 8).is_none(),
+            "one repair probe per turn"
+        );
+        if matches!(admission, ChildEvidenceAdmission::Refused(_)) {
+            assert_refusal_kept_accumulators_clean(&state, &observed, before_budget);
+        } else {
+            assert_eq!(state.successful_tool_call_count, 1);
+            assert!(state.successful_tool_names.contains(GROUNDED_ANSWER_TOOL_NAME));
+            assert_eq!(state.child_query_execution_ids, vec![child_id]);
+            assert!(state.assistant_grounding.verification_corpus.is_empty());
+        }
+    }
+}
+
+/// Unverifiable child data, a malformed envelope and a missing child execution
+/// id never authorize a probe.
+#[test]
+fn denied_child_outcomes_never_fund_a_repair_probe() {
+    let child_id = Uuid::from_u128(61);
+
+    let unverifiable = observe_grounded_call(
+        ChildEvidenceAdmission::Refused(ChildEvidenceRefusal::UnverifiableChild),
+        true,
+        false,
+        vec![child_id],
+    );
+    assert!(unverifiable.probe.is_none());
+    assert_refusal_kept_accumulators_clean(
+        &unverifiable.state,
+        &unverifiable.observed,
+        unverifiable.before_budget,
+    );
+
+    let malformed = observe_grounded_call(
+        ChildEvidenceAdmission::Refused(ChildEvidenceRefusal::InadmissibleSources),
+        false,
+        false,
+        vec![child_id],
+    );
+    assert!(malformed.probe.is_none());
+    assert_refusal_kept_accumulators_clean(
+        &malformed.state,
+        &malformed.observed,
+        malformed.before_budget,
+    );
+
+    let unidentified =
+        observe_grounded_call(ChildEvidenceAdmission::NotApplicable, true, false, Vec::new());
+    assert!(unidentified.probe.is_none());
+    assert!(!unidentified.state.focused_grounded_follow_up.requires_resolution());
+
+    let passthrough =
+        observe_grounded_call(ChildEvidenceAdmission::Passthrough, true, false, vec![child_id]);
+    assert!(passthrough.probe.is_none());
+
+    let error = observe_grounded_call(
+        ChildEvidenceAdmission::Refused(ChildEvidenceRefusal::UnverifiableChild),
+        false,
+        true,
+        vec![child_id],
+    );
+    assert!(error.probe.is_none());
+    assert_error_refusal_kept_accumulators_clean(&error.state, &error.observed);
+}
+
+/// A refused outcome leaves every model-visible accumulator untouched.
+fn assert_refusal_kept_accumulators_clean(
+    state: &super::state_machine::McpAgentLoopState,
+    observed: &ObservedAgentToolOutcomes,
+    before_budget: crate::services::query::execution::semantic_verification::SelectedEvidenceMeasurement,
+) {
+    let message = state.messages.last().expect("refusal message");
+    assert!(!message.content.as_deref().unwrap_or_default().contains("child secret"));
+    assert!(state.assistant_grounding.verification_corpus.is_empty());
+    assert!(state.assistant_grounding.document_references.is_empty());
+    assert!(!state.grounded_answer_evidence_ledger.has_guardable_evidence());
+    assert_eq!(state.verified_grounded_answer_count, 0);
+    assert!(state.last_verified_grounded_answer.is_none());
+    assert_eq!(state.successful_tool_call_count, 0);
+    assert!(state.successful_tool_names.is_empty());
+    assert!(state.child_query_execution_ids.is_empty());
+    assert!(observed.child_query_execution_ids.is_empty());
+    assert_eq!(state.evidence_budget.measurement(), before_budget);
+    assert!(state.evidence_manifest.sources.is_empty());
+}
+
+/// A refused error outcome leaks neither its payload nor its counters.
+fn assert_error_refusal_kept_accumulators_clean(
+    state: &super::state_machine::McpAgentLoopState,
+    observed: &ObservedAgentToolOutcomes,
+) {
+    assert!(
+        !state
+            .messages
+            .last()
+            .and_then(|message| message.content.as_deref())
+            .unwrap_or_default()
+            .contains("child error secret")
+    );
+    assert!(!state.grounded_answer_evidence_ledger.has_guardable_evidence());
+    assert_eq!(state.successful_tool_call_count, 0);
+    assert!(state.child_query_execution_ids.is_empty());
+    assert!(observed.child_query_execution_ids.is_empty());
+}
+
+#[test]
+fn repeated_child_source_must_match_the_already_admitted_identity_and_text() {
+    let mut budget = EvidenceBudget::new();
+    let mut manifest = AgentEvidenceManifest::default();
+    let report = child_report(SemanticSourceLocator::Chunk { chunk_id: Uuid::from_u128(20) }, 10);
+    assert_eq!(
+        super::iteration::admit_child_report_sources(&mut budget, &mut manifest, &report),
+        ChildReportAdmission::Admitted
+    );
+    let before = budget.measurement();
+    assert_eq!(
+        super::iteration::admit_child_report_sources(&mut budget, &mut manifest, &report),
+        ChildReportAdmission::Admitted
+    );
+    assert_eq!(budget.measurement(), before);
+    assert_eq!(manifest.sources.len(), 1);
+
+    let mut changed_text = report.clone();
+    changed_text.sources[0].text.push('x');
+    assert_eq!(
+        super::iteration::admit_child_report_sources(&mut budget, &mut manifest, &changed_text),
+        ChildReportAdmission::InvalidSource
+    );
+    let mut changed_revision = report.clone();
+    changed_revision.sources[0].document_revision_id = Uuid::from_u128(99);
+    assert_eq!(
+        super::iteration::admit_child_report_sources(&mut budget, &mut manifest, &changed_revision),
+        ChildReportAdmission::InvalidSource
+    );
+
+    // A presentation limit must not hide a later conflict with an admitted chunk.
+    let mut hidden_conflict =
+        child_report(SemanticSourceLocator::Segment { segment_id: Uuid::from_u128(30) }, 10);
+    let mut duplicate = hidden_conflict.sources[0].clone();
+    duplicate.source_id = "s2".to_string();
+    duplicate.locator = SemanticSourceLocator::Chunk { chunk_id: Uuid::from_u128(20) };
+    duplicate.text = "different text".to_string();
+    hidden_conflict.sources.push(duplicate);
+    assert_eq!(
+        super::iteration::admit_child_report_sources(&mut budget, &mut manifest, &hidden_conflict),
+        ChildReportAdmission::InvalidSource
+    );
+
+    assert_eq!(budget.measurement(), before);
+    assert_eq!(manifest.sources[0].text, report.sources[0].text);
+    assert_eq!(manifest.sources[0].document_revision_id, report.sources[0].document_revision_id);
+}
+
+#[test]
+fn child_source_gate_rejects_missing_stale_or_unverifiable_reports() {
+    let report = child_report(SemanticSourceLocator::Chunk { chunk_id: Uuid::from_u128(20) }, 10);
+    assert!(super::iteration::child_source_evidence_gate(Some(&report), Some(true)).is_some());
+    assert!(
+        super::iteration::child_source_evidence_gate(None, Some(true)).is_none(),
+        "missing child report must not pass"
+    );
+    assert!(
+        super::iteration::child_source_evidence_gate(Some(&report), Some(false)).is_none(),
+        "stale child sources must not pass"
+    );
+    assert!(
+        super::iteration::child_source_evidence_gate(Some(&report), None).is_none(),
+        "uncheckable currentness must not pass"
+    );
+
+    let empty = SemanticVerificationReport { sources: Vec::new(), ..report.clone() };
+    assert!(
+        super::iteration::child_source_evidence_gate(Some(&empty), Some(true)).is_none(),
+        "a report without typed sources must not pass"
+    );
+    let mut budget = EvidenceBudget::new();
+    let mut manifest = AgentEvidenceManifest::default();
+    assert_eq!(
+        super::iteration::admit_child_report_sources(
+            &mut budget,
+            &mut manifest,
+            &child_report(SemanticSourceLocator::Chunk { chunk_id: Uuid::nil() }, 10),
+        ),
+        ChildReportAdmission::InvalidSource
+    );
+    assert_eq!(budget.measurement().source_entries, 0);
+    assert!(manifest.sources.is_empty());
+}
+
+#[test]
+fn repeated_source_text_leaves_room_for_a_distinct_excerpt() {
+    let mut grounding = AssistantGroundingEvidence::default();
+    let original = "а".repeat(TOOL_GROUNDING_FRAGMENT_CHAR_LIMIT + 1);
+    push_tool_source_text(&mut grounding, &original);
+    let mut available = TOOL_GROUNDING_TOTAL_CHAR_LIMIT - TOOL_GROUNDING_FRAGMENT_CHAR_LIMIT;
+    let mut filler = 'a'..='z';
+    while available > 4 {
+        let length = (available - 4).min(TOOL_GROUNDING_FRAGMENT_CHAR_LIMIT);
+        let distinct = filler.next().unwrap().to_string().repeat(length);
+        push_tool_source_text(&mut grounding, &distinct);
+        available -= length;
+    }
+    push_tool_source_text(&mut grounding, &original);
+    push_tool_source_text(&mut grounding, "факт");
+    assert_eq!(grounding.verification_corpus.last().map(String::as_str), Some("факт"));
+}
+
+#[test]
+fn document_read_admission_preserves_prior_and_suppresses_overflow_before_model() {
+    use crate::services::query::execution::semantic_verification::{
+        EvidenceAdmission, EvidenceBudget, MAX_SOURCE_ENTRIES,
+    };
+    let mut grounding = AssistantGroundingEvidence::default();
+    let mut budget = EvidenceBudget::new();
+    let result = native_document_read_result("admitted source", 0, 15);
+    let reference =
+        native_document_read_reference(READ_DOCUMENT_TOOL_NAME, &result).expect("source");
+    let mut allowed = super::test_support::synthetic_success_outcome();
+    allowed.document_reference = Some(Box::new(reference));
+    allowed.message_content = "admitted source".into();
+    assert!(admit_tool_grounding(&mut grounding, &mut budget, READ_DOCUMENT_TOOL_NAME, &allowed));
+    assert_eq!(admitted_tool_message(&allowed, true), "admitted source");
+    for index in 0..(MAX_SOURCE_ENTRIES - 1) {
+        assert_eq!(
+            budget.try_admit_block(Uuid::from_u128(100 + index as u128), 1),
+            EvidenceAdmission::Retained
+        );
+    }
+    assert!(admit_tool_grounding(&mut grounding, &mut budget, READ_DOCUMENT_TOOL_NAME, &allowed));
+    assert_eq!(grounding.document_references.len(), 1);
+
+    let result = native_document_read_result("rejected secret", 20, 100);
+    let mut rejected = super::test_support::synthetic_success_outcome();
+    rejected.document_reference =
+        native_document_read_reference(READ_DOCUMENT_TOOL_NAME, &result).map(Box::new);
+    rejected.message_content = "rejected secret".into();
+    let admitted =
+        admit_tool_grounding(&mut grounding, &mut budget, READ_DOCUMENT_TOOL_NAME, &rejected);
+    assert!(!admitted);
+    assert!(!admitted_tool_message(&rejected, admitted).contains("rejected secret"));
+    assert!(grounding.verification_corpus.iter().all(|text| !text.contains("rejected secret")));
+    assert_eq!(grounding.document_references[0].excerpt, "admitted source");
+    rejected.document_reference = None;
+    assert!(!admit_tool_grounding(&mut grounding, &mut budget, READ_DOCUMENT_TOOL_NAME, &rejected));
 }
 
 #[test]
@@ -163,7 +595,7 @@ fn raw_result_text_is_never_remembered_as_an_answer() {
         message_content: String::new(),
         result_text: Some(rendered_tool_text),
         result_json: None,
-        grounding_text: None,
+        source_texts: Vec::new(),
         document_reference: None,
         grounded_answer_body: None,
         grounded_answer_outcome: None,
@@ -213,7 +645,7 @@ fn verified_grounded_answer_memory_prefers_structured_answer_body() {
             "structuredContent": structured_content,
             "isError": false
         })),
-        grounding_text: None,
+        source_texts: Vec::new(),
         document_reference: None,
         grounded_answer_body: Some("Clean Alpha answer.".to_string()),
         grounded_answer_outcome: Some(AgentGroundedAnswerOutcome {
@@ -609,6 +1041,21 @@ fn final_grounded_answer_readiness_requires_complete_assessment() {
     };
 
     assert!(!grounded_answer_ready(GROUNDED_ANSWER_TOOL_NAME, &result));
+}
+
+#[test]
+fn ready_passthrough_preserves_historical_and_absence_caveats() {
+    let question = "What does the source establish?";
+    let answer = "The historical source described `alpha`; it does not establish a prohibition.";
+    let call = ChatToolCall {
+        id: "call-grounded".to_string(),
+        name: GROUNDED_ANSWER_TOOL_NAME.to_string(),
+        arguments_json: serde_json::json!({"query": question}).to_string(),
+    };
+    let outcome = ready_grounded_answer_passthrough_outcome(answer, question);
+    let result = grounded_answer_passthrough_candidate(&[call], &[outcome], question)
+        .expect("verified answer should be passed through");
+    assert_eq!(result.answer, answer);
 }
 
 #[test]

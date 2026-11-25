@@ -159,7 +159,8 @@ impl PgSearchStore {
         let visibility = current_knowledge_graph_target!(
             "knowledge_evidence_entity_support",
             "e.entity_id",
-            "e.library_id"
+            "e.library_id",
+            GRAPH_LANE_READINESS
         );
         let (exact_sql, prefix_sql) = lexical_lane_sql(&format!(
             "select e.entity_id, e.workspace_id, e.library_id, e.\u{63}anonical_label as primary_label, e.entity_type, e.summary,
@@ -214,7 +215,8 @@ impl PgSearchStore {
         let visibility = current_knowledge_graph_target!(
             "knowledge_evidence_relation_support",
             "r.relation_id",
-            "r.library_id"
+            "r.library_id",
+            GRAPH_LANE_READINESS
         );
         let (exact_sql, prefix_sql) = lexical_lane_sql(&format!(
             "select relation_id, workspace_id, library_id, predicate, normalized_assertion, summary,

@@ -281,7 +281,11 @@ distributed lock for multi-replica operation.
 
 The shared HTTP client applies `REQUEST_TIMEOUT_SECONDS` to each IronRAG
 request, including create, revision and delete admission and each operation
-status read. There is no separate or derived mutation-admission timeout. An
+status read, except for two blocking calls that carry their own budget:
+`REVISION_CREATE_TIMEOUT_SECONDS` for a synchronous revision-create POST and
+`EXECUTE_INGEST_JOB_TIMEOUT_SECONDS` for the exact-job execute POST, which runs
+that job's whole ingest pipeline before it answers. There is no separate or
+derived mutation-admission timeout. An
 HTTP request timeout follows the normal item or webhook error path; it is not
 converted into a deferred outcome, and the new source token is not recorded as
 applied. A timed-out admission may still have reached IronRAG, so the timeout

@@ -25,7 +25,6 @@ pub(crate) async fn verify_generated_answer(
             intent_profile: &generation.intent_profile,
             evidence: &generation.authoritative_evidence,
             chunks: &generation.primary_answer_chunks,
-            prompt_context: &generation.prompt_context,
             assistant_grounding: &generation.assistant_grounding,
         });
     apply_structural_coverage_warning(
@@ -131,6 +130,94 @@ pub(super) fn apply_structural_coverage_warning(
     if matches!(verification.state, QueryVerificationState::Verified) {
         verification.state = QueryVerificationState::PartiallySupported;
     }
+}
+
+/// Verifier warning code for an answer that dropped a statement the retrieved
+/// evidence marked as exact wording.
+pub(crate) const EXACT_WORDING_OMITTED: &str = "exact_wording_omitted";
+
+/// How many omitted statements the warning names before summarizing the rest.
+#[cfg(test)]
+const EXACT_WORDING_WARNING_LIST_LIMIT: usize = 3;
+
+/// Applies the exact-wording contract of the answer context to the final visible
+/// body: a `[graph-edge evidence]` line marked `exact_wording: yes` is source
+/// wording the answer must keep, so a body that omits one is not a complete
+/// factual answer. The omitted statement is reported as a warning; it is never
+/// removed from the contract because the answer skipped it, and the warning adds
+/// no unrelated quote.
+#[cfg(test)]
+pub(super) fn append_exact_wording_warning(
+    answer: &str,
+    prompt_context: &str,
+    verification: &mut super::super::RuntimeAnswerVerification,
+) {
+    if has_verification_warning(verification, EXACT_WORDING_OMITTED) {
+        return;
+    }
+    let missing = missing_exact_wording_statements(answer, prompt_context);
+    if missing.is_empty() {
+        return;
+    }
+    let listed = missing
+        .iter()
+        .take(EXACT_WORDING_WARNING_LIST_LIMIT)
+        .cloned()
+        .collect::<Vec<_>>()
+        .join(" | ");
+    verification.warnings.push(QueryVerificationWarning {
+        code: EXACT_WORDING_OMITTED.to_string(),
+        message: format!(
+            "Answer omitted {} statement(s) the retrieved evidence marked as exact wording: {listed}",
+            missing.len()
+        ),
+        related_segment_id: None,
+        related_fact_id: None,
+    });
+    if matches!(verification.state, QueryVerificationState::Verified) {
+        verification.state = QueryVerificationState::PartiallySupported;
+    }
+}
+
+/// Statements the answer context presented with the exact-wording marker, in
+/// context order and without repeats.
+#[cfg(test)]
+pub(super) fn required_exact_wording_statements(prompt_context: &str) -> Vec<String> {
+    const EVIDENCE_PREFIX: &str = "[graph-edge evidence] evidence: ";
+    let marker = format!(" | {}", super::super::RuntimeMatchedRelationship::EXACT_WORDING_FIELD);
+    let mut statements = Vec::new();
+    for line in prompt_context.lines() {
+        let Some(rest) = line.trim_start().strip_prefix(EVIDENCE_PREFIX) else {
+            continue;
+        };
+        let Some((statement, _)) = rest.split_once(marker.as_str()) else {
+            continue;
+        };
+        let statement = statement.trim();
+        if statement.is_empty() {
+            continue;
+        }
+        if !statements.iter().any(|seen: &String| seen == statement) {
+            statements.push(statement.to_string());
+        }
+    }
+    statements
+}
+
+/// Exact-wording statements absent from the answer. Wording is compared after
+/// whitespace normalization, which does not accept a paraphrase.
+#[cfg(test)]
+pub(super) fn missing_exact_wording_statements(answer: &str, prompt_context: &str) -> Vec<String> {
+    let answer_normalized = normalize_exact_wording_text(answer);
+    required_exact_wording_statements(prompt_context)
+        .into_iter()
+        .filter(|statement| !answer_normalized.contains(&normalize_exact_wording_text(statement)))
+        .collect()
+}
+
+#[cfg(test)]
+fn normalize_exact_wording_text(value: &str) -> String {
+    value.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 /// Verification confirms grounding, not completeness: a one-item answer to
@@ -469,4 +556,76 @@ pub(super) fn structural_answer_contains_anchor(
         return answer_tokens.contains(token);
     }
     answer_lower.contains(anchor)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::super::types::RuntimeAnswerVerification;
+    use super::{
+        EXACT_WORDING_OMITTED, append_exact_wording_warning, missing_exact_wording_statements,
+        required_exact_wording_statements,
+    };
+    use crate::domains::query::QueryVerificationState;
+
+    const CONTEXT: &str = "Context block\n\
+        [graph-edge evidence] evidence: Автоматическая рассылка писем в изменение не входит. | exact_wording: yes | relation_hint: A --includes--> B\n\
+        [graph-edge evidence] evidence: Показ сообщения в том же чате заявку не создаёт. | relation_hint: C --shows--> D\n\
+        [graph-edge relation_hint] E --relates--> F";
+
+    fn verification(state: QueryVerificationState) -> RuntimeAnswerVerification {
+        RuntimeAnswerVerification {
+            state,
+            warnings: Vec::new(),
+            unsupported_literals: Vec::new(),
+            semantic_verification: None,
+        }
+    }
+
+    #[test]
+    fn only_marked_graph_evidence_is_required_verbatim() {
+        assert_eq!(
+            required_exact_wording_statements(CONTEXT),
+            vec!["Автоматическая рассылка писем в изменение не входит.".to_string()]
+        );
+    }
+
+    #[test]
+    fn a_paraphrase_does_not_satisfy_the_exact_wording_contract() {
+        let answer = "Автоматическая рассылка писем в изменение не включается.";
+        assert_eq!(
+            missing_exact_wording_statements(answer, CONTEXT),
+            vec!["Автоматическая рассылка писем в изменение не входит.".to_string()]
+        );
+    }
+
+    #[test]
+    fn the_marked_statement_in_any_wrapping_satisfies_the_contract() {
+        let answer = "Итог:\n  Автоматическая рассылка писем\n  в изменение не входит.\nОстальное не заявка.";
+        assert!(missing_exact_wording_statements(answer, CONTEXT).is_empty());
+    }
+
+    #[test]
+    fn omitting_the_statement_warns_and_demotes_a_verified_answer() {
+        let mut result = verification(QueryVerificationState::Verified);
+        append_exact_wording_warning("Ответ без обязательной формулировки.", CONTEXT, &mut result);
+        let warning = result
+            .warnings
+            .iter()
+            .find(|warning| warning.code == EXACT_WORDING_OMITTED)
+            .expect("omitted exact wording is a typed warning");
+        assert!(warning.message.contains("не входит."), "{}", warning.message);
+        assert_eq!(result.state, QueryVerificationState::PartiallySupported);
+    }
+
+    #[test]
+    fn keeping_the_statement_adds_no_warning() {
+        let mut result = verification(QueryVerificationState::Verified);
+        append_exact_wording_warning(
+            "Автоматическая рассылка писем в изменение не входит. Заявку это не создаёт.",
+            CONTEXT,
+            &mut result,
+        );
+        assert!(result.warnings.is_empty());
+        assert_eq!(result.state, QueryVerificationState::Verified);
+    }
 }

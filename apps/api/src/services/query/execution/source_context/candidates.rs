@@ -12,8 +12,9 @@ use super::{
         SOURCE_CONTEXT_ANCHOR_LIMIT_PER_DOCUMENT, SOURCE_CONTEXT_DEFAULT_NEIGHBOR_BACKWARD,
         SOURCE_CONTEXT_DEFAULT_NEIGHBOR_FORWARD, SOURCE_CONTEXT_DOCUMENT_HEAD_CHUNK_INDEX,
         SOURCE_CONTEXT_DOCUMENT_LIMIT, SOURCE_CONTEXT_FALLBACK_DOCUMENT_LIMIT,
-        SOURCE_CONTEXT_GRAPH_EVIDENCE_BONUS, SOURCE_CONTEXT_PROCEDURAL_NEIGHBOR_BACKWARD,
-        SourceContextAnchor, SourceContextCandidate, SourceContextNeighborSpan,
+        SOURCE_CONTEXT_GRAPH_EVIDENCE_BONUS, SOURCE_CONTEXT_OVERVIEW_OPENING_LIMIT,
+        SOURCE_CONTEXT_PROCEDURAL_NEIGHBOR_BACKWARD, SourceContextAnchor, SourceContextCandidate,
+        SourceContextNeighborSpan,
     },
 };
 
@@ -267,6 +268,113 @@ pub(super) fn seed_document_head_source_context_anchors(candidates: &mut [Source
             },
         );
     }
+}
+
+/// Reserve a ranked passage and an opening from the leading documents before a
+/// long run of updates to one document can spend the entire evidence budget.
+pub(crate) fn overview_evidence_anchor_ranks(
+    query_ir: &QueryIR,
+    chunks: &[RuntimeMatchedChunk],
+    document_index: &HashMap<Uuid, KnowledgeDocumentRow>,
+) -> Vec<usize> {
+    if !query_ir.requests_document_overview_evidence() {
+        return Vec::new();
+    }
+    let document_limit = if query_ir.is_multi_document() && query_ir.document_focus.is_none() {
+        SOURCE_CONTEXT_DOCUMENT_LIMIT
+    } else {
+        1
+    };
+    let mut seen = HashSet::new();
+    let mut anchors = Vec::new();
+    for (rank, chunk) in chunks.iter().enumerate() {
+        if seen.contains(&chunk.document_id) || is_source_profile_runtime_chunk(chunk) {
+            continue;
+        }
+        let Some(document) = document_index.get(&chunk.document_id) else { continue };
+        if !super::super::chunk_support::document_has_exact_readable_revision(
+            document,
+            chunk.revision_id,
+        ) || crate::domains::content::role_is_attached_context(&document.document_role)
+            || chunk.source_text.trim().is_empty()
+        {
+            continue;
+        }
+        seen.insert(chunk.document_id);
+        anchors.push(rank);
+        if let Some(openings) = document_overview_openings(chunk, chunks) {
+            for opening_rank in std::iter::once(openings.primary).chain(openings.reading_order) {
+                if opening_rank != rank && !anchors.contains(&opening_rank) {
+                    anchors.push(opening_rank);
+                }
+            }
+        }
+        if seen.len() == document_limit {
+            break;
+        }
+    }
+    anchors
+}
+
+/// Opening passages of one document, chosen from the head window.
+///
+/// The primary opening follows the head/first-substantive policy: a body chunk
+/// wins over a bare heading, then the lowest source index. Callers with one
+/// free prompt slot take [`primary`](Self::primary). Callers placing two slots
+/// follow [`reading_order`](Self::reading_order), which is sorted by source
+/// `chunk_index` rather than by retrieval position.
+#[derive(Debug, Clone)]
+pub(crate) struct DocumentOverviewOpenings {
+    pub(crate) primary: usize,
+    pub(crate) reading_order: Vec<usize>,
+}
+
+/// Opening passages of one document: the head section plus the next distinct
+/// section when the opening spans more than one structural block.
+///
+/// A definition and the acceptance criteria that follow it are separate
+/// sections even when both chunks report the same dominant kind, so source
+/// order, exact revision and distinct visible text decide instead of a
+/// per-kind assumption. Empty profile chunks and duplicate text cannot fill a
+/// second slot; the limit stays structural rather than corpus-specific.
+pub(crate) fn document_overview_openings(
+    representative: &RuntimeMatchedChunk,
+    chunks: &[RuntimeMatchedChunk],
+) -> Option<DocumentOverviewOpenings> {
+    let (head, end) = super::source_anchor_window(
+        SOURCE_CONTEXT_DOCUMENT_HEAD_CHUNK_INDEX,
+        0,
+        SOURCE_CONTEXT_DEFAULT_NEIGHBOR_FORWARD,
+    );
+    let mut candidates = chunks
+        .iter()
+        .enumerate()
+        .filter(|(_, candidate)| {
+            candidate.document_id == representative.document_id
+                && candidate.revision_id == representative.revision_id
+                && (head..=end).contains(&candidate.chunk_index)
+                && !is_source_profile_runtime_chunk(candidate)
+                && !candidate.source_text.trim().is_empty()
+        })
+        .collect::<Vec<_>>();
+    candidates.sort_by_key(|(_, chunk)| {
+        (chunk.chunk_kind.as_deref() == Some(super::types::HEADING_CHUNK_KIND), chunk.chunk_index)
+    });
+    let mut selected = Vec::<usize>::with_capacity(SOURCE_CONTEXT_OVERVIEW_OPENING_LIMIT);
+    for (rank, chunk) in candidates {
+        if selected.len() >= SOURCE_CONTEXT_OVERVIEW_OPENING_LIMIT {
+            break;
+        }
+        let text = chunk.source_text.trim();
+        if selected.iter().any(|chosen| chunks[*chosen].source_text.trim() == text) {
+            continue;
+        }
+        selected.push(rank);
+    }
+    let primary = *selected.first()?;
+    let mut reading_order = selected;
+    reading_order.sort_by_key(|rank| chunks[*rank].chunk_index);
+    Some(DocumentOverviewOpenings { primary, reading_order })
 }
 
 pub(super) fn unique_candidate_revision_ids(candidates: &[SourceContextCandidate]) -> Vec<Uuid> {

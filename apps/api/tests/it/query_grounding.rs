@@ -433,9 +433,11 @@ fn admitted_query_turns_fit_the_default_worker_stack() -> Result<()> {
         .await
         .context("grounded-query worker must survive admission")?
         .expect_err("a missing binding must stop before retrieval providers");
-        // Direct retrieval treats the missing embedding binding as an unproven
-        // vector inventory, so it fails closed with a state conflict.
-        assert!(matches!(error, ApiError::Conflict(_)), "expected an inventory conflict, got {error:?}");
+        // The inventory conflict is exposed as a typed unavailable dependency.
+        assert!(
+            matches!(error, ApiError::ServiceUnavailable { kind: "query_state_conflict", .. }),
+            "expected a typed inventory conflict, got {error:?}"
+        );
         let failure_codes: Vec<String> = sqlx::query_scalar(
             "select runtime.failure_code from query_execution execution
              join runtime_execution runtime on runtime.id = execution.runtime_execution_id
@@ -445,8 +447,69 @@ fn admitted_query_turns_fit_the_default_worker_stack() -> Result<()> {
         .fetch_all(&fixture.state.persistence.postgres)
         .await?;
         assert_eq!(failure_codes, ["query_binding_not_configured", "query_binding_not_configured", "query_state_conflict"]);
+        Box::pin(check_stream_execution_handles(&fixture, actor.id)).await?;
         fixture.cleanup().await
     })
+}
+
+async fn check_stream_execution_handles(
+    fixture: &QueryGroundingAppFixture,
+    actor_id: Uuid,
+) -> Result<()> {
+    use axum::extract::{Path, State};
+    use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
+    use ironrag_backend::interfaces::http::query;
+
+    let auth = crate::iam_token_support::scoped_workspace_auth(
+        actor_id,
+        fixture.workspace_id,
+        &["query_run", "query_read"],
+    );
+    let mut executions = std::collections::HashSet::new();
+    let mut requests = std::collections::HashSet::new();
+    let question = "What is the request latency budget?";
+    for _ in 0..2 {
+        let response = Box::pin(query::create_session_turn(
+            auth.clone(),
+            State(fixture.state.clone()),
+            Path(fixture.conversation_id),
+            HeaderMap::from_iter([(header::ACCEPT, HeaderValue::from_static("text/event-stream"))]),
+            axum::Json(serde_json::from_value(json!({"contentText": question}))?),
+        ))
+        .await
+        .map_err(|error| anyhow!("{error}"))?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let id = Uuid::parse_str(
+            response
+                .headers()
+                .get("x-ironrag-query-execution-id")
+                .context("stream has no parent execution handle")?
+                .to_str()?,
+        )?;
+        assert!(executions.insert(id), "two submissions must not share an execution");
+        // The fixture reaches a terminal event without a provider binding.
+        let body = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            axum::body::to_bytes(response.into_body(), 64 * 1024),
+        )
+        .await??;
+        assert!(std::str::from_utf8(&body)?.contains("query_binding_not_configured"));
+
+        let axum::Json(detail) =
+            Box::pin(query::get_execution(auth.clone(), State(fixture.state.clone()), Path(id)))
+                .await
+                .map_err(|error| anyhow!("{error}"))?;
+        let request = detail.request_turn.context("recorded request turn")?;
+        assert_eq!(detail.execution.id, id);
+        assert_eq!(detail.execution.conversation_id, fixture.conversation_id);
+        assert_eq!(detail.execution.request_turn_id, Some(request.id));
+        assert_eq!(request.conversation_id, fixture.conversation_id);
+        assert_eq!(request.content_text, question);
+        assert!(requests.insert(request.id), "each submission has its own request turn");
+        assert_eq!(detail.execution.failure_code.as_deref(), Some("query_binding_not_configured"));
+        assert!(detail.response_turn.is_none());
+    }
+    Ok(())
 }
 
 impl QueryGroundingAppFixture {
@@ -3074,6 +3137,7 @@ async fn cached_replay_service_denies_retained_a_after_intent_and_bound_c() -> R
                 }),
                 parent_async_operation_id: None,
                 priority: 100,
+                enrichment_scope: None,
             },
             None,
         )

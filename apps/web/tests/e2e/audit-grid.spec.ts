@@ -25,6 +25,8 @@ const auditItems: AuditEventResponse[] = Array.from({ length: 26 }, (_, index) =
             totalCost: '0.125',
             currencyCode: 'USD',
             providerCallCount: 2,
+            costCoverage: 'partial',
+            unpricedProviderCallCount: 1,
           },
         }
       : {}),
@@ -116,7 +118,7 @@ for (const [viewport, width, theme] of [
     await expect(table.getByText('Needle User')).toBeVisible()
     await expect(table.getByText('Actor 24', { exact: true })).toHaveCount(0)
     await expect(table.getByText('openai_compatible:atlas')).toBeVisible()
-    await expect(table.getByText('USD 0.125 · 2 calls')).toBeVisible()
+    await expect(table.getByText('USD 0.125 · partial, 1 unpriced · 2 completed calls')).toBeVisible()
     const inclusion = page.getByRole('checkbox', { name: 'Assistant model and cost' })
     await page.getByText('Assistant model and cost', { exact: true }).click()
     await expect(inclusion).not.toBeChecked()

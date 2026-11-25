@@ -15,6 +15,7 @@ use crate::{
     services::query::planner::{QueryIntentProfile, RuntimeQueryPlan},
 };
 
+use super::chunk_support::ContextExcerpt;
 use super::technical_literals::TechnicalLiteralIntent;
 
 #[derive(Debug, Clone, serde::Serialize, utoipa::ToSchema)]
@@ -25,6 +26,14 @@ pub(crate) struct RuntimeMatchedEntity {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub summary: Option<String>,
     pub score: Option<f32>,
+}
+
+impl RuntimeMatchedEntity {
+    pub(super) fn context_excerpt(&self) -> Option<ContextExcerpt<'_>> {
+        const ENTITY_SUMMARY_CONTEXT_CHARS: usize = 320;
+        let excerpt = ContextExcerpt::new(self.summary.as_deref()?, ENTITY_SUMMARY_CONTEXT_CHARS);
+        (!excerpt.source.is_empty()).then_some(excerpt)
+    }
 }
 
 #[derive(Debug, Clone, serde::Serialize, utoipa::ToSchema)]
@@ -40,6 +49,112 @@ pub(crate) struct RuntimeMatchedRelationship {
     pub score: Option<f32>,
 }
 
+/// Longest statement the grounded-answer contract protects verbatim
+/// (`mustPreserveSpans`). Longer graph summaries stay ordinary evidence.
+pub(crate) const PROTECTED_STATEMENT_MAX_CHARS: usize = 240;
+
+pub(crate) fn protected_statement(text: &str) -> Option<&str> {
+    let text = text.trim();
+    (text.chars().count() <= PROTECTED_STATEMENT_MAX_CHARS
+        && text.chars().any(char::is_alphanumeric))
+    .then_some(text)
+}
+
+/// Canonical owner for applicable verbatim source statements shared by
+/// execution verification and MCP `mustPreserveSpans` serialization.
+///
+/// A candidate statement is selected only when it appears verbatim inside an
+/// authorized primary source passage cited by completed semantic verification
+/// and matches the question's content tokens. It never filters by whether the
+/// draft answer already included the statement, and never admits synthesized
+/// graph summaries, titles, or unrelated peripheral quotes.
+pub(crate) fn applicable_preserved_source_spans<'a>(
+    question: &str,
+    candidate_statements: impl IntoIterator<Item = &'a str>,
+    semantic_verification: Option<
+        &ironrag_contracts::assistant::semantic_verification::SemanticVerificationReport,
+    >,
+    limit: usize,
+) -> Vec<String> {
+    use ironrag_contracts::assistant::semantic_verification::{
+        SemanticClaimSupport, SemanticVerificationOutcome,
+    };
+    if limit == 0 {
+        return Vec::new();
+    }
+    let Some(report) = semantic_verification else {
+        return Vec::new();
+    };
+    let SemanticVerificationOutcome::Completed { assessment } = &report.outcome else {
+        return Vec::new();
+    };
+    let cited_quotes: Vec<&str> = assessment
+        .units
+        .iter()
+        .filter(|unit| unit.support != SemanticClaimSupport::NoFactualClaims)
+        .flat_map(|unit| unit.evidence.iter().map(|link| link.quote.as_str()))
+        .collect();
+    if cited_quotes.is_empty() {
+        return Vec::new();
+    }
+    let question_tokens = crate::services::query::text_match::normalized_alnum_tokens(question, 4);
+    if question_tokens.is_empty() {
+        return Vec::new();
+    }
+    let mut selected = Vec::new();
+    let mut seen = std::collections::BTreeSet::new();
+    for candidate in candidate_statements {
+        if selected.len() >= limit {
+            break;
+        }
+        let Some(span) = protected_statement(candidate) else {
+            continue;
+        };
+        if !cited_quotes.iter().any(|quote| quote.contains(span)) {
+            continue;
+        }
+        if !statement_is_applicable_to_question(&question_tokens, span) {
+            continue;
+        }
+        if seen.insert(span.to_owned()) {
+            selected.push(span.to_owned());
+        }
+    }
+    selected
+}
+
+fn statement_is_applicable_to_question(
+    question_tokens: &std::collections::BTreeSet<String>,
+    statement: &str,
+) -> bool {
+    let statement_tokens =
+        crate::services::query::text_match::normalized_alnum_tokens(statement, 4);
+    if statement_tokens.is_empty() {
+        return false;
+    }
+    let matched = question_tokens
+        .iter()
+        .filter(|q_token| {
+            statement_tokens
+                .iter()
+                .any(|s_token| preserved_statement_tokens_match(q_token, s_token))
+        })
+        .count();
+    matched >= 2
+}
+
+fn preserved_statement_tokens_match(left: &str, right: &str) -> bool {
+    if crate::services::query::text_match::near_token_match(left, right) {
+        return true;
+    }
+    let min_len = left.chars().count().min(right.chars().count());
+    if min_len < 4 {
+        return false;
+    }
+    let common_prefix = left.chars().zip(right.chars()).take_while(|(a, b)| a == b).count();
+    common_prefix >= 4 && common_prefix.saturating_mul(5) >= min_len.saturating_mul(3)
+}
+
 impl RuntimeMatchedRelationship {
     pub(crate) fn claim_text(&self) -> String {
         format!("{} --{}--> {}", self.from_label, self.relation_type, self.to_label)
@@ -49,12 +164,18 @@ impl RuntimeMatchedRelationship {
         self.summary.as_deref().map(str::trim).filter(|value| !value.is_empty())
     }
 
+    /// Field marking a recorded statement the answer must keep verbatim.
+    pub(crate) const EXACT_WORDING_FIELD: &'static str = "exact_wording: yes";
+
     pub(crate) fn context_line(&self) -> String {
         if let Some(summary) = self.evidence_text() {
-            let mut line = format!(
-                "[graph-edge evidence] evidence: {summary} | relation_hint: {}",
-                self.claim_text()
-            );
+            let mut line = format!("[graph-edge evidence] evidence: {summary}");
+            if protected_statement(summary).is_some() {
+                line.push_str(" | ");
+                line.push_str(Self::EXACT_WORDING_FIELD);
+            }
+            line.push_str(" | relation_hint: ");
+            line.push_str(&self.claim_text());
             if self.support_count > 1 {
                 line.push_str(" | support_count: ");
                 line.push_str(&self.support_count.to_string());
@@ -92,6 +213,12 @@ pub(crate) enum RuntimeChunkScoreKind {
     SourceContext,
     FocusedDocument,
     LatestVersion,
+}
+
+impl RuntimeChunkScoreKind {
+    pub(super) const fn can_yield_overview_slot(self) -> bool {
+        matches!(self, Self::Relevance | Self::SourceContext)
+    }
 }
 
 #[derive(Debug, Clone, serde::Serialize, utoipa::ToSchema)]
@@ -160,6 +287,7 @@ pub(crate) struct RuntimeStructuredQueryDiagnostics {
     pub(crate) rerank: crate::domains::query::RerankMetadata,
     pub(crate) context_assembly: crate::domains::query::ContextAssemblyMetadata,
     pub(crate) grouped_references: Vec<crate::domains::query::GroupedReference>,
+    pub(crate) retrieval_degradations: Vec<RetrievalDegradation>,
     pub(crate) context_text: Option<String>,
     pub(crate) warning: Option<String>,
     pub(crate) warning_kind: Option<&'static str>,
@@ -182,6 +310,66 @@ pub(crate) struct QueryExecutionEnrichment {
     pub rerank: crate::domains::query::RerankMetadata,
     pub context_assembly: crate::domains::query::ContextAssemblyMetadata,
     pub grouped_references: Vec<crate::domains::query::GroupedReference>,
+}
+
+/// One graph context line selected for the answer, paired with the evidence it
+/// carries and with the producer that selected it. The producer owns both
+/// representations while it formats the line, so no consumer has to strip
+/// headers or attributes back out of the rendered text to recover the claim.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SelectedGraphContextLine {
+    rendered: String,
+    source: SelectedGraphContextSource,
+}
+
+/// Which producer selected the line. A document graph-evidence passage is a
+/// claim about a document; a matched entity is a graph node whose summary
+/// describes the node itself. Consumers that accept only document passages ask
+/// for the passage body instead of reading every summary as one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum SelectedGraphContextSource {
+    /// `graph_evidence` row: the shortened body is always evidence.
+    Passage(String),
+    /// Explicit target node: only the summary excerpt used is evidence.
+    MatchedEntity(Option<String>),
+}
+
+impl SelectedGraphContextLine {
+    /// Document graph-evidence line: `evidence_text` is the shortened body the
+    /// producer formatted into `rendered`.
+    pub(crate) fn passage(rendered: String, evidence_text: String) -> Self {
+        Self { rendered, source: SelectedGraphContextSource::Passage(evidence_text) }
+    }
+
+    /// Matched entity line: `evidence_text` is the summary excerpt the producer
+    /// formatted into `rendered`, or `None` for a navigation-only line.
+    pub(crate) fn matched_entity(rendered: String, evidence_text: Option<String>) -> Self {
+        Self { rendered, source: SelectedGraphContextSource::MatchedEntity(evidence_text) }
+    }
+
+    /// Line as it enters the answer context.
+    pub(crate) fn rendered(&self) -> &str {
+        &self.rendered
+    }
+
+    /// Evidence the line carries: the shortened claim body of a graph-evidence
+    /// row or the summary excerpt used for a matched-entity row.
+    /// Navigation-only lines carry none.
+    pub(crate) fn evidence_text(&self) -> Option<&str> {
+        match &self.source {
+            SelectedGraphContextSource::Passage(evidence_text) => Some(evidence_text),
+            SelectedGraphContextSource::MatchedEntity(evidence_text) => evidence_text.as_deref(),
+        }
+    }
+
+    /// Body of a document graph-evidence passage. `None` for matched-entity
+    /// lines: a node summary describes the node, it is not a document passage.
+    pub(crate) fn passage_evidence_text(&self) -> Option<&str> {
+        match &self.source {
+            SelectedGraphContextSource::Passage(evidence_text) => Some(evidence_text),
+            SelectedGraphContextSource::MatchedEntity(_) => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -216,8 +404,9 @@ pub(crate) struct RuntimeStructuredQueryResult {
     /// Runtime graph evidence rows that did not necessarily hydrate to
     /// `knowledge_chunk` rows. They are already selected and ranked by the
     /// retrieval graph-evidence lane, so authoritative answer assembly can render
-    /// them without parsing the old bounded context string.
-    pub(crate) graph_evidence_context_lines: Vec<String>,
+    /// them without parsing the old bounded context string. Each entry keeps the
+    /// evidence text apart from its presentation.
+    pub(crate) graph_evidence_context_lines: Vec<SelectedGraphContextLine>,
     /// Final ranked graph entities that shaped the answer context. These feed
     /// the persisted context bundle so execution detail references stay aligned
     /// with the evidence the answer actually saw.
@@ -306,6 +495,9 @@ pub(crate) struct SemanticRerankExecutionContext {
 pub(crate) struct PreparedAnswerQueryResult {
     pub(crate) structured: RuntimeStructuredQueryResult,
     pub(crate) answer_context: String,
+    /// The final warning owner reports partial coverage when evidence was dropped.
+    pub(crate) evidence_selection:
+        Option<super::semantic_verification::SelectedEvidenceMeasurement>,
     /// Compiled typed representation of the user's question produced by
     /// `QueryCompilerService`. Downstream stages (verification, ranking,
     /// answer generation) should read routing signals from this instead
@@ -444,18 +636,59 @@ pub(crate) struct RuntimeVectorSearchContext {
     pub(crate) source_truth_version: i64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum QueryVectorReadiness {
+    Ready,
+    EmptyInventory,
+    ProviderUnavailable,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, utoipa::ToSchema)]
+pub(crate) enum RetrievalDegradation {
+    #[serde(rename = "vector_provider_unavailable")]
+    VectorProvider,
+    #[serde(rename = "vector_store_unavailable")]
+    VectorStore,
+    #[serde(rename = "lexical_store_unavailable")]
+    LexicalStore,
+    #[serde(rename = "graph_store_unavailable")]
+    GraphStore,
+}
+
+impl RetrievalDegradation {
+    pub(crate) const fn warning_code(self) -> &'static str {
+        match self {
+            Self::VectorProvider => "retrieval_vector_provider_unavailable",
+            Self::VectorStore => "retrieval_vector_store_unavailable",
+            Self::LexicalStore => "retrieval_lexical_store_unavailable",
+            Self::GraphStore => "retrieval_graph_store_unavailable",
+        }
+    }
+
+    pub(crate) fn warning(self) -> QueryVerificationWarning {
+        QueryVerificationWarning {
+            code: self.warning_code().into(),
+            message: "An optional retrieval channel was unavailable; the answer uses only the remaining authorized evidence.".into(),
+            related_segment_id: None,
+            related_fact_id: None,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct StructuredQueryPlanningStage {
     pub(crate) planning: crate::domains::query::QueryPlanningMetadata,
     pub(crate) plan: RuntimeQueryPlan,
     pub(crate) technical_literal_intent: TechnicalLiteralIntent,
     pub(crate) question_embedding: Vec<f32>,
+    pub(crate) vector_readiness: QueryVectorReadiness,
     pub(crate) hyde_embedding: Option<Vec<f32>>,
     /// Request-scoped exact-profile inventory preflight. Both chunk and
     /// entity ANN lanes consume this same immutable result; neither lane may
     /// rescan the full vector inventory or infer dimensions independently.
     pub(crate) vector_search_context: Option<RuntimeVectorSearchContext>,
     pub(crate) graph_index: QueryGraphIndex,
+    pub(crate) graph_store_unavailable: bool,
     pub(crate) document_index: HashMap<Uuid, KnowledgeDocumentRow>,
     pub(crate) candidate_limit: usize,
 }
@@ -464,8 +697,9 @@ pub(crate) struct StructuredQueryPlanningStage {
 pub(crate) struct StructuredQueryRetrievalStage {
     pub(crate) planning: StructuredQueryPlanningStage,
     pub(crate) bundle: RetrievalBundle,
-    pub(crate) graph_evidence_context_lines: Vec<String>,
+    pub(crate) graph_evidence_context_lines: Vec<SelectedGraphContextLine>,
     pub(crate) graph_evidence_source_document_ids: Vec<Uuid>,
+    pub(crate) degradations: Vec<RetrievalDegradation>,
 }
 
 #[derive(Debug, Clone)]
@@ -481,7 +715,7 @@ pub(crate) struct StructuredQueryRerankStage {
 pub(crate) struct StructuredQueryAssemblyStage {
     pub(crate) rerank: StructuredQueryRerankStage,
     pub(crate) context_text: String,
-    pub(crate) graph_evidence_context_lines: Vec<String>,
+    pub(crate) graph_evidence_context_lines: Vec<SelectedGraphContextLine>,
     pub(crate) technical_literals_text: Option<String>,
     pub(crate) technical_literal_chunks: Vec<RuntimeMatchedChunk>,
     pub(crate) retrieved_documents: Vec<RuntimeRetrievedDocumentBrief>,
@@ -580,5 +814,106 @@ pub(crate) fn sample_technical_fact_row(
         conflict_group_id: None,
         created_at: now,
         updated_at: now,
+    }
+}
+
+#[cfg(test)]
+mod preserved_span_tests {
+    use ironrag_contracts::assistant::semantic_verification::{
+        SEMANTIC_VERIFICATION_PROTOCOL_VERSION, SemanticAnswerUnit, SemanticAssessment,
+        SemanticByteSpan, SemanticClaimSupport, SemanticCompleteness, SemanticEvidenceLink,
+        SemanticEvidenceScope, SemanticNotRunReason, SemanticResponseClassification,
+        SemanticSourceEntry, SemanticSourceLocator, SemanticUnitVerdict,
+        SemanticVerificationOutcome, SemanticVerificationReport,
+    };
+
+    use super::*;
+
+    fn sample_report(
+        outcome: SemanticVerificationOutcome,
+        source_text: &str,
+    ) -> SemanticVerificationReport {
+        SemanticVerificationReport {
+            protocol_version: SEMANTIC_VERIFICATION_PROTOCOL_VERSION,
+            question_sha256: "a".repeat(64),
+            checked_answer_sha256: "b".repeat(64),
+            visible_answer_sha256: Some("b".repeat(64)),
+            evidence_manifest_sha256: "c".repeat(64),
+            answer_units: vec![SemanticAnswerUnit {
+                unit_id: "u1".to_string(),
+                span: SemanticByteSpan { start: 0, end: 5 },
+                text: "claim".to_string(),
+            }],
+            sources: vec![SemanticSourceEntry {
+                source_id: "s1".to_string(),
+                document_id: Uuid::from_u128(1),
+                document_revision_id: Uuid::from_u128(2),
+                locator: SemanticSourceLocator::Chunk { chunk_id: Uuid::from_u128(3) },
+                scope: SemanticEvidenceScope::SelectedExcerpt,
+                text_sha256: "d".repeat(64),
+                text: source_text.to_string(),
+            }],
+            elapsed_ms: 1,
+            provider_call_id: None,
+            preparation_limit: None,
+            outcome,
+        }
+    }
+
+    fn completed_report(support: SemanticClaimSupport, quote: &str) -> SemanticVerificationReport {
+        sample_report(
+            SemanticVerificationOutcome::Completed {
+                assessment: SemanticAssessment {
+                    claim_support: support,
+                    completeness: SemanticCompleteness::Complete,
+                    missing_caveats: Vec::new(),
+                    response_classification: SemanticResponseClassification::FactualAnswer,
+                    units: vec![SemanticUnitVerdict {
+                        unit_id: "u1".to_string(),
+                        support,
+                        asserts_document_absence: false,
+                        evidence: vec![SemanticEvidenceLink {
+                            source_id: "s1".to_string(),
+                            span: SemanticByteSpan { start: 0, end: quote.len() },
+                            quote: quote.to_string(),
+                        }],
+                    }],
+                },
+            },
+            quote,
+        )
+    }
+
+    #[test]
+    fn applicable_preserved_source_spans_handles_outcomes_no_factual_claims_and_cyrillic_stems() {
+        let statement = "Параметры очереди обработки задач требуют явного таймаута.";
+        let peripheral = "Архивный раздел описывает старый формат экспорта.";
+        let question = "Какие параметры очередности обработки требуют таймаут?";
+
+        let not_run = sample_report(
+            SemanticVerificationOutcome::NotRun { reason: SemanticNotRunReason::Disabled },
+            statement,
+        );
+        assert!(
+            applicable_preserved_source_spans(question, [statement], Some(&not_run), 8).is_empty()
+        );
+
+        let no_factual = completed_report(SemanticClaimSupport::NoFactualClaims, statement);
+        assert!(
+            applicable_preserved_source_spans(question, [statement], Some(&no_factual), 8)
+                .is_empty()
+        );
+
+        let quote = format!("{statement} {peripheral}");
+        let completed = completed_report(SemanticClaimSupport::Supported, &quote);
+        assert_eq!(
+            applicable_preserved_source_spans(
+                question,
+                [statement, peripheral, "Нецитируемая строка про параметры обработки."],
+                Some(&completed),
+                8,
+            ),
+            vec![statement.to_string()]
+        );
     }
 }

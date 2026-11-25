@@ -93,6 +93,12 @@ pub struct CreateSessionTurnRequest {
     top_k: Option<usize>,
 }
 
+/// Response header carrying the server-allocated parent query-execution
+/// identifier for a streamed turn. It is written before the stream body, so a
+/// client that loses the transport can read back that exact execution with
+/// `GET /v1/query/executions/{executionId}` instead of resubmitting the turn.
+pub(crate) const QUERY_EXECUTION_ID_HEADER: &str = "x-ironrag-query-execution-id";
+
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/query/libraries/{library_id}/sessions", get(list_sessions).post(create_session))
@@ -429,7 +435,7 @@ pub async fn get_session(
     params(("sessionId" = uuid::Uuid, Path, description = "Query session identifier")),
     request_body(content = CreateSessionTurnRequest, description = "User message plus optional retrieval/debug controls for a new assistant turn."),
     responses(
-        (status = 200, description = "Turn execution result with grounded answer + evidence references", body = ironrag_contracts::assistant::AssistantExecutionDetail),
+        (status = 200, description = "Turn execution result with grounded answer + evidence references", body = ironrag_contracts::assistant::AssistantExecutionDetail, headers(("x-ironrag-query-execution-id" = uuid::Uuid, description = "Streamed responses only: the parent execution ID, available before the first event. Recover an interrupted stream with GET /v1/query/executions/{executionId}."))),
         (status = 401, description = "Caller is not authenticated"),
         (status = 403, description = "Caller is not authorized for the session"),
         (status = 404, description = "Session not found"),
@@ -452,10 +458,11 @@ pub async fn create_session_turn(
     let span = tracing::Span::current();
     if accepts_event_stream(&headers) {
         let stream = create_session_turn_event_stream(auth, state, session_id, payload).await?;
-        return Ok(stream.into_response());
+        return Ok(stream);
     }
     let outcome =
-        execute_ui_session_turn(state.clone(), auth.clone(), session_id, payload, None).await?;
+        execute_ui_session_turn(state.clone(), auth.clone(), session_id, payload, None, None)
+            .await?;
     append_query_execution_audit(state.clone(), auth.principal_id, "ui", &outcome).await;
     span.record("elapsed_ms", started_at.elapsed().as_millis() as u64);
     Ok(Json(map_ui_turn_execution_response(outcome)).into_response())

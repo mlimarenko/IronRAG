@@ -459,6 +459,8 @@ interface AuditAssistantCall {
   totalCost?: string | number | null
   currencyCode?: string | null
   providerCallCount: number
+  unpricedProviderCallCount: number
+  costCoverage?: 'complete' | 'partial' | 'unknown' | null
 }
 
 export interface AuditEvent {

@@ -1,6 +1,6 @@
 use super::{
-    AssistantGroundingEvidence, HashSet, PreparedAnswerQueryResult, QueryIR, RuntimeChunkScoreKind,
-    RuntimeMatchedChunk, SINGLE_SHOT_CONFIDENT_ANSWER_CHARS, Uuid,
+    AnswerGenerationStage, AssistantGroundingEvidence, HashSet, PreparedAnswerQueryResult, QueryIR,
+    RuntimeChunkScoreKind, RuntimeMatchedChunk, SINGLE_SHOT_CONFIDENT_ANSWER_CHARS, Uuid,
     strip_trailing_media_source_token,
 };
 
@@ -148,19 +148,18 @@ pub(super) fn selected_runtime_answer_chunks(
     prepared: &PreparedAnswerQueryResult,
 ) -> Vec<RuntimeMatchedChunk> {
     let mut seen = HashSet::<Uuid>::new();
-    let mut chunks = Vec::<RuntimeMatchedChunk>::new();
-    for chunk in prepared
+    selected_chunks(prepared).filter(|chunk| seen.insert(chunk.chunk_id)).cloned().collect()
+}
+
+fn selected_chunks(
+    prepared: &PreparedAnswerQueryResult,
+) -> impl Iterator<Item = &RuntimeMatchedChunk> {
+    prepared
         .structured
         .ordered_source_units
         .iter()
         .chain(prepared.structured.technical_literal_chunks.iter())
         .chain(prepared.structured.context_chunks.iter())
-    {
-        if seen.insert(chunk.chunk_id) {
-            chunks.push(chunk.clone());
-        }
-    }
-    chunks
 }
 
 pub(super) fn build_update_procedure_answer_with_source_context_fallback(
@@ -190,86 +189,82 @@ pub(super) fn selected_runtime_grounding_evidence(
     prepared: &PreparedAnswerQueryResult,
     mut grounding: AssistantGroundingEvidence,
 ) -> AssistantGroundingEvidence {
-    let mut seen = grounding
-        .verification_corpus
-        .iter()
-        .map(|fragment| fragment.trim().to_string())
-        .collect::<HashSet<_>>();
-
-    push_grounding_fragment(
-        &mut grounding.verification_corpus,
-        &mut seen,
-        &prepared.structured.context_text,
-    );
-    if let Some(text) = &prepared.structured.technical_literals_text {
-        push_grounding_fragment(&mut grounding.verification_corpus, &mut seen, text);
-    }
-    for line in &prepared.structured.graph_evidence_context_lines {
-        push_grounding_fragment(&mut grounding.verification_corpus, &mut seen, line);
-    }
-    for chunk in prepared
-        .structured
-        .ordered_source_units
-        .iter()
-        .chain(prepared.structured.technical_literal_chunks.iter())
-        .chain(prepared.structured.context_chunks.iter())
-    {
-        push_grounding_fragment(&mut grounding.verification_corpus, &mut seen, &chunk.source_text);
-        push_grounding_fragment(&mut grounding.verification_corpus, &mut seen, &chunk.excerpt);
-    }
-    for document in &prepared.structured.retrieved_documents {
-        push_grounding_fragment(
-            &mut grounding.verification_corpus,
-            &mut seen,
-            &document.preview_excerpt,
+    let passages = graph_passages_in_context(prepared, &prepared.answer_context)
+        .chain(
+            selected_chunks(prepared)
+                .flat_map(|chunk| [chunk.source_text.as_str(), chunk.excerpt.as_str()]),
+        )
+        .chain(
+            prepared.structured.retrieved_documents.iter().map(|doc| doc.preview_excerpt.as_str()),
         );
-        push_grounding_fragment(&mut grounding.verification_corpus, &mut seen, &document.title);
-        if let Some(document_hint) = &document.document_hint {
-            push_grounding_fragment(&mut grounding.verification_corpus, &mut seen, document_hint);
-        }
-    }
-    push_grounding_fragment(
-        &mut grounding.verification_corpus,
-        &mut seen,
-        &prepared.answer_context,
-    );
+    let additions = {
+        let mut seen: HashSet<_> = grounding.source_texts().map(str::trim).collect();
+        passages
+            .map(str::trim)
+            .filter(|s| !s.is_empty() && seen.insert(*s))
+            .map(str::to_owned)
+            .collect::<Vec<_>>()
+    };
+    grounding.verification_corpus.extend(additions);
     grounding
 }
 
-pub(super) fn push_grounding_fragment(
-    corpus: &mut Vec<String>,
-    seen: &mut HashSet<String>,
-    fragment: &str,
-) {
-    let trimmed = fragment.trim();
-    if trimmed.is_empty() {
-        return;
-    }
-    if seen.insert(trimmed.to_string()) {
-        corpus.push(trimmed.to_string());
+/// A focused or truncated prompt can omit a ranked graph statement. Only
+/// typed statement bodies are eligible; the prompt can narrow that set, never add to it.
+fn graph_passages_in_context<'a>(
+    prepared: &'a PreparedAnswerQueryResult,
+    prompt: &'a str,
+) -> impl Iterator<Item = &'a str> {
+    let selected = &prepared.structured;
+    selected
+        .graph_evidence_context_lines
+        .iter()
+        .filter_map(|line| line.evidence_text())
+        .chain(selected.graph_relation_references.iter().filter_map(|edge| edge.evidence_text()))
+        .chain(
+            selected
+                .graph_entity_references
+                .iter()
+                .filter_map(|node| node.context_excerpt().map(|excerpt| excerpt.source)),
+        )
+        .map(str::trim)
+        .filter(move |text| !text.is_empty() && prompt.contains(*text))
+}
+
+pub(super) fn preflight_graph_grounding(
+    prepared: &PreparedAnswerQueryResult,
+    prompt: &str,
+) -> AssistantGroundingEvidence {
+    let mut seen = HashSet::new();
+    AssistantGroundingEvidence {
+        verification_corpus: graph_passages_in_context(prepared, prompt)
+            .filter(|text| seen.insert(*text))
+            .map(str::to_owned)
+            .collect(),
+        ..Default::default()
     }
 }
 
-pub(super) fn literal_revision_context(
-    prompt_context: &str,
-    assistant_grounding: &AssistantGroundingEvidence,
-) -> String {
-    let mut context = prompt_context.trim().to_string();
-    if assistant_grounding.verification_corpus.is_empty() {
-        return context;
-    }
-    if !context.is_empty() {
-        context.push_str("\n\n");
-    }
-    context.push_str("Additional tool evidence observed by the answer generator:\n");
-    for (index, fragment) in assistant_grounding.verification_corpus.iter().enumerate() {
-        let trimmed = fragment.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        context.push_str(&format!("\n[TOOL_EVIDENCE {}]\n{}\n", index + 1, trimmed));
-    }
-    context
+pub(super) fn literal_revision_context(generation: &AnswerGenerationStage) -> String {
+    let evidence = &generation.authoritative_evidence;
+    let mut seen = HashSet::new();
+    generation
+        .primary_answer_chunks
+        .iter()
+        .flat_map(|chunk| [chunk.source_text.as_str(), chunk.excerpt.as_str()])
+        .chain(evidence.structured_blocks.iter().map(|block| block.text.as_str()))
+        .chain(
+            evidence
+                .technical_facts
+                .iter()
+                .map(|fact| fact.display_value.as_str())
+                .filter(|value| generation.prompt_context.contains(*value)),
+        )
+        .chain(generation.assistant_grounding.source_texts())
+        .map(str::trim)
+        .filter(|text| !text.is_empty() && seen.insert(*text))
+        .collect::<Vec<_>>()
+        .join("\n\n")
 }
 
 pub(super) fn merge_generation_usage(

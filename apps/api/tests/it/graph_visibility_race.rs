@@ -90,6 +90,7 @@ pub(crate) async fn seed_published_graph(
             }),
             parent_async_operation_id: None,
             priority: 100,
+            enrichment_scope: None,
         },
         None,
     )

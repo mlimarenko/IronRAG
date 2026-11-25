@@ -1,5 +1,8 @@
 use crate::infra::knowledge_plane::ChunkLexicalQuery;
 
+use super::super::semantic_verification::{
+    EvidenceAdmission, EvidenceBudget, chunk_evidence_bytes,
+};
 use super::coverage::{
     EvidenceCoverage, compare_operands_covered_by_context, operand_covered_by_evidence,
 };
@@ -36,6 +39,7 @@ pub(super) struct CompareContextProbeOutcome {
     pub(super) missing_operand_count: usize,
     pub(super) added_chunk_count: usize,
     pub(super) unresolved_operand_count: usize,
+    pub(super) skipped_over_budget: usize,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -44,12 +48,14 @@ pub(super) struct TechnicalFocusProbeOutcome {
     pub(super) probe_term_count: usize,
     pub(super) missing_term_count: usize,
     pub(super) added_chunk_count: usize,
+    pub(super) skipped_over_budget: usize,
 }
 
 pub(super) async fn augment_technical_focus_context(
     context: &EvidenceProbeContext<'_>,
     answer_context: &mut String,
     structured: &mut super::super::RuntimeStructuredQueryResult,
+    budget: &mut EvidenceBudget,
 ) -> anyhow::Result<TechnicalFocusProbeOutcome> {
     let probe_terms = collect_technical_focus_probe_terms(context.ir);
     if probe_terms.is_empty() {
@@ -74,6 +80,23 @@ pub(super) async fn augment_technical_focus_context(
         &existing_chunk_ids,
     )
     .await?;
+    let mut skipped_over_budget = 0;
+    let probe_chunks = probe_chunks
+        .into_iter()
+        .filter(|chunk| {
+            match budget.try_admit_chunk(
+                chunk.chunk_id,
+                super::super::semantic_verification::chunk_evidence_bytes(chunk),
+            ) {
+                EvidenceAdmission::Retained => true,
+                EvidenceAdmission::Duplicate => false,
+                EvidenceAdmission::OverBudget => {
+                    skipped_over_budget += 1;
+                    false
+                }
+            }
+        })
+        .collect::<Vec<_>>();
     if !probe_chunks.is_empty() {
         let probe_question = missing_terms.join(" ");
         let literal_inventory =
@@ -90,6 +113,7 @@ pub(super) async fn augment_technical_focus_context(
         probe_term_count: probe_terms.len(),
         missing_term_count: missing_terms.len(),
         added_chunk_count: probe_chunks.len(),
+        skipped_over_budget,
     })
 }
 
@@ -380,6 +404,7 @@ pub(super) async fn augment_partial_compare_context(
     context: &EvidenceProbeContext<'_>,
     answer_context: &mut String,
     structured: &mut super::super::RuntimeStructuredQueryResult,
+    budget: &mut EvidenceBudget,
 ) -> anyhow::Result<CompareContextProbeOutcome> {
     if !matches!(context.ir.act, QueryAct::Compare) {
         return Ok(CompareContextProbeOutcome::default());
@@ -394,10 +419,23 @@ pub(super) async fn augment_partial_compare_context(
         missing_operand_count: missing_operands.len(),
         added_chunk_count: 0,
         unresolved_operand_count: missing_operands.len(),
+        skipped_over_budget: 0,
     };
     let existing_chunk_ids = HashSet::<Uuid>::new();
     let probe_chunks =
         probe_missing_compare_operands(context, &missing_operands, &existing_chunk_ids).await?;
+    let mut skipped_over_budget = 0;
+    let probe_chunks = probe_chunks
+        .into_iter()
+        .filter(|chunk| match budget.try_admit_chunk(chunk.chunk_id, chunk_evidence_bytes(chunk)) {
+            EvidenceAdmission::Retained => true,
+            EvidenceAdmission::Duplicate => false,
+            EvidenceAdmission::OverBudget => {
+                skipped_over_budget += 1;
+                false
+            }
+        })
+        .collect::<Vec<_>>();
     if !probe_chunks.is_empty() {
         let probe_question = missing_operands.join(" ");
         let probe_context = render_targeted_evidence_chunk_section(&probe_question, &probe_chunks);
@@ -407,6 +445,7 @@ pub(super) async fn augment_partial_compare_context(
         append_probe_context_chunks(structured, probe_chunks.clone());
         outcome.added_chunk_count = probe_chunks.len();
     }
+    outcome.skipped_over_budget = skipped_over_budget;
 
     match compare_operands_covered_by_context(context.ir, answer_context) {
         EvidenceCoverage::Sufficient => {

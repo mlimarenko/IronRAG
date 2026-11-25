@@ -12,7 +12,7 @@
 # and nothing to stage.
 
 # Build the virtualenv on musl, in the same pinned base all targets run.
-FROM python:3.12-alpine@sha256:1b668429b3511ab407d8e00648891631b0b1a4d7e15e3ca70f38ab5b91ad4ab4 AS runtime-base
+FROM python@sha256:1b668429b3511ab407d8e00648891631b0b1a4d7e15e3ca70f38ab5b91ad4ab4 AS runtime-base
 
 ARG APP_VERSION
 # `apk upgrade` is what ships patched musl and zlib: the pinned base digest

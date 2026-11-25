@@ -43,6 +43,75 @@ defaulted: select the release explicitly.
 `GET /health` answers with the source name and the build version, which is how
 you check what is actually running.
 
+### One YouTrack item
+
+With the normal YouTrack settings, routing configuration and state volume,
+use the canonical internal YouTrack item ID to observe and process one item:
+
+```bash
+ironrag-connector youtrack --once --kind issue --item-id <issue-internal-id>
+ironrag-connector youtrack --once --kind article --item-id <article-internal-id>
+```
+
+The command fetches the item and its access and related-content evidence,
+checks configured scope, then uses the ordinary REQUIRED materialization path.
+It prints a JSON outcome and exits without a sweep, reaper or webhook server.
+An inaccessible, excluded or restricted item is skipped, not republished.
+Skipping does not retire an existing copy; use the authorized lifecycle for
+access revocation. The same state volume and exclusive pidfile are required to
+resume an existing journal episode.
+
+Exit code 0 means the command returned an outcome, not that it processed the
+item: inspect JSON `action` and `detail`, including `skipped`, `unrouted` and
+deferred outcomes. A process error exits nonzero. Confirm the native journal
+and document head when verifying a resumed materialization.
+
+### Execute one admitted ingest job
+
+A REQUIRED create that the server accepted returns a deferred outcome whose
+JSON `admission.jobId` names the queued job. Run exactly that job with the same
+connector settings:
+
+```bash
+ironrag-connector youtrack --execute-ingest-job <job-uuid>
+```
+
+This is the second phase of the same two-phase contract: one
+`POST /v1/ops/ingest-queue/jobs/{jobId}/execute` with this source's configured
+credential, no source observation, no queue listing, no dequeue or fan-out and
+no automatic retry. A job that is not `queued`, has no recorded mutation origin
+or is already leased is refused by the server; the typed problem error is
+printed and the command exits nonzero. The command is not combined with
+`--once`, `--list`, `--kind`, `--item-id` or `--enrichment-scope`.
+
+The server answers only after that job's pipeline, so the call has its own
+budget: `EXECUTE_INGEST_JOB_TIMEOUT_SECONDS` (default 1800) instead of the
+ordinary `REQUEST_TIMEOUT_SECONDS`. A Full ingest of real-corpus material runs
+for minutes; a client that gave up earlier would leave an interrupted attempt
+behind. Repeating the command for the same job is a server-side retry, not a
+second publication — but repeat it only once the printed record shows the
+previous attempt finished as retryable and the job is `queued` again. A
+request cut short by a proxy does not prove the server stopped: while the job
+still holds its lease, the server refuses the repeat with the typed `409`
+conflict.
+
+The bundled web proxy serves the rest of `/v1/` with a 300 s read timeout and
+gives this one route its own 1800 s read budget in both of its servers, plain
+HTTP and TLS. That number is the proxy's limit, not a completion promise: a
+deployment that raises `EXECUTE_INGEST_JOB_TIMEOUT_SECONDS` above it must
+change the proxy as well, and an ingress or another proxy in front of the
+bundle keeps its own timeout, which stays the deployer's setting.
+
+The printed result is the executed job's own record: `action: requested`, the
+job's `queueState`, `completedAt`, the server-reported `readiness` (text,
+vector, graph) and its `latestAttempt` including any `failureCode`,
+`failureMessage` and `retryable` flag. The endpoint answers with this job, not
+with the privileged global queue, so the connector's `library_write` credential
+is enough and no `ops_read` grant is involved. A 200 means the server completed
+the control request for this job; publication, cost and the current head are
+established by the operation, job and document reads, never inferred from the
+status code.
+
 ## State volume permissions
 
 The containers run as uid 10001. The state volume must be writable by that user.

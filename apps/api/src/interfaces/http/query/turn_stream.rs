@@ -66,12 +66,19 @@ pub(super) async fn create_session_turn_event_stream(
     state: AppState,
     session_id: Uuid,
     payload: CreateSessionTurnRequest,
-) -> Result<Sse<impl futures::Stream<Item = Result<Event, Infallible>>>, ApiError> {
+) -> Result<Response, ApiError> {
     let _ = load_query_session_and_authorize(&auth, &state, session_id, POLICY_QUERY_RUN).await?;
+    // Allocated after admission and before the producer starts: the same UUID
+    // seeds the parent query execution and is published in the response header,
+    // so a client that loses the stream can read back that exact execution.
+    let query_execution_id = Uuid::now_v7();
     let (sender, receiver) =
         tokio::sync::mpsc::channel::<AssistantTurnStreamEvent>(ASSISTANT_TURN_STREAM_BUFFER);
     let state_for_task = state.clone();
     let auth_for_task = auth.clone();
+    // `tokio::spawn` starts with no ambient scope: the caller the middleware
+    // proved for this request is carried into the producer explicitly.
+    let caller = super::super::middleware::auth::dispatch_caller_for(&auth);
 
     tokio::spawn(async move {
         let panic_sender = sender.clone();
@@ -106,13 +113,17 @@ pub(super) async fn create_session_turn_event_stream(
             let progress_started_at = Instant::now();
             let mut progress_task = spawn_progress_reporter(sender.clone(), progress_started_at);
 
-            let result = execute_ui_session_turn(
-                state_for_task.clone(),
-                auth_for_task.clone(),
-                session_id,
-                payload,
-                Some(agent_activity_tx),
-            )
+            let result = Box::pin(crate::shared::provider_http::with_dispatch_caller(
+                caller,
+                execute_ui_session_turn(
+                    state_for_task.clone(),
+                    auth_for_task.clone(),
+                    session_id,
+                    payload,
+                    Some(query_execution_id),
+                    Some(agent_activity_tx),
+                ),
+            ))
             .await;
             if let Some(handle) = progress_task.disarm() {
                 handle.abort();
@@ -238,12 +249,19 @@ pub(super) async fn create_session_turn_event_stream(
                             r#"{{"type":"failed","code":"internal","message":"failed to serialize stream event: {error}"}}"#
                         ))
                 });
-            (Ok(event), receiver)
+            (Ok::<Event, Infallible>(event), receiver)
         })
     });
 
-    Ok(Sse::new(stream)
-        .keep_alive(KeepAlive::new().interval(Duration::from_secs(10)).text("keep-alive")))
+    let mut response = Sse::new(stream)
+        .keep_alive(KeepAlive::new().interval(Duration::from_secs(10)).text("keep-alive"))
+        .into_response();
+    response.headers_mut().insert(
+        header::HeaderName::from_static(QUERY_EXECUTION_ID_HEADER),
+        header::HeaderValue::try_from(query_execution_id.to_string())
+            .map_err(|error| ApiError::internal_with_log(error, "internal"))?,
+    );
+    Ok(response)
 }
 
 /// Spawns the periodic `working` progress reporter for a turn stream and wraps
@@ -284,6 +302,7 @@ pub(super) async fn execute_ui_session_turn(
     auth: AuthContext,
     session_id: Uuid,
     payload: CreateSessionTurnRequest,
+    parent_execution_id: Option<Uuid>,
     agent_activity_tx: Option<tokio::sync::mpsc::Sender<AgentLoopActivityEvent>>,
 ) -> Result<crate::services::query::service::QueryTurnExecutionResult, ApiError> {
     let _ = load_query_session_and_authorize(&auth, &state, session_id, POLICY_QUERY_RUN).await?;
@@ -301,6 +320,7 @@ pub(super) async fn execute_ui_session_turn(
                 top_k: resolve_query_turn_top_k(payload.top_k),
                 include_debug: payload.include_debug.unwrap_or(false),
             },
+            parent_execution_id,
             agent_activity_tx,
         )
         .await

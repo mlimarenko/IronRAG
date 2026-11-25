@@ -9,7 +9,11 @@ use crate::{
     },
     shared::extraction::{
         ExtractionOutput,
-        image::{self, VisionCallReceipt, VisualTextOutcome},
+        image::{
+            self, InferredVisualStructure, UnitEvidence, VISUAL_TRANSCRIPTION_EVIDENCE,
+            VisionCallReceipt, VisualCoverage, VisualTextOutcome,
+        },
+        text_quality,
     },
 };
 
@@ -31,6 +35,12 @@ pub struct VisualRecognitionReceipt {
     pub outcomes: Vec<serde_json::Value>,
     pub calls: Vec<VisionCallReceipt>,
     pub warnings: Vec<String>,
+    /// Per-unit quality and visual coverage of the delivered text.
+    pub unit_evidence: Vec<UnitEvidence>,
+    /// Interpreted structure reported by the provider. It never joins the unit
+    /// text and never becomes a schema or foreign-key fact; the stored outcome
+    /// next to it remains the verbatim transcription.
+    pub inferred_visual_structure: Vec<InferredVisualStructure>,
 }
 
 impl VisualRecognitionReceipt {
@@ -40,6 +50,9 @@ impl VisualRecognitionReceipt {
             output.model_name = Some(call.model_name.clone());
         }
         output.source_map["visual_recognition"] = serde_json::json!(self.outcomes);
+        output.source_map["unit_evidence"] = serde_json::json!(self.unit_evidence);
+        output.source_map["inferred_visual_structure"] =
+            serde_json::json!(self.inferred_visual_structure);
         output.usage_json = serde_json::json!({"vision_calls": self.calls});
         output.warnings.extend(self.warnings);
     }
@@ -67,30 +80,126 @@ fn invalid_visual(file_kind: UploadFileKind) -> FileExtractError {
     }
 }
 
-/// The native parent validates producer output. Validate again at the paid boundary,
-/// before sending any bytes or modifying units. Nothing is published on partial failure.
+/// Per-unit facts collected before and during recognition.
+#[derive(Debug, Clone, Copy)]
+struct UnitCoverage {
+    native_text_low_confidence: bool,
+    coverage: VisualCoverage,
+    /// A visual reading produced text that this unit uses.
+    visual_read_text: bool,
+}
+
+fn unit_evidence(
+    native: &Extraction,
+    units: &std::collections::HashMap<u32, UnitCoverage>,
+) -> Vec<UnitEvidence> {
+    native
+        .units
+        .iter()
+        .map(|unit| {
+            let unit_coverage = units.get(&unit.ordinal).copied().unwrap_or(UnitCoverage {
+                native_text_low_confidence: false,
+                coverage: VisualCoverage::None,
+                visual_read_text: false,
+            });
+            UnitEvidence::new(
+                unit.ordinal,
+                &unit.content,
+                unit_coverage.native_text_low_confidence,
+                unit_coverage.coverage,
+                unit_coverage.visual_read_text,
+            )
+        })
+        .collect()
+}
+
+/// [`recognize_native_visuals_with_ledger`] without a reservation owner.
 pub async fn recognize_native_visuals(
     native: &mut Extraction,
     file_kind: UploadFileKind,
     input: VisualRecognitionInput<'_>,
 ) -> Result<VisualRecognitionReceipt, FileExtractError> {
-    let text_limit = native.text_byte_limit;
+    recognize_native_visuals_with_ledger(native, file_kind, input, None).await
+}
+
+/// Records the widest visual reading that covers a native unit. Full-page and
+/// picture readings never mix.
+fn apply_visual_coverage(unit: &mut UnitCoverage, kind: VisualInputKind) {
+    unit.coverage = match kind {
+        VisualInputKind::PdfPage | VisualInputKind::RasterFrame => VisualCoverage::FullPageVision,
+        VisualInputKind::EmbeddedPicture => match unit.coverage {
+            // A unit that kept native text is reported by its widest
+            // visual reading; full-page and picture readings never mix.
+            VisualCoverage::None | VisualCoverage::NativeText => {
+                VisualCoverage::EmbeddedPictureVision
+            }
+            VisualCoverage::FullPageVision | VisualCoverage::EmbeddedPictureVision => unit.coverage,
+        },
+    };
+}
+
+/// Native text quality per unit ordinal, measured before any transcription
+/// joins a unit.
+fn native_unit_coverage(native: &Extraction) -> std::collections::HashMap<u32, UnitCoverage> {
+    native
+        .units
+        .iter()
+        .map(|unit| {
+            let native_text_low_confidence = text_quality::is_low_confidence_text(&unit.content);
+            let coverage = if unit.content.trim().is_empty() {
+                VisualCoverage::None
+            } else {
+                VisualCoverage::NativeText
+            };
+            (
+                unit.ordinal,
+                UnitCoverage { native_text_low_confidence, coverage, visual_read_text: false },
+            )
+        })
+        .collect()
+}
+
+/// Admits the measured native text against the extraction text budget.
+fn admitted_native_text_bytes(
+    native: &Extraction,
+    text_limit: usize,
+    file_kind: UploadFileKind,
+) -> Result<usize, FileExtractError> {
     let text_bytes = native
         .units
         .iter()
         .try_fold(0usize, |total, unit| total.checked_add(unit.content.len()))
         .and_then(|total| total.checked_add(native.units.len().saturating_sub(1) * 2));
-    let Some(mut text_bytes) =
-        text_bytes.filter(|total| (1..=MAX_TEXT).contains(&text_limit) && *total <= text_limit)
-    else {
-        return Err(FileExtractError::ExtractionFailed {
+    text_bytes
+        .filter(|total| (1..=MAX_TEXT).contains(&text_limit) && *total <= text_limit)
+        .ok_or_else(|| FileExtractError::ExtractionFailed {
             file_kind,
             class: ExtractionFailureClass::ContentInvalid,
             message: "native text exceeds the admitted extraction text budget".into(),
-        });
-    };
+        })
+}
+
+/// The native parent validates producer output. Validate again at the paid boundary,
+/// before sending any bytes or modifying units. Nothing is published on partial failure.
+///
+/// `ledger` is the ingestion boundary's durable reservation owner for paid Vision
+/// calls; each physical attempt reserves, settles or fails its own row.
+pub async fn recognize_native_visuals_with_ledger(
+    native: &mut Extraction,
+    file_kind: UploadFileKind,
+    input: VisualRecognitionInput<'_>,
+    ledger: Option<&dyn image::VisionCallLedger>,
+) -> Result<VisualRecognitionReceipt, FileExtractError> {
+    let text_limit = native.text_byte_limit;
+    // Native quality is measured before any transcription joins a unit, so the
+    // record can say whether the stored native layer itself was unreliable.
+    let mut units = native_unit_coverage(native);
+    let mut text_bytes = admitted_native_text_bytes(native, text_limit, file_kind)?;
     if native.visual_inputs.is_empty() {
-        return Ok(VisualRecognitionReceipt::default());
+        return Ok(VisualRecognitionReceipt {
+            unit_evidence: unit_evidence(native, &units),
+            ..Default::default()
+        });
     }
     let mut ordinals = std::collections::HashSet::new();
     let mut page_kinds = std::collections::HashMap::new();
@@ -120,16 +229,25 @@ pub async fn recognize_native_visuals(
         if kinds.0 && kinds.1 {
             return Err(invalid_visual(file_kind));
         }
+        // Every admitted visual input is read before this call returns, so the
+        // coverage of its unit is known here even when the reading finds no text.
+        if let Some(unit) = units.get_mut(&visual.source_unit) {
+            apply_visual_coverage(unit, visual.kind);
+        }
         decoded.push(bytes);
     }
     let provider =
         input.vision_provider.ok_or_else(|| super::missing_vision_binding_error(file_kind))?;
     let empty_parameters = serde_json::json!({});
     let parameters = input.extra_parameters_json.unwrap_or(&empty_parameters);
-    let binding_identity = serde_json::json!({
-        "provider":provider.provider_kind,"model":provider.model_name,
-        "parameters_sha256":hex::encode(Sha256::digest(serde_json::to_vec(parameters).map_err(|_| invalid_visual(file_kind))?)),
-        "endpoint_sha256":hex::encode(Sha256::digest(input.base_url.unwrap_or_default().as_bytes())),
+    let binding_identity = image::vision_binding_identity(&image::VisionProviderInput {
+        dispatch: input.dispatch,
+        max_output_tokens_override: input.max_output_tokens_override,
+        provider_kind: &provider.provider_kind,
+        model_name: &provider.model_name,
+        api_key: input.api_key,
+        base_url: input.base_url,
+        extra_parameters_json: parameters,
     });
     let mut receipt = VisualRecognitionReceipt::default();
     let mut recognized = Vec::new();
@@ -140,7 +258,7 @@ pub async fn recognize_native_visuals(
         .map(|unit| unit.ordinal)
         .collect::<std::collections::HashSet<_>>();
     for (visual, bytes) in native.visual_inputs.iter().zip(decoded) {
-        let result = image::recognize_visual(
+        let result = image::recognize_visual_with_ledger(
             input.gateway,
             image::VisionProviderInput {
                 dispatch: input.dispatch,
@@ -154,6 +272,7 @@ pub async fn recognize_native_visuals(
             &visual.mime,
             &bytes,
             input.cancellation_token,
+            ledger,
         )
         .await;
         let result = match result {
@@ -169,6 +288,7 @@ pub async fn recognize_native_visuals(
                     },
                     message: error.message.into(),
                     calls: receipt.calls,
+                    provider_call_id: error.provider_call_id,
                 });
             }
         };
@@ -184,8 +304,24 @@ pub async fn recognize_native_visuals(
                     class: ExtractionFailureClass::ContentInvalid,
                     message: "recognized text exceeds the extraction text budget".into(),
                     calls: receipt.calls,
+                    // The paid reading already succeeded, so the settled attempt
+                    // keeps its provider-call identity.
+                    provider_call_id: result.provider_call_id,
                 });
             }
+            if let Some(unit) = units.get_mut(&visual.source_unit) {
+                unit.visual_read_text = true;
+            }
+        }
+        if !result.relations.is_empty() {
+            // Interpreted structure is stored apart from the transcription: it
+            // never joins the unit text and never becomes a schema fact.
+            receipt.inferred_visual_structure.push(InferredVisualStructure::new(
+                visual.source_unit,
+                image::IMAGE_OCR_PROMPT,
+                binding_identity.clone(),
+                result.relations,
+            ));
         }
         receipt.outcomes.push(serde_json::json!({
             "kind":visual.kind,"ordinal":visual.ordinal,"native_index":visual.native_index,
@@ -194,7 +330,10 @@ pub async fn recognize_native_visuals(
             "width":visual.width,"height":visual.height,
             "display_extent_96_dpi":visual.display_extent_96_dpi,
             "binding":binding_identity,
-            "prompt_sha256":hex::encode(Sha256::digest(image::IMAGE_OCR_PROMPT.as_bytes())),
+            "prompt_sha256":image::prompt_sha256(image::IMAGE_OCR_PROMPT),
+            // The stored outcome is the verbatim transcription only; any
+            // interpretation is a separate inferred record.
+            "evidence":VISUAL_TRANSCRIPTION_EVIDENCE,"inferred":false,
             "outcome":result.outcome,
         }));
         recognized.push((visual.source_unit, result.outcome));
@@ -206,13 +345,25 @@ pub async fn recognize_native_visuals(
                 .iter_mut()
                 .find(|unit| unit.ordinal == ordinal)
                 .ok_or_else(|| invalid_visual(file_kind))?;
-            if !unit.content.trim().is_empty() {
-                unit.content.push_str("\n\n");
+            // A full-page reading supersedes a low-confidence native layer;
+            // keeping both would present OCR noise next to read text.
+            let replace_noisy_native = units.get(&ordinal).is_some_and(|coverage| {
+                coverage.visual_read_text
+                    && coverage.native_text_low_confidence
+                    && coverage.coverage == VisualCoverage::FullPageVision
+            });
+            if replace_noisy_native {
+                unit.content = text.trim().to_string();
+            } else {
+                if !unit.content.trim().is_empty() {
+                    unit.content.push_str("\n\n");
+                }
+                unit.content.push_str(text.trim());
             }
-            unit.content.push_str(text.trim());
         }
     }
     native.content =
         native.units.iter().map(|unit| unit.content.as_str()).collect::<Vec<_>>().join("\n\n");
+    receipt.unit_evidence = unit_evidence(native, &units);
     Ok(receipt)
 }

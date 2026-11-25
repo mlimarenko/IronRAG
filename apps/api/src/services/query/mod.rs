@@ -11,6 +11,7 @@ pub(crate) mod latest_versions;
 pub mod llm_context_debug;
 pub(crate) mod planner;
 pub(crate) mod provider_billing;
+pub(crate) mod reference_selection;
 pub(crate) mod result_cache;
 pub mod search;
 pub mod service;

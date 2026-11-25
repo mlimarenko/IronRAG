@@ -6,13 +6,17 @@ How a provider call becomes a reported cost, and what a reported number means.
 
 | Stage | Table | Written when |
 |---|---|---|
-| Reservation | `billing_provider_call` | before a paid request is issued (state `started`) |
+| Reservation | `billing_provider_call` | before each paid physical request is issued (state `started`) |
 | Usage | `billing_usage` | after the provider responds, one row per billing unit (input / output / cached input tokens) |
 | Charge | `billing_charge` | after usage is recorded; reads the applicable rate from the model row and always writes |
 | Rollup | `billing_execution_cost` | recomputed per execution after usage changes |
 
 The reservation exists before the request so an ambiguous timeout can always
-be reconciled. Usage is committed before any terminal query outcome. For new
+be reconciled. One reservation is one physical request: a retried send owns its
+own row, and a superseded attempt is terminalized before the next attempt
+starts. The row is created in the same transaction that debits the financial
+allowance counter, so the recorded sends and the consumed allowance cannot
+drift apart. Usage is committed before any terminal query outcome. For new
 calls, model validation guarantees the pricing needed to write charges.
 
 ## 2. Models carry pricing
@@ -56,6 +60,25 @@ calls with missing prices use `partial` or `unknown`:
 | `complete` | every call priced (or no calls at all) | the total |
 | `partial` | some calls priced, some not | the total, marked as a lower bound with the unpriced count |
 | `unknown` | calls exist, none priced | "cost unknown", never `$0.00` |
+
+A send that produced no reply — a canceled or failed attempt — is counted as an
+unresolved observation, not as a free call. Its provider-side charge, if any,
+cannot be recovered from the response the ledger never received.
+
+### Control-plane exception and its coverage limit
+
+Account creation and update may validate a proposed provider credential with a
+chat round trip before the account or any binding exists. That probe is a
+control-plane operation, not a product execution: it has no owning execution and
+no workspace, and `billing_provider_call` requires a workspace. Outside an
+active incident scope it keeps its existing narrow authorization and runs
+without a ledger row or a counter debit, so **its cost is not represented by
+this ledger and must not be reported as zero**. Under an active incident scope
+it is refused before any provider I/O.
+
+The exception is keyed on the dispatch authority that only the crate-visible
+catalog constructors can set. A runtime binding or ordinary-vision send can
+never carry it, and every such send still requires exact per-send attribution.
 
 A zero total alone is ambiguous and must never be rendered as "free".
 

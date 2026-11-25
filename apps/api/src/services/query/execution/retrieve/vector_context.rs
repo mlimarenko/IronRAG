@@ -3,11 +3,10 @@ use anyhow::Context;
 use super::{
     AiBindingPurpose, AppState, BTreeSet, EmbeddingProfileIndexState,
     EmbeddingProfileInventoryVersion, HashMap, KnowledgeChunkRow, KnowledgeDocumentRow,
-    QueryServiceError, RuntimeMatchedChunk, RuntimeQueryMode, RuntimeQueryPlan,
-    RuntimeVectorSearchContext, Uuid, ensure_active_embedding_profile_key,
-    ensure_embedding_profile_inventory_version_current, ensure_library_embedding_profile_indexed,
-    is_source_profile_chunk_row, load_embedding_profile_inventory_version, map_chunk_hit,
-    score_desc_chunks,
+    QueryServiceError, RuntimeMatchedChunk, RuntimeQueryMode, RuntimeVectorSearchContext, Uuid,
+    ensure_active_embedding_profile_key, ensure_embedding_profile_inventory_version_current,
+    ensure_library_embedding_profile_indexed, is_source_profile_chunk_row,
+    load_embedding_profile_inventory_version, map_chunk_hit, score_desc_chunks,
 };
 
 /// Hydrate a bag of `(chunk_id, score)` hits into ranked
@@ -167,11 +166,4 @@ pub(crate) fn expanded_candidate_limit(
         return intrinsic_limit;
     }
     top_k
-}
-
-/// Always returns `false` — both vector and lexical lanes run on every
-/// query. The `exact_literal_technical` planner bit still affects boosts
-/// and context packing; it does not disable the semantic lane.
-pub(crate) const fn should_skip_vector_search(_plan: &RuntimeQueryPlan) -> bool {
-    false
 }

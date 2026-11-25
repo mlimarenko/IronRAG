@@ -79,20 +79,21 @@ AdapterFactory = Callable[[Any, PolicyOverrides], SourceAdapter]
 WebhookFactory = Callable[[SourceAdapter, Orchestrator], list[WebhookHandler]]
 
 
-def build_app(
-    settings: BaseConnectorSettings,
-    adapter_factory: AdapterFactory,
-    *,
-    webhook_factory: WebhookFactory | None = None,
-) -> FastAPI:
-    """Build the FastAPI app.
+@dataclass
+class ConnectorComponents:
+    adapter: SourceAdapter
+    ironrag: IronRagClient
+    router: Router
+    policies: PolicyOverrides
+    routing_reloader: RoutingReloader
+    state: StateStore
+    orchestrator: Orchestrator
+    pidfile: PidfileLock
 
-    ``adapter_factory`` receives the settings and the live per-kind policy
-    table once routing is loaded. ``webhook_factory`` receives the adapter and
-    the framework-owned Orchestrator, so handlers reuse the same orchestrator
-    the sweep uses and cursor state, routing decisions, and dedup cache stay
-    coherent across webhook + sweep paths.
-    """
+
+def build_components(
+    settings: BaseConnectorSettings, adapter_factory: AdapterFactory
+) -> ConnectorComponents:
     configure_logging(settings.log_level)
     routing = load_routing_config(settings.routing_config_path)
     router = Router(routing)
@@ -127,6 +128,37 @@ def build_app(
         state=state,
         policies=policies,
     )
+    pidfile_path = settings.pidfile_path or settings.state_db_path.with_name(
+        f"ironrag-connector-{adapter.name}.pid"
+    )
+    return ConnectorComponents(
+        adapter,
+        ironrag,
+        router,
+        policies,
+        routing_reloader,
+        state,
+        orchestrator,
+        PidfileLock(pidfile_path),
+    )
+
+
+def build_app(
+    settings: BaseConnectorSettings,
+    adapter_factory: AdapterFactory,
+    *,
+    webhook_factory: WebhookFactory | None = None,
+) -> FastAPI:
+    """Build the FastAPI app with the shared connector components."""
+    components = build_components(settings, adapter_factory)
+    adapter = components.adapter
+    ironrag = components.ironrag
+    router = components.router
+    policies = components.policies
+    routing_reloader = components.routing_reloader
+    state = components.state
+    orchestrator = components.orchestrator
+    pidfile = components.pidfile
     sync_manager = SyncManager(
         adapter=adapter,
         ironrag=ironrag,
@@ -142,10 +174,6 @@ def build_app(
         routing_reloader=routing_reloader,
     )
 
-    pidfile_path = settings.pidfile_path or settings.state_db_path.with_name(
-        f"ironrag-connector-{adapter.name}.pid"
-    )
-    pidfile = PidfileLock(pidfile_path)
     mounted_webhooks: list[str] = []
     cleanup_requested = (
         asyncio.Event()

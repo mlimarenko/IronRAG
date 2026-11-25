@@ -58,6 +58,7 @@ pub(crate) use budgeting::{
     source_slice_context_budget_chars, source_slice_context_top_k, source_slice_requested_count,
     structured_source_context_top_k, structured_source_context_top_k_for_chunks,
 };
+pub(crate) use candidates::{document_overview_openings, overview_evidence_anchor_ranks};
 pub(crate) use orchestration::{
     StructuredSourceContextAugmentRequest, augment_structured_source_context,
 };

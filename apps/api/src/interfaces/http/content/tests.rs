@@ -241,8 +241,10 @@ fn document_hint_patch_rejects_oversized_payload() {
 
 #[test]
 fn document_status_filter_trims_empty_values_and_preserves_requested_statuses() {
-    let statuses = parse_document_status_filter(" canceled, ready, ,failed, processing, queued ")
-        .expect("known statuses must parse");
+    let statuses = parse_document_status_filter(
+        " canceled, ready, ,failed, processing, queued, paused, pending_materialization, empty ",
+    )
+    .expect("known statuses must parse");
 
     assert_eq!(
         statuses,
@@ -252,6 +254,9 @@ fn document_status_filter_trims_empty_values_and_preserves_requested_statuses() 
             ironrag_contracts::documents::DocumentStatus::Failed,
             ironrag_contracts::documents::DocumentStatus::Processing,
             ironrag_contracts::documents::DocumentStatus::Queued,
+            ironrag_contracts::documents::DocumentStatus::Paused,
+            ironrag_contracts::documents::DocumentStatus::PendingMaterialization,
+            ironrag_contracts::documents::DocumentStatus::Empty,
         ]
     );
     assert!(parse_document_status_filter(" , ").unwrap().is_empty());

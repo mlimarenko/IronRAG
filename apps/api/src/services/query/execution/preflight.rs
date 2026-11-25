@@ -2,6 +2,10 @@ use std::collections::{HashMap, HashSet};
 
 use uuid::Uuid;
 
+use super::semantic_verification::{
+    EvidenceBudget, bounded_evidence_notice, retain_bounded_blocks, retain_bounded_chunks,
+};
+
 #[path = "preflight_setup_structured_stage.rs"]
 pub(super) mod setup_structured_stage;
 
@@ -96,12 +100,34 @@ pub(super) struct AnswerEvidencePreflight {
     pub(super) authoritative_evidence: AuthoritativeAnswerEvidence,
     pub(super) prompt_context: String,
     pub(super) answer_override: Option<DeterministicAnswerOverride>,
+    /// True when the bounded selection dropped authorized evidence. The final
+    /// warning owner surfaces this instead of claiming full coverage.
+    pub(super) evidence_selection_bounded: bool,
+    pub(super) evidence_selection_measurement:
+        super::semantic_verification::SelectedEvidenceMeasurement,
 }
 
 #[derive(Debug, Clone)]
 pub(super) struct DeterministicAnswerOverride {
     pub(super) answer: String,
     pub(super) answer_kind: AnswerKind,
+}
+
+/// Logs the bounded evidence selection of a preflight, when it dropped anything.
+fn log_bounded_preflight_evidence(
+    source_entries: usize,
+    evidence_utf8_bytes: usize,
+    dropped_over_budget: usize,
+    dropped_duplicates: usize,
+) {
+    tracing::warn!(
+        stage = "answer.preflight_evidence_budget",
+        source_entries,
+        evidence_utf8_bytes,
+        dropped_over_budget,
+        dropped_duplicates,
+        "bounded preflight evidence selection"
+    );
 }
 
 pub(super) async fn prepare_answer_preflight(
@@ -203,10 +229,33 @@ pub(super) async fn prepare_answer_preflight(
         &mut preflight_evidence,
     )
     .await?;
+    // One bounded evidence selection before the fixed-evidence prompt is built.
+    // Structured segments use the remaining space after chunk selection.
+    let mut evidence_budget = EvidenceBudget::new();
+    let chunk_retention = retain_bounded_chunks(
+        &mut preflight_answer_chunks,
+        &mut evidence_budget,
+        &prepared.query_ir,
+        &document_index,
+    );
+    let block_retention =
+        retain_bounded_blocks(&mut preflight_evidence.structured_blocks, &mut evidence_budget);
+    let evidence_truncated = chunk_retention.is_truncated() || block_retention.is_truncated();
+    // Truncation survives later assembly, but counts describe this selected set.
+    let evidence_selection_bounded = evidence_truncated || prepared.evidence_selection.is_some();
+    let evidence_selection_measurement = evidence_budget.measurement();
+    if evidence_truncated || chunk_retention.duplicates > 0 || block_retention.duplicates > 0 {
+        log_bounded_preflight_evidence(
+            evidence_budget.measurement().source_entries,
+            evidence_budget.measurement().evidence_utf8_bytes,
+            chunk_retention.over_budget + block_retention.over_budget,
+            chunk_retention.duplicates + block_retention.duplicates,
+        );
+    }
     let graph_evidence_context_lines = build_preflight_graph_evidence_context_lines(
         &prepared.structured.graph_evidence_context_lines,
     );
-    let prompt_context = build_authoritative_answer_context(
+    let mut prompt_context = build_authoritative_answer_context(
         question,
         &prepared.query_ir,
         prepared.structured.technical_literals_text.as_deref(),
@@ -214,6 +263,10 @@ pub(super) async fn prepare_answer_preflight(
         &preflight_answer_chunks,
         &graph_evidence_context_lines,
     );
+    if evidence_selection_bounded {
+        prompt_context.push_str("\n\n");
+        prompt_context.push_str(&bounded_evidence_notice(evidence_budget.measurement()));
+    }
     let prompt_context = prepend_preflight_source_title_inventory(
         &document_index,
         &preflight_evidence,
@@ -281,5 +334,7 @@ pub(super) async fn prepare_answer_preflight(
         authoritative_evidence: preflight_evidence,
         prompt_context,
         answer_override,
+        evidence_selection_bounded,
+        evidence_selection_measurement,
     })
 }

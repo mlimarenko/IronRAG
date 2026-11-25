@@ -58,7 +58,7 @@ fn complete_response(prepared: &PreparedSemanticVerification) -> ChatResponse {
             "evidenceManifestSha256":prepared.manifest_sha256(),
             "units":[{"unitId":prepared.units()[0].unit_id, "support":"supported",
                 "assertsDocumentAbsence":false, "evidence":[{
-                    "sourceId":prepared.sources()[0].source_id, "quote":"The marker is amber."
+                    "passageId":prepared.passages()[0].handle
                 }]}],
             "completeness":"complete", "missingCaveats":[],
             "responseClassification":"factual_answer"
@@ -102,6 +102,9 @@ fn structured_request_uses_protocol_and_hard_output_cap() {
     assert_eq!(sent["units"].as_array().unwrap().len(), 1);
     assert_eq!(sent["sources"].as_array().unwrap().len(), 1);
     assert!(sent["sources"][0].get("documentId").is_none());
+    assert!(sent["sources"][0].get("text").is_none());
+    assert_eq!(sent["sources"][0]["passages"].as_array().unwrap().len(), 1);
+    assert_eq!(sent["sources"][0]["passages"][0]["text"], "The marker is amber.");
 }
 
 #[test]
@@ -238,7 +241,7 @@ fn assert_gateway_request_body(bytes: &[u8], model_name: &str) -> anyhow::Result
     assert_eq!(body["max_tokens"], 4096);
     assert_eq!(body["response_format"]["type"], "json_schema");
     assert_eq!(body["response_format"]["json_schema"]["strict"], true);
-    assert_eq!(body["response_format"]["json_schema"]["schema"], response_json_schema());
+    assert_eq!(body["response_format"]["json_schema"]["schema"], response_json_schema(&prepared()));
     assert_eq!(body["messages"][0]["content"], SYSTEM_PROMPT);
     assert_eq!(body["frequency_penalty"], 0.25);
     // The gateway machine-owns n=1 by default; ensure the hostile n=4 was not forwarded.
@@ -310,11 +313,30 @@ fn json_object_debug_messages_use_the_effective_gateway_system() {
     let mut binding = binding();
     binding.extra_parameters_json["_providerProfile"]["runtime"]["structuredOutput"] =
         serde_json::json!("json_object");
-    let request = build_verification_request(&binding, &prepared()).unwrap();
+    let prepared = prepared();
+    let request = build_verification_request(&binding, &prepared).unwrap();
     let system = request.messages[0].content.as_deref().unwrap();
     assert!(system.len() > SYSTEM_PROMPT.len());
     assert_eq!(request.messages[1].content.as_deref(), Some(request.request.prompt.as_str()));
-    assert!(system.contains("questionSha256"));
+    assert!(system.ends_with(&response_json_schema(&prepared).to_string()));
+}
+
+#[test]
+fn json_object_escaped_schema_counts_toward_request_cap() {
+    let mut binding = binding();
+    binding.extra_parameters_json["_providerProfile"]["runtime"]["structuredOutput"] =
+        serde_json::json!("json_object");
+    let input = prepared();
+    let base = build_verification_request(&binding, &input).unwrap();
+    let base_size = serde_json::to_vec(&base.request).unwrap().len();
+    let system_size = serde_json::to_vec(&base.messages[0].content).unwrap().len();
+    assert!(system_size > 2048);
+    binding.extra_parameters_json["padding"] =
+        serde_json::json!("x".repeat(MAX_REQUEST_UTF8_BYTES - base_size - system_size / 2));
+    assert!(matches!(
+        build_verification_request(&binding, &input),
+        Err(SemanticNotRunReason::InputLimitExceeded)
+    ));
 }
 
 #[test]

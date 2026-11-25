@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::{collections::HashMap, sync::atomic::AtomicBool};
 
 use tracing::Instrument as _;
 
@@ -20,8 +20,9 @@ use crate::{
 use super::semantic_rerank::{
     SemanticCandidateOrder, SemanticRerankAttempt, SemanticRerankDegradation,
     SemanticRerankFailure, SemanticRerankPolicy, await_semantic_rerank_within_turn_wait,
-    execute_semantic_rerank, prepare_semantic_rerank_request, record_semantic_rerank_degradation,
-    try_acquire_distributed_shadow_lease, try_acquire_shadow_task_permit,
+    execute_semantic_rerank, execute_semantic_rerank_with_phase, prepare_semantic_rerank_request,
+    record_semantic_rerank_degradation, try_acquire_distributed_shadow_lease,
+    try_acquire_shadow_task_permit,
 };
 use super::types::{
     RetrievalBundle, RuntimeChunkScoreKind, RuntimeMatchedChunk, RuntimeMatchedEntity,
@@ -45,13 +46,17 @@ pub(crate) struct ApplyRerankRequest<'a> {
 /// Opens the rerank span and delegates to the configured-rerank body, so every
 /// early return keeps its parent span instead of leaving the rerank phase
 /// unidentified in the trace.
-pub(crate) async fn apply_configured_rerank(request: ApplyRerankRequest<'_>) -> RerankMetadata {
+pub(crate) async fn apply_configured_rerank(
+    request: ApplyRerankRequest<'_>,
+) -> Result<RerankMetadata, crate::services::query::error::QueryServiceError> {
     let mode = request.state.retrieval_intelligence.semantic_rerank.mode;
     let span = tracing::info_span!("retrieval.rerank", "ironrag.rerank.mode" = ?mode);
     apply_configured_rerank_inner(request).instrument(span).await
 }
 
-async fn apply_configured_rerank_inner(request: ApplyRerankRequest<'_>) -> RerankMetadata {
+async fn apply_configured_rerank_inner(
+    request: ApplyRerankRequest<'_>,
+) -> Result<RerankMetadata, crate::services::query::error::QueryServiceError> {
     let ApplyRerankRequest {
         state,
         library_id,
@@ -63,7 +68,7 @@ async fn apply_configured_rerank_inner(request: ApplyRerankRequest<'_>) -> Reran
     } = request;
     let mode = state.retrieval_intelligence.semantic_rerank.mode;
     if mode == SemanticRerankMode::Off || !state.retrieval_intelligence.rerank_enabled {
-        return apply_deterministic_rerank(state, question, plan, bundle);
+        return Ok(apply_deterministic_rerank(state, question, plan, bundle));
     }
 
     let entity_candidates = build_entity_candidates(&bundle.entities);
@@ -88,9 +93,9 @@ async fn apply_configured_rerank_inner(request: ApplyRerankRequest<'_>) -> Reran
             outcome: SemanticRerankOutcome::NotApplicable,
             prepared_candidate_count,
         });
-        return metadata;
+        return Ok(metadata);
     };
-    match mode {
+    Ok(match mode {
         SemanticRerankMode::Off => apply_deterministic_rerank(state, question, plan, bundle),
         SemanticRerankMode::Shadow => {
             let mut metadata = apply_deterministic_rerank(state, question, plan, bundle);
@@ -127,33 +132,36 @@ async fn apply_configured_rerank_inner(request: ApplyRerankRequest<'_>) -> Reran
                     query_execution_id,
                     prepared_candidate_count,
                 );
-                return semantic_fallback_metadata(
+                return Ok(semantic_fallback_metadata(
                     apply_deterministic_rerank(state, question, plan, bundle),
                     mode,
                     prepared_candidate_count,
                     SemanticRerankOutcome::TimedOut,
-                );
+                ));
             }
+            let financial_state_unknown = AtomicBool::new(false);
             let attempt = await_semantic_rerank_within_turn_wait(
                 policy.turn_wait,
                 // The provider stage is large and only optionally on the turn
                 // path; boxing keeps the enclosing query futures below the
                 // `large_futures` limit instead of inlining it three calls deep.
-                Box::pin(execute_semantic_rerank(
+                Box::pin(execute_semantic_rerank_with_phase(
                     state,
                     library_id,
                     semantic_rerank_context,
                     prepared,
                     policy,
+                    &financial_state_unknown,
                 )),
+                &financial_state_unknown,
             )
             .await;
             match attempt {
-                Some(SemanticRerankAttempt::Applied {
+                Ok(Some(SemanticRerankAttempt::Applied {
                     order,
                     prepared_candidate_count,
                     reordered_count,
-                }) => {
+                })) => {
                     semantic_chunk_ranks.extend(
                         order.provider_ranked_chunk_ids().iter().enumerate().filter_map(
                             |(rank, chunk_id)| {
@@ -176,9 +184,24 @@ async fn apply_configured_rerank_inner(request: ApplyRerankRequest<'_>) -> Reran
                         }),
                     }
                 }
-                Some(SemanticRerankAttempt::Failed { failure, prepared_candidate_count }) => {
+                Ok(Some(SemanticRerankAttempt::Failed { failure, prepared_candidate_count })) => {
+                    match failure {
+                        SemanticRerankFailure::TerminalProvider(failure) => {
+                            return Err(
+                                crate::services::query::error::QueryServiceError::Provider(failure),
+                            );
+                        }
+                        SemanticRerankFailure::Integrity => return Err(
+                            crate::services::query::error::QueryServiceError::StateConflict {
+                                message:
+                                    "semantic rerank reservation or accounting integrity failure"
+                                        .to_string(),
+                            },
+                        ),
+                        _ => {}
+                    }
                     record_semantic_rerank_degradation(SemanticRerankDegradation::from_failure(
-                        failure,
+                        failure.clone(),
                     ));
                     semantic_fallback_metadata(
                         apply_deterministic_rerank(state, question, plan, bundle),
@@ -187,7 +210,7 @@ async fn apply_configured_rerank_inner(request: ApplyRerankRequest<'_>) -> Reran
                         failure_metadata_outcome(failure),
                     )
                 }
-                None => {
+                Ok(None) => {
                     record_semantic_rerank_degradation(SemanticRerankDegradation::TurnWaitExceeded);
                     log_turn_wait_exceeded(
                         &policy,
@@ -202,9 +225,15 @@ async fn apply_configured_rerank_inner(request: ApplyRerankRequest<'_>) -> Reran
                         SemanticRerankOutcome::TimedOut,
                     )
                 }
+                Err(_) => {
+                    return Err(crate::services::query::error::QueryServiceError::StateConflict {
+                        message: "semantic rerank financial or accounting state unresolved"
+                            .to_string(),
+                    });
+                }
             }
         }
-    }
+    })
 }
 
 /// Logs a provider budget that cannot fit inside the turn wait budget.
@@ -365,12 +394,15 @@ fn semantic_candidate_order(bundle: &RetrievalBundle) -> SemanticCandidateOrder 
     }
 }
 
-const fn failure_metadata_outcome(failure: SemanticRerankFailure) -> SemanticRerankOutcome {
+fn failure_metadata_outcome(failure: SemanticRerankFailure) -> SemanticRerankOutcome {
     match failure {
         SemanticRerankFailure::MissingBinding => SemanticRerankOutcome::MissingBinding,
         SemanticRerankFailure::TimedOut => SemanticRerankOutcome::TimedOut,
         SemanticRerankFailure::ProviderFailure => SemanticRerankOutcome::ProviderFailure,
         SemanticRerankFailure::InvalidResponse => SemanticRerankOutcome::InvalidResponse,
+        SemanticRerankFailure::TerminalProvider(_) | SemanticRerankFailure::Integrity => {
+            SemanticRerankOutcome::ProviderFailure
+        }
     }
 }
 

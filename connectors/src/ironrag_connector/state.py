@@ -194,9 +194,10 @@ class PayloadIdentity(BaseModel):
 
     model_config = ConfigDict(frozen=True, extra="forbid")
     document_id: UUID
-    operation: Literal["replace", "append"]
+    operation: Literal["create", "replace", "append"]
     replacement: ReplacementIdentity
     caller_key: str | None = None
+    enrichment_scope: str | None = None
     visibility_intent_id: UUID | None = None
     base_revision_id: UUID | None = None
     appended_text: str | None = None
@@ -941,6 +942,51 @@ class StateStore:
             attempt.intent_required,
             identity,
         )
+
+    def record_created_admission(
+        self,
+        *,
+        document_id: str,
+        library_id: str,
+        observation: MaterializationObservation,
+        handle: OperationHandle,
+    ) -> MaterializationAttempt:
+        """Persist the provider-free create admission before any publication wait.
+
+        Reuses the existing per-copy attempt journal (no new table or state
+        model). A later restart finds this exact receipt instead of admitting a
+        second create for the same source identity.
+        """
+        if observation.payload_identity is None:
+            raise ValueError("created admission requires complete payload identity")
+        attempt = self.prepare_materialization_attempt(
+            observation,
+            document_id=document_id,
+            library_id=library_id,
+            intent_required=False,
+        )
+        return self.record_payload_receipt(attempt, handle)
+
+    def finalize_created_admission(self, attempt: MaterializationAttempt) -> MaterializationAttempt:
+        """Settle the existing journal entry once its operation is terminal."""
+        if attempt.phase != "payload_submitting" or attempt.payload_receipt is None:
+            raise ValueError("only a pending created admission can be finalized")
+        return self.transition_materialization_attempt(attempt, phase="payload_terminal")
+
+    def pending_created_admission(
+        self, document_id: str, replacement: ReplacementIdentity
+    ) -> MaterializationAttempt | None:
+        """The still-unpublished create admission matching this exact payload."""
+        for attempt in self.materialization_attempts_for_document(document_id):
+            if (
+                attempt.payload_receipt is not None
+                and attempt.phase == "payload_submitting"
+                and attempt.payload_identity is not None
+                and attempt.payload_identity.operation == "create"
+                and attempt.payload_identity.replacement == replacement
+            ):
+                return attempt
+        return None
 
     def materialization_attempts_for_document(
         self, document_id: str

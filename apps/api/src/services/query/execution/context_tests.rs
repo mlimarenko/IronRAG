@@ -16,7 +16,7 @@ use super::super::{
 };
 use super::*;
 use super::{
-    answer_context::focused_preview_from_bundle_chunks,
+    answer_context::{canonical_brief_preview, select_brief_candidates},
     assembly::{
         DECLARATION_INVENTORY_CONTEXT_CHARS, DECLARATION_INVENTORY_ENTRY_LIMIT,
         declaration_inventory_context_block, interleave_bounded_context_lines,

@@ -41,6 +41,7 @@ fn replacement_auto_key_binds_all_metadata_scope_intent_and_actual_bytes() {
         mime_type: None,
         file_bytes: b"source".to_vec(),
         visibility_intent_id: None,
+        enrichment_scope: None,
     };
     let hash = hash_replace_payload(&command).unwrap();
     let mut siblings = Vec::new();
@@ -118,6 +119,7 @@ fn semantic_hash_has_unambiguous_field_boundaries_and_nulls() {
 fn upload_auto_key_uses_effective_creation_descriptor_and_caller_namespace() {
     use super::*;
     let command = UploadInlineDocumentCommand {
+        enrichment_scope: None,
         workspace_id: Uuid::from_u128(1),
         library_id: Uuid::from_u128(2),
         external_key: None,

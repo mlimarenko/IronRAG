@@ -19,6 +19,7 @@ from ironrag_connector.ironrag import (
     OperationStatus,
     OperationStatusValue,
     ProblemDetails,
+    RevisionFile,
     VisibilityIntentReceipt,
     VisibilityIntentRequest,
 )
@@ -402,7 +403,8 @@ class MemoryIronRag:
         target = str(document_id)
         body = revision_request_identity(document_id, request)
         idempotency_key = request["idempotency_key"]
-        file_bytes = request.get("file_bytes")
+        upload = request.get("file")
+        file_bytes = upload.data if upload is not None else None
         if idempotency_key in self.payload_handles:
             if self.payload_bodies[idempotency_key] != body:
                 raise IronRagConflictError(
@@ -469,7 +471,7 @@ async def test_memory_revision_replay_checks_complete_body() -> None:
     document = await server.create_document(
         LIBRARY_ID, external_key="fake:page:1", file_bytes=b"same"
     )
-    body = {"mode": "replace", "file_bytes": b"same", "idempotency_key": "fixed"}
+    body = {"mode": "replace", "file": RevisionFile(data=b"same"), "idempotency_key": "fixed"}
     handle = await server.create_revision(document.id, **body)
     assert await server.create_revision(document.id, **body) == handle
     with pytest.raises(IronRagConflictError) as caught:

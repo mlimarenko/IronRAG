@@ -57,6 +57,7 @@ fn focused_follow_up_stays_effectively_non_identical_after_ui_normalization() {
     assert_ne!(initial_fingerprint, focused_fingerprint);
     assert_eq!(normalized["query"].as_str(), Some(question));
     assert_eq!(normalized["topK"], serde_json::json!(32));
+    assert_eq!(normalized["sequenceAttempt"], serde_json::json!(1));
     assert!(normalized.get(RUNTIME_REPAIR_ARGUMENT_FIELD).is_none());
 }
 
@@ -570,10 +571,16 @@ fn typed_grounded_answer_outcome_fails_closed_on_mismatch_or_truncated_candidate
 
     for result in [mismatched, truncated] {
         assert!(grounded_answer_typed_outcome(GROUNDED_ANSWER_TOOL_NAME, &result).is_none());
+        // A malformed terminal clarification fails closed but has no repair
+        // budget; follow-up signals the incomplete response without a new call.
+        assert!(!grounded_answer_ready(GROUNDED_ANSWER_TOOL_NAME, &result));
         assert_eq!(
             grounded_answer_repair_reason(GROUNDED_ANSWER_TOOL_NAME, "Neutral question", &result),
-            Some(GroundedAnswerRepairReason::VerificationIncomplete),
+            None
         );
+        let envelope = grounded_answer_completion_envelope(&result).expect("completion envelope");
+        assert_eq!(envelope.repair_policy.max_additional_grounded_answer_calls, 0);
+        assert!(!envelope.repair_policy.required);
         assert!(grounded_answer_needs_follow_up(GROUNDED_ANSWER_TOOL_NAME, &result));
     }
 }

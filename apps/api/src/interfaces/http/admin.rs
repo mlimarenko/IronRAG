@@ -21,7 +21,7 @@ use crate::{
         AdminLibraryPageOrder, AdminLibraryPageQuery, AdminLibraryPageRow, AdminLibrarySearchScope,
     },
     interfaces::http::{auth::AuthContext, router_support::ApiError},
-    services::catalog_service::INGEST_REQUIRED_BINDINGS,
+    services::{catalog_service::INGEST_REQUIRED_BINDINGS, ops::billing::derived_cost_coverage},
 };
 
 const DEFAULT_ADMIN_LIBRARY_PAGE_LIMIT: u32 = 50;
@@ -396,18 +396,31 @@ struct AdminLibraryCostSummarySource {
     unpriced_provider_call_count: i64,
 }
 
+/// Admin library cost summary from the library rollup.
+///
+/// Returns `None` when the rollup is unhealthy, holds more than one currency, or
+/// records no provider-call observation at all: a stored zero without a settled
+/// or unpriced call is not a free library. Coverage uses the same canonical rule
+/// as the billing read paths — the unpriced count includes unresolved
+/// reservations and cannot be compared with the settled count as a denominator.
 fn map_admin_library_cost_summary(
     source: AdminLibraryCostSummarySource,
 ) -> Option<AdminLibraryCostSummary> {
-    (!source.cost_blocked && source.currency_count <= 1).then(|| AdminLibraryCostSummary {
+    if source.cost_blocked || source.currency_count > 1 {
+        return None;
+    }
+    if source.provider_call_count == 0 && source.unpriced_provider_call_count == 0 {
+        return None;
+    }
+    Some(AdminLibraryCostSummary {
         total_cost: source.total_cost.to_string(),
         currency_code: source.currency_code,
         document_count: source.document_count,
         provider_call_count: source.provider_call_count,
         unpriced_provider_call_count: source.unpriced_provider_call_count,
-        cost_coverage: match CostCoverageStatus::from_call_counts(
-            source.provider_call_count,
+        cost_coverage: match derived_cost_coverage(
             source.unpriced_provider_call_count,
+            source.total_cost,
         ) {
             CostCoverageStatus::Complete => AdminLibraryCostCoverage::Complete,
             CostCoverageStatus::Partial => AdminLibraryCostCoverage::Partial,
@@ -1024,6 +1037,98 @@ mod tests {
         assert_eq!(value.unpriced_call_count, 1);
         // The lossless summary keeps every digit the rollup carried.
         assert_eq!(item.cost_summary.expect("summary").total_cost, "1.2345");
+        Ok(())
+    }
+
+    #[test]
+    fn admin_library_item_omits_cost_without_observed_calls() -> Result<(), ApiError> {
+        let item = map_admin_library_item(AdminLibraryPageRow {
+            id: Uuid::from_u128(1),
+            slug: "documents".to_string(),
+            display_name: "Documents".to_string(),
+            lifecycle_state: "active".to_string(),
+            include_document_hint_in_mcp_answers: true,
+            workspace_id: Uuid::from_u128(2),
+            workspace_slug: "primary".to_string(),
+            workspace_display_name: "Primary".to_string(),
+            missing_binding_purposes: Vec::new(),
+            queued_job_count: 0,
+            cost_blocked: false,
+            currency_count: 1,
+            total_cost: Decimal::ZERO,
+            currency_code: "USD".to_string(),
+            document_count: 0,
+            provider_call_count: 0,
+            unpriced_provider_call_count: 0,
+            coverage_state: Some("complete".to_string()),
+        })?;
+        assert!(
+            item.cost_summary.is_none(),
+            "a stored zero without a settled or unpriced call is not a free library"
+        );
+        assert!(item.cost_value.is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn admin_library_item_calls_a_charge_next_to_an_unresolved_reservation_partial()
+    -> Result<(), ApiError> {
+        let item = map_admin_library_item(AdminLibraryPageRow {
+            id: Uuid::from_u128(1),
+            slug: "documents".to_string(),
+            display_name: "Documents".to_string(),
+            lifecycle_state: "active".to_string(),
+            include_document_hint_in_mcp_answers: true,
+            workspace_id: Uuid::from_u128(2),
+            workspace_slug: "primary".to_string(),
+            workspace_display_name: "Primary".to_string(),
+            missing_binding_purposes: Vec::new(),
+            queued_job_count: 0,
+            cost_blocked: false,
+            currency_count: 1,
+            total_cost: Decimal::new(4000, 4),
+            currency_code: "USD".to_string(),
+            document_count: 1,
+            provider_call_count: 1,
+            unpriced_provider_call_count: 1,
+            coverage_state: Some("unknown".to_string()),
+        })?;
+        let summary = item.cost_summary.expect("an observed charge keeps its summary");
+        assert_eq!(summary.cost_coverage, AdminLibraryCostCoverage::Partial);
+        assert_eq!(summary.unpriced_provider_call_count, 1);
+        Ok(())
+    }
+
+    #[test]
+    fn admin_library_item_withholds_a_priced_zero_next_to_an_unresolved_reservation()
+    -> Result<(), ApiError> {
+        let item = map_admin_library_item(AdminLibraryPageRow {
+            id: Uuid::from_u128(1),
+            slug: "documents".to_string(),
+            display_name: "Documents".to_string(),
+            lifecycle_state: "active".to_string(),
+            include_document_hint_in_mcp_answers: true,
+            workspace_id: Uuid::from_u128(2),
+            workspace_slug: "primary".to_string(),
+            workspace_display_name: "Primary".to_string(),
+            missing_binding_purposes: Vec::new(),
+            queued_job_count: 0,
+            cost_blocked: false,
+            currency_count: 1,
+            total_cost: Decimal::ZERO,
+            currency_code: "USD".to_string(),
+            document_count: 1,
+            provider_call_count: 1,
+            unpriced_provider_call_count: 1,
+            coverage_state: Some("partial".to_string()),
+        })?;
+        let summary = item.cost_summary.expect("a recorded observation keeps its summary");
+        assert_eq!(
+            summary.cost_coverage,
+            AdminLibraryCostCoverage::Unknown,
+            "a zero total plus an unresolved reservation cannot prove a priced call"
+        );
+        assert!(item.cost_value.is_none());
         Ok(())
     }
 

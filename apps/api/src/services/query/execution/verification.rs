@@ -41,7 +41,6 @@ pub(crate) struct AnswerVerificationRequest<'a> {
     pub(crate) intent_profile: &'a QueryIntentProfile,
     pub(crate) evidence: &'a AuthoritativeAnswerEvidence,
     pub(crate) chunks: &'a [RuntimeMatchedChunk],
-    pub(crate) prompt_context: &'a str,
     pub(crate) assistant_grounding: &'a AssistantGroundingEvidence,
 }
 
@@ -54,7 +53,6 @@ pub(crate) fn verify_answer_against_authoritative_evidence(
         intent_profile,
         evidence,
         chunks,
-        prompt_context,
         assistant_grounding,
     } = request;
     if let Some(early_result) =
@@ -63,7 +61,7 @@ pub(crate) fn verify_answer_against_authoritative_evidence(
         return early_result;
     }
 
-    let corpora = VerificationCorpora::new(evidence, chunks, assistant_grounding, prompt_context);
+    let corpora = VerificationCorpora::new(evidence, chunks, assistant_grounding);
     let question_wildcard_prefixes = literal_wildcard_prefixes(question, 2);
     let (inline_literals, fenced_line_literals) = extract_answer_literals(answer);
     let formal_exact_claims = if intent_profile.exact_literal_technical {
@@ -114,7 +112,6 @@ pub(crate) fn verify_answer_against_authoritative_evidence(
 }
 
 struct VerificationCorpora {
-    all: Vec<String>,
     grounding: Vec<String>,
     boundary: Vec<String>,
     relationships: Vec<String>,
@@ -125,17 +122,9 @@ impl VerificationCorpora {
         evidence: &AuthoritativeAnswerEvidence,
         chunks: &[RuntimeMatchedChunk],
         assistant_grounding: &AssistantGroundingEvidence,
-        prompt_context: &str,
     ) -> Self {
-        let mut all = build_verification_corpus(evidence, chunks, assistant_grounding);
-        let grounding = all.clone();
-        let normalized_prompt_context = normalize_verification_literal(prompt_context);
-        if !normalized_prompt_context.is_empty() {
-            all.push(normalized_prompt_context);
-        }
         Self {
-            all,
-            grounding,
+            grounding: build_verification_corpus(evidence, chunks, assistant_grounding),
             boundary: build_boundary_verification_corpus(evidence, chunks, assistant_grounding),
             relationships: build_exact_relationship_verification_corpus(
                 evidence,
@@ -230,7 +219,6 @@ fn verify_formatted_literals<'a>(
         } else {
             literal_is_supported_by_evidence_corpus(
                 literal,
-                &corpora.all,
                 &corpora.boundary,
                 &corpora.grounding,
                 &corpora.relationships,
@@ -482,6 +470,7 @@ pub(crate) struct QueryVerificationPersistence<'a> {
     pub(crate) answer_disposition: QueryAnswerDisposition,
     pub(crate) clarification: &'a QueryClarification,
     pub(crate) authoritative_evidence: &'a AuthoritativeAnswerEvidence,
+    pub(crate) primary_answer_chunks: &'a [RuntimeMatchedChunk],
     pub(crate) assistant_grounding: &'a AssistantGroundingEvidence,
     pub(crate) answer_kind: Option<AnswerKind>,
 }
@@ -496,6 +485,7 @@ pub(crate) async fn persist_query_verification(
         answer_disposition,
         clarification,
         authoritative_evidence,
+        primary_answer_chunks,
         assistant_grounding,
         answer_kind,
     } = request;
@@ -512,6 +502,7 @@ pub(crate) async fn persist_query_verification(
     let candidate_summary = enrich_query_candidate_summary(
         bundle.candidate_summary.clone(),
         authoritative_evidence,
+        primary_answer_chunks,
         assistant_grounding,
     );
     let candidate_summary = attach_query_answer_outcome(
@@ -654,9 +645,25 @@ fn verification_state_label(state: QueryVerificationState) -> &'static str {
     }
 }
 
+/// Unique chunk identities backing the final answer. The composed agent path
+/// clears `chunk_rows` because bundle rows are not generator evidence, so the
+/// admitted primary chunks carry its reference count; the ordinary path counts
+/// a chunk present in both inputs once.
+pub(crate) fn canonical_chunk_reference_count(
+    evidence: &AuthoritativeAnswerEvidence,
+    primary_answer_chunks: &[RuntimeMatchedChunk],
+) -> usize {
+    let mut chunk_ids =
+        HashSet::with_capacity(evidence.chunk_rows.len() + primary_answer_chunks.len());
+    chunk_ids.extend(evidence.chunk_rows.iter().map(|row| row.chunk_id));
+    chunk_ids.extend(primary_answer_chunks.iter().map(|chunk| chunk.chunk_id));
+    chunk_ids.len()
+}
+
 pub(crate) fn enrich_query_candidate_summary(
     candidate_summary: serde_json::Value,
     authoritative_evidence: &AuthoritativeAnswerEvidence,
+    primary_answer_chunks: &[RuntimeMatchedChunk],
     assistant_grounding: &AssistantGroundingEvidence,
 ) -> serde_json::Value {
     let mut summary = candidate_summary;
@@ -673,7 +680,10 @@ pub(crate) fn enrich_query_candidate_summary(
     );
     object.insert(
         "finalChunkReferences".to_string(),
-        serde_json::json!(authoritative_evidence.chunk_rows.len()),
+        serde_json::json!(canonical_chunk_reference_count(
+            authoritative_evidence,
+            primary_answer_chunks,
+        )),
     );
     object.insert(
         "finalAssistantDocumentReferences".to_string(),

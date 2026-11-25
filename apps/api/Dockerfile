@@ -1,7 +1,8 @@
 # syntax=docker/dockerfile:1.7
 
 # ── Stage 1: Rust builder ──────────────────────────────────────────────
-FROM rust@sha256:c9155318d07341301a78b45ecdd81af2e43b8b297d64e8fd4c5e80d7735607c3 AS builder
+# rust:1.100.0-bookworm
+FROM rust@sha256:ade39a710ef85f3506cffcfec3e8a24ba090badef1dff2fb798f71d878833fea AS builder
 WORKDIR /workspace
 # No default: the build identity is baked into the binary and served by
 # /v1/version, so an unset value must stop the build rather than ship a
@@ -26,9 +27,8 @@ RUN apt-get update \
   && rm -rf /tmp/wild.tgz "/tmp/wild-linker-${WILD_VERSION}-x86_64-unknown-linux-gnu" \
   && rm -rf /var/lib/apt/lists/*
 
-# Fast linker + release-profile overrides for incremental Docker builds.
-# Public releases (gh/master) reset these via `--build-arg` to restore
-# the default Cargo release profile (lto, single codegen-unit, etc.).
+# Bound Cargo concurrency and keep LLVM partitions small inside the existing
+# CI memory limit. Optimization remains at the release profile's level.
 # RUSTUP_TOOLCHAIN pins rustup to the toolchain already baked into the base
 # image and short-circuits the `rust-toolchain.toml` channel re-validation,
 # which otherwise reaches static.rust-lang.org on every build. That fetch can
@@ -36,9 +36,11 @@ RUN apt-get update \
 # so the build must not depend on it — the base image is the source of truth
 # for the toolchain version (asserted below against the digest-pinned image).
 ENV CARGO_HOME=/usr/local/cargo \
-    RUSTUP_TOOLCHAIN=1.99.1 \
+    RUSTUP_TOOLCHAIN=1.100.0 \
     RUSTFLAGS="-C linker=clang -C link-arg=--ld-path=/usr/local/bin/wild" \
     CARGO_INCREMENTAL=0 \
+    CARGO_BUILD_JOBS=1 \
+    CARGO_PROFILE_RELEASE_CODEGEN_UNITS=256 \
     APP_VERSION=${APP_VERSION}
 
 # Copy the whole source tree once. BuildKit cache mounts keep `target/` and
@@ -55,8 +57,8 @@ ARG CARGO_FEATURES=
 # Gate the build on the compiler the base image actually activates. The FROM
 # digest fixes what is installed and RUSTUP_TOOLCHAIN selects it, but a drift
 # there would otherwise ship an artefact built by some other rustc despite the
-# expected 1.99.1 builder image.
-RUN test "$(rustc --version | awk '{print $2}')" = "1.99.1"
+# expected 1.100.0 builder image.
+RUN test "$(rustc --version | awk '{print $2}')" = "1.100.0"
 # --mount=type=cache,target=/workspace/target persists compiled artefacts
 # across `docker build` runs.  Combined with CARGO_INCREMENTAL=0 + wild,
 # only changed crates are relinked.
@@ -94,7 +96,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,id=ironrag-cargo-reg,sha
 # sha256 pins the bytes, so a removed or changed package fails the build
 # instead of silently resolving another version. Delete this stage and the
 # runtime install once trixie ships the fix.
-FROM debian:trixie-slim@sha256:62bd423aeee912639ca8ee681c2b762cb3e25137e0a92b20be455898a9f034ad AS sqlite-package
+FROM debian@sha256:62bd423aeee912639ca8ee681c2b762cb3e25137e0a92b20be455898a9f034ad AS sqlite-package
 ARG SQLITE_VERSION=3.54.1-2
 ARG SQLITE_SHA256=7789bf0b2338b781de388d83d7c473f9386c9ef638af110b5c1b3d1debb36f00
 RUN printf '%s\n' \
@@ -115,7 +117,7 @@ RUN printf '%s\n' \
     && rm -rf /var/lib/apt/lists/*
 
 # ── Stage 3: native parsing runtime; image recognition uses LLM Vision ──
-FROM debian:trixie-slim@sha256:62bd423aeee912639ca8ee681c2b762cb3e25137e0a92b20be455898a9f034ad AS runtime
+FROM debian@sha256:62bd423aeee912639ca8ee681c2b762cb3e25137e0a92b20be455898a9f034ad AS runtime
 WORKDIR /app
 ARG APT_CACHEBUST=20261022
 COPY --from=sqlite-package /out/libsqlite3-0.deb /tmp/libsqlite3-0.deb

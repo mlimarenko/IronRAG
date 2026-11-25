@@ -155,9 +155,9 @@ class NativeEvidenceTests(unittest.TestCase):
                        min_entity_reference_count=1, min_relation_reference_count=1,
                        allowed_verification_states=["partially_supported"])
         result = replay(capture_for(case, ["Wrong response."]), case)
-        self.assertTrue({"answer_required", "answer_opening_required", "answer_forbidden", "chunk_references",
-                         "prepared_segment_references", "technical_fact_references", "entity_references",
-                         "relation_references", "verification_state"} <= set(result["failedChecks"]))
+        self.assertLessEqual({"answer_required", "answer_opening_required", "answer_forbidden", "chunk_references",
+                              "prepared_segment_references", "technical_fact_references", "entity_references",
+                              "relation_references", "verification_state"}, set(result["failedChecks"]))
 
     def test_missing_search_and_timing_are_unavailable_not_zero_or_pass(self):
         case = neutral_benchmark_case("native")

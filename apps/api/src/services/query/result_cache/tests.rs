@@ -408,6 +408,7 @@ fn answer_runtime_fingerprint_covers_deterministic_answer_builders() {
     let unique_paths = paths.iter().copied().collect::<BTreeSet<_>>();
     assert_eq!(paths.len(), unique_paths.len());
     for required in [
+        "agent_loop/compaction.rs",
         "domains/query.rs",
         "domains/query_ir.rs",
         "completion_policy.rs",

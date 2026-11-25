@@ -1326,8 +1326,7 @@ async fn empty_and_failed_documents_surface_honest_readability_metadata_in_hits(
 
 #[tokio::test]
 #[ignore = "requires local postgres and redis services"]
-async fn processing_documents_with_extracted_text_surface_as_readable_graph_sparse_hits()
--> anyhow::Result<()> {
+async fn processing_documents_with_extracted_text_surface_as_readable_hits() -> anyhow::Result<()> {
     let settings = Settings::from_env().context("failed to load settings for search state test")?;
     let fixture = Box::pin(McpSearchFixture::create(settings)).await?;
 
@@ -1370,11 +1369,11 @@ async fn processing_documents_with_extracted_text_surface_as_readable_graph_spar
             .context("processing readable hit missing")?;
         assert_eq!(hit["latestRevisionId"], json!(revision_id));
         assert_eq!(hit["readabilityState"], json!("readable"));
-        assert_eq!(hit["readinessKind"], json!("graph_sparse"));
-        assert_eq!(hit["graphCoverageKind"], json!("graph_sparse"));
+        assert_eq!(hit["readinessKind"], json!("readable"));
+        assert_eq!(hit["graphCoverageKind"], json!("empty"));
         assert_eq!(
             hit["statusReason"],
-            json!("document text is readable, but graph coverage is still sparse for this revision"),
+            json!("document text is readable, but structured preparation and graph extraction are still processing"),
         );
         assert!(hit["excerpt"].as_str().is_some_and(|excerpt| excerpt.contains("status-signal")));
         assert!(hit["excerptStartOffset"].as_i64().is_some());
@@ -1544,11 +1543,11 @@ async fn extracted_text_matches_are_searchable_without_chunk_rows_and_after_grap
             .context("ready direct-text hit missing")?;
         assert_eq!(ready_hit["latestRevisionId"], json!(ready_revision_id));
         assert_eq!(ready_hit["readabilityState"], json!("readable"));
-        assert_eq!(ready_hit["readinessKind"], json!("graph_sparse"));
-        assert_eq!(ready_hit["graphCoverageKind"], json!("graph_sparse"));
+        assert_eq!(ready_hit["readinessKind"], json!("readable"));
+        assert_eq!(ready_hit["graphCoverageKind"], json!("empty"));
         assert_eq!(
             ready_hit["statusReason"],
-            json!("document text is readable, but graph coverage is still sparse for this revision"),
+            json!("document text is readable, but structured preparation and graph extraction are still processing"),
         );
         assert!(
             ready_hit["excerpt"]
@@ -1562,12 +1561,12 @@ async fn extracted_text_matches_are_searchable_without_chunk_rows_and_after_grap
             .context("failed direct-text hit missing")?;
         assert_eq!(failed_hit["latestRevisionId"], json!(failed_revision_id));
         assert_eq!(failed_hit["readabilityState"], json!("readable"));
-        assert_eq!(failed_hit["readinessKind"], json!("graph_sparse"));
+        assert_eq!(failed_hit["readinessKind"], json!("readable"));
         assert_eq!(failed_hit["graphCoverageKind"], json!("failed"));
         assert_eq!(
             failed_hit["statusReason"],
             json!(
-                "document text is readable, but normalized technical facts and graph evidence are not available yet"
+                "document text is readable, but structured preparation and graph extraction are still processing"
             ),
         );
         assert!(

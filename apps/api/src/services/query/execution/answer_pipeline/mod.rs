@@ -61,6 +61,7 @@ mod coverage;
 mod deterministic;
 mod disposition;
 mod document_statement;
+mod evidence_reproduction;
 mod literal_coverage;
 mod literal_revision;
 mod output_boundary;
@@ -71,9 +72,12 @@ mod variant_selection;
 mod verification;
 
 pub(crate) use deterministic::generate_answer_query;
+pub(crate) use evidence_reproduction::ANSWER_REPRODUCED_EVIDENCE;
+pub(super) use evidence_reproduction::evidence_reproduction_warning;
 pub(crate) use literal_coverage::literal_revision_targets;
 pub(crate) use preflight::{PrepareAnswerQueryRequest, prepare_answer_query};
 pub(crate) use single_shot::AnswerQueryRequest;
+pub(crate) use verification::EXACT_WORDING_OMITTED;
 #[cfg(test)]
 pub(crate) use verification::apply_enumeration_coverage_warning;
 
@@ -152,6 +156,8 @@ mod context_probes_tests;
 mod coverage_tests;
 #[cfg(test)]
 mod disposition_tests;
+#[cfg(test)]
+mod evidence_reproduction_tests;
 #[cfg(test)]
 mod literal_revision_tests;
 #[cfg(test)]

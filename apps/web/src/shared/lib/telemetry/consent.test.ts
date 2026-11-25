@@ -119,6 +119,22 @@ describe('telemetry consent', () => {
     expect(reloaded.isTelemetryAllowed()).toBe(false)
   })
 
+  it('stays fail-closed before session hydration even with a stored browser choice', async () => {
+    // A cold store has not been told whether anyone is signed in. The synthetic
+    // choice stands in for a signed-out visitor's earlier decision; it must not
+    // become an active grant until the shell reports a resolved session.
+    localStorage.setItem(TELEMETRY_CONSENT_STORAGE_KEY, 'granted')
+    vi.resetModules()
+    const cold = await import('./consent')
+
+    expect(cold.readTelemetryConsentState()).toEqual({
+      consent: 'unset',
+      status: 'loading',
+      principalId: null,
+    })
+    expect(cold.isTelemetryAllowed()).toBe(false)
+  })
+
   it('notifies another anonymous tab when its browser choice becomes account-owned', () => {
     writeBrowserTelemetryConsent('granted')
     const listener = vi.fn()

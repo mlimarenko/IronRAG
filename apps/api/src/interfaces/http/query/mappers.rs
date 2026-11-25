@@ -577,6 +577,7 @@ pub(super) fn map_chunk_reference(
     ironrag_contracts::assistant::AssistantChunkReference {
         execution_id: reference.execution_id,
         chunk_id: reference.chunk_id,
+        revision_id: reference.revision_id,
         rank: reference.rank,
         score: reference.score,
         document_id: reference.document_id,

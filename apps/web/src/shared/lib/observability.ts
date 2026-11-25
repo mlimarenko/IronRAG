@@ -92,7 +92,9 @@ async function createZoneContextManager() {
 
 /** Accept an OTLP base URL or a signal-specific URL and return the base. */
 const otlpBaseUrl = (value: string): string => {
-  const withoutTrailing = value.replace(/\/+$/, '')
+  let end = value.length
+  while (end > 0 && value[end - 1] === '/') end -= 1
+  const withoutTrailing = value.slice(0, end)
   return withoutTrailing.replace(/\/v1\/(?:traces|metrics|logs)$/i, '')
 }
 

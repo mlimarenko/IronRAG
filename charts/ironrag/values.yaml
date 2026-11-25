@@ -470,7 +470,7 @@ dependencies:
     workMem: 4MB
     image:
       repository: pgvector/pgvector
-      tag: pg18
+      tag: 0.8.7-pg19-bookworm
       digest: ""
       pullPolicy: IfNotPresent
     persistence:

@@ -16,10 +16,10 @@ use crate::infra::{
         IngestRevisionExtractArtifact, IngestRevisionWriteAuthority, RevisionReadinessUpdate,
     },
     knowledge_rows::{
-        KNOWLEDGE_CHUNK_VECTOR_KIND, KnowledgeChunkRow, KnowledgeChunkSupportReferenceRow,
-        KnowledgeDocumentRow, KnowledgeRevisionRow, KnowledgeStructuredBlockRow,
-        KnowledgeStructuredRevisionRow, KnowledgeTechnicalFactRow, LibraryGenerationSignals,
-        StructuredRevisionCounts,
+        KNOWLEDGE_CHUNK_VECTOR_KIND, KnowledgeChunkReferenceMetadataRow, KnowledgeChunkRow,
+        KnowledgeChunkSupportReferenceRow, KnowledgeDocumentRow, KnowledgeRevisionRow,
+        KnowledgeStructuredBlockRow, KnowledgeStructuredRevisionRow, KnowledgeTechnicalFactRow,
+        LibraryGenerationSignals, StructuredRevisionCounts,
     },
 };
 
@@ -586,6 +586,18 @@ impl<'r> FromRow<'r, PgRow> for KnowledgeChunkRow {
             window_text: row.try_get("window_text")?,
             occurred_at: row.try_get("occurred_at")?,
             occurred_until: row.try_get("occurred_until")?,
+        })
+    }
+}
+
+impl<'r> FromRow<'r, PgRow> for KnowledgeChunkReferenceMetadataRow {
+    fn from_row(row: &'r PgRow) -> Result<Self, sqlx::Error> {
+        Ok(Self {
+            chunk_id: row.try_get("chunk_id")?,
+            document_id: row.try_get("document_id")?,
+            revision_id: row.try_get("revision_id")?,
+            section_path: row.try_get("section_path")?,
+            heading_trail: row.try_get("heading_trail")?,
         })
     }
 }

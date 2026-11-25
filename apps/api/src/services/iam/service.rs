@@ -319,6 +319,14 @@ impl IamService {
         Self
     }
 
+    /// Resolves the workspace/library/document scope a runtime execution's owner
+    /// grants read access to.
+    ///
+    /// A runtime row whose owner row is gone is answered with the same public
+    /// `NotFound` as a runtime id that never existed: the read contract is about
+    /// the requested runtime, so the owner kind, owner id and the dependent
+    /// row's own id stay out of the response. Database faults keep their own
+    /// `internal` classification.
     pub async fn resolve_runtime_execution_access_scope(
         &self,
         state: &AppState,
@@ -333,7 +341,7 @@ impl IamService {
                 .await
                 .map_err(|e| ApiError::internal_with_log(e, "internal"))?
                 .ok_or_else(|| {
-                    ApiError::resource_not_found("query_execution", runtime_execution.owner_id)
+                    ApiError::resource_not_found("runtime_execution", runtime_execution.id)
                 })?;
                 Ok(RuntimeExecutionAccessScope {
                     workspace_id: execution.workspace_id,
@@ -350,10 +358,7 @@ impl IamService {
                     .await
                     .map_err(|e| ApiError::internal_with_log(e, "internal"))?
                     .ok_or_else(|| {
-                        ApiError::resource_not_found(
-                            "runtime_graph_extraction",
-                            runtime_execution.owner_id,
-                        )
+                        ApiError::resource_not_found("runtime_execution", runtime_execution.id)
                     })?;
                 let library = crate::infra::repositories::catalog_repository::get_library_by_id(
                     &state.persistence.postgres,
@@ -361,7 +366,9 @@ impl IamService {
                 )
                 .await
                 .map_err(|e| ApiError::internal_with_log(e, "internal"))?
-                .ok_or_else(|| ApiError::resource_not_found("library", extraction.library_id))?;
+                .ok_or_else(|| {
+                    ApiError::resource_not_found("runtime_execution", runtime_execution.id)
+                })?;
                 Ok(RuntimeExecutionAccessScope {
                     workspace_id: library.workspace_id,
                     library_id: library.id,
@@ -376,10 +383,7 @@ impl IamService {
                     .await
                     .map_err(|e| ApiError::internal_with_log(e, "internal"))?
                     .ok_or_else(|| {
-                        ApiError::resource_not_found(
-                            "knowledge_revision",
-                            runtime_execution.owner_id,
-                        )
+                        ApiError::resource_not_found("runtime_execution", runtime_execution.id)
                     })?;
                 Ok(RuntimeExecutionAccessScope {
                     workspace_id: revision.workspace_id,

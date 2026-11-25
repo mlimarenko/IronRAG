@@ -24,6 +24,7 @@ fn enrich_query_candidate_summary_overwrites_authoritative_reference_counts() {
                 sample_technical_fact_row(Uuid::now_v7(), Uuid::now_v7(), Uuid::now_v7()),
             ],
         },
+        &[],
         &AssistantGroundingEvidence::default(),
     );
 
@@ -31,6 +32,64 @@ fn enrich_query_candidate_summary_overwrites_authoritative_reference_counts() {
     assert_eq!(enriched["finalPreparedSegmentReferences"], serde_json::json!(1));
     assert_eq!(enriched["finalTechnicalFactReferences"], serde_json::json!(2));
     assert_eq!(enriched["finalEntityReferences"], serde_json::json!(3));
+}
+
+#[test]
+fn chunk_reference_count_deduplicates_overlapping_query_chunks() {
+    let shared_chunk_id = Uuid::now_v7();
+    let primary_only_chunk_id = Uuid::now_v7();
+    let matched_chunk = |chunk_id: Uuid, text: &str| RuntimeMatchedChunk {
+        chunk_id,
+        document_id: Uuid::now_v7(),
+        revision_id: Uuid::now_v7(),
+        chunk_index: 0,
+        chunk_kind: None,
+        document_label: "fixture.md".to_string(),
+        excerpt: text.to_string(),
+        score_kind: crate::services::query::execution::RuntimeChunkScoreKind::Relevance,
+        score: None,
+        source_text: text.to_string(),
+    };
+    let evidence = AuthoritativeAnswerEvidence {
+        bundle: None,
+        chunk_rows: vec![
+            sample_chunk_row(Uuid::now_v7(), Uuid::now_v7(), Uuid::now_v7()),
+            sample_chunk_row(shared_chunk_id, Uuid::now_v7(), Uuid::now_v7()),
+        ],
+        structured_blocks: Vec::new(),
+        technical_facts: Vec::new(),
+    };
+    let primary_answer_chunks = vec![
+        matched_chunk(shared_chunk_id, "shared"),
+        matched_chunk(primary_only_chunk_id, "primary"),
+    ];
+
+    let enriched = enrich_query_candidate_summary(
+        serde_json::json!({}),
+        &evidence,
+        &primary_answer_chunks,
+        &AssistantGroundingEvidence::default(),
+    );
+
+    // The bundle row and the admitted chunk that share `shared_chunk_id` are
+    // one reference; the ordinary path must not count the overlap twice.
+    assert_eq!(enriched["finalChunkReferences"], serde_json::json!(3));
+
+    let diagnostics = enrich_query_assembly_diagnostics(
+        serde_json::json!({}),
+        &RuntimeAnswerVerification {
+            semantic_verification: None,
+            state: QueryVerificationState::Verified,
+            warnings: Vec::new(),
+            unsupported_literals: Vec::new(),
+        },
+        QueryAnswerDisposition::FactualReady,
+        &enriched,
+        &AssistantGroundingEvidence::default(),
+    )
+    .expect("typed verification diagnostics should serialize");
+
+    assert_eq!(diagnostics["structuredEvidence"]["chunkReferenceCount"], 3);
 }
 
 #[test]
@@ -251,6 +310,9 @@ fn apply_query_execution_warning_sets_typed_fields() {
             warning: None,
         },
         grouped_references: Vec::new(),
+        retrieval_degradations: vec![
+            crate::services::query::execution::types::RetrievalDegradation::VectorProvider,
+        ],
         context_text: None,
         warning: None,
         warning_kind: None,
@@ -266,6 +328,11 @@ fn apply_query_execution_warning_sets_typed_fields() {
 
     assert_eq!(diagnostics.warning.as_deref(), Some("Graph coverage is still converging."));
     assert_eq!(diagnostics.warning_kind, Some("partial_convergence"));
+    apply_query_execution_warning(&mut diagnostics, None);
+    assert_eq!(
+        diagnostics.retrieval_degradations,
+        vec![crate::services::query::execution::types::RetrievalDegradation::VectorProvider,],
+    );
 }
 
 #[test]

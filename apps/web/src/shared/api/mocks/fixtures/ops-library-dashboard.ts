@@ -33,6 +33,9 @@ const DEFAULT_OPS_LIBRARY_DASHBOARD = {
     graphReady: 1,
     graphSparse: 1,
     processing: 1,
+    paused: 0,
+    pendingMaterialization: 0,
+    readable: 2,
     queued: 1,
     ready: 2,
     recomputedAt: '2026-05-05T11:45:00.000Z',
@@ -79,12 +82,15 @@ const DEFAULT_OPS_LIBRARY_DASHBOARD = {
       },
     ],
     readinessSummary: {
-      documentCountsByReadiness: [
-        ['graph_ready', 1],
-        ['graph_sparse', 1],
+      documentCountsByStatus: [
+        ['ready', 2],
         ['processing', 1],
         ['queued', 1],
         ['failed', 1],
+        ['paused', 0],
+        ['pending_materialization', 0],
+        ['canceled', 0],
+        ['empty', 0],
       ],
       graphReadyDocumentCount: 1,
       graphSparseDocumentCount: 1,

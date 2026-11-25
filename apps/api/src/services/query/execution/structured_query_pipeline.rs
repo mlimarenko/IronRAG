@@ -100,7 +100,7 @@ pub(crate) async fn finalize_structured_query(
         context_assembly: assembly_stage.context_assembly.clone(),
         grouped_references: assembly_stage.grouped_references.clone(),
     };
-    let diagnostics = build_structured_query_diagnostics(
+    let mut diagnostics = build_structured_query_diagnostics(
         &assembly_stage.rerank.retrieval.planning.plan,
         &assembly_stage.rerank.retrieval.bundle,
         &assembly_stage.rerank.retrieval.planning.graph_index,
@@ -108,6 +108,7 @@ pub(crate) async fn finalize_structured_query(
         include_debug,
         &assembly_stage.context_text,
     );
+    diagnostics.retrieval_degradations = assembly_stage.rerank.retrieval.degradations.clone();
 
     // Snapshot the final ranked chunks so the turn layer can write
     // `query_chunk_reference` audit rows keyed by the execution_id.
@@ -200,7 +201,7 @@ pub(crate) async fn rerank_structured_query(
         bundle: &mut retrieval.bundle,
         semantic_chunk_ranks: &mut semantic_chunk_ranks,
     })
-    .await;
+    .await?;
 
     Ok(StructuredQueryRerankStage { retrieval, rerank, semantic_chunk_ranks })
 }
@@ -234,14 +235,6 @@ async fn assemble_structured_query(
     let effective_top_k =
         structured_source_context_top_k_for_chunks(query_ir, plan.top_k, &bundle.chunks);
     promote_comparison_target_chunks(query_ir, &mut bundle.chunks);
-    let retrieved_documents = load_retrieved_document_briefs(
-        state,
-        &bundle.chunks,
-        &rerank.retrieval.planning.document_index,
-        effective_top_k,
-        focused_document_id,
-    )
-    .await;
     let pagination_requested = false;
     let literal_focus_keywords = technical_literal_focus_keywords(question, Some(query_ir));
     let technical_literal_chunks = select_technical_literal_chunks(TechnicalLiteralSelection {
@@ -281,7 +274,17 @@ async fn assemble_structured_query(
         Some(query_ir),
         &demoted_document_ids,
         semantic_chunk_ranks,
+        &rerank.retrieval.planning.document_index,
     );
+
+    let retrieved_documents = load_retrieved_document_briefs(
+        state,
+        &bundle.chunks,
+        &rerank.retrieval.planning.document_index,
+        effective_top_k,
+        focused_document_id,
+    )
+    .await;
 
     let include_graph_context = include_graph_context_for_query(query_ir);
     if !include_graph_context {
@@ -309,6 +312,8 @@ async fn assemble_structured_query(
     if include_graph_context {
         graph_evidence_lines.extend(rerank.retrieval.graph_evidence_context_lines.clone());
     }
+    let rendered_graph_evidence_lines =
+        graph_evidence_lines.iter().map(|line| line.rendered().to_string()).collect::<Vec<_>>();
     let context_text = assemble_bounded_context_for_query_with_inventory_candidates(
         BoundedContextInventoryQuery {
             query_ir,
@@ -316,7 +321,7 @@ async fn assemble_structured_query(
             entities: &bundle.entities,
             relationships: &bundle.relationships,
             chunks: &bundle.chunks,
-            graph_evidence_lines: &graph_evidence_lines,
+            graph_evidence_lines: &rendered_graph_evidence_lines,
             inventory_candidates: &declaration_inventory_candidates,
             focused_document_id,
             fallback_declaration_chunks: &declaration_context_chunks,

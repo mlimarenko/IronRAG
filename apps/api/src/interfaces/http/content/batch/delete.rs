@@ -317,6 +317,7 @@ async fn delete_single_document(
                 source_identity: None,
                 revision: None,
                 parent_async_operation_id: parent_id,
+                enrichment_scope: None,
             },
         )
         .await

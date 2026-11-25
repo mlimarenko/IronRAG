@@ -48,10 +48,7 @@ pub(super) async fn generate_hyde_passage(
 
     let response = match tokio::time::timeout(
         HYDE_TIMEOUT,
-        crate::observability::with_provider_call_id(
-            provider_call.provider_call_id(),
-            state.llm_gateway.generate(request),
-        ),
+        provider_call.scoped(state.llm_gateway.generate(request)),
     )
     .await
     {

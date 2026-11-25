@@ -439,7 +439,10 @@ pub(super) fn redacted_failure_detail(error: &anyhow::Error) -> Option<String> {
             return Some((*kind).to_string());
         }
         match cause.downcast_ref::<QueryServiceError>() {
-            Some(QueryServiceError::Provider(failure)) => {
+            Some(
+                QueryServiceError::Provider(failure)
+                | QueryServiceError::EmbeddingProvider { failure, .. },
+            ) => {
                 return failure.detail_redacted().map(str::to_string);
             }
             Some(QueryServiceError::Internal(inner)) => {
@@ -461,10 +464,13 @@ pub(super) fn query_service_failure_code(
         }
         QueryServiceError::BindingNotConfigured { .. } => "query_binding_not_configured",
         QueryServiceError::StateConflict { .. } => "query_state_conflict",
-        QueryServiceError::Provider(failure) => match failure.kind() {
+        QueryServiceError::Provider(failure)
+        | QueryServiceError::EmbeddingProvider { failure, .. } => match failure.kind() {
             ProviderFailureKind::Unavailable => "query_provider_failed",
             ProviderFailureKind::QuotaExhausted => "query_provider_quota_exhausted",
             ProviderFailureKind::RequestRejected => "query_provider_request_rejected",
+            ProviderFailureKind::AdmissionRefused => "query_provider_admission_refused",
+            ProviderFailureKind::AllowanceExhausted => "query_provider_allowance_exhausted",
         },
         QueryServiceError::CacheUnavailable { .. } => "query_dependency_unavailable",
         QueryServiceError::Cancelled => "query_cancelled",
@@ -482,7 +488,14 @@ fn api_failure_code(error: &ApiError, fallback: &'static str) -> &'static str {
         ApiError::ProviderFailure(_) => "query_provider_failed",
         ApiError::GatewayTimeout { .. } => "query_deadline_exceeded",
         ApiError::NotFound(_) => "query_not_found",
-        ApiError::ServiceUnavailable { .. } => "query_dependency_unavailable",
+        ApiError::ServiceUnavailable { kind, .. } => match *kind {
+            "query_provider_admission_refused" => "query_provider_admission_refused",
+            "query_provider_allowance_exhausted" => "query_provider_allowance_exhausted",
+            "query_provider_quota_exhausted" => "query_provider_quota_exhausted",
+            "query_provider_request_rejected" => "query_provider_request_rejected",
+            "query_state_conflict" => "query_state_conflict",
+            _ => "query_dependency_unavailable",
+        },
         ApiError::BootstrapAlreadyClaimed(_)
         | ApiError::Conflict(_)
         | ApiError::UnreadableDocument(_)
@@ -505,8 +518,9 @@ pub(super) fn anyhow_failure_code(error: &anyhow::Error, fallback: &'static str)
     if let Some(error) = error.downcast_ref::<ApiError>() {
         return api_failure_code(error, fallback);
     }
-    if error.downcast_ref::<ProviderCallError>().is_some() {
-        return "query_provider_failed";
+    if let Some(error) = error.downcast_ref::<ProviderCallError>() {
+        let failure = crate::shared::provider_failure::ProviderFailure::from(error);
+        return query_service_failure_code(&QueryServiceError::Provider(failure), fallback);
     }
     fallback
 }
@@ -723,8 +737,23 @@ pub(super) fn query_execution_api_failure(code: &str) -> QueryExecutionApiFailur
             QueryExecutionApiFailure::ServiceUnavailable("query_dependency_unavailable")
         }
         "query_provider_failed" => QueryExecutionApiFailure::ProviderFailure,
+        "query_provider_admission_refused" => {
+            QueryExecutionApiFailure::ServiceUnavailable("query_provider_admission_refused")
+        }
+        "query_provider_allowance_exhausted" => {
+            QueryExecutionApiFailure::ServiceUnavailable("query_provider_allowance_exhausted")
+        }
+        "query_provider_quota_exhausted" => {
+            QueryExecutionApiFailure::ServiceUnavailable("query_provider_quota_exhausted")
+        }
+        "query_provider_request_rejected" => {
+            QueryExecutionApiFailure::ServiceUnavailable("query_provider_request_rejected")
+        }
         "query_not_found" => QueryExecutionApiFailure::NotFound,
-        "query_state_conflict" | "query_cancelled" => QueryExecutionApiFailure::Conflict,
+        "query_state_conflict" => {
+            QueryExecutionApiFailure::ServiceUnavailable("query_state_conflict")
+        }
+        "query_cancelled" => QueryExecutionApiFailure::Conflict,
         code if is_runtime_policy_failure_code(code) => QueryExecutionApiFailure::Conflict,
         _ => QueryExecutionApiFailure::Internal,
     }

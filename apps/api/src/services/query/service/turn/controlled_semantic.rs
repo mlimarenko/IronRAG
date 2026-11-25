@@ -537,7 +537,14 @@ async fn read_source(
     );
     let result = call_named_tool(
         "read_document",
-        ToolCallContext { auth, state, request_id, surface_kind: RuntimeSurfaceKind::Ui },
+        ToolCallContext {
+            auth,
+            state,
+            request_id,
+            surface_kind: RuntimeSurfaceKind::Ui,
+            // UI turn path: no MCP session is bound to this dispatch.
+            caller_context: None,
+        },
         &json!({"documentId":pin.document_id,"mode":"full","includeReferences":true}),
     )
     .await
@@ -833,6 +840,7 @@ async fn observe_inner(input: Observation<'_>) -> Result<()> {
         answer_disposition: QueryAnswerDisposition::NonTerminal,
         clarification: &Default::default(),
         authoritative_evidence: &stage.generation.authoritative_evidence,
+        primary_answer_chunks: &stage.generation.primary_answer_chunks,
         assistant_grounding: &grounding,
         answer_kind: None,
     })

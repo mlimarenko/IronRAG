@@ -177,6 +177,10 @@ function mockSdk() {
 
 async function grantConsent() {
   localStorage.setItem(TELEMETRY_CONSENT_STORAGE_KEY, 'granted')
+  // The bridge resolves an anonymous visitor before the stored pre-sign-in
+  // choice becomes active; a cold store is not anonymous yet.
+  const consent = await import('./telemetry/consent')
+  consent.clearAccountTelemetryConsent()
   vi.stubEnv('VITE_OTEL_EXPORTER_OTLP_ENDPOINT', '/otlp')
   vi.stubEnv('VITE_OTEL_SERVICE_NAME', 'ironrag-web-test')
   vi.stubEnv('VITE_OTEL_SERVICE_VERSION', '1.2.3')
@@ -222,6 +226,8 @@ describe('observability', () => {
 
   it('stays a no-op when no OTLP endpoint was baked into the image', async () => {
     localStorage.setItem(TELEMETRY_CONSENT_STORAGE_KEY, 'granted')
+    const consent = await import('./telemetry/consent')
+    consent.clearAccountTelemetryConsent()
     vi.stubEnv('VITE_OTEL_EXPORTER_OTLP_ENDPOINT', '')
     const sdk = mockSdk()
     const info = vi.spyOn(console, 'info').mockImplementation(() => undefined)

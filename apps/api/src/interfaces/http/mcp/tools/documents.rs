@@ -96,7 +96,7 @@ pub(crate) fn descriptor(name: &str) -> Option<McpToolDescriptor> {
         }),
         "list_documents" => Some(McpToolDescriptor {
             name: "list_documents",
-            description: "List documents in a knowledge library. Use this ONLY for library inventory and meta questions about document records and document metadata. Never use it as the proof step for ordinary content questions, setup questions, factual questions, versioned change-summary questions, or inventories of identifiers, values, parameters, modules, packages, graph nodes, or other items mentioned inside document content — it returns only titles and status, not grounded body evidence. For those questions use `grounded_answer` or inspect source content with `search_documents` + `read_document`; for composite questions, use listing only to choose follow-up document reads, not as the final absence check.",
+            description: "List documents in a knowledge library. `totalCount` counts authorized inventory after `readableOnly` and `statusFilter`; `count` is this page's length. Use this ONLY for library inventory and meta questions about document records and document metadata. Never use it as the proof step for ordinary content questions, setup questions, factual questions, versioned change-summary questions, or inventories of identifiers, values, parameters, modules, packages, graph nodes, or other items mentioned inside document content — it returns only titles and status, not grounded body evidence. For those questions use `grounded_answer` or inspect source content with `search_documents` + `read_document`; for composite questions, use listing only to choose follow-up document reads, not as the final absence check.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -112,8 +112,16 @@ pub(crate) fn descriptor(name: &str) -> Option<McpToolDescriptor> {
                     },
                     "statusFilter": {
                         "type": "string",
-                        "enum": ["processing", "readable", "failed"],
-                        "description": "Optional readability-state filter. `readable` includes documents whose raw readiness kinds are `readable`, `graph_sparse`, or `graph_ready`."
+                        "enum": ironrag_contracts::documents::DocumentStatus::ALL,
+                        "description": "Optional operational document status. Use readableOnly to select current readable content independently of queued, paused or failed enrichment."
+                    },
+                    "readableOnly": {
+                        "type": "boolean",
+                        "description": "true selects documents with a current readable revision; false selects documents without one. Omit for all authorized document records."
+                    },
+                    "continuationToken": {
+                        "type": "string",
+                        "description": "Continuation returned with hasMore. Keep the same library and filters. If the inventory changes, discard the token and restart once; do not repeat a conflicting token."
                     }
                 }
             }),
@@ -524,11 +532,10 @@ async fn list_documents(context: ToolCallContext<'_>, arguments: &Value) -> McpT
         Ok(args) => {
             let library_id = match args.library.as_deref() {
                 Some(library_ref) => {
-                    match crate::services::mcp::access::load_library_by_catalog_ref(
+                    match crate::services::mcp::access::load_library_for_document_inventory(
                         context.auth,
                         context.state,
                         library_ref,
-                        crate::interfaces::http::authorization::POLICY_MCP_MEMORY_READ,
                     )
                     .await
                     {
@@ -547,13 +554,11 @@ async fn list_documents(context: ToolCallContext<'_>, arguments: &Value) -> McpT
                     }
                 },
             };
-            let limit = args.limit.unwrap_or(50).clamp(1, 200);
             match crate::services::mcp::access::list_documents(
                 context.auth,
                 context.state,
                 library_id,
-                limit,
-                args.status_filter.as_deref(),
+                &args,
             )
             .await
             {
@@ -798,6 +803,7 @@ mod tests {
             query: "subject S parameter P".to_string(),
             limit: 3,
             libraries: vec!["workspace/library".to_string()],
+            degradations: Vec::new(),
             hits: vec![McpDocumentHit {
                 document_id: test_uuid(1),
                 library_id: test_uuid(2),

@@ -3,13 +3,10 @@ use uuid::Uuid;
 
 use crate::{
     app::state::AppState,
-    domains::{
-        content::LibraryKnowledgeCoverage,
-        knowledge::{
-            KnowledgeChunk, KnowledgeContextBundle, KnowledgeDocument, KnowledgeLibraryGeneration,
-            KnowledgeLibrarySummary, KnowledgeRevision, StructuredBlock,
-            StructuredDocumentRevision, TypedTechnicalFact,
-        },
+    domains::knowledge::{
+        KnowledgeChunk, KnowledgeContextBundle, KnowledgeDocument, KnowledgeLibraryGeneration,
+        KnowledgeLibrarySummary, KnowledgeRevision, StructuredBlock, StructuredDocumentRevision,
+        TypedTechnicalFact,
     },
     infra::{
         knowledge_plane::{
@@ -616,24 +613,6 @@ impl KnowledgeService {
         Ok(rows.into_iter().map(map_library_generation_row).collect())
     }
 
-    pub async fn get_library_knowledge_coverage(
-        &self,
-        state: &AppState,
-        library_id: Uuid,
-    ) -> Result<LibraryKnowledgeCoverage, ApiError> {
-        let summary = self.get_library_summary(state, library_id).await?;
-        let last_generation_id = summary.latest_generation.as_ref().map(|generation| generation.id);
-        Ok(LibraryKnowledgeCoverage {
-            library_id: summary.library_id,
-            document_counts_by_readiness: summary.document_counts_by_readiness,
-            graph_ready_document_count: summary.graph_ready_document_count,
-            graph_sparse_document_count: summary.graph_sparse_document_count,
-            typed_fact_document_count: summary.typed_fact_document_count,
-            last_generation_id,
-            updated_at: summary.updated_at,
-        })
-    }
-
     /// Authoritative library summary. Document metrics, graph topology, and
     /// typed-fact coverage are loaded from one repeatable-read repository
     /// snapshot so a concurrent graph publication cannot produce a mixed
@@ -672,26 +651,10 @@ pub(crate) fn build_library_summary_from_dashboard_snapshot(
     let graph_ready_document_count = metrics.graph_ready;
     let graph_sparse_document_count = metrics.graph_sparse;
 
-    let mut document_counts_by_readiness = std::collections::BTreeMap::<String, i64>::new();
-    if metrics.failed > 0 {
-        document_counts_by_readiness.insert("failed".to_string(), metrics.failed);
-    }
-    let processing_total = metrics.processing + metrics.queued;
-    if processing_total > 0 {
-        document_counts_by_readiness.insert("processing".to_string(), processing_total);
-    }
-    if graph_ready_document_count > 0 {
-        document_counts_by_readiness.insert("graph_ready".to_string(), graph_ready_document_count);
-    }
-    if graph_sparse_document_count > 0 {
-        document_counts_by_readiness
-            .insert("graph_sparse".to_string(), graph_sparse_document_count);
-    }
-
     build_library_summary(
         library_id,
         LibrarySummaryInputs {
-            document_counts_by_readiness,
+            document_counts_by_status: metrics.status_counts(),
             graph_ready_document_count,
             graph_sparse_document_count,
             typed_fact_document_count: dashboard_snapshot.typed_fact_document_count,
@@ -702,7 +665,7 @@ pub(crate) fn build_library_summary_from_dashboard_snapshot(
 }
 
 struct LibrarySummaryInputs<'a> {
-    document_counts_by_readiness: std::collections::BTreeMap<String, i64>,
+    document_counts_by_status: std::collections::BTreeMap<String, i64>,
     graph_ready_document_count: i64,
     graph_sparse_document_count: i64,
     typed_fact_document_count: i64,
@@ -732,7 +695,7 @@ fn build_library_summary(
     KnowledgeLibrarySummary {
         library_id,
         graph_status,
-        document_counts_by_readiness: inputs.document_counts_by_readiness,
+        document_counts_by_status: inputs.document_counts_by_status,
         node_count: inputs.graph_snapshot.map_or(0, |snapshot| i64::from(snapshot.node_count)),
         edge_count: inputs.graph_snapshot.map_or(0, |snapshot| i64::from(snapshot.edge_count)),
         graph_ready_document_count: inputs.graph_ready_document_count,
@@ -1042,7 +1005,7 @@ mod tests {
         let summary = build_library_summary(
             Uuid::nil(),
             LibrarySummaryInputs {
-                document_counts_by_readiness: std::collections::BTreeMap::new(),
+                document_counts_by_status: std::collections::BTreeMap::new(),
                 graph_ready_document_count: 0,
                 graph_sparse_document_count: 0,
                 typed_fact_document_count: 3,
@@ -1052,5 +1015,36 @@ mod tests {
         );
 
         assert_eq!(summary.typed_fact_document_count, 3);
+    }
+
+    #[test]
+    fn library_summary_uses_status_buckets_independent_of_graph_coverage() {
+        let snapshot = repositories::content_document_list_repository::LibraryDashboardSnapshot {
+            metrics: ironrag_contracts::documents::LibraryDocumentMetrics {
+                total: 8,
+                ready: 1,
+                processing: 1,
+                queued: 1,
+                paused: 1,
+                failed: 1,
+                canceled: 1,
+                pending_materialization: 1,
+                empty: 1,
+                graph_ready: 0,
+                graph_sparse: 1,
+                readable: 2,
+                recomputed_at: chrono::Utc::now(),
+            },
+            graph_snapshot: None,
+            typed_fact_document_count: 0,
+            oldest_available_queued_job_at: None,
+        };
+        let summary = build_library_summary_from_dashboard_snapshot(Uuid::nil(), &snapshot, None);
+        assert_eq!(summary.document_counts_by_status.len(), 8);
+        for status in ironrag_contracts::documents::DocumentStatus::ALL {
+            assert_eq!(summary.document_counts_by_status.get(status.as_str()), Some(&1));
+        }
+        assert_eq!(summary.graph_sparse_document_count, 1);
+        assert!(!summary.document_counts_by_status.contains_key("graph_sparse"));
     }
 }

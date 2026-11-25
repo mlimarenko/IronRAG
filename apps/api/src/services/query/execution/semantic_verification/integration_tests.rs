@@ -44,12 +44,12 @@ fn report(
     completeness: &str,
     response: &str,
 ) -> Result<SemanticVerificationReport, SemanticValidationError> {
-    let quote =
-        json!({"sourceId":prepared.sources()[0].source_id,"quote":prepared.sources()[0].text});
-    let links = if support == "no_factual_claims" { json!([]) } else { json!([quote.clone()]) };
+    let passage = &prepared.passages()[0];
+    let link = json!({"passageId": &passage.handle});
+    let links = if support == "no_factual_claims" { json!([]) } else { json!([link.clone()]) };
     let units = prepared.units().iter().map(|unit| json!({"unitId":unit.unit_id,"support":support,"assertsDocumentAbsence":response == "correct_source_bounded_abstention","evidence":links})).collect::<Vec<_>>();
     let caveats = if completeness == "missing_essential_caveats" {
-        json!([{"description":"An essential qualification was omitted.","evidence":[quote]}])
+        json!([{"description":"An essential qualification was omitted.","evidence":[link]}])
     } else {
         json!([])
     };
@@ -352,7 +352,10 @@ async fn paid_attempt_is_retained_before_completion_failure_is_propagated() -> T
 
 #[test]
 fn preparation_refusal_remains_empty_unchecked_metadata_after_reload() -> TestResult {
-    let error = SemanticPreparationError::AnswerTooLarge;
+    let error = SemanticPreparationError::AnswerTooLarge(preparation_limit(
+        SemanticPreparationBound::AnswerUtf8Bytes,
+        MAX_ANSWER_UTF8_BYTES + 1,
+    ));
     let mut refused =
         preparation_failure_report("Q", &"x".repeat(MAX_ANSWER_UTF8_BYTES + 1), error, 1);
     bind_visible_answer(&mut refused, "A system fallback.");
@@ -418,7 +421,7 @@ fn document_character_offsets_are_converted_without_inventing_complete_scope() -
 }
 
 #[test]
-fn selected_semantic_chunk_retains_window_conditions_and_table_column_identity() -> TestResult {
+fn selected_semantic_chunk_cites_only_its_own_fragment() -> TestResult {
     use crate::infra::knowledge_rows::KnowledgeChunkRow;
     use ironrag_contracts::assistant::semantic_verification::SemanticEvidenceScope;
     let mut row: KnowledgeChunkRow = serde_json::from_value(json!({
@@ -434,11 +437,13 @@ fn selected_semantic_chunk_retains_window_conditions_and_table_column_identity()
     let prepared =
         prepare("When is restart allowed?", "Restart requires confirmation.", vec![source])?;
     let sent = prepared.request_json();
-    assert!(
-        sent["sources"][0]["text"]
-            .as_str()
-            .is_some_and(|text| text.contains("restart is forbidden"))
-    );
+    let passages = sent["sources"][0]["passages"].as_array().ok_or("missing passages")?;
+    let sent_text: String =
+        passages.iter().filter_map(|passage| passage["text"].as_str()).collect();
+    // The cited range belongs to this chunk id, which holds only its own text:
+    // the containing window is answer context, not this chunk's evidence.
+    assert!(sent_text.contains("may restart the service"));
+    assert!(!sent_text.contains("restart is forbidden"), "{sent_text}");
     assert_eq!(prepared.sources()[0].scope, SemanticEvidenceScope::SelectedExcerpt);
     row.chunk_kind = Some("table_row".into());
     row.content_text = "LP-080 | 20 GB".into();

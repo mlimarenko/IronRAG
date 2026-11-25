@@ -15,7 +15,7 @@ use super::literal_revision::{
     LiteralRevisionAttempt, LiteralRevisionPath, revise_answer_literals_if_needed,
 };
 use super::output_boundary::{
-    enforce_hard_output_boundary, selected_runtime_answer_chunks,
+    enforce_hard_output_boundary, preflight_graph_grounding, selected_runtime_answer_chunks,
     selected_runtime_grounding_evidence,
 };
 use super::preflight::{
@@ -35,6 +35,69 @@ use self::logging::{log_single_shot_accepted, log_single_shot_done, log_single_s
 
 mod logging;
 mod preflight_stages;
+
+/// Paid generation must not start on generation evidence that the verifier
+/// cannot bound. The assembly owner already trims to the budget; this is the
+/// final typed guard on the answer paths that still call a provider.
+pub(super) fn refuse_over_budget_evidence(
+    execution_id: uuid::Uuid,
+    stage: &'static str,
+    chunks: &[crate::services::query::execution::types::RuntimeMatchedChunk],
+    evidence: &crate::services::query::execution::types::AuthoritativeAnswerEvidence,
+    grounding: &crate::services::query::assistant_grounding::AssistantGroundingEvidence,
+) -> anyhow::Result<()> {
+    match crate::services::query::execution::semantic_verification::measure_selected_evidence(
+        chunks, evidence, grounding,
+    ) {
+        Ok(_) => Ok(()),
+        Err(error) => {
+            log_refused_generation(execution_id, stage, error);
+            Err(anyhow::Error::new(error)
+                .context("selected evidence exceeds the semantic verification budget"))
+        }
+    }
+}
+
+/// Reports why generation was refused, keeping the typed bound when the refusal
+/// carries one.
+fn log_refused_generation(
+    execution_id: uuid::Uuid,
+    stage: &'static str,
+    error: crate::services::query::execution::semantic_verification::SemanticPreparationError,
+) {
+    match error.limit_measurement() {
+        Some(measurement) => log_refused_generation_bound(execution_id, stage, measurement),
+        None => log_refused_generation_unverifiable(execution_id, stage, error),
+    }
+}
+
+fn log_refused_generation_bound(
+    execution_id: uuid::Uuid,
+    stage: &'static str,
+    measurement: ironrag_contracts::assistant::semantic_verification::SemanticPreparationLimit,
+) {
+    tracing::warn!(
+        stage,
+        %execution_id,
+        bound = measurement.bound.as_str(),
+        actual = measurement.actual,
+        limit = measurement.limit,
+        "refusing generation: selected evidence exceeds the semantic verifier budget"
+    );
+}
+
+fn log_refused_generation_unverifiable(
+    execution_id: uuid::Uuid,
+    stage: &'static str,
+    error: crate::services::query::execution::semantic_verification::SemanticPreparationError,
+) {
+    tracing::warn!(
+        stage,
+        %execution_id,
+        error = ?error,
+        "refusing generation: selected evidence cannot be verified"
+    );
+}
 
 /// The identity and question context shared by every grounded-answer stage.
 /// Grouping it lets each stage take one value instead of six loose arguments.
@@ -144,6 +207,19 @@ async fn try_fast_path_answer(
     let single_shot_start = std::time::Instant::now();
     let request = context.request;
     let prepared = context.prepared;
+    let fast_path_evidence_chunks = selected_runtime_answer_chunks(prepared);
+    refuse_over_budget_evidence(
+        context.snapshot_context.execution_id(),
+        "answer.fast_path_evidence_limits",
+        &fast_path_evidence_chunks,
+        &crate::services::query::execution::AuthoritativeAnswerEvidence {
+            bundle: None,
+            chunk_rows: Vec::new(),
+            structured_blocks: Vec::new(),
+            technical_facts: Vec::new(),
+        },
+        &crate::services::query::assistant_grounding::AssistantGroundingEvidence::default(),
+    )?;
     tracing::info!(
         stage = "answer.single_shot_start",
         execution_id = %context.snapshot_context.execution_id(),
@@ -155,7 +231,7 @@ async fn try_fast_path_answer(
         answer_context_chars = prepared.answer_context.chars().count(),
         "single-shot grounded-answer fast path start"
     );
-    match run_single_shot_fast_path(context, single_shot_start, provider_calls).await? {
+    match Box::pin(run_single_shot_fast_path(context, single_shot_start, provider_calls)).await? {
         SingleShotOutcome::Accepted(result) => Ok(FastPathOutcome::Accepted(*result)),
         SingleShotOutcome::Rejected(candidate) => Ok(FastPathOutcome::Escalate {
             candidate: Box::new(candidate.map(|candidate| *candidate)),
@@ -236,7 +312,13 @@ async fn run_single_shot_fast_path(
     .await;
     match single_shot_result {
         Ok(single) => {
-            finish_single_shot_fast_path(context, single, single_shot_start, provider_calls).await
+            Box::pin(finish_single_shot_fast_path(
+                context,
+                single,
+                single_shot_start,
+                provider_calls,
+            ))
+            .await
         }
         Err(error) => {
             tracing::warn!(
@@ -323,7 +405,6 @@ async fn finish_single_shot_fast_path(
             revision_question: generation_question,
             verification_question: request.effective_question,
             conversation_history: request.conversation_history_messages,
-            prepared,
             path: LiteralRevisionPath::FastPath,
         },
         &mut verification_stage,
@@ -355,7 +436,11 @@ async fn finish_single_shot_fast_path(
                 state,
                 execution: execution_context,
                 question: request.effective_question,
+                conversation_history: request.conversation_history_messages,
                 snapshot: context.snapshot_context,
+                retrieval_degradations: &prepared.structured.diagnostics.retrieval_degradations,
+                bounded_selection: prepared.evidence_selection,
+                candidate_relationships: &prepared.structured.graph_relation_references,
             },
             verification_stage,
             provider_calls,
@@ -412,8 +497,10 @@ async fn finish_preflight_override(
             intent_profile: prepared.structured.intent_profile.clone(),
             primary_answer_chunks: answer.preflight.primary_answer_chunks.clone(),
             authoritative_evidence: answer.preflight.authoritative_evidence.clone(),
-            assistant_grounding:
-                crate::services::query::assistant_grounding::AssistantGroundingEvidence::default(),
+            assistant_grounding: preflight_graph_grounding(
+                prepared,
+                &answer.preflight.prompt_context,
+            ),
             answer: override_answer,
             usage_json: serde_json::json!({
                 "deterministic": true,
@@ -430,7 +517,14 @@ async fn finish_preflight_override(
             state,
             execution: request.execution_context,
             question: request.effective_question,
+            conversation_history: request.conversation_history_messages,
             snapshot: answer.snapshot_context,
+            retrieval_degradations: &prepared.structured.diagnostics.retrieval_degradations,
+            bounded_selection: answer
+                .preflight
+                .evidence_selection_bounded
+                .then_some(answer.preflight.evidence_selection_measurement),
+            candidate_relationships: &prepared.structured.graph_relation_references,
         },
         verification_stage,
         provider_calls,
@@ -484,7 +578,7 @@ pub(super) async fn generate_answer_query_after_binding(
         snapshot_context: &snapshot_context,
     };
     let (preflight_candidate, attempted_answer_generation) =
-        match try_fast_path_answer(&fast_path_context, provider_calls).await? {
+        match Box::pin(try_fast_path_answer(&fast_path_context, provider_calls)).await? {
             FastPathOutcome::Accepted(result) => return Ok(result),
             FastPathOutcome::Escalate { candidate, attempted_answer_generation } => {
                 (*candidate, attempted_answer_generation)

@@ -26,9 +26,7 @@ use crate::{
         QueryAnswerDisposition, QueryClarification, QueryConversationState, QueryExecutionDetail,
         QueryTurnKind, QueryVerificationState, QueryVerificationWarning, resolve_top_k,
     },
-    domains::query_ir::{
-        QueryIR, QueryLanguage, VerificationLevel, literal_text_is_identifier_shaped,
-    },
+    domains::query_ir::{QueryIR, VerificationLevel, literal_text_is_identifier_shaped},
     domains::{
         agent_runtime::{
             RuntimeDecisionKind, RuntimeExecutionOwner, RuntimeStageKind, RuntimeStageState,
@@ -61,7 +59,7 @@ use crate::{
                 AgentTurnFailure, AgentTurnResult, LiteralRevisionRequest, McpToolAgentTurnInput,
                 run_literal_revision_turn, run_mcp_tool_agent_turn,
             },
-            assistant_grounding::AssistantGroundingEvidence,
+            assistant_grounding::{AgentEvidenceManifest, AssistantGroundingEvidence},
             error::QueryServiceError,
             execution::{
                 AnswerKind, AnswerQueryRequest, AnswerVerificationRequest, AnswerVisibilityKind,
@@ -98,10 +96,10 @@ use super::{
     },
     is_runtime_policy_failure_code, runtime_mode_label,
     session::{
-        build_conversation_runtime_context,
+        PriorGroundedAnswerContext, build_conversation_runtime_context,
         build_conversation_runtime_context_with_external_history, derive_conversation_title,
-        load_prior_grounded_answer_context_messages, map_conversation_row, map_execution_row,
-        map_turn_row, normalize_required_text, should_refresh_conversation_title,
+        load_prior_grounded_answer_context, map_conversation_row, map_execution_row, map_turn_row,
+        normalize_required_text, should_refresh_conversation_title,
         should_replay_prior_grounded_answer_context,
     },
 };
@@ -138,16 +136,15 @@ use agent_answer::{AgentAnswerStageInput, execute_agent_answer_stages};
 use agent_grounding::{
     AgentAnswerVerificationRequest, ensure_agent_tool_context_bundle,
     is_system_statement_passthrough, materialize_agent_grounding_from_child_execution,
-    system_statement_kind_from_child_executions, verify_agent_answer_against_tool_evidence,
+    system_statement_kind_from_child_executions,
 };
 use agent_verification::{
     agent_answer_allows_parent_model_revision,
     agent_answer_requires_parent_tool_evidence_verification, agent_has_verifiable_tool_evidence,
     agent_verification_needs_literal_revision, context_reference_set_has_grounding,
-    literal_inventory_coverage_revision_targets, literal_inventory_revision_context,
-    literal_revision_covers_required_literals, literal_revision_history_literal_coverage,
-    no_agent_tool_evidence_warnings, no_verifiable_tool_evidence_warnings, ui_agent_iteration_cap,
-    verification_state_storage_label,
+    literal_inventory_coverage_revision_targets, literal_revision_covers_required_literals,
+    literal_revision_history_literal_coverage, no_agent_tool_evidence_warnings,
+    no_verifiable_tool_evidence_warnings, ui_agent_iteration_cap, verification_state_storage_label,
 };
 use cache_coordination::{CacheCoordinationRequest, CacheFillCoordination};
 use cache_policy::{
@@ -240,7 +237,9 @@ mod test_prelude {
         },
     };
     pub(super) use crate::interfaces::http::router_support::ApiError;
-    pub(super) use crate::services::query::assistant_grounding::AssistantGroundingEvidence;
+    pub(super) use crate::services::query::assistant_grounding::{
+        AgentEvidenceManifest, AssistantGroundingEvidence,
+    };
     pub(super) use crate::services::query::error::QueryServiceError;
     pub(super) use crate::services::query::service::ExternalConversationTurn;
 

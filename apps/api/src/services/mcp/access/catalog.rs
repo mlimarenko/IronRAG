@@ -125,18 +125,66 @@ pub(crate) async fn load_library_by_catalog_ref(
     library_ref: &str,
     accepted_permissions: &[&str],
 ) -> Result<CatalogLibraryRow, ApiError> {
+    let library = load_library_row_by_catalog_ref(state, library_ref).await?;
+    authorize_library_permission(auth, library.workspace_id, library.id, accepted_permissions)?;
+    Ok(library)
+}
+
+async fn load_library_row_by_catalog_ref(
+    state: &AppState,
+    library_ref: &str,
+) -> Result<CatalogLibraryRow, ApiError> {
     let (workspace_ref, library_slug) = parse_library_catalog_ref(library_ref)?;
     let workspace = load_workspace_row_by_catalog_ref(state, &workspace_ref).await?;
-    let library = catalog_repository::get_library_by_workspace_and_slug(
+    catalog_repository::get_library_by_workspace_and_slug(
         &state.persistence.postgres,
         workspace.id,
         &library_slug,
     )
     .await
     .map_err(|error| ApiError::internal_with_log(error, "internal"))?
-    .ok_or_else(|| ApiError::resource_not_found("library", library_ref))?;
-    authorize_library_permission(auth, library.workspace_id, library.id, accepted_permissions)?;
+    .ok_or_else(|| ApiError::resource_not_found("library", library_ref))
+}
+
+pub(crate) async fn load_library_for_document_inventory(
+    auth: &AuthContext,
+    state: &AppState,
+    library_ref: &str,
+) -> Result<CatalogLibraryRow, ApiError> {
+    let library = load_library_row_by_catalog_ref(state, library_ref).await?;
+    if !auth.has_document_or_library_read_scope_for_library(
+        library.workspace_id,
+        library.id,
+        POLICY_MCP_MEMORY_READ,
+    ) {
+        return Err(ApiError::Unauthorized);
+    }
     Ok(library)
+}
+
+/// `None` admits the library; `Some` admits exactly the granted document IDs.
+pub(super) fn document_inventory_scope(
+    auth: &AuthContext,
+    workspace_id: Uuid,
+    library_id: Uuid,
+) -> Option<Vec<Uuid>> {
+    if auth.has_library_permission(workspace_id, library_id, POLICY_MCP_MEMORY_READ) {
+        return None;
+    }
+    Some(
+        auth.grants
+            .iter()
+            .filter(|grant| {
+                grant.resource_kind == "document"
+                    && grant.workspace_id == Some(workspace_id)
+                    && grant.library_id == Some(library_id)
+                    && POLICY_MCP_MEMORY_READ.contains(&grant.permission_kind.as_str())
+            })
+            .filter_map(|grant| grant.document_id)
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect(),
+    )
 }
 
 pub(crate) async fn load_sole_query_authorized_library(
@@ -642,18 +690,16 @@ pub(crate) async fn describe_library(
         auth.has_library_permission(library.workspace_id, library.id, POLICY_MCP_MEMORY_READ);
     let supports_write =
         auth.has_library_permission(library.workspace_id, library.id, POLICY_LIBRARY_WRITE);
-    let coverage = state
-        .application_services
-        .knowledge
-        .get_library_knowledge_coverage(state, library.id)
-        .await?;
-    let document_count =
-        usize::try_from(coverage.document_counts_by_readiness.values().copied().sum::<i64>())
-            .unwrap_or(usize::MAX);
-    let readable_document_count = readiness_count(&coverage, "readable")
-        .saturating_add(usize::try_from(coverage.graph_sparse_document_count).unwrap_or(usize::MAX))
-        .saturating_add(usize::try_from(coverage.graph_ready_document_count).unwrap_or(usize::MAX));
-    let processing_document_count = readiness_count(&coverage, "processing");
+    let document_ids = document_inventory_scope(auth, library.workspace_id, library.id);
+    let snapshot =
+        crate::infra::repositories::content_document_list_repository::load_library_dashboard_snapshot_for_documents(
+            &state.persistence.postgres,
+            library.id,
+            document_ids.as_deref(),
+        )
+        .await
+        .map_err(|error| ApiError::internal_with_log(error, "document inventory lookup failed"))?;
+    let metrics = &snapshot.metrics;
     let descriptor = McpLibraryDescriptor {
         library_id: library.id,
         workspace_id: library.workspace_id,
@@ -664,21 +710,18 @@ pub(crate) async fn describe_library(
             .map_err(|_| ApiError::Internal)?,
         recognition_policy: parse_library_recognition_policy(&library)?,
         ingestion_readiness: map_ingestion_readiness(ingestion_readiness),
-        document_count,
-        readable_document_count,
-        processing_document_count,
-        failed_document_count: readiness_count(&coverage, "failed"),
-        document_counts_by_readiness: coverage
-            .document_counts_by_readiness
-            .iter()
-            .map(|(kind, count)| (kind.clone(), usize::try_from(*count).unwrap_or(usize::MAX)))
+        document_count: inventory_count(metrics.total),
+        readable_document_count: inventory_count(metrics.readable),
+        processing_document_count: inventory_count(metrics.processing),
+        failed_document_count: inventory_count(metrics.failed),
+        document_counts_by_status: metrics
+            .status_counts()
+            .into_iter()
+            .map(|(status, count)| (status, inventory_count(count)))
             .collect(),
-        graph_ready_document_count: usize::try_from(coverage.graph_ready_document_count)
-            .unwrap_or(usize::MAX),
-        graph_sparse_document_count: usize::try_from(coverage.graph_sparse_document_count)
-            .unwrap_or(usize::MAX),
-        typed_fact_document_count: usize::try_from(coverage.typed_fact_document_count)
-            .unwrap_or(usize::MAX),
+        graph_ready_document_count: inventory_count(metrics.graph_ready),
+        graph_sparse_document_count: inventory_count(metrics.graph_sparse),
+        typed_fact_document_count: inventory_count(snapshot.typed_fact_document_count),
         supports_search,
         supports_read: auth.has_document_or_library_read_scope_for_library(
             library.workspace_id,
@@ -699,16 +742,8 @@ fn map_ingestion_readiness(
     }
 }
 
-fn readiness_count(
-    coverage: &crate::domains::content::LibraryKnowledgeCoverage,
-    readiness_kind: &str,
-) -> usize {
-    coverage
-        .document_counts_by_readiness
-        .get(readiness_kind)
-        .copied()
-        .and_then(|count| usize::try_from(count).ok())
-        .unwrap_or_default()
+fn inventory_count(count: i64) -> usize {
+    usize::try_from(count.max(0)).unwrap_or(usize::MAX)
 }
 
 #[cfg(test)]
@@ -758,6 +793,39 @@ mod tests {
             is_system_admin: false,
             system_role: None,
         }
+    }
+
+    #[test]
+    fn inventory_scope_distinguishes_library_document_and_no_read_grants() {
+        let workspace_id = Uuid::from_u128(10);
+        let library_id = Uuid::from_u128(11);
+        let document_id = Uuid::from_u128(12);
+        let broad = auth_with_grants(vec![grant(
+            100,
+            "library",
+            Some(workspace_id),
+            Some(library_id),
+            PERMISSION_LIBRARY_READ,
+        )]);
+        assert_eq!(document_inventory_scope(&broad, workspace_id, library_id), None);
+
+        let mut document_grant =
+            grant(101, "document", Some(workspace_id), Some(library_id), PERMISSION_LIBRARY_READ);
+        document_grant.document_id = Some(document_id);
+        document_grant.resource_id = document_id;
+        let restricted = auth_with_grants(vec![document_grant.clone(), document_grant]);
+        assert_eq!(
+            document_inventory_scope(&restricted, workspace_id, library_id),
+            Some(vec![document_id]),
+        );
+        assert_eq!(
+            document_inventory_scope(&restricted, workspace_id, Uuid::from_u128(13)),
+            Some(Vec::new()),
+        );
+        assert_eq!(
+            document_inventory_scope(&auth_with_grants(Vec::new()), workspace_id, library_id),
+            Some(Vec::new()),
+        );
     }
 
     #[test]

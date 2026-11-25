@@ -342,6 +342,38 @@ DDL и повреждённый current certificate вызывают отказ 
 отказ сбросом данных или правкой SQLx ledger. Наличие команды не является
 разрешением применить её к существующей установке.
 
+### `migrate text-publication-schema`
+
+Разрешает чтение актуальной допущенной revision после подготовки текста, до
+завершения необязательного обогащения векторами и графом. View сохраняет проверки
+документа, scope, текущего head, visibility intent и replacement identity.
+Потребители векторов и графа отдельно проверяют готовность своего канала.
+
+Точный predecessor - user-preference baseline
+`e6749be6a755648961fd13e26a9090c9df0f087d1860ab10a7d40cec71ffc439eb77122dca45c1c25f94998a7a4e65af`.
+Сначала пройдите все применимые более ранние guarded hops.
+
+```bash
+ironrag-maintenance migrate text-publication-schema --json
+# После проверки dry-run, резервных копий и окна смены runtime:
+ironrag-maintenance migrate text-publication-schema --apply --json
+```
+
+Перед применением остановите и дренируйте API, workers и maintenance writers.
+Команда и новый runtime должны использовать новый backend image: старый бинарь
+не принимает новый checksum baseline. Сохраните PostgreSQL, векторное хранилище,
+исходные файлы и ключи credentials. Переход заменяет только view и проверяет его
+точное определение и сохраненные admission guards до compare-and-set checksum.
+Он не возвращает исторические head, не запускает re-ingest и не меняет финансовый
+допуск.
+
+Dry-run ничего не записывает. Неизвестный checksum, измененный predecessor,
+заранее примененный view или отказ целевого certificate не допускают stamp.
+Повторная команда проверяет записанную ревизию и возвращает `alreadyCurrent`,
+не восстанавливая прежний view. Не снимайте schema-rollout fence до приемки
+целевой схемы и точного артефакта нового runtime. Не обходите отказ ручной
+правкой migration ledger.
+
 ## `audit` — проверка без изменений
 
 Подкоманды `audit` отвечают на вопрос «что происходит» и не изменяют данные.
@@ -518,16 +550,12 @@ ironrag-maintenance gc stale-evidence --library <uuid> --json
 
 ### `repair null-heads`
 
-**Что делает.** Для каждого документа с `readable_revision_id IS
-NULL AND active_revision_id IS NULL`, у которого есть хотя бы одна
-revision с persisted chunks, продвигает самую свежую chunk-bearing
-revision в head. Использует тот же `promote_document_head`, что
-ingest pipeline в success-flow, поэтому результат неотличим от
-свежего успешного ingest. Идемпотентно.
-
-**Когда запускать.** Single-shot восстановление за один проход
-после известного инцидента. Когда нужно отработать каждый
-eligible-документ сразу, без rate-limit.
+**Что делает.** Находит подходящие документы с пустым head и сохраненными
+chunks и перепроверяет их под lifecycle locks. Даже подходящую revision
+команда не продвигает: у исторической revision нет текущего владельца
+публикации. Публикация принадлежит обычному циклу materialization
+источника и ingest. `promoted` остается равным нулю; успешное выполнение
+команды не означает, что документы стали доступны для чтения.
 
 **Пример.**
 
@@ -537,25 +565,23 @@ ironrag-maintenance repair null-heads --library <uuid> --json
 
 ### `repair null-heads-auto`
 
-**Что делает.** То же recovery-действие, что `repair null-heads`,
-но per-document результат записывается на
-`content_document_head`, чтобы flaky upstream не сжёг recovery-
-бюджет на одном документе:
+**Что делает.** Отбирает кандидатов с учетом cooldown и dead-letter и
+вызывает ту же операцию без продвижения revision. Такой no-op не
+записывает успех или ошибку. При настоящих ошибках используются
+recovery-счетчики в `content_document_head`:
 
 * Документ, тронутый за последний час, пропускается (cooldown).
-* На success `recovery_attempts_count` сбрасывается,
-  `last_recovery_attempt_at = now()`.
-* На failure `recovery_attempts_count` инкрементируется, если
+* Подходящий no-op не меняет `recovery_attempts_count` и
+  `last_recovery_attempt_at`: записывать нечего, продвижения нет.
+* При настоящей ошибке `recovery_attempts_count` инкрементируется, если
   новая ошибка совпадает с `last_recovery_error_code`; иначе
   счётчик сбрасывается в 1.
 * Три подряд same-error failure'а ставят `dead_letter_at`,
   документ выпадает из будущих авто-проходов до тех пор, пока
   оператор не снимет метку.
 
-**Когда запускать.** Перезапускаешь recovery на одну библиотеку
-циклами или из cron. Везде, где flaky внешняя зависимость может
-ронять один и тот же документ повторно — rate-limit превращает
-это в управляемый backlog вместо tight retry storm.
+Не используйте команду для повторной публикации исторического содержимого.
+Актуальное содержимое публикуется через разрешенный источник и его lifecycle.
 
 **Пример.**
 
@@ -563,9 +589,7 @@ ironrag-maintenance repair null-heads --library <uuid> --json
 ironrag-maintenance repair null-heads-auto --library <uuid> --json
 ```
 
-Пример вывода: `"promoted": 24, "failed": 0, "dead_lettered": 0,
-"cooldown_skipped": 0` — за этот проход чисто восстановлено 24
-документа; следующие проходы в течение часа эти 24 пропустят.
+`promoted: 0` не отличает no-op подходящих кандидатов от прохода без них.
 
 ### `repair clear-recovery-dead-letter`
 

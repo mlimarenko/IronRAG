@@ -3,7 +3,7 @@ use ironrag_backend::services::maintenance::{
     baseline_delta, billing_document_read_schema::migrate_billing_document_read_schema,
     billing_knowledge_search_schema::migrate_billing_knowledge_search_schema,
     provider_source_generation_fence_schema::migrate_provider_source_generation_fence,
-    user_preference_schema::migrate_user_preference_schema as migrate,
+    text_publication_schema, user_preference_schema::migrate_user_preference_schema as migrate,
 };
 
 const DELTA_SQL: &str = include_str!("../../../ops/apply-user-preference-schema.sql");
@@ -76,6 +76,17 @@ async fn additive_user_preference_schema_requires_exact_predecessor_and_cascades
         assert_eq!(
             hex::encode(baseline_checksum(&pool).await?),
             baseline_delta::BASELINE_REVISION_USER_PREFERENCE_SHA384
+        );
+
+        // Current readiness is the text-publication revision, so the documented
+        // additive path advances its final hop before the readiness certificate
+        // can stand for this database.
+        let publication =
+            text_publication_schema::migrate_text_publication_schema(&pool, true).await?;
+        assert!(publication.schema_applied && !publication.already_current);
+        assert_eq!(
+            hex::encode(baseline_checksum(&pool).await?),
+            baseline_delta::BASELINE_REVISION_TEXT_PUBLICATION_SHA384
         );
         persistence::validate_baseline_objects_present(&pool).await?;
 

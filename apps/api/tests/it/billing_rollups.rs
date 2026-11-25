@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use anyhow::{Context, Result};
 use chrono::Utc;
 use rust_decimal::Decimal;
@@ -13,7 +15,13 @@ use ironrag_backend::{
     infra::{
         persistence::Persistence,
         repositories::{
-            billing_repository, content_document_list_repository::DocumentListSortColumn,
+            ai_repository::{
+                AdmittedCaller, CALLER_BINDING_FORMAT_VERSION, CallerBinding, FinancialAdmission,
+                FinancialAdmissionState, FinancialModelAllowance, FinancialRequestEnvelope,
+                RequiredFinancialScope,
+            },
+            billing_repository,
+            content_document_list_repository::DocumentListSortColumn,
             query_repository, runtime_repository,
         },
     },
@@ -23,9 +31,10 @@ use ironrag_backend::{
         ingest::service::{AdmitIngestJobCommand, INGEST_STAGE_EMBED_CHUNK, LeaseAttemptCommand},
         ops::billing::{
             CaptureExecutionBillingCommand, CaptureIngestAttemptBillingCommand,
-            CaptureQueryExecutionBillingCommand, ReserveExecutionProviderCallCommand,
+            CaptureQueryExecutionBillingCommand,
         },
     },
+    shared::{provider_http::DispatchCaller, provider_send::ProviderSendAttribution},
 };
 
 struct TempDatabase {
@@ -346,6 +355,95 @@ async fn openai_chat_catalog_ids(postgres: &PgPool) -> Result<(Uuid, Uuid)> {
     Ok((model.provider_id, model.model_id))
 }
 
+/// The attribution of one test-owned provider call in the fixture's scope.
+struct TestProviderCall<'a> {
+    owning_execution_kind: &'a str,
+    owning_execution_id: Uuid,
+    runtime_execution_id: Option<Uuid>,
+    runtime_task_kind: Option<&'a str>,
+    provider_catalog_id: Uuid,
+    model_catalog_id: Uuid,
+    call_kind: &'a str,
+}
+
+/// Writes the one durable row a send owns, in the `started` state every
+/// settlement under test expects, at the attribution the test names.
+///
+/// The product writer of that row is the physical-send admission; a test that
+/// only exercises settlement names the row itself instead of routing a paid
+/// request through an admission it does not mean to test.
+async fn write_provider_call(
+    fixture: &BillingRollupsFixture,
+    provider_call_id: Uuid,
+    call: TestProviderCall<'_>,
+) -> Result<Uuid> {
+    billing_repository::create_provider_call(
+        &fixture.state.persistence.postgres,
+        &billing_repository::NewBillingProviderCall {
+            id: provider_call_id,
+            workspace_id: fixture.workspace_id,
+            library_id: fixture.library_id,
+            binding_id: None,
+            owning_execution_kind: call.owning_execution_kind,
+            owning_execution_id: call.owning_execution_id,
+            runtime_execution_id: call.runtime_execution_id,
+            runtime_task_kind: call.runtime_task_kind,
+            provider_catalog_id: call.provider_catalog_id,
+            model_catalog_id: call.model_catalog_id,
+            call_kind: call.call_kind,
+            call_state: "started",
+            completed_at: None,
+        },
+    )
+    .await
+    .with_context(|| format!("failed to write provider call {provider_call_id}"))?;
+    Ok(provider_call_id)
+}
+
+async fn count_provider_calls(
+    postgres: &PgPool,
+    owning_execution_kind: &str,
+    owning_execution_id: Uuid,
+) -> Result<i64> {
+    let count = sqlx::query_scalar::<_, i64>(
+        "select count(*)::bigint
+         from billing_provider_call
+         where owning_execution_kind = $1::billing_owning_execution_kind
+           and owning_execution_id = $2",
+    )
+    .bind(owning_execution_kind)
+    .bind(owning_execution_id)
+    .fetch_one(postgres)
+    .await
+    .context("failed to count provider call rows")?;
+    Ok(count)
+}
+
+/// The grant the product reads back from the provider row, as typed data.
+fn decode_admission(value: serde_json::Value) -> Result<FinancialAdmission> {
+    Ok(serde_json::from_value(value)?)
+}
+
+/// The attribution of one physical send of the fixture's query answer call.
+fn send_attribution(
+    fixture: &BillingRollupsFixture,
+    provider_catalog_id: Uuid,
+    model_catalog_id: Uuid,
+) -> ProviderSendAttribution {
+    ProviderSendAttribution {
+        workspace_id: fixture.workspace_id,
+        library_id: fixture.library_id,
+        owning_execution_kind: "query_execution".to_string(),
+        owning_execution_id: fixture.query_execution_id,
+        call_kind: "query_answer".to_string(),
+        binding_id: None,
+        provider_catalog_id,
+        model_catalog_id,
+        runtime_execution_id: Some(fixture.query_runtime_execution_id),
+        runtime_task_kind: Some(RuntimeTaskKind::QueryAnswer.as_str()),
+    }
+}
+
 struct SyntheticDisjointPricingCatalog {
     provider_catalog_id: Uuid,
     model_catalog_id: Uuid,
@@ -441,6 +539,68 @@ async fn create_synthetic_disjoint_pricing_catalog(
         provider_kind,
         model_name,
     })
+}
+
+/// Publishes an active chat admission for the synthetic catalog and returns the
+/// scope a physical send must be admitted under.
+async fn publish_synthetic_chat_admission(
+    postgres: &PgPool,
+    catalog: &SyntheticDisjointPricingCatalog,
+    endpoint: &str,
+    mutation_id: Uuid,
+    principal_id: Uuid,
+) -> Result<(RequiredFinancialScope, Uuid)> {
+    let mut admission = FinancialAdmission {
+        version: 1,
+        provider_id: catalog.provider_catalog_id,
+        scope_id: Uuid::now_v7(),
+        policy_fingerprint: String::new(),
+        cutoff: Utc::now() + chrono::Duration::hours(1),
+        state: FinancialAdmissionState::Active,
+        grant_microusd: 20,
+        global_limit: 2,
+        global_consumed: 0,
+        models: BTreeMap::from([(
+            catalog.model_name.clone(),
+            FinancialModelAllowance {
+                endpoint: endpoint.to_string(),
+                envelope: FinancialRequestEnvelope::Chat {
+                    allowed_service_tiers: vec!["default".to_string()],
+                    max_input_bytes: 4096,
+                    max_output_tokens: 1024,
+                    max_input_tokens: 100_000,
+                    media: None,
+                },
+                attempt_microusd: 10,
+                limit: 2,
+                consumed: 0,
+            },
+        )]),
+        caller_binding: Some(CallerBinding {
+            format_version: CALLER_BINDING_FORMAT_VERSION,
+            generation: 1,
+            callers: vec![AdmittedCaller::MutationOrigin { mutation_id, principal_id }],
+        }),
+        history: Vec::new(),
+    };
+    admission.policy_fingerprint = admission.immutable_fingerprint()?;
+    let required_scope = RequiredFinancialScope {
+        provider_id: admission.provider_id,
+        scope_id: admission.scope_id,
+        policy_fingerprint: admission.policy_fingerprint.clone(),
+    };
+    let published = sqlx::query(
+        "update ai_provider_catalog
+         set capability_flags_json =
+             jsonb_set(capability_flags_json, '{financialAdmission}', $2::jsonb, true)
+         where id = $1",
+    )
+    .bind(catalog.provider_catalog_id)
+    .bind(serde_json::to_value(&admission)?)
+    .execute(postgres)
+    .await?;
+    assert_eq!(published.rows_affected(), 1);
+    Ok((required_scope, catalog.provider_catalog_id))
 }
 
 fn build_test_state(mut settings: Settings, postgres: PgPool) -> Result<AppState> {
@@ -652,28 +812,23 @@ async fn long_context_pricing_boundary_is_persisted_on_provider_call_charges() -
                 Decimal::new(101, 5),
             ),
         ] {
-            let provider_call_id = billing
-                .reserve_execution_provider_call(
-                    &fixture.state,
-                    ReserveExecutionProviderCallCommand {
-                        workspace_id: fixture.workspace_id,
-                        library_id: fixture.library_id,
-                        owning_execution_kind: "query_execution".to_string(),
-                        owning_execution_id: fixture.query_execution_id,
-                        runtime_execution_id: Some(fixture.query_runtime_execution_id),
-                        runtime_task_kind: Some(RuntimeTaskKind::QueryAnswer),
-                        binding_id: None,
-                        provider_catalog_id: catalog.provider_catalog_id,
-                        model_catalog_id: catalog.model_catalog_id,
-                        call_kind: "query_answer".to_string(),
-                    },
-                )
-                .await
-                .with_context(|| {
-                    format!(
-                        "failed to reserve provider call at {request_input_tokens} request tokens"
-                    )
-                })?;
+            let provider_call_id = write_provider_call(
+                &fixture,
+                Uuid::now_v7(),
+                TestProviderCall {
+                    owning_execution_kind: "query_execution",
+                    owning_execution_id: fixture.query_execution_id,
+                    runtime_execution_id: Some(fixture.query_runtime_execution_id),
+                    runtime_task_kind: Some(RuntimeTaskKind::QueryAnswer.as_str()),
+                    provider_catalog_id: catalog.provider_catalog_id,
+                    model_catalog_id: catalog.model_catalog_id,
+                    call_kind: "query_answer",
+                },
+            )
+            .await
+            .with_context(|| {
+                format!("failed to write provider call at {request_input_tokens} request tokens")
+            })?;
             billing
                 .complete_reserved_provider_call(
                     &fixture.state,
@@ -827,54 +982,27 @@ async fn authoritative_billing_rollups_cover_query_and_ingest_executions() -> Re
 
         let provider_catalog_id = query_model.provider_id;
         let model_catalog_id = query_model.model_id;
-        let requested_provider_call_id = Uuid::now_v7();
-        let reservation_command = ReserveExecutionProviderCallCommand {
-            workspace_id: fixture.workspace_id,
-            library_id: fixture.library_id,
-            owning_execution_kind: "query_execution".to_string(),
-            owning_execution_id: fixture.query_execution_id,
-            runtime_execution_id: Some(fixture.query_rerank_runtime_execution_id),
-            runtime_task_kind: Some(RuntimeTaskKind::QueryRerank),
-            binding_id: None,
-            provider_catalog_id,
-            model_catalog_id,
-            call_kind: "query_rerank".to_string(),
-        };
-        let rerank_provider_call_id = billing
-            .reserve_execution_provider_call_with_id(
-                &fixture.state,
-                requested_provider_call_id,
-                reservation_command.clone(),
-            )
-            .await
-            .context("failed to reserve rerank billing")?;
-        assert_eq!(rerank_provider_call_id, requested_provider_call_id);
-        let repeated_reservation_id = billing
-            .reserve_execution_provider_call_with_id(
-                &fixture.state,
-                requested_provider_call_id,
-                reservation_command.clone(),
-            )
-            .await
-            .context("same stable provider-call reservation must be idempotent")?;
-        assert_eq!(repeated_reservation_id, requested_provider_call_id);
-        let mut mismatched_reservation = reservation_command;
-        mismatched_reservation.call_kind = "query_answer".to_string();
-        let mismatch = billing
-            .reserve_execution_provider_call_with_id(
-                &fixture.state,
-                requested_provider_call_id,
-                mismatched_reservation,
-            )
-            .await
-            .expect_err("a stable event id must not alias different attribution");
-        assert!(mismatch.to_string().contains("different or terminal event"));
+        let rerank_provider_call_id = write_provider_call(
+            &fixture,
+            Uuid::now_v7(),
+            TestProviderCall {
+                owning_execution_kind: "query_execution",
+                owning_execution_id: fixture.query_execution_id,
+                runtime_execution_id: Some(fixture.query_rerank_runtime_execution_id),
+                runtime_task_kind: Some(RuntimeTaskKind::QueryRerank.as_str()),
+                provider_catalog_id,
+                model_catalog_id,
+                call_kind: "query_rerank",
+            },
+        )
+        .await
+        .context("failed to write rerank billing row")?;
         let reserved = billing_repository::get_provider_call_by_id(
             &fixture.state.persistence.postgres,
             rerank_provider_call_id,
         )
         .await?
-        .context("reserved rerank provider call missing")?;
+        .context("rerank provider call missing")?;
         assert_eq!(reserved.call_state, "started");
 
         let rerank_usage = serde_json::json!({
@@ -1117,28 +1245,20 @@ async fn provider_completion_retries_are_atomic_and_idempotent_across_commit_amb
             "input_tokens": 1000,
             "total_tokens": 1000,
         });
-        let reserve_command = || ReserveExecutionProviderCallCommand {
-            workspace_id: fixture.workspace_id,
-            library_id: fixture.library_id,
-            owning_execution_kind: "query_execution".to_string(),
+        let call = || TestProviderCall {
+            owning_execution_kind: "query_execution",
             owning_execution_id: fixture.query_execution_id,
             runtime_execution_id: Some(fixture.query_rerank_runtime_execution_id),
-            runtime_task_kind: Some(RuntimeTaskKind::QueryRerank),
-            binding_id: None,
+            runtime_task_kind: Some(RuntimeTaskKind::QueryRerank.as_str()),
             provider_catalog_id,
             model_catalog_id,
-            call_kind: "query_rerank".to_string(),
+            call_kind: "query_rerank",
         };
 
         let precommit_failure_id = Uuid::now_v7();
-        billing
-            .reserve_execution_provider_call_with_id(
-                &fixture.state,
-                precommit_failure_id,
-                reserve_command(),
-            )
+        write_provider_call(&fixture, precommit_failure_id, call())
             .await
-            .context("failed to reserve the pre-commit fault event")?;
+            .context("failed to write the pre-commit fault event")?;
         sqlx::query(AssertSqlSafe(format!(
             "create function test_fail_provider_completion() returns trigger
              language plpgsql
@@ -1260,14 +1380,9 @@ async fn provider_completion_retries_are_atomic_and_idempotent_across_commit_amb
         );
 
         let transient_failure_id = Uuid::now_v7();
-        billing
-            .reserve_execution_provider_call_with_id(
-                &fixture.state,
-                transient_failure_id,
-                reserve_command(),
-            )
+        write_provider_call(&fixture, transient_failure_id, call())
             .await
-            .context("failed to reserve the bounded-retry fault event")?;
+            .context("failed to write the bounded-retry fault event")?;
         sqlx::query("create sequence test_provider_completion_fault_sequence start 1")
             .execute(postgres)
             .await?;
@@ -1338,7 +1453,7 @@ async fn provider_completion_retries_are_atomic_and_idempotent_across_commit_amb
 
 #[tokio::test]
 #[ignore = "requires local postgres with required extensions"]
-async fn distinct_reserved_calls_serialize_rollup_and_terminal_failures_refresh_count() -> Result<()>
+async fn distinct_provider_calls_serialize_rollup_and_terminal_failures_refresh_count() -> Result<()>
 {
     let fixture = BillingRollupsFixture::create_with_max_connections(4).await?;
 
@@ -1346,26 +1461,21 @@ async fn distinct_reserved_calls_serialize_rollup_and_terminal_failures_refresh_
         let billing = &fixture.state.application_services.billing;
         let (provider_catalog_id, model_catalog_id) =
             openai_chat_catalog_ids(&fixture.state.persistence.postgres).await?;
-        let reserve = || ReserveExecutionProviderCallCommand {
-            workspace_id: fixture.workspace_id,
-            library_id: fixture.library_id,
-            owning_execution_kind: "query_execution".to_string(),
+        let call = || TestProviderCall {
+            owning_execution_kind: "query_execution",
             owning_execution_id: fixture.query_execution_id,
             runtime_execution_id: Some(fixture.query_rerank_runtime_execution_id),
-            runtime_task_kind: Some(RuntimeTaskKind::QueryRerank),
-            binding_id: None,
+            runtime_task_kind: Some(RuntimeTaskKind::QueryRerank.as_str()),
             provider_catalog_id,
             model_catalog_id,
-            call_kind: "query_rerank".to_string(),
+            call_kind: "query_rerank",
         };
-        let first_call_id = billing
-            .reserve_execution_provider_call(&fixture.state, reserve())
+        let first_call_id = write_provider_call(&fixture, Uuid::now_v7(), call())
             .await
-            .context("failed to reserve first concurrent provider call")?;
-        let second_call_id = billing
-            .reserve_execution_provider_call(&fixture.state, reserve())
+            .context("failed to write first concurrent provider call")?;
+        let second_call_id = write_provider_call(&fixture, Uuid::now_v7(), call())
             .await
-            .context("failed to reserve second concurrent provider call")?;
+            .context("failed to write second concurrent provider call")?;
         let usage = serde_json::json!({"input_tokens": 1000, "total_tokens": 1000});
 
         let (first, second) = tokio::join!(
@@ -1400,10 +1510,9 @@ async fn distinct_reserved_calls_serialize_rollup_and_terminal_failures_refresh_
         assert_eq!(repaired.total_cost, priced.total_cost);
         assert_eq!(repaired.provider_call_count, 2);
 
-        let failed_call_id = billing
-            .reserve_execution_provider_call(&fixture.state, reserve())
+        let failed_call_id = write_provider_call(&fixture, Uuid::now_v7(), call())
             .await
-            .context("failed to reserve terminal failure provider call")?;
+            .context("failed to write terminal failure provider call")?;
         billing
             .finish_reserved_provider_call_without_usage(&fixture.state, failed_call_id, "failed")
             .await
@@ -1414,9 +1523,17 @@ async fn distinct_reserved_calls_serialize_rollup_and_terminal_failures_refresh_
             .await
             .context("failed to load refreshed execution cost")?;
         assert_eq!(refreshed.total_cost, priced.total_cost);
+        // The terminal attempt is durable but never settled: it leaves the
+        // settled count at two and appears as one unknown liability. The
+        // refreshed value proves the derived rollup was rebuilt from the ledger
+        // instead of serving the stale row injected above.
         assert_eq!(
-            refreshed.provider_call_count, 3,
-            "terminal provider attempts must refresh the derived execution rollup",
+            refreshed.provider_call_count, 2,
+            "a terminal provider call without usage is not a settled provider call",
+        );
+        assert_eq!(
+            refreshed.unpriced_provider_call_count, 1,
+            "terminal provider attempts must refresh the derived execution rollup and keep the unknown liability",
         );
         Ok(())
     }
@@ -1435,24 +1552,21 @@ async fn durable_dirty_generation_recovers_a_crash_before_derived_rollup() -> Re
         let billing = &fixture.state.application_services.billing;
         let (provider_catalog_id, model_catalog_id) =
             openai_chat_catalog_ids(&fixture.state.persistence.postgres).await?;
-        let provider_call_id = billing
-            .reserve_execution_provider_call(
-                &fixture.state,
-                ReserveExecutionProviderCallCommand {
-                    workspace_id: fixture.workspace_id,
-                    library_id: fixture.library_id,
-                    owning_execution_kind: "query_execution".to_string(),
-                    owning_execution_id: fixture.query_execution_id,
-                    runtime_execution_id: Some(fixture.query_rerank_runtime_execution_id),
-                    runtime_task_kind: Some(RuntimeTaskKind::QueryRerank),
-                    binding_id: None,
-                    provider_catalog_id,
-                    model_catalog_id,
-                    call_kind: "query_rerank".to_string(),
-                },
-            )
-            .await
-            .context("failed to reserve durable-rollup provider call")?;
+        let provider_call_id = write_provider_call(
+            &fixture,
+            Uuid::now_v7(),
+            TestProviderCall {
+                owning_execution_kind: "query_execution",
+                owning_execution_id: fixture.query_execution_id,
+                runtime_execution_id: Some(fixture.query_rerank_runtime_execution_id),
+                runtime_task_kind: Some(RuntimeTaskKind::QueryRerank.as_str()),
+                provider_catalog_id,
+                model_catalog_id,
+                call_kind: "query_rerank",
+            },
+        )
+        .await
+        .context("failed to write durable-rollup provider call")?;
         let original = billing
             .complete_reserved_provider_call(
                 &fixture.state,
@@ -1563,24 +1677,21 @@ async fn historical_query_billing_repairs_after_conversation_retention_deletes_e
         let billing = &fixture.state.application_services.billing;
         let (provider_catalog_id, model_catalog_id) =
             openai_chat_catalog_ids(&fixture.state.persistence.postgres).await?;
-        let provider_call_id = billing
-            .reserve_execution_provider_call(
-                &fixture.state,
-                ReserveExecutionProviderCallCommand {
-                    workspace_id: fixture.workspace_id,
-                    library_id: fixture.library_id,
-                    owning_execution_kind: "query_execution".to_string(),
-                    owning_execution_id: fixture.query_execution_id,
-                    runtime_execution_id: Some(fixture.query_runtime_execution_id),
-                    runtime_task_kind: Some(RuntimeTaskKind::QueryAnswer),
-                    binding_id: None,
-                    provider_catalog_id,
-                    model_catalog_id,
-                    call_kind: "query_answer".to_string(),
-                },
-            )
-            .await
-            .context("failed to reserve retained-history provider call")?;
+        let provider_call_id = write_provider_call(
+            &fixture,
+            Uuid::now_v7(),
+            TestProviderCall {
+                owning_execution_kind: "query_execution",
+                owning_execution_id: fixture.query_execution_id,
+                runtime_execution_id: Some(fixture.query_runtime_execution_id),
+                runtime_task_kind: Some(RuntimeTaskKind::QueryAnswer.as_str()),
+                provider_catalog_id,
+                model_catalog_id,
+                call_kind: "query_answer",
+            },
+        )
+        .await
+        .context("failed to write retained-history provider call")?;
         let original = billing
             .complete_reserved_provider_call(
                 &fixture.state,
@@ -2260,23 +2371,19 @@ async fn stale_provider_call_reaper_is_bounded_concurrent_and_idempotent() -> Re
         let billing = &fixture.state.application_services.billing;
         let (provider_catalog_id, model_catalog_id) =
             openai_chat_catalog_ids(&fixture.state.persistence.postgres).await?;
-        let reserve = || ReserveExecutionProviderCallCommand {
-            workspace_id: fixture.workspace_id,
-            library_id: fixture.library_id,
-            owning_execution_kind: "query_execution".to_string(),
+        let call = || TestProviderCall {
+            owning_execution_kind: "query_execution",
             owning_execution_id: fixture.query_execution_id,
             runtime_execution_id: Some(fixture.query_rerank_runtime_execution_id),
-            runtime_task_kind: Some(RuntimeTaskKind::QueryRerank),
-            binding_id: None,
+            runtime_task_kind: Some(RuntimeTaskKind::QueryRerank.as_str()),
             provider_catalog_id,
             model_catalog_id,
-            call_kind: "query_rerank".to_string(),
+            call_kind: "query_rerank",
         };
 
-        let terminal_call_id = billing
-            .reserve_execution_provider_call(&fixture.state, reserve())
+        let terminal_call_id = write_provider_call(&fixture, Uuid::now_v7(), call())
             .await
-            .context("failed to reserve terminal control provider call")?;
+            .context("failed to write terminal control provider call")?;
         billing
             .finish_reserved_provider_call_without_usage(
                 &fixture.state,
@@ -2289,16 +2396,14 @@ async fn stale_provider_call_reaper_is_bounded_concurrent_and_idempotent() -> Re
         let mut stale_call_ids = Vec::with_capacity(3);
         for _ in 0..3 {
             stale_call_ids.push(
-                billing
-                    .reserve_execution_provider_call(&fixture.state, reserve())
+                write_provider_call(&fixture, Uuid::now_v7(), call())
                     .await
-                    .context("failed to reserve stale provider call")?,
+                    .context("failed to write stale provider call")?,
             );
         }
-        let fresh_call_id = billing
-            .reserve_execution_provider_call(&fixture.state, reserve())
+        let fresh_call_id = write_provider_call(&fixture, Uuid::now_v7(), call())
             .await
-            .context("failed to reserve fresh provider call")?;
+            .context("failed to write fresh provider call")?;
 
         let mut old_call_ids = stale_call_ids.clone();
         old_call_ids.push(terminal_call_id);
@@ -2381,9 +2486,18 @@ async fn stale_provider_call_reaper_is_bounded_concurrent_and_idempotent() -> Re
             .get_execution_cost(&fixture.state, "query_execution", fixture.query_execution_id)
             .await
             .context("failed to load reaper-refreshed execution cost")?;
+        // No attempt completed, so the settled count stays zero, while every one
+        // of the five reservations stays durable as unknown liability. That
+        // split is what proves the bounded unique-execution repair covered the
+        // terminal control call, the three reaped reservations and the fresh
+        // active one instead of reporting an empty rollup.
         assert_eq!(
-            refreshed.provider_call_count, 5,
-            "the bounded unique-execution repair must include every terminal and active attempt",
+            refreshed.provider_call_count, 0,
+            "no reservation completed, so no call is settled",
+        );
+        assert_eq!(
+            refreshed.unpriced_provider_call_count, 5,
+            "the bounded unique-execution repair must keep every terminal and active attempt as unpriced liability",
         );
         Ok(())
     }
@@ -2395,40 +2509,41 @@ async fn stale_provider_call_reaper_is_bounded_concurrent_and_idempotent() -> Re
 
 #[tokio::test]
 #[ignore = "requires local postgres with required extensions"]
-async fn execution_cost_returns_zero_rollup_for_ingest_attempt_without_provider_calls() -> Result<()>
-{
+async fn execution_cost_requires_measured_provider_call_evidence() -> Result<()> {
     let fixture = BillingRollupsFixture::create().await?;
 
     let result = async {
         let billing = &fixture.state.application_services.billing;
-        let zero_cost = billing
+        // An execution with no provider call has no cost evidence: the read is an
+        // explicit absence, never a fabricated 0 / "USD" / complete row.
+        let missing = billing
             .get_execution_cost(&fixture.state, "ingest_attempt", fixture.ingest_attempt_id)
-            .await
-            .context("failed to load zero-cost ingest execution")?;
-        assert_eq!(zero_cost.total_cost, Decimal::ZERO);
-        assert_eq!(zero_cost.provider_call_count, 0);
-        assert_eq!(zero_cost.currency_code, "USD");
+            .await;
+        assert!(
+            matches!(
+                missing,
+                Err(ironrag_backend::interfaces::http::router_support::ApiError::NotFound(_))
+            ),
+            "a missing provider-call observation must not be served as a measured zero"
+        );
 
         let (provider_catalog_id, model_catalog_id) =
             openai_chat_catalog_ids(&fixture.state.persistence.postgres).await?;
-        let failed_call_id = billing
-            .reserve_execution_provider_call(
-                &fixture.state,
-                ReserveExecutionProviderCallCommand {
-                    workspace_id: fixture.workspace_id,
-                    library_id: fixture.library_id,
-                    owning_execution_kind: "ingest_attempt".to_string(),
-                    owning_execution_id: fixture.ingest_attempt_id,
-                    runtime_execution_id: None,
-                    runtime_task_kind: None,
-                    binding_id: None,
-                    provider_catalog_id,
-                    model_catalog_id,
-                    call_kind: "extract_graph".to_string(),
-                },
-            )
-            .await
-            .context("failed to reserve zero-usage provider attempt")?;
+        let failed_call_id = write_provider_call(
+            &fixture,
+            Uuid::now_v7(),
+            TestProviderCall {
+                owning_execution_kind: "ingest_attempt",
+                owning_execution_id: fixture.ingest_attempt_id,
+                runtime_execution_id: None,
+                runtime_task_kind: None,
+                provider_catalog_id,
+                model_catalog_id,
+                call_kind: "extract_graph",
+            },
+        )
+        .await
+        .context("failed to write zero-usage provider attempt")?;
         billing
             .finish_reserved_provider_call_without_usage(&fixture.state, failed_call_id, "failed")
             .await
@@ -2436,9 +2551,58 @@ async fn execution_cost_returns_zero_rollup_for_ingest_attempt_without_provider_
         let failed_cost = billing
             .get_execution_cost(&fixture.state, "ingest_attempt", fixture.ingest_attempt_id)
             .await
-            .context("failed to load zero-cost terminal provider attempt")?;
+            .context("failed to load the terminal provider attempt")?;
+        assert_eq!(
+            failed_cost.provider_call_count, 0,
+            "a failed reservation is not a settled call"
+        );
+        assert_eq!(failed_cost.unpriced_provider_call_count, 1);
+        assert_eq!(
+            failed_cost.cost_coverage,
+            ironrag_backend::domains::billing::CostCoverageStatus::Unknown
+        );
         assert_eq!(failed_cost.total_cost, Decimal::ZERO);
-        assert_eq!(failed_cost.provider_call_count, 1);
+
+        // A completed call whose payload carries no priced usage was never priced
+        // at all. Its absence of charges must keep the execution unknown instead
+        // of turning it into a complete zero (this is the generic call kind, not
+        // one of the two kinds with a declared mandatory-usage shape).
+        let completed_call_id = write_provider_call(
+            &fixture,
+            Uuid::now_v7(),
+            TestProviderCall {
+                owning_execution_kind: "ingest_attempt",
+                owning_execution_id: fixture.ingest_attempt_id,
+                runtime_execution_id: None,
+                runtime_task_kind: None,
+                provider_catalog_id,
+                model_catalog_id,
+                call_kind: "extract_graph",
+            },
+        )
+        .await
+        .context("failed to write the usage-less provider attempt")?;
+        billing
+            .complete_reserved_provider_call_deferred_rollup(
+                &fixture.state,
+                completed_call_id,
+                &serde_json::json!({}),
+            )
+            .await
+            .context("failed to complete the usage-less provider attempt")?;
+        let incomplete = billing
+            .get_execution_cost(&fixture.state, "ingest_attempt", fixture.ingest_attempt_id)
+            .await
+            .context("failed to load the usage-less provider attempt")?;
+        assert_eq!(incomplete.provider_call_count, 1);
+        assert_eq!(
+            incomplete.unpriced_provider_call_count, 2,
+            "a completed call without any priced usage stays unpriced"
+        );
+        assert_eq!(
+            incomplete.cost_coverage,
+            ironrag_backend::domains::billing::CostCoverageStatus::Unknown
+        );
         Ok(())
     }
     .await;
@@ -2504,6 +2668,1394 @@ async fn inline_ingest_billing_capture_produces_provider_calls_and_rollup() -> R
     }
     .await;
 
+    fixture.cleanup().await?;
+    result
+}
+
+/// Two ordinary sends of the same logical call each own one durable row.
+///
+/// Without a required scope the send admits no counter debit, so the only
+/// durable effect of a send is its own `billing_provider_call` row. Two sends
+/// therefore leave two distinct rows with the same attribution, which is the
+/// unit the ledger and the counter share.
+#[tokio::test]
+#[ignore = "requires local postgres with required extensions"]
+async fn two_ordinary_sends_write_one_row_each() -> Result<()> {
+    let fixture = BillingRollupsFixture::create().await?;
+
+    let result = async {
+        let postgres = &fixture.state.persistence.postgres;
+        let (provider_catalog_id, model_catalog_id) = openai_chat_catalog_ids(postgres).await?;
+        let attribution = send_attribution(&fixture, provider_catalog_id, model_catalog_id);
+        let caller = DispatchCaller::MutationOrigin {
+            mutation_id: Uuid::now_v7(),
+            principal_id: Uuid::now_v7(),
+        };
+        let body = serde_json::json!({"model": "unused-without-a-required-scope"});
+
+        let mut send_ids = Vec::with_capacity(2);
+        for _ in 0..2 {
+            let requested_id = Uuid::now_v7();
+            let admitted = billing_repository::admit_provider_send(
+                postgres,
+                billing_repository::ProviderSendRequest {
+                    required_scope: None,
+                    caller: &caller,
+                    model: "unused-without-a-required-scope",
+                    endpoint: "https://provider.example/v1/chat/completions",
+                    body: &body,
+                    attribution: &attribution,
+                    provider_call_id: requested_id,
+                },
+            )
+            .await
+            .map_err(|error| anyhow::anyhow!("ordinary send admission refused: {error:?}"))?;
+            assert_eq!(admitted.provider_call_id, requested_id);
+            assert_eq!(admitted.scope_id, None, "an ordinary send debits no incident scope",);
+            send_ids.push(admitted.provider_call_id);
+        }
+        assert_ne!(send_ids[0], send_ids[1], "each send owns its own row identity");
+        assert_eq!(
+            count_provider_calls(postgres, "query_execution", fixture.query_execution_id).await?,
+            2,
+            "two admitted sends write exactly two rows",
+        );
+
+        for provider_call_id in send_ids {
+            let row = billing_repository::get_provider_call_by_id(postgres, provider_call_id)
+                .await?
+                .context("admitted send row is missing")?;
+            assert_eq!(row.call_state, "started");
+            assert_eq!(row.owning_execution_kind, "query_execution");
+            assert_eq!(row.owning_execution_id, fixture.query_execution_id);
+            assert_eq!(row.call_kind, "query_answer");
+            assert_eq!(row.workspace_id, fixture.workspace_id);
+            assert_eq!(row.library_id, fixture.library_id);
+        }
+        Ok(())
+    }
+    .await;
+
+    fixture.cleanup().await?;
+    result
+}
+
+/// An attribution outside the owning execution's workspace or library is
+/// refused before anything is written.
+#[tokio::test]
+#[ignore = "requires local postgres with required extensions"]
+async fn attribution_outside_the_owning_execution_scope_writes_no_row() -> Result<()> {
+    let fixture = BillingRollupsFixture::create().await?;
+
+    let result = async {
+        let postgres = &fixture.state.persistence.postgres;
+        let (provider_catalog_id, model_catalog_id) = openai_chat_catalog_ids(postgres).await?;
+        let attribution = send_attribution(&fixture, provider_catalog_id, model_catalog_id);
+        let caller = DispatchCaller::MutationOrigin {
+            mutation_id: Uuid::now_v7(),
+            principal_id: Uuid::now_v7(),
+        };
+        let body = serde_json::json!({"model": "unused-without-a-required-scope"});
+
+        let mut wrong_workspace = attribution.clone();
+        wrong_workspace.workspace_id = Uuid::now_v7();
+        let mut wrong_library = attribution.clone();
+        wrong_library.library_id = Uuid::now_v7();
+
+        for (label, refused) in [("workspace", wrong_workspace), ("library", wrong_library)] {
+            let requested_id = Uuid::now_v7();
+            let outcome = billing_repository::admit_provider_send(
+                postgres,
+                billing_repository::ProviderSendRequest {
+                    required_scope: None,
+                    caller: &caller,
+                    model: "unused-without-a-required-scope",
+                    endpoint: "https://provider.example/v1/chat/completions",
+                    body: &body,
+                    attribution: &refused,
+                    provider_call_id: requested_id,
+                },
+            )
+            .await;
+            assert!(
+                matches!(outcome, Err(billing_repository::ProviderSendAdmissionError::Attribution)),
+                "a {label} outside the owning execution must be refused as an attribution mismatch",
+            );
+            assert!(
+                billing_repository::get_provider_call_by_id(postgres, requested_id)
+                    .await?
+                    .is_none(),
+                "a refused {label} attribution writes no row",
+            );
+        }
+        assert_eq!(
+            count_provider_calls(postgres, "query_execution", fixture.query_execution_id).await?,
+            0,
+            "no refused attempt leaves a row behind",
+        );
+
+        // The untouched attribution proves the refusals above are about the
+        // mismatch and not about a fixture that cannot admit at all.
+        billing_repository::admit_provider_send(
+            postgres,
+            billing_repository::ProviderSendRequest {
+                required_scope: None,
+                caller: &caller,
+                model: "unused-without-a-required-scope",
+                endpoint: "https://provider.example/v1/chat/completions",
+                body: &body,
+                attribution: &attribution,
+                provider_call_id: Uuid::now_v7(),
+            },
+        )
+        .await
+        .map_err(|error| anyhow::anyhow!("the matching attribution must be admitted: {error:?}"))?;
+        assert_eq!(
+            count_provider_calls(postgres, "query_execution", fixture.query_execution_id).await?,
+            1,
+            "the matching attribution writes its one row",
+        );
+        Ok(())
+    }
+    .await;
+
+    fixture.cleanup().await?;
+    result
+}
+
+/// A send whose runtime execution belongs to another owner is refused, so the
+/// row cannot inherit a foreign owner, task kind or attribution.
+#[tokio::test]
+#[ignore = "requires local postgres with required extensions"]
+async fn runtime_execution_from_another_owner_writes_no_row() -> Result<()> {
+    let fixture = BillingRollupsFixture::create().await?;
+
+    let result = async {
+        let postgres = &fixture.state.persistence.postgres;
+        let (provider_catalog_id, model_catalog_id) = openai_chat_catalog_ids(postgres).await?;
+        let caller = DispatchCaller::MutationOrigin {
+            mutation_id: Uuid::now_v7(),
+            principal_id: Uuid::now_v7(),
+        };
+        let body = serde_json::json!({"model": "unused-without-a-required-scope"});
+        let endpoint = "https://provider.example/v1/chat/completions";
+
+        // The owning execution is the fixture's ingest attempt, while the named
+        // runtime execution still belongs to the query execution.
+        let mut foreign_runtime = send_attribution(&fixture, provider_catalog_id, model_catalog_id);
+        foreign_runtime.owning_execution_kind = "ingest_attempt".to_string();
+        foreign_runtime.owning_execution_id = fixture.ingest_attempt_id;
+        foreign_runtime.call_kind = "extract_graph".to_string();
+
+        let requested_id = Uuid::now_v7();
+        let outcome = billing_repository::admit_provider_send(
+            postgres,
+            billing_repository::ProviderSendRequest {
+                required_scope: None,
+                caller: &caller,
+                model: "unused-without-a-required-scope",
+                endpoint,
+                body: &body,
+                attribution: &foreign_runtime,
+                provider_call_id: requested_id,
+            },
+        )
+        .await;
+        assert!(
+            matches!(outcome, Err(billing_repository::ProviderSendAdmissionError::Attribution)),
+            "a runtime execution of another owner must be refused as an attribution mismatch",
+        );
+        assert!(
+            billing_repository::get_provider_call_by_id(postgres, requested_id).await?.is_none(),
+            "a refused runtime attribution writes no row",
+        );
+        assert_eq!(
+            count_provider_calls(postgres, "ingest_attempt", fixture.ingest_attempt_id).await?,
+            0,
+        );
+
+        // The same owner without a runtime half is admitted: the refusal above
+        // was the foreign runtime execution, not the owner itself.
+        let mut owned = foreign_runtime.clone();
+        owned.runtime_execution_id = None;
+        owned.runtime_task_kind = None;
+        billing_repository::admit_provider_send(
+            postgres,
+            billing_repository::ProviderSendRequest {
+                required_scope: None,
+                caller: &caller,
+                model: "unused-without-a-required-scope",
+                endpoint,
+                body: &body,
+                attribution: &owned,
+                provider_call_id: Uuid::now_v7(),
+            },
+        )
+        .await
+        .map_err(|error| anyhow::anyhow!("the owned attribution must be admitted: {error:?}"))?;
+        assert_eq!(
+            count_provider_calls(postgres, "ingest_attempt", fixture.ingest_attempt_id).await?,
+            1,
+        );
+        Ok(())
+    }
+    .await;
+
+    fixture.cleanup().await?;
+    result
+}
+
+/// One admitted send under a real financial scope writes one row and debits
+/// exactly one model unit and one global unit in that same transaction.
+///
+/// The scope is the durable grant the product reads, written on the model's own
+/// provider row, so the counter and the row are observed after a real admission
+/// rather than through a test-only shortcut.
+#[tokio::test]
+#[ignore = "requires local postgres with required extensions"]
+async fn admitted_send_debits_one_model_and_one_global_unit_with_its_row() -> Result<()> {
+    let fixture = BillingRollupsFixture::create().await?;
+
+    let result = async {
+        let postgres = &fixture.state.persistence.postgres;
+        let catalog = create_synthetic_disjoint_pricing_catalog(postgres).await?;
+        let model_name = catalog.model_name.clone();
+        let endpoint = "https://provider.example/v1/chat/completions";
+        let mutation_id = Uuid::now_v7();
+        let principal_id = Uuid::now_v7();
+        let caller = DispatchCaller::MutationOrigin { mutation_id, principal_id };
+
+        let mut admission = FinancialAdmission {
+            version: 1,
+            provider_id: catalog.provider_catalog_id,
+            scope_id: Uuid::now_v7(),
+            policy_fingerprint: String::new(),
+            cutoff: Utc::now() + chrono::Duration::hours(1),
+            state: FinancialAdmissionState::Active,
+            grant_microusd: 20,
+            global_limit: 2,
+            global_consumed: 0,
+            models: BTreeMap::from([(
+                model_name.clone(),
+                FinancialModelAllowance {
+                    endpoint: endpoint.to_string(),
+                    envelope: FinancialRequestEnvelope::Chat {
+                        allowed_service_tiers: vec!["default".to_string()],
+                        max_input_bytes: 4096,
+                        max_output_tokens: 1024,
+                        max_input_tokens: 100_000,
+                        media: None,
+                    },
+                    attempt_microusd: 10,
+                    limit: 2,
+                    consumed: 0,
+                },
+            )]),
+            caller_binding: Some(CallerBinding {
+                format_version: CALLER_BINDING_FORMAT_VERSION,
+                generation: 1,
+                callers: vec![AdmittedCaller::MutationOrigin { mutation_id, principal_id }],
+            }),
+            history: Vec::new(),
+        };
+        admission.policy_fingerprint = admission.immutable_fingerprint()?;
+        let required_scope = RequiredFinancialScope {
+            provider_id: admission.provider_id,
+            scope_id: admission.scope_id,
+            policy_fingerprint: admission.policy_fingerprint.clone(),
+        };
+        let published = sqlx::query(
+            "update ai_provider_catalog
+             set capability_flags_json =
+                 jsonb_set(capability_flags_json, '{financialAdmission}', $2::jsonb, true)
+             where id = $1",
+        )
+        .bind(catalog.provider_catalog_id)
+        .bind(serde_json::to_value(&admission)?)
+        .execute(postgres)
+        .await
+        .context("failed to publish the fixture financial admission")?;
+        assert_eq!(published.rows_affected(), 1);
+
+        let body = serde_json::json!({
+            "model": model_name.clone(),
+            "messages": [{"role": "user", "content": "billing admission"}],
+            "service_tier": "default",
+            "n": 1,
+            "max_completion_tokens": 16,
+        });
+        let attribution =
+            send_attribution(&fixture, catalog.provider_catalog_id, catalog.model_catalog_id);
+        let provider_call_id = Uuid::now_v7();
+        let admitted = billing_repository::admit_provider_send(
+            postgres,
+            billing_repository::ProviderSendRequest {
+                required_scope: Some(&required_scope),
+                caller: &caller,
+                model: &model_name,
+                endpoint,
+                body: &body,
+                attribution: &attribution,
+                provider_call_id,
+            },
+        )
+        .await
+        .map_err(|error| anyhow::anyhow!("scoped send admission refused: {error:?}"))?;
+        assert_eq!(admitted.provider_call_id, provider_call_id);
+        assert_eq!(admitted.scope_id, Some(required_scope.scope_id));
+
+        let row = billing_repository::get_provider_call_by_id(postgres, provider_call_id)
+            .await?
+            .context("the admitted send row is missing")?;
+        assert_eq!(row.call_state, "started");
+        assert_eq!(row.model_catalog_id, catalog.model_catalog_id);
+        assert_eq!(
+            count_provider_calls(postgres, "query_execution", fixture.query_execution_id).await?,
+            1,
+            "one admitted send writes exactly one row",
+        );
+
+        let stored: Option<serde_json::Value> = sqlx::query_scalar(
+            "select capability_flags_json -> 'financialAdmission'
+             from ai_provider_catalog
+             where id = $1",
+        )
+        .bind(catalog.provider_catalog_id)
+        .fetch_one(postgres)
+        .await?;
+        let stored: FinancialAdmission =
+            decode_admission(stored.context("financial admission is missing")?)?;
+        assert_eq!(stored.global_consumed, 1, "one send debits one global unit");
+        assert_eq!(
+            stored.models.get(&model_name).map(|allowance| allowance.consumed),
+            Some(1),
+            "one send debits one unit of its own model",
+        );
+
+        // A refused attribution changes neither the row count nor the counter.
+        let mut refused = attribution.clone();
+        refused.owning_execution_id = fixture.ingest_attempt_id;
+        let refused_id = Uuid::now_v7();
+        let outcome = billing_repository::admit_provider_send(
+            postgres,
+            billing_repository::ProviderSendRequest {
+                required_scope: Some(&required_scope),
+                caller: &caller,
+                model: &model_name,
+                endpoint,
+                body: &body,
+                attribution: &refused,
+                provider_call_id: refused_id,
+            },
+        )
+        .await;
+        assert!(
+            matches!(outcome, Err(billing_repository::ProviderSendAdmissionError::Attribution)),
+            "an attribution of another owner is refused before the counter moves",
+        );
+        assert!(
+            billing_repository::get_provider_call_by_id(postgres, refused_id).await?.is_none(),
+            "a refused send writes no row",
+        );
+        assert_eq!(
+            count_provider_calls(postgres, "query_execution", fixture.query_execution_id).await?,
+            1,
+        );
+        let after_refusal: Option<serde_json::Value> = sqlx::query_scalar(
+            "select capability_flags_json -> 'financialAdmission'
+             from ai_provider_catalog
+             where id = $1",
+        )
+        .bind(catalog.provider_catalog_id)
+        .fetch_one(postgres)
+        .await?;
+        let after_refusal =
+            decode_admission(after_refusal.context("the financial admission disappeared")?)?;
+        assert_eq!(after_refusal.global_consumed, 1, "a refused send debits nothing");
+        assert_eq!(
+            after_refusal.models.get(&model_name).map(|allowance| allowance.consumed),
+            Some(1),
+        );
+        Ok(())
+    }
+    .await;
+
+    fixture.cleanup().await?;
+    result
+}
+
+/// A logical call that is retried once at the transport boundary owns two
+/// durable rows and two admission debits, with the superseded attempt already
+/// terminal before the retry is admitted.
+#[tokio::test]
+#[ignore = "requires local postgres with required extensions; provider HTTP is local and synthetic"]
+async fn a_retried_physical_send_owns_two_rows_and_two_debits() -> Result<()> {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+
+    use ironrag_backend::{
+        integrations::{
+            provider_admission::FinancialDispatchAdmission,
+            retry::{ProviderCallError, RetryPolicy, with_retry},
+        },
+        shared::{
+            provider_http::{
+                ProviderDispatchError, ProviderSurface, send_provider_http_request,
+                test_runtime_binding_authority, with_test_dispatch_caller,
+            },
+            provider_send::{ProviderSendScope, with_provider_send},
+        },
+    };
+
+    let fixture = BillingRollupsFixture::create().await?;
+
+    let route_probe = std::net::UdpSocket::bind("0.0.0.0:0")?;
+    route_probe.connect("192.0.2.1:9")?;
+    let host = route_probe.local_addr()?.ip();
+    let listener = tokio::net::TcpListener::bind((host, 0)).await?;
+    let base_url = format!("http://{}", listener.local_addr()?);
+    let dispatches = Arc::new(AtomicUsize::new(0));
+    let counter = Arc::clone(&dispatches);
+    let app = axum::Router::new().route(
+        "/v1/chat/completions",
+        axum::routing::post(move || {
+            let counter = Arc::clone(&counter);
+            async move {
+                let attempt = counter.fetch_add(1, Ordering::SeqCst);
+                let (status, body) = if attempt == 0 {
+                    (
+                        axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                        serde_json::json!({"error": {"message": "synthetic retry"}}),
+                    )
+                } else {
+                    (
+                        axum::http::StatusCode::OK,
+                        serde_json::json!({
+                            "id": "synthetic",
+                            "object": "chat.completion",
+                            "choices": [{
+                                "index": 0,
+                                "message": {"role": "assistant", "content": "ok"},
+                                "finish_reason": "stop"
+                            }],
+                            "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}
+                        }),
+                    )
+                };
+                (status, axum::Json(body))
+            }
+        }),
+    );
+    let server = tokio::spawn(async move { axum::serve(listener, app).await });
+
+    let result = async {
+        let postgres = &fixture.state.persistence.postgres;
+        let catalog = create_synthetic_disjoint_pricing_catalog(postgres).await?;
+        let endpoint = format!("{base_url}/v1/chat/completions");
+        let mutation_id = Uuid::now_v7();
+        let principal_id = Uuid::now_v7();
+        let caller = DispatchCaller::MutationOrigin { mutation_id, principal_id };
+
+        let mut admission = FinancialAdmission {
+            version: 1,
+            provider_id: catalog.provider_catalog_id,
+            scope_id: Uuid::now_v7(),
+            policy_fingerprint: String::new(),
+            cutoff: Utc::now() + chrono::Duration::hours(1),
+            state: FinancialAdmissionState::Active,
+            grant_microusd: 20,
+            global_limit: 2,
+            global_consumed: 0,
+            models: BTreeMap::from([(
+                catalog.model_name.clone(),
+                FinancialModelAllowance {
+                    endpoint: endpoint.clone(),
+                    envelope: FinancialRequestEnvelope::Chat {
+                        allowed_service_tiers: vec!["default".to_string()],
+                        max_input_bytes: 4096,
+                        max_output_tokens: 1024,
+                        max_input_tokens: 100_000,
+                        media: None,
+                    },
+                    attempt_microusd: 10,
+                    limit: 2,
+                    consumed: 0,
+                },
+            )]),
+            caller_binding: Some(CallerBinding {
+                format_version: CALLER_BINDING_FORMAT_VERSION,
+                generation: 1,
+                callers: vec![AdmittedCaller::MutationOrigin { mutation_id, principal_id }],
+            }),
+            history: Vec::new(),
+        };
+        admission.policy_fingerprint = admission.immutable_fingerprint()?;
+        let required_scope = RequiredFinancialScope {
+            provider_id: admission.provider_id,
+            scope_id: admission.scope_id,
+            policy_fingerprint: admission.policy_fingerprint.clone(),
+        };
+        sqlx::query(
+            "update ai_provider_catalog
+             set capability_flags_json =
+                 jsonb_set(capability_flags_json, '{financialAdmission}', $2::jsonb, true)
+             where id = $1",
+        )
+        .bind(catalog.provider_catalog_id)
+        .bind(serde_json::to_value(&admission)?)
+        .execute(postgres)
+        .await?;
+
+        let attribution =
+            send_attribution(&fixture, catalog.provider_catalog_id, catalog.model_catalog_id);
+        let scope = ProviderSendScope::new(attribution, Uuid::now_v7());
+        let authority = test_runtime_binding_authority(
+            catalog.provider_kind.clone(),
+            catalog.provider_catalog_id,
+            catalog.model_name.clone(),
+            base_url.clone(),
+        );
+        // The attested context copies the ambient caller, so it must be built
+        // with the same caller the stored admission binds.
+        let context = with_test_dispatch_caller(caller, async {
+            authority.attest(ProviderSurface::Chat, None)
+        })
+        .await;
+        let body = serde_json::json!({
+            "model": catalog.model_name.clone(),
+            "messages": [{"role": "user", "content": "retry boundary"}],
+            "service_tier": "default",
+            "n": 1,
+            "max_completion_tokens": 16,
+        });
+        let url = reqwest::Url::parse(&endpoint)?;
+        let admission = FinancialDispatchAdmission::new(
+            postgres.clone(),
+            Some(required_scope.clone()),
+            true,
+        );
+
+        let retried = with_test_dispatch_caller(
+            caller,
+            with_provider_send(scope.clone(), async {
+                with_retry(
+                    || async {
+                        let request = reqwest::Client::new().post(url.clone()).json(&body);
+                        let send = send_provider_http_request(
+                            request,
+                            &context,
+                            &admission,
+                            "chat",
+                        )
+                        .await
+                        .map_err(|error| match error {
+                            ProviderDispatchError::Refused(refusal) => {
+                                ProviderCallError::admission(
+                                    ironrag_backend::integrations::provider_budget::ProviderBudgetError::Dispatch(refusal),
+                                )
+                            }
+                            ProviderDispatchError::Build => {
+                                ProviderCallError::protocol("synthetic request could not be built")
+                            }
+                            ProviderDispatchError::Transport(source) => {
+                                ProviderCallError::transport("synthetic transport", source)
+                            }
+                        })?;
+                        let (response, mut permit) = send.into_parts();
+                        if !response.status().is_success() {
+                            let status = response.status();
+                            // The superseded send must be terminal before the
+                            // retry is admitted.
+                            permit.fail_send();
+                            return Err(ProviderCallError::http_status(
+                                "synthetic",
+                                status,
+                                &reqwest::header::HeaderMap::new(),
+                                "synthetic retryable status",
+                            ));
+                        }
+                        permit.complete_send();
+                        Ok(())
+                    },
+                    RetryPolicy::idempotent_provider_call(
+                        2,
+                        std::time::Duration::ZERO,
+                        std::time::Duration::ZERO,
+                    ),
+                )
+                .await
+            }),
+        )
+        .await;
+        retried?;
+
+        assert_eq!(
+            dispatches.load(Ordering::SeqCst),
+            2,
+            "the retry must reach the transport twice"
+        );
+        let rows: Vec<(Uuid, String)> = sqlx::query_as(
+            "select id, call_state::text from billing_provider_call
+             where owning_execution_kind='query_execution' and owning_execution_id=$1
+             order by started_at",
+        )
+        .bind(fixture.query_execution_id)
+        .fetch_all(postgres)
+        .await?;
+        assert_eq!(rows.len(), 2, "each physical send owns exactly one row");
+        assert_eq!(rows[0].1, "failed", "the 503 attempt is terminal before the retry");
+
+        let second = scope.current_send_id().context("the accepted send row must be published")?;
+        assert_eq!(rows[1].0, second, "the accepted row is the one being settled");
+        fixture
+            .state
+            .application_services
+            .billing
+            .complete_reserved_provider_call_deferred_rollup_with_retry(
+                &fixture.state,
+                second,
+                &serde_json::json!({
+                    "prompt_tokens": 10,
+                    "completion_tokens": 5,
+                    "total_tokens": 15,
+                }),
+            )
+            .await?;
+
+        let states: Vec<String> = sqlx::query_scalar(
+            "select call_state::text from billing_provider_call
+             where owning_execution_kind='query_execution' and owning_execution_id=$1
+             order by call_state::text",
+        )
+        .bind(fixture.query_execution_id)
+        .fetch_all(postgres)
+        .await?;
+        assert_eq!(states, vec!["completed".to_string(), "failed".to_string()]);
+
+        let stored = decode_admission(
+            sqlx::query_scalar(
+                "select capability_flags_json -> 'financialAdmission'
+                 from ai_provider_catalog where id = $1",
+            )
+            .bind(catalog.provider_catalog_id)
+            .fetch_one(postgres)
+            .await?,
+        )?;
+        assert_eq!(stored.global_consumed, 2, "two admitted sends debit twice");
+        assert_eq!(stored.models[&catalog.model_name].consumed, 2);
+        Ok(())
+    }
+    .await;
+
+    server.abort();
+    fixture.cleanup().await?;
+    result
+}
+
+/// A reply that is accepted but never settled stays attributable to the caller's
+/// guard: the transport neither cancels the row nor claims usage, and the guard's
+/// own terminalization cancels exactly that row without usage or charge.
+#[tokio::test]
+#[ignore = "requires local postgres with required extensions; provider HTTP is local and synthetic"]
+async fn a_received_but_unsettled_send_terminalizes_without_usage() -> Result<()> {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+
+    use ironrag_backend::{
+        integrations::provider_admission::FinancialDispatchAdmission,
+        shared::{
+            provider_http::{
+                ProviderSurface, send_provider_http_request, test_runtime_binding_authority,
+                with_test_dispatch_caller,
+            },
+            provider_send::{ProviderSendScope, with_provider_send},
+        },
+    };
+
+    let fixture = BillingRollupsFixture::create().await?;
+
+    let route_probe = std::net::UdpSocket::bind("0.0.0.0:0")?;
+    route_probe.connect("192.0.2.1:9")?;
+    let host = route_probe.local_addr()?.ip();
+    let listener = tokio::net::TcpListener::bind((host, 0)).await?;
+    let base_url = format!("http://{}", listener.local_addr()?);
+    let dispatches = Arc::new(AtomicUsize::new(0));
+    let counter = Arc::clone(&dispatches);
+    let app = axum::Router::new().route(
+        "/v1/chat/completions",
+        axum::routing::post(move || {
+            let counter = Arc::clone(&counter);
+            async move {
+                counter.fetch_add(1, Ordering::SeqCst);
+                (
+                    axum::http::StatusCode::OK,
+                    axum::Json(serde_json::json!({
+                        "id": "synthetic",
+                        "object": "chat.completion",
+                        "choices": [{
+                            "index": 0,
+                            "message": {"role": "assistant", "content": "ok"},
+                            "finish_reason": "stop"
+                        }],
+                        "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}
+                    })),
+                )
+            }
+        }),
+    );
+    let server = tokio::spawn(async move { axum::serve(listener, app).await });
+
+    let result = async {
+        let postgres = &fixture.state.persistence.postgres;
+        let catalog = create_synthetic_disjoint_pricing_catalog(postgres).await?;
+        let endpoint = format!("{base_url}/v1/chat/completions");
+        let mutation_id = Uuid::now_v7();
+        let principal_id = Uuid::now_v7();
+        let caller = DispatchCaller::MutationOrigin { mutation_id, principal_id };
+        let (required_scope, provider_catalog_id) = publish_synthetic_chat_admission(
+            postgres,
+            &catalog,
+            &endpoint,
+            mutation_id,
+            principal_id,
+        )
+        .await?;
+
+        let attribution = send_attribution(&fixture, provider_catalog_id, catalog.model_catalog_id);
+        let scope = ProviderSendScope::new(attribution, Uuid::now_v7());
+        let authority = test_runtime_binding_authority(
+            catalog.provider_kind.clone(),
+            provider_catalog_id,
+            catalog.model_name.clone(),
+            base_url.clone(),
+        );
+        // The attested context copies the ambient caller, so it must be built
+        // with the same caller the stored admission binds.
+        let context = with_test_dispatch_caller(caller, async {
+            authority.attest(ProviderSurface::Chat, None)
+        })
+        .await;
+        let body = serde_json::json!({
+            "model": catalog.model_name.clone(),
+            "messages": [{"role": "user", "content": "handoff"}],
+            "service_tier": "default",
+            "n": 1,
+            "max_completion_tokens": 16,
+        });
+        let url = reqwest::Url::parse(&endpoint)?;
+        let admission = FinancialDispatchAdmission::new(
+            postgres.clone(),
+            Some(required_scope.clone()),
+            true,
+        );
+        let accepted = with_test_dispatch_caller(
+            caller,
+            with_provider_send(scope.clone(), async {
+                let request = reqwest::Client::new().post(url).json(&body);
+                let send =
+                    send_provider_http_request(request, &context, &admission, "chat").await?;
+                Ok::<_, ironrag_backend::shared::provider_http::ProviderDispatchError>(
+                    send.into_parts(),
+                )
+            }),
+        )
+        .await
+        .expect("the admitted send reaches the provider");
+        let (response, mut permit) = accepted;
+        // The reply is received and accepted. The transport hands the row to the
+        // caller's settlement guard, so the permit must not cancel it and must
+        // not claim usage.
+        permit.complete_send();
+        drop(permit);
+        drop(response);
+
+        let row_id = scope
+            .current_send_id()
+            .context("the accepted send row must be published")?;
+        let state = sqlx::query_scalar::<_, String>(
+            "select call_state::text from billing_provider_call where id=$1",
+        )
+        .bind(row_id)
+        .fetch_one(postgres)
+        .await?;
+        assert_eq!(state, "started", "an accepted reply waits for the caller's settlement");
+        // The caller guard owns the row from here: when it is dropped without a
+        // settlement, it cancels exactly this row and records no usage.
+        fixture
+            .state
+            .application_services
+            .billing
+            .finish_reserved_provider_call_without_usage(&fixture.state, row_id, "canceled")
+            .await?;
+        let state = sqlx::query_scalar::<_, String>(
+            "select call_state::text from billing_provider_call where id=$1",
+        )
+        .bind(row_id)
+        .fetch_one(postgres)
+        .await?;
+        assert_eq!(state, "canceled", "the caller guard terminalizes the row without usage");
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("select count(*) from billing_usage where provider_call_id=$1")
+                .bind(row_id)
+                .fetch_one(postgres)
+                .await?,
+            0,
+            "no usage may be invented",
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("select count(*) from billing_charge c join billing_usage u on u.id=c.usage_id where u.provider_call_id=$1")
+                .bind(row_id)
+                .fetch_one(postgres)
+                .await?,
+            0,
+            "no charge may be invented",
+        );
+        assert_eq!(dispatches.load(Ordering::SeqCst), 1, "a canceled handoff never retries");
+        Ok(())
+    }
+    .await;
+
+    server.abort();
+    fixture.cleanup().await?;
+    result
+}
+
+/// A failed admission commit never dispatches and leaves neither a row nor a
+/// debit. The deferred constraint trigger fails the commit after the writes, so
+/// the whole unit rolls back.
+#[tokio::test]
+#[ignore = "requires local postgres with required extensions; provider HTTP is local and synthetic"]
+async fn a_failed_admission_commit_dispatches_nothing_and_writes_nothing() -> Result<()> {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+
+    use ironrag_backend::{
+        integrations::provider_admission::FinancialDispatchAdmission,
+        shared::{
+            provider_http::{
+                ProviderSurface, send_provider_http_request, test_runtime_binding_authority,
+                with_test_dispatch_caller,
+            },
+            provider_send::{ProviderSendScope, with_provider_send},
+        },
+    };
+
+    let fixture = BillingRollupsFixture::create().await?;
+
+    let route_probe = std::net::UdpSocket::bind("0.0.0.0:0")?;
+    route_probe.connect("192.0.2.1:9")?;
+    let host = route_probe.local_addr()?.ip();
+    let listener = tokio::net::TcpListener::bind((host, 0)).await?;
+    let base_url = format!("http://{}", listener.local_addr()?);
+    let dispatches = Arc::new(AtomicUsize::new(0));
+    let counter = Arc::clone(&dispatches);
+    let app = axum::Router::new().route(
+        "/v1/chat/completions",
+        axum::routing::post(move || {
+            let counter = Arc::clone(&counter);
+            async move {
+                counter.fetch_add(1, Ordering::SeqCst);
+                (
+                    axum::http::StatusCode::OK,
+                    axum::Json(serde_json::json!({"id": "synthetic", "choices": []})),
+                )
+            }
+        }),
+    );
+    let server = tokio::spawn(async move { axum::serve(listener, app).await });
+
+    let result = async {
+        let postgres = &fixture.state.persistence.postgres;
+        let catalog = create_synthetic_disjoint_pricing_catalog(postgres).await?;
+        let endpoint = format!("{base_url}/v1/chat/completions");
+        let mutation_id = Uuid::now_v7();
+        let principal_id = Uuid::now_v7();
+        let caller = DispatchCaller::MutationOrigin { mutation_id, principal_id };
+        let (required_scope, provider_catalog_id) = publish_synthetic_chat_admission(
+            postgres,
+            &catalog,
+            &endpoint,
+            mutation_id,
+            principal_id,
+        )
+        .await?;
+
+        sqlx::query(
+            "create function test_fail_admission_commit() returns trigger
+             language plpgsql
+             as $$
+             begin
+                 raise exception 'synthetic admission commit failure';
+             end;
+             $$",
+        )
+        .execute(postgres)
+        .await?;
+        sqlx::query(
+            "create constraint trigger test_fail_admission_commit
+             after update on ai_provider_catalog
+             deferrable initially deferred
+             for each row execute function test_fail_admission_commit()",
+        )
+        .execute(postgres)
+        .await?;
+
+        let attribution = send_attribution(&fixture, provider_catalog_id, catalog.model_catalog_id);
+        let scope = ProviderSendScope::new(attribution, Uuid::now_v7());
+        let authority = test_runtime_binding_authority(
+            catalog.provider_kind.clone(),
+            provider_catalog_id,
+            catalog.model_name.clone(),
+            base_url.clone(),
+        );
+        // The attested context copies the ambient caller, so it must be built
+        // with the same caller the stored admission binds.
+        let context = with_test_dispatch_caller(caller, async {
+            authority.attest(ProviderSurface::Chat, None)
+        })
+        .await;
+        let body = serde_json::json!({
+            "model": catalog.model_name.clone(),
+            "messages": [{"role": "user", "content": "commit failure"}],
+            "service_tier": "default",
+            "n": 1,
+            "max_completion_tokens": 16,
+        });
+        let url = reqwest::Url::parse(&endpoint)?;
+        let admission =
+            FinancialDispatchAdmission::new(postgres.clone(), Some(required_scope.clone()), true);
+        let refused = with_test_dispatch_caller(
+            caller,
+            with_provider_send(scope.clone(), async {
+                let request = reqwest::Client::new().post(url).json(&body);
+                send_provider_http_request(request, &context, &admission, "chat").await
+            }),
+        )
+        .await;
+        match refused {
+            Err(ironrag_backend::shared::provider_http::ProviderDispatchError::Refused(
+                ironrag_backend::shared::provider_http::ProviderDispatchRefusal::Admission,
+            )) => {}
+            Err(other) => panic!(
+                "a failed admission commit must surface the native admission refusal, got {other:?}"
+            ),
+            Ok(_) => panic!("a failed admission commit must not produce a dispatchable response"),
+        }
+        assert_eq!(dispatches.load(Ordering::SeqCst), 0, "no provider request leaves the process");
+        assert_eq!(scope.current_send_id(), None, "no row was published");
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "select count(*) from billing_provider_call where owning_execution_id=$1",
+            )
+            .bind(fixture.query_execution_id)
+            .fetch_one(postgres)
+            .await?,
+            0,
+            "the rolled-back admission writes no row",
+        );
+        let stored = decode_admission(
+            sqlx::query_scalar(
+                "select capability_flags_json -> 'financialAdmission'
+                 from ai_provider_catalog where id = $1",
+            )
+            .bind(provider_catalog_id)
+            .fetch_one(postgres)
+            .await?,
+        )?;
+        assert_eq!(stored.global_consumed, 0, "the rolled-back admission debits nothing");
+        assert_eq!(stored.models[&catalog.model_name].consumed, 0);
+        Ok(())
+    }
+    .await;
+
+    server.abort();
+    fixture.cleanup().await?;
+    result
+}
+
+/// The server committed the row and the debit, but the admission reply was
+/// lost. Admission must report failure, no provider request may leave, and the
+/// committed row must be reconciled to a terminal unknown-usage state with its
+/// original attribution and debit intact.
+#[tokio::test]
+#[ignore = "requires local postgres with required extensions; provider HTTP is local and synthetic"]
+async fn a_lost_commit_ack_keeps_the_row_and_debit_without_dispatch() -> Result<()> {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+
+    use ironrag_backend::{
+        integrations::provider_admission::FinancialDispatchAdmission,
+        shared::{
+            provider_http::{
+                ProviderSurface, send_provider_http_request, test_runtime_binding_authority,
+                with_test_dispatch_caller,
+            },
+            provider_send::{ProviderSendScope, with_provider_send},
+        },
+    };
+
+    let fixture = BillingRollupsFixture::create().await?;
+
+    let route_probe = std::net::UdpSocket::bind("0.0.0.0:0")?;
+    route_probe.connect("192.0.2.1:9")?;
+    let host = route_probe.local_addr()?.ip();
+    let listener = tokio::net::TcpListener::bind((host, 0)).await?;
+    let base_url = format!("http://{}", listener.local_addr()?);
+    let dispatches = Arc::new(AtomicUsize::new(0));
+    let counter = Arc::clone(&dispatches);
+    let app = axum::Router::new().route(
+        "/v1/chat/completions",
+        axum::routing::post(move || {
+            let counter = Arc::clone(&counter);
+            async move {
+                counter.fetch_add(1, Ordering::SeqCst);
+                (
+                    axum::http::StatusCode::OK,
+                    axum::Json(serde_json::json!({"id": "synthetic", "choices": []})),
+                )
+            }
+        }),
+    );
+    let server = tokio::spawn(async move { axum::serve(listener, app).await });
+
+    let result = async {
+        let postgres = &fixture.state.persistence.postgres;
+        let catalog = create_synthetic_disjoint_pricing_catalog(postgres).await?;
+        let endpoint = format!("{base_url}/v1/chat/completions");
+        let mutation_id = Uuid::now_v7();
+        let principal_id = Uuid::now_v7();
+        let caller = DispatchCaller::MutationOrigin { mutation_id, principal_id };
+        let (required_scope, provider_catalog_id) = publish_synthetic_chat_admission(
+            postgres,
+            &catalog,
+            &endpoint,
+            mutation_id,
+            principal_id,
+        )
+        .await?;
+
+        let attribution = send_attribution(&fixture, provider_catalog_id, catalog.model_catalog_id);
+        let scope = ProviderSendScope::new(attribution.clone(), Uuid::now_v7());
+        // The first send of a scope reuses the logical id as its row id.
+        ironrag_backend::infra::repositories::billing_repository::arm_lost_commit_ack(
+            scope.logical_id(),
+        );
+        let authority = test_runtime_binding_authority(
+            catalog.provider_kind.clone(),
+            provider_catalog_id,
+            catalog.model_name.clone(),
+            base_url.clone(),
+        );
+        // The attested context copies the ambient caller, so it must be built
+        // with the same caller the stored admission binds.
+        let context = with_test_dispatch_caller(caller, async {
+            authority.attest(ProviderSurface::Chat, None)
+        })
+        .await;
+        let body = serde_json::json!({
+            "model": catalog.model_name.clone(),
+            "messages": [{"role": "user", "content": "lost ack"}],
+            "service_tier": "default",
+            "n": 1,
+            "max_completion_tokens": 16,
+        });
+        let url = reqwest::Url::parse(&endpoint)?;
+        let admission =
+            FinancialDispatchAdmission::new(postgres.clone(), Some(required_scope.clone()), true);
+        let refused = with_test_dispatch_caller(
+            caller,
+            with_provider_send(scope.clone(), async {
+                let request = reqwest::Client::new().post(url).json(&body);
+                send_provider_http_request(request, &context, &admission, "chat").await
+            }),
+        )
+        .await;
+        assert!(refused.is_err(), "a lost acknowledgement surfaces as an admission failure");
+        assert_eq!(dispatches.load(Ordering::SeqCst), 0, "no provider request leaves the process");
+        assert_eq!(scope.current_send_id(), None, "no current row is published to the caller");
+
+        let row = billing_repository::get_provider_call_by_id(postgres, scope.logical_id())
+            .await?
+            .context("the committed row must remain durable")?;
+        assert_eq!(row.call_state, "canceled", "the committed row is terminal without usage");
+        assert_eq!(row.owning_execution_kind, attribution.owning_execution_kind);
+        assert_eq!(row.owning_execution_id, attribution.owning_execution_id);
+        assert_eq!(row.call_kind, attribution.call_kind);
+        assert_eq!(row.binding_id, attribution.binding_id);
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "select count(*) from billing_usage where provider_call_id=$1"
+            )
+            .bind(row.id)
+            .fetch_one(postgres)
+            .await?,
+            0,
+            "a lost acknowledgement records no usage",
+        );
+
+        let stored = decode_admission(
+            sqlx::query_scalar(
+                "select capability_flags_json -> 'financialAdmission'
+                 from ai_provider_catalog where id = $1",
+            )
+            .bind(provider_catalog_id)
+            .fetch_one(postgres)
+            .await?,
+        )?;
+        assert_eq!(stored.global_consumed, 1, "the committed debit is preserved exactly once");
+        assert_eq!(stored.models[&catalog.model_name].consumed, 1);
+
+        // An unrelated logical call keeps its own empty scope.
+        let other = ProviderSendScope::new(attribution, Uuid::now_v7());
+        assert_eq!(other.current_send_id(), None);
+        assert!(
+            sqlx::query_scalar::<_, i64>(
+                "select count(*) from billing_provider_call where call_state='started'",
+            )
+            .fetch_one(postgres)
+            .await?
+                == 0,
+            "no admitted row is left unsettled",
+        );
+        Ok(())
+    }
+    .await;
+
+    server.abort();
+    fixture.cleanup().await?;
+    result
+}
+
+/// Usage observed before a cancellation must survive the handoff and settle
+/// exactly once: the late cleanup retry must not duplicate usage or charges.
+#[tokio::test]
+#[ignore = "requires local postgres with required extensions"]
+async fn observed_usage_settles_exactly_once_after_a_cancelled_handoff() -> Result<()> {
+    let fixture = BillingRollupsFixture::create().await?;
+    let result = async {
+        let postgres = &fixture.state.persistence.postgres;
+        let catalog = create_synthetic_disjoint_pricing_catalog(postgres).await?;
+        let provider_call_id = Uuid::now_v7();
+        write_provider_call(
+            &fixture,
+            provider_call_id,
+            TestProviderCall {
+                owning_execution_kind: "query_execution",
+                owning_execution_id: fixture.query_execution_id,
+                runtime_execution_id: Some(fixture.query_runtime_execution_id),
+                runtime_task_kind: Some(RuntimeTaskKind::QueryAnswer.as_str()),
+                provider_catalog_id: catalog.provider_catalog_id,
+                model_catalog_id: catalog.model_catalog_id,
+                call_kind: "query_answer",
+            },
+        )
+        .await?;
+        let usage_json = serde_json::json!({
+            "prompt_tokens": 17,
+            "completion_tokens": 5,
+            "total_tokens": 22,
+        });
+        let billing = &fixture.state.application_services.billing;
+        billing
+            .complete_reserved_provider_call_deferred_rollup_with_retry(
+                &fixture.state,
+                provider_call_id,
+                &usage_json,
+            )
+            .await?;
+        // The late cleanup of a cancelled handoff repeats the same stable
+        // completion with the exact observed usage.
+        billing
+            .complete_reserved_provider_call_deferred_rollup_with_retry(
+                &fixture.state,
+                provider_call_id,
+                &usage_json,
+            )
+            .await?;
+        let row = billing_repository::get_provider_call_by_id(postgres, provider_call_id)
+            .await?
+            .context("the observed-usage row disappeared")?;
+        assert_eq!(row.call_state, "completed");
+        let usage: Vec<(String, i64)> = sqlx::query_as(
+            "select usage_kind, quantity::bigint from billing_usage
+             where provider_call_id=$1 order by usage_kind",
+        )
+        .bind(provider_call_id)
+        .fetch_all(postgres)
+        .await?;
+        assert_eq!(
+            usage,
+            vec![("completion_tokens".to_string(), 5), ("prompt_tokens".to_string(), 17)],
+            "the late retry must keep exactly the observed per-unit usage",
+        );
+        let charges: Vec<(String, i64)> = sqlx::query_as(
+            "select u.usage_kind, count(*)::bigint from billing_charge c
+             join billing_usage u on u.id=c.usage_id
+             where u.provider_call_id=$1 group by u.usage_kind order by u.usage_kind",
+        )
+        .bind(provider_call_id)
+        .fetch_all(postgres)
+        .await?;
+        assert_eq!(
+            charges,
+            vec![("completion_tokens".to_string(), 1), ("prompt_tokens".to_string(), 1)],
+            "each priced unit is charged exactly once",
+        );
+        Ok(())
+    }
+    .await;
+    fixture.cleanup().await?;
+    result
+}
+
+/// Aborting a body read that is suspended after the response headers must
+/// terminalize the admitted row through its transport guard, without a retry.
+#[tokio::test]
+#[ignore = "requires local postgres with required extensions; provider HTTP is local and synthetic"]
+async fn aborting_a_suspended_body_read_terminalizes_the_admitted_row() -> Result<()> {
+    use ironrag_backend::{
+        integrations::provider_admission::FinancialDispatchAdmission,
+        shared::{
+            provider_http::{
+                ProviderSurface, send_provider_http_request, test_runtime_binding_authority,
+                with_test_dispatch_caller,
+            },
+            provider_send::{ProviderSendScope, with_provider_send},
+        },
+    };
+
+    let fixture = BillingRollupsFixture::create().await?;
+
+    let route_probe = std::net::UdpSocket::bind("0.0.0.0:0")?;
+    route_probe.connect("192.0.2.1:9")?;
+    let host = route_probe.local_addr()?.ip();
+    let listener = tokio::net::TcpListener::bind((host, 0)).await?;
+    let base_url = format!("http://{}", listener.local_addr()?);
+    let app = axum::Router::new().route(
+        "/v1/chat/completions",
+        axum::routing::post(|| async {
+            // Headers leave immediately; the body never produces a frame, so a
+            // reader suspends until its owner aborts it.
+            let body = axum::body::Body::from_stream(futures::stream::pending::<
+                Result<axum::body::Bytes, std::io::Error>,
+            >());
+            axum::response::Response::builder()
+                .status(axum::http::StatusCode::OK)
+                .header("content-type", "application/json")
+                .body(body)
+                .expect("synthetic suspended response")
+        }),
+    );
+    let server = tokio::spawn(async move { axum::serve(listener, app).await });
+
+    let result = async {
+        let postgres = &fixture.state.persistence.postgres;
+        let catalog = create_synthetic_disjoint_pricing_catalog(postgres).await?;
+        let endpoint = format!("{base_url}/v1/chat/completions");
+        let mutation_id = Uuid::now_v7();
+        let principal_id = Uuid::now_v7();
+        let caller = DispatchCaller::MutationOrigin { mutation_id, principal_id };
+        let (required_scope, provider_catalog_id) = publish_synthetic_chat_admission(
+            postgres,
+            &catalog,
+            &endpoint,
+            mutation_id,
+            principal_id,
+        )
+        .await?;
+
+        let attribution = send_attribution(&fixture, provider_catalog_id, catalog.model_catalog_id);
+        let scope = ProviderSendScope::new(attribution, Uuid::now_v7());
+        let authority = test_runtime_binding_authority(
+            catalog.provider_kind.clone(),
+            provider_catalog_id,
+            catalog.model_name.clone(),
+            base_url.clone(),
+        );
+        // The attested context copies the ambient caller, so it must be built
+        // with the same caller the stored admission binds.
+        let context = with_test_dispatch_caller(caller, async {
+            authority.attest(ProviderSurface::Chat, None)
+        })
+        .await;
+        let body = serde_json::json!({
+            "model": catalog.model_name.clone(),
+            "messages": [{"role": "user", "content": "suspended body"}],
+            "service_tier": "default",
+            "n": 1,
+            "max_completion_tokens": 16,
+        });
+        let url = reqwest::Url::parse(&endpoint)?;
+        let admission = FinancialDispatchAdmission::new(
+            postgres.clone(),
+            Some(required_scope.clone()),
+            true,
+        );
+        let (response, permit) = with_test_dispatch_caller(
+            caller,
+            with_provider_send(scope.clone(), async {
+                let request = reqwest::Client::new().post(url).json(&body);
+                let send =
+                    send_provider_http_request(request, &context, &admission, "chat").await?;
+                Ok::<_, ironrag_backend::shared::provider_http::ProviderDispatchError>(
+                    send.into_parts(),
+                )
+            }),
+        )
+        .await
+        .expect("the admitted send reaches the provider");
+
+        let read = tokio::time::timeout(std::time::Duration::from_millis(150), response.bytes())
+            .await;
+        assert!(read.is_err(), "the body read must be suspended until the abort");
+        drop(permit);
+
+        let row_id = scope
+            .current_send_id()
+            .context("the admitted send row must be published")?;
+        let mut state = String::new();
+        for _ in 0..40 {
+            state = sqlx::query_scalar("select call_state::text from billing_provider_call where id=$1")
+                .bind(row_id)
+                .fetch_one(postgres)
+                .await?;
+            if state != "started" {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        assert_eq!(state, "canceled", "the aborted body read terminalizes its own row");
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("select count(*) from billing_usage where provider_call_id=$1")
+                .bind(row_id)
+                .fetch_one(postgres)
+                .await?,
+            0,
+            "an aborted body read settles no usage",
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "select count(*) from billing_provider_call where owning_execution_id=$1 and call_state='started'",
+            )
+            .bind(fixture.query_execution_id)
+            .fetch_one(postgres)
+            .await?,
+            0,
+            "no second attempt or unsettled row is left behind",
+        );
+        Ok(())
+    }
+    .await;
+
+    server.abort();
     fixture.cleanup().await?;
     result
 }

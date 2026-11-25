@@ -551,6 +551,21 @@ impl QueryIR {
             && !self.is_follow_up()
     }
 
+    /// A version can qualify the subject of an overview without turning it into
+    /// a lookup for one exact value. Ordered slices and date windows keep their own ranking.
+    #[must_use]
+    pub fn requests_document_overview_evidence(&self) -> bool {
+        matches!(self.act, QueryAct::Describe | QueryAct::Compare)
+            && matches!(self.scope, QueryScope::SingleDocument | QueryScope::MultiDocument)
+            && self.source_slice.is_none()
+            && self.temporal_constraints.is_empty()
+            && !self.is_follow_up()
+            && self.literal_constraints.iter().all(|literal| {
+                literal.kind == LiteralKind::Version
+                    || !literal_kind_has_exact_technical_shape(literal.kind, &literal.text)
+            })
+    }
+
     #[must_use]
     pub const fn requests_source_slice_context(&self) -> bool {
         self.source_slice.is_some()

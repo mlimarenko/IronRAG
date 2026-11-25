@@ -1414,6 +1414,7 @@ async fn library_with_uploaded_blob(
         .upload_inline_document(
             &fixture.state,
             UploadInlineDocumentCommand {
+                enrichment_scope: None,
                 workspace_id: fixture.workspace_id,
                 library_id,
                 external_key: Some(format!("snapshot-blob-{}", Uuid::now_v7())),
@@ -1761,6 +1762,7 @@ async fn seed_readable_content_document(
         .upload_inline_document(
             &fixture.state,
             UploadInlineDocumentCommand {
+                enrichment_scope: None,
                 workspace_id: fixture.workspace_id,
                 library_id,
                 external_key: Some(format!("suppressed-{}", Uuid::now_v7().simple())),
@@ -1882,6 +1884,7 @@ async fn seed_suppressed_document(
                 mime_type: Some("text/plain".to_string()),
                 file_bytes: bytes,
                 visibility_intent_id: Some(accepted_intent.visibility_intent_id),
+                enrichment_scope: None,
             },
         )
         .await
@@ -2221,6 +2224,7 @@ async fn admit_snapshot_replacement(
                 mime_type: Some("text/plain".to_owned()),
                 file_bytes: b"complete replacement bytes".to_vec(),
                 visibility_intent_id,
+                enrichment_scope: None,
             },
         )
         .await

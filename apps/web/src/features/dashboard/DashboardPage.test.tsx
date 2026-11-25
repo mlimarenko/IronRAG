@@ -21,6 +21,9 @@ const mocks = vi.hoisted(() => ({
         ready: 4,
         processing: 0,
         queued: 0,
+        paused: 0,
+        pendingMaterialization: 0,
+        readable: 4,
         failed: 0,
         canceled: 0,
         empty: 0,
@@ -114,6 +117,9 @@ describe('DashboardPage knowledge coverage', () => {
     mocks.queryResult.data.metrics.canceled = 0
     mocks.queryResult.data.metrics.processing = 0
     mocks.queryResult.data.metrics.queued = 0
+    mocks.queryResult.data.metrics.paused = 0
+    mocks.queryResult.data.metrics.pendingMaterialization = 0
+    mocks.queryResult.data.metrics.readable = 4
     mocks.queryResult.data.graph.status = 'partial'
     mocks.queryResult.data.attention = []
     mocks.queryResult.data.recentDocuments = []
@@ -185,11 +191,13 @@ describe('DashboardPage knowledge coverage', () => {
   })
 
   it('accounts for every not-ready lifecycle bucket without calling queued work active', () => {
-    mocks.queryResult.data.metrics.total = 11
+    mocks.queryResult.data.metrics.total = 14
     mocks.queryResult.data.metrics.processing = 2
     mocks.queryResult.data.metrics.queued = 3
     mocks.queryResult.data.metrics.failed = 1
     mocks.queryResult.data.metrics.canceled = 1
+    mocks.queryResult.data.metrics.paused = 1
+    mocks.queryResult.data.metrics.pendingMaterialization = 2
 
     render(
       <MemoryRouter>
@@ -198,13 +206,36 @@ describe('DashboardPage knowledge coverage', () => {
     )
 
     const notReadyMetric = screen.getByRole('link', { name: /dashboard\.notReadyForSearch/ })
-    expect(notReadyMetric).toHaveTextContent('7')
+    expect(notReadyMetric).toHaveTextContent('10')
     // Only the buckets that hold something: a fixed four-part line spent its
     // width on zeros and wrapped to a second row to report them.
     expect(notReadyMetric).toHaveTextContent('dashboard.notReadyProcessing')
     expect(notReadyMetric).toHaveTextContent('dashboard.notReadyQueued')
     expect(notReadyMetric).toHaveTextContent('dashboard.notReadyFailed')
     expect(notReadyMetric).toHaveTextContent('dashboard.notReadyCanceled')
+    expect(notReadyMetric).toHaveTextContent('dashboard.notReadyPaused')
+    expect(notReadyMetric).toHaveTextContent('dashboard.notReadyPendingMaterialization')
+  })
+
+  it('shows readable publications independently and counts graphless ready documents', () => {
+    Object.assign(mocks.queryResult.data.metrics, {
+      total: 6,
+      ready: 4,
+      readable: 5,
+      graphReady: 1,
+      graphSparse: 0,
+    })
+    render(
+      <MemoryRouter>
+        <DashboardPage />
+      </MemoryRouter>,
+    )
+    expect(screen.getByRole('link', { name: /dashboard\.materials/ })).toHaveTextContent(
+      '5 dashboard.availableNow',
+    )
+    const graphGap = screen.getByRole('link', { name: /dashboard\.factMapLimitedDocuments/ })
+    expect(graphGap).toHaveTextContent('3')
+    expect(graphGap).toHaveAttribute('href', '/documents?status=graphgap')
   })
 
   it('names only the not-ready buckets that hold something', () => {

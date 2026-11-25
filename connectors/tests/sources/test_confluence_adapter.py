@@ -517,3 +517,101 @@ async def test_fetch_carries_dependents_token_onto_the_materialized_ref() -> Non
         assert isinstance(result, SourceFetchMaterialized)
         assert result.item.ref.dependents_token == ref.dependents_token
         assert result.item.ref.dependents_token is not None
+
+
+@pytest.mark.asyncio
+async def test_attachments_disabled_page_carries_no_dependents() -> None:
+    """With attachment ingestion off the proven dependent set is empty."""
+
+    fake = FakeConfluence()
+    with patch("ironrag_connector.sources.confluence.adapter.ConfluenceClient", return_value=fake):
+        settings = _settings().model_copy(update={"confluence_include_attachments": False})
+        adapter = ConfluenceAdapter(settings)
+        ref = await _first(adapter.iter_items())
+        result = await adapter.fetch(ref)
+
+    assert isinstance(result, SourceFetchMaterialized)
+    assert result.item.dependents == ()
+
+
+@pytest.mark.asyncio
+async def test_fetch_defers_an_unexpected_ref_kind() -> None:
+    with patch(
+        "ironrag_connector.sources.confluence.adapter.ConfluenceClient",
+        return_value=FakeConfluence(),
+    ):
+        adapter = ConfluenceAdapter(_settings())
+        ref = SourceItemRef(
+            item_id="77",
+            kind=KIND_ATTACHMENT,
+            external_key="confluence:attachment:77",
+        )
+        result = await adapter.fetch(ref)
+
+    assert isinstance(result, SourceFetchDeferred)
+    assert result.reason == f"unexpected ref kind: {KIND_ATTACHMENT}"
+
+
+class MalformedAttachmentConfluence(FakeConfluence):
+    def __init__(self, attachment: dict[str, Any]) -> None:
+        super().__init__()
+        self._attachment = attachment
+
+    async def list_attachments(self, page_id: str) -> list[dict[str, Any]]:
+        return [self._attachment]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("attachment", "reason"),
+    [
+        (
+            {"id": 77, "_links": {"download": "/download/77"}},
+            "Confluence attachment metadata contained an invalid id",
+        ),
+        (
+            {"id": "77", "_links": ["/download/77"]},
+            "Confluence attachment metadata contained invalid links",
+        ),
+        (
+            {"id": "77", "_links": {"download": "  "}},
+            "Confluence attachment metadata contained an invalid download link",
+        ),
+        (
+            {"id": "77"},
+            "Confluence attachment metadata contained invalid links",
+        ),
+    ],
+)
+async def test_malformed_attachment_metadata_defers_the_parent(
+    attachment: dict[str, Any], reason: str
+) -> None:
+    fake = MalformedAttachmentConfluence(attachment)
+    with patch("ironrag_connector.sources.confluence.adapter.ConfluenceClient", return_value=fake):
+        adapter = ConfluenceAdapter(_settings())
+        ref = await _first(adapter.iter_items())
+        result = await adapter.fetch(ref)
+
+    assert isinstance(result, SourceFetchDeferred)
+    assert result.reason == reason
+
+
+class VanishedAttachmentConfluence(FakeConfluence):
+    async def download(self, path_or_url: str) -> tuple[bytes, str]:
+        raise ConfluenceNotFoundError("attachment vanished during materialization")
+
+
+@pytest.mark.asyncio
+async def test_attachment_download_404_defers_the_whole_parent() -> None:
+    """A snapshot that loses an attachment mid-materialization is deferred."""
+
+    with patch(
+        "ironrag_connector.sources.confluence.adapter.ConfluenceClient",
+        return_value=VanishedAttachmentConfluence(),
+    ):
+        adapter = ConfluenceAdapter(_settings())
+        ref = await _first(adapter.iter_items())
+        result = await adapter.fetch(ref)
+
+    assert isinstance(result, SourceFetchDeferred)
+    assert result.reason == ("Confluence attachment snapshot changed during materialization")

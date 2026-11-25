@@ -27,6 +27,74 @@ enum Outcome {
     Blocked,
 }
 
+/// One mock admission the real transport would perform for a mocked vision gateway.
+struct MockVisionSendAdmission<'a> {
+    workspace_id: Uuid,
+    library_id: Uuid,
+    read_id: Uuid,
+    binding_id: Uuid,
+    provider_catalog_id: Uuid,
+    model_catalog_id: Uuid,
+    model_name: &'a str,
+}
+
+/// Simulates the admission the real transport performs, so a mocked gateway can
+/// participate in the same send scope a product send would use.
+async fn admit_mock_vision_send(
+    pool: &sqlx::PgPool,
+    send: MockVisionSendAdmission<'_>,
+) -> Result<Uuid> {
+    let MockVisionSendAdmission {
+        workspace_id,
+        library_id,
+        read_id,
+        binding_id,
+        provider_catalog_id,
+        model_catalog_id,
+        model_name,
+    } = send;
+    let provider_call_id = Uuid::now_v7();
+    let attribution = ironrag_backend::shared::provider_send::ProviderSendAttribution {
+        workspace_id,
+        library_id,
+        owning_execution_kind: "mcp_document_read".to_string(),
+        owning_execution_id: read_id,
+        call_kind: ironrag_backend::domains::billing::MCP_SOURCE_IMAGE_DESCRIPTION_CALL_KIND
+            .to_string(),
+        binding_id: Some(binding_id),
+        provider_catalog_id,
+        model_catalog_id,
+        runtime_execution_id: None,
+        runtime_task_kind: None,
+    };
+    let body = serde_json::json!({"model": model_name});
+    ironrag_backend::infra::repositories::billing_repository::admit_provider_send(
+        pool,
+        ironrag_backend::infra::repositories::billing_repository::ProviderSendRequest {
+            required_scope: None,
+            caller: &ironrag_backend::shared::provider_http::DispatchCaller::Unattributed,
+            model: model_name,
+            endpoint: "https://provider.example/v1/chat/completions",
+            body: &body,
+            attribution: &attribution,
+            provider_call_id,
+        },
+    )
+    .await
+    .map_err(|error| {
+        // Mirror the real transport: a refused admission surfaces as the typed
+        // dispatch refusal, not as a generic fixture error.
+        anyhow::Error::new(ironrag_backend::integrations::retry::ProviderCallError::admission(
+            ironrag_backend::integrations::provider_budget::ProviderBudgetError::Dispatch(
+                ironrag_backend::shared::provider_http::ProviderDispatchRefusal::Admission,
+            ),
+        ))
+        .context(format!("mock admission failed: {error:?}"))
+    })?;
+    ironrag_backend::shared::provider_send::publish_test_send_row(provider_call_id);
+    Ok(provider_call_id)
+}
+
 struct RecordingVisionGateway {
     outcome: Outcome,
     attempts: AtomicUsize,
@@ -34,6 +102,11 @@ struct RecordingVisionGateway {
     entered: Notify,
     response_returned: Notify,
     pool: sqlx::PgPool,
+    workspace_id: Uuid,
+    library_id: Uuid,
+    binding_id: Uuid,
+    provider_catalog_id: Uuid,
+    model_catalog_id: Uuid,
 }
 
 #[async_trait]
@@ -49,6 +122,26 @@ impl LlmGateway for RecordingVisionGateway {
     }
     async fn vision_extract(&self, request: VisionRequest) -> Result<VisionResponse> {
         self.attempts.fetch_add(1, Ordering::SeqCst);
+        let read_id: Uuid = sqlx::query_scalar(
+            "select id from billing_document_read where workspace_id=$1 and library_id=$2 order by id desc limit 1",
+        )
+        .bind(self.workspace_id)
+        .bind(self.library_id)
+        .fetch_one(&self.pool)
+        .await?;
+        admit_mock_vision_send(
+            &self.pool,
+            MockVisionSendAdmission {
+                workspace_id: self.workspace_id,
+                library_id: self.library_id,
+                read_id,
+                binding_id: self.binding_id,
+                provider_catalog_id: self.provider_catalog_id,
+                model_catalog_id: self.model_catalog_id,
+                model_name: &request.model_name,
+            },
+        )
+        .await?;
         // Admission is observed from a separate DB connection at the I/O boundary.
         let reserved: i64 = sqlx::query_scalar(
             "select count(*) from billing_provider_call where call_state='started'",
@@ -156,7 +249,7 @@ async fn configure_vision(
         Some(&encrypted),
     )
     .await?;
-    ai_repository::create_binding(
+    let binding = ai_repository::create_binding(
         pool,
         ai_repository::CreateAiBindingInput {
             scope_kind: "library",
@@ -183,6 +276,11 @@ async fn configure_vision(
         entered: Notify::new(),
         response_returned: Notify::new(),
         pool: pool.clone(),
+        workspace_id: fixture.workspace_id,
+        library_id: fixture.library_id,
+        binding_id: binding.id,
+        provider_catalog_id: provider.id,
+        model_catalog_id: model.id,
     });
     fixture.state.llm_gateway = gateway.clone();
     Ok(gateway)
@@ -291,7 +389,14 @@ async fn native_image_reads_account_success_failure_and_unknown_usage() -> Resul
             };
             assert_eq!(usage, expected_usage, "exact returned dimensions must survive; absent usage is not zero");
             let cost = fixture.state.application_services.billing.roll_up_execution_cost(&fixture.state, &call.owning_execution_kind, call.owning_execution_id).await?.context("durable cost coverage")?;
-            assert_eq!(cost.provider_call_count, 1);
+            // Only a completed call is a settled observation. The failed attempt
+            // stays durable and unpriced, so it must not disappear from the
+            // ledger while it also must not pass as a settled call.
+            let settled_calls = i32::from(!matches!(outcome, Outcome::Failure));
+            assert_eq!(
+                cost.provider_call_count, settled_calls,
+                "a failed attempt is not a settled provider call",
+            );
             let attributed_document: Uuid = sqlx::query_scalar("select knowledge_document_id from billing_execution_cost where owning_execution_id=$1")
                 .bind(call.owning_execution_id).fetch_one(&fixture.state.persistence.postgres).await?;
             assert_eq!(attributed_document, document);
@@ -328,7 +433,15 @@ async fn native_image_admission_failure_prevents_provider_io() -> Result<()> {
             .execute(&fixture.state.persistence.postgres).await?;
         let response = fixture.mcp_tool_call(&token, "read_document", json!({"documentId":document})).await?;
         assert!(response.get("error").is_some() || response["result"]["isError"] == true);
-        assert_eq!(gateway.attempts.load(Ordering::SeqCst), 0);
+        let rendered = response.to_string();
+        assert!(
+            rendered.contains("provider_admission_refused"),
+            "the read must fail with the native admission refusal, got {rendered}"
+        );
+        // The recording gateway counts an entered attempt before it admits, so
+        // the provider-I/O signal is the dispatch counter, which only moves
+        // after admission succeeds.
+        assert_eq!(gateway.dispatches.load(Ordering::SeqCst), 0);
         assert!(calls(&fixture).await?.is_empty());
         Ok(())
     }.await;
@@ -372,7 +485,12 @@ async fn native_image_cancellation_retains_unknown_liability() -> Result<()> {
         assert_eq!(notification.payload(), rows[0].id.to_string());
         assert_eq!(rows[0].call_state, "canceled");
         let cost = fixture.state.application_services.billing.roll_up_execution_cost(&fixture.state, &rows[0].owning_execution_kind, rows[0].owning_execution_id).await?.context("canceled cost coverage")?;
-        assert_eq!(cost.provider_call_count, 1);
+        // The canceled reservation is durable but unsettled, so it is unknown
+        // liability rather than a settled call.
+        assert_eq!(
+            cost.provider_call_count, 0,
+            "a canceled reservation is not a settled provider call",
+        );
         assert_eq!(cost.unpriced_provider_call_count, 1);
         let quantities: i64 = sqlx::query_scalar("select count(*) from billing_usage").fetch_one(&fixture.state.persistence.postgres).await?;
         assert_eq!(quantities, 0);

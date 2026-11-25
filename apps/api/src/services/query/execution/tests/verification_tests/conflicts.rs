@@ -50,7 +50,6 @@ fn verify_answer_marks_conflicting_even_when_one_literal_is_grounded() {
             ],
         },
         chunks: &[],
-        prompt_context: "",
         assistant_grounding: &AssistantGroundingEvidence::default(),
     });
 
@@ -93,7 +92,6 @@ fn verify_answer_reports_typed_conflict_without_inventing_named_claims() {
             technical_facts,
         },
         chunks: &[],
-        prompt_context: "",
         assistant_grounding: &AssistantGroundingEvidence::default(),
     });
 
@@ -140,7 +138,6 @@ fn verify_answer_marks_conflicting_when_exact_literal_question_stays_ambiguous()
             ],
         },
         chunks: &[],
-        prompt_context: "",
         assistant_grounding: &AssistantGroundingEvidence::default(),
     });
 

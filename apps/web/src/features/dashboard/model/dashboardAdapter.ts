@@ -27,6 +27,9 @@ export type DashboardViewModel = {
     ready: number
     processing: number
     queued: number
+    paused: number
+    pendingMaterialization: number
+    readable: number
     failed: number
     canceled: number
     empty: number
@@ -152,6 +155,9 @@ export function dashboardAdapter(surface: DashboardSurface): DashboardViewModel 
       ready: surface.documentMetrics.ready,
       processing: surface.documentMetrics.processing,
       queued: surface.documentMetrics.queued,
+      paused: surface.documentMetrics.paused,
+      pendingMaterialization: surface.documentMetrics.pendingMaterialization,
+      readable: surface.documentMetrics.readable,
       failed: surface.documentMetrics.failed,
       canceled: surface.documentMetrics.canceled,
       empty: surface.documentMetrics.empty,

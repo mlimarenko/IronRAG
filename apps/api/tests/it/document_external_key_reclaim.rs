@@ -228,6 +228,7 @@ fn admission_request(
         }),
         parent_async_operation_id: None,
         priority: 100,
+        enrichment_scope: None,
     }
 }
 

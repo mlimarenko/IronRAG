@@ -190,6 +190,10 @@ struct SeedTurnExecutionRequest<'a> {
     content_text: &'a str,
     binding_id: Option<Uuid>,
     surface_kind: RuntimeSurfaceKind,
+    /// Identifier the UI stream already published to the client, so the answer
+    /// can be read back by that exact execution. `None` keeps the canonical
+    /// allocation for every other caller.
+    parent_execution_id: Option<Uuid>,
 }
 
 /// Seeds the runtime session and persists the query execution row shared by
@@ -210,8 +214,9 @@ async fn seed_turn_execution(
         content_text,
         binding_id,
         surface_kind,
+        parent_execution_id,
     } = request;
-    let execution_id = Uuid::now_v7();
+    let execution_id = parent_execution_id.unwrap_or_else(Uuid::now_v7);
     let execution_context_bundle_id = Uuid::now_v7();
     let runtime_session =
         seed_query_runtime_session(state, execution_id, conversation_context, surface_kind).await?;
@@ -274,6 +279,7 @@ impl QueryService {
         state: &AppState,
         auth: &AuthContext,
         command: ExecuteConversationTurnCommand,
+        parent_execution_id: Option<Uuid>,
         activity_tx: Option<Sender<AgentLoopActivityEvent>>,
     ) -> Result<QueryTurnExecutionResult, ApiError> {
         // Mark this scope as the latency-sensitive query lane so every provider
@@ -283,7 +289,13 @@ impl QueryService {
             crate::integrations::provider_budget::ProviderLane::Query,
             crate::services::query::turn_admission::with_query_turn_admission(
                 state.query_turn_admission.clone(),
-                self.execute_assistant_agent_turn_inner(state, auth, command, activity_tx),
+                self.execute_assistant_agent_turn_inner(
+                    state,
+                    auth,
+                    command,
+                    parent_execution_id,
+                    activity_tx,
+                ),
             ),
         ))
         .await
@@ -294,6 +306,7 @@ impl QueryService {
         state: &'a AppState,
         auth: &'a AuthContext,
         command: ExecuteConversationTurnCommand,
+        parent_execution_id: Option<Uuid>,
         activity_tx: Option<Sender<AgentLoopActivityEvent>>,
     ) -> Result<QueryTurnExecutionResult, ApiError> {
         let PreparedConversationTurn {
@@ -317,7 +330,7 @@ impl QueryService {
         .map_err(|e| ApiError::internal_with_log(e, "internal"))?
         .ok_or_else(|| ApiError::resource_not_found("workspace", library.workspace_id))?;
         let library_ref = library_catalog_ref(&workspace.slug, &library.slug);
-        let prior_grounded_answer_context_messages = prior_agent_grounded_answer_context(
+        let prior_grounded_answer_context = prior_agent_grounded_answer_context(
             state,
             &conversation,
             &library,
@@ -342,6 +355,7 @@ impl QueryService {
             content_text: &content_text,
             binding_id,
             surface_kind: command.surface_kind,
+            parent_execution_id,
         })
         .await?;
         let agent_request_id = execution.id.to_string();
@@ -360,7 +374,7 @@ impl QueryService {
             async_operation.id,
         );
 
-        let outcome = execute_agent_answer_stages(AgentAnswerStageInput {
+        let outcome = Box::pin(execute_agent_answer_stages(AgentAnswerStageInput {
             state,
             auth,
             library: &library,
@@ -372,15 +386,14 @@ impl QueryService {
             execution: &execution,
             execution_context_bundle_id,
             provider_execution_context,
-            prior_grounded_answer_context_messages: prior_grounded_answer_context_messages
-                .as_slice(),
+            prior_grounded_answer_context: &prior_grounded_answer_context,
             agent_conversation_history: agent_conversation_history.as_slice(),
             agent_grounded_answer_tool_history,
             agent_request_id: &agent_request_id,
             activity_tx,
             top_k,
             runtime_session: &mut runtime_session,
-        })
+        }))
         .await;
 
         let terminal_execution = finalize_agent_runtime_execution(
@@ -501,6 +514,7 @@ impl QueryService {
             content_text: &content_text,
             binding_id,
             surface_kind: command.surface_kind,
+            parent_execution_id: None,
         })
         .await?;
         let async_operation = open_query_execution_operation(
@@ -619,24 +633,25 @@ mod stack_tests {
 
     #[test]
     fn query_turn_stage_futures_fit_worker_stack() {
-        let assistant = future_size(|(service, state, auth, command, activity)| {
+        let assistant = future_size(|(service, state, auth, command, execution, activity)| {
             QueryService::execute_assistant_agent_turn_inner(
-                service, state, auth, command, activity,
+                service, state, auth, command, execution, activity,
             )
         });
         let answer = future_size(execute_agent_answer_stages);
         let grounded = future_size(|(service, state, command)| {
             QueryService::execute_grounded_answer_pipeline(service, state, command)
         });
-        let admitted_assistant = future_size(|(service, state, auth, command, activity)| {
-            let state: &AppState = state;
-            crate::services::query::turn_admission::with_query_turn_admission(
-                state.query_turn_admission.clone(),
-                QueryService::execute_assistant_agent_turn_inner(
-                    service, state, auth, command, activity,
-                ),
-            )
-        });
+        let admitted_assistant =
+            future_size(|(service, state, auth, command, execution, activity)| {
+                let state: &AppState = state;
+                crate::services::query::turn_admission::with_query_turn_admission(
+                    state.query_turn_admission.clone(),
+                    QueryService::execute_assistant_agent_turn_inner(
+                        service, state, auth, command, execution, activity,
+                    ),
+                )
+            });
         let admitted_grounded = future_size(|(service, state, command)| {
             let state: &AppState = state;
             crate::services::query::turn_admission::with_query_turn_admission(

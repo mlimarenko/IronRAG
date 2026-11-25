@@ -42,3 +42,46 @@ def test_redaction_processor_and_service_binding() -> None:
     assert fingerprint("RuntimeError", "failed after 3 attempts") == fingerprint(
         "RuntimeError", "failed after 7 attempts"
     )
+
+
+def test_error_fingerprint_reads_the_active_exception() -> None:
+    """``exc_info=True`` means the exception being handled right now."""
+
+    try:
+        raise RuntimeError("upstream rejected the request")
+    except RuntimeError:
+        event = add_error_fingerprint(None, "error", {"event": "x", "exc_info": True})
+
+    assert event["error_fingerprint"] == fingerprint(
+        "RuntimeError", "upstream rejected the request"
+    )
+
+
+def test_error_fingerprint_accepts_a_bare_exception_value() -> None:
+    event = add_error_fingerprint(
+        None, "error", {"event": "x", "exc_info": PermissionError("denied")}
+    )
+
+    assert event["error_fingerprint"] == fingerprint("PermissionError", "denied")
+
+
+def test_error_fingerprint_falls_back_outside_an_exception_scope() -> None:
+    """``exc_info=True`` with no active exception still yields one stable key."""
+
+    event = add_error_fingerprint(None, "error", {"event": "x", "exc_info": True})
+    opaque = add_error_fingerprint(None, "error", {"event": "x", "exc_info": {"detail": 1}})
+
+    assert event["error_fingerprint"] == fingerprint("unknown", "unknown")
+    assert opaque["error_fingerprint"] == fingerprint("exception", "unknown")
+
+
+def test_redaction_walks_tuple_values() -> None:
+    """A tuple is traversed like a list, so nested strings are still scrubbed."""
+
+    event = redact_event(
+        None,
+        "error",
+        {"event": "x", "pair": ("token=abc123", "plain")},
+    )
+
+    assert event["pair"] == ("[REDACTED:token]", "plain")

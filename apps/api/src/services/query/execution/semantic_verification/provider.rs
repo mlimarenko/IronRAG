@@ -136,7 +136,7 @@ pub(super) fn build_verification_request(
         "json_schema": {
             "name": "semantic_verification",
             "strict": true,
-            "schema": response_json_schema(),
+            "schema": response_json_schema(prepared),
         }
     });
     let prompt = serde_json::to_string(&prepared.request_json())
@@ -148,11 +148,6 @@ pub(super) fn build_verification_request(
     seed.max_output_tokens_override = Some(max_tokens);
     disable_bounded_answer_reasoning(&binding.provider_kind, &mut seed.extra_parameters_json);
     let request = build_structured_chat_request(seed, prompt, response_format);
-    let serialized =
-        serde_json::to_vec(&request).map_err(|_| SemanticNotRunReason::InputLimitExceeded)?;
-    if serialized.len() > MAX_REQUEST_UTF8_BYTES {
-        return Err(SemanticNotRunReason::InputLimitExceeded);
-    }
     // Reuse the gateway's effective-system owner, including its JSON-object
     // schema suffix, rather than recording a different debug prompt.
     let system = provider_system_prompt(
@@ -162,6 +157,16 @@ pub(super) fn build_verification_request(
         mode,
     )
     .map_err(|_| SemanticNotRunReason::UnsupportedStructuredTransport)?;
+    // The gateway lowers JSON-object mode by embedding the schema in the
+    // system message, where JSON escaping can increase its wire size. Count
+    // that serialized message in addition to the original request as a bound.
+    let serialized =
+        serde_json::to_vec(&request).map_err(|_| SemanticNotRunReason::InputLimitExceeded)?;
+    let system_bytes =
+        serde_json::to_vec(&system).map_err(|_| SemanticNotRunReason::InputLimitExceeded)?.len();
+    if serialized.len().saturating_add(system_bytes).saturating_add(1024) > MAX_REQUEST_UTF8_BYTES {
+        return Err(SemanticNotRunReason::InputLimitExceeded);
+    }
     let mut messages = Vec::new();
     if let Some(system) = system {
         messages.push(ChatMessage::system(system));
@@ -327,10 +332,7 @@ async fn execute_reserved_request(
     let provider_started = Instant::now();
     let response = tokio::time::timeout_at(
         deadline,
-        crate::observability::with_provider_call_id(
-            provider_call_id,
-            state.llm_gateway.generate(request.request),
-        ),
+        reservation.scoped(state.llm_gateway.generate(request.request)),
     )
     .await;
     let response = match response {

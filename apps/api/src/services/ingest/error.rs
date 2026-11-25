@@ -63,6 +63,12 @@ impl IngestServiceError {
                 crate::shared::provider_failure::ProviderFailureKind::RequestRejected => {
                     "IngestServiceError::ProviderRequestRejected"
                 }
+                crate::shared::provider_failure::ProviderFailureKind::AdmissionRefused => {
+                    "IngestServiceError::ProviderAdmissionRefused"
+                }
+                crate::shared::provider_failure::ProviderFailureKind::AllowanceExhausted => {
+                    "IngestServiceError::ProviderAllowanceExhausted"
+                }
             },
             Self::Cancelled => "IngestServiceError::Cancelled",
             Self::Repository(_) => "IngestServiceError::Repository",

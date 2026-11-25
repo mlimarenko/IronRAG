@@ -438,6 +438,26 @@ fn graph_reconcile_accepts_code_like_current_chunk_text() {
     assert!(is_graph_reconcile_chunk_text_eligible(text));
 }
 
+#[test]
+fn graph_merge_withholds_low_confidence_text_from_relation_evidence() {
+    use super::revision_merge::{RevisionMergeChunkAdmission, revision_merge_chunk_admission};
+
+    assert_eq!(
+        revision_merge_chunk_admission("Payments reference invoices and orders by key."),
+        RevisionMergeChunkAdmission::Merge
+    );
+    let noise = concat!(
+        "overview status alpha beta gamma ",
+        "abCD4efGH hiJKlmNO pQrST uvWXyZab ",
+        "cdEFGh3Ij klMNOprs tuVWxyZq mnOPqRst"
+    );
+    assert_eq!(
+        revision_merge_chunk_admission(noise),
+        RevisionMergeChunkAdmission::LowConfidenceText
+    );
+    assert!(!is_graph_reconcile_chunk_text_eligible(noise));
+}
+
 fn snapshot_row(
     library_id: Uuid,
     graph_status: &str,

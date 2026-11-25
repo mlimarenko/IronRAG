@@ -70,7 +70,15 @@ impl DeterministicAnswerContext<'_> {
                 state: self.state,
                 execution: self.execution,
                 question: self.effective_question,
+                conversation_history: &[],
                 snapshot: self.snapshot_context,
+                retrieval_degradations: &self
+                    .prepared
+                    .structured
+                    .diagnostics
+                    .retrieval_degradations,
+                bounded_selection: self.prepared.evidence_selection,
+                candidate_relationships: &self.prepared.structured.graph_relation_references,
             },
             verification_stage,
             self.provider_calls,

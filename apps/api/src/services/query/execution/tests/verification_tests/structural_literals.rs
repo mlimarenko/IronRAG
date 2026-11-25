@@ -10,7 +10,6 @@ fn verify_answer_accepts_structural_config_literal_from_an_exact_source_line() {
         chunks: &[runtime_chunk(
             "Configuration section:\n[AlphaFeature] enableFlag = true\nEnd of section.",
         )],
-        prompt_context: "Configuration section:\n[AlphaFeature] enableFlag = true\nEnd of section.",
         assistant_grounding: &AssistantGroundingEvidence::default(),
     });
 
@@ -29,7 +28,6 @@ fn verify_answer_rejects_structural_config_literals_spread_across_fragments() {
             runtime_chunk("Configuration section [AlphaFeature] contains enableFlag."),
             runtime_chunk("Another section documents true for a different key."),
         ],
-        prompt_context: "Configuration section [AlphaFeature] contains enableFlag. Another section documents true for a different key.",
         assistant_grounding: &AssistantGroundingEvidence::default(),
     });
 
@@ -45,7 +43,6 @@ fn verify_answer_accepts_code_like_assignment_literal_from_an_exact_source_line(
         intent_profile: &QueryIntentProfile::default(),
         evidence: &empty_authoritative_evidence(),
         chunks: &[runtime_chunk("Receipt configuration:\nsendReceiptCopy = false")],
-        prompt_context: "Receipt configuration:\nsendReceiptCopy = false",
         assistant_grounding: &AssistantGroundingEvidence::default(),
     });
 
@@ -61,7 +58,6 @@ fn verify_answer_fully_verifies_an_exact_assignment_answer() {
         intent_profile: &QueryIntentProfile::default(),
         evidence: &empty_authoritative_evidence(),
         chunks: &[runtime_chunk("sendReceiptCopy = false")],
-        prompt_context: "sendReceiptCopy = false",
         assistant_grounding: &AssistantGroundingEvidence::default(),
     });
 
@@ -95,7 +91,6 @@ fn verify_answer_rejects_assignment_substrings_of_other_keys_or_values() {
                 intent_profile: &QueryIntentProfile::default(),
                 evidence: &empty_authoritative_evidence(),
                 chunks: &[runtime_chunk(source)],
-                prompt_context: source,
                 assistant_grounding: &AssistantGroundingEvidence::default(),
             });
         assert_eq!(
@@ -126,7 +121,6 @@ fn verify_answer_preserves_assignment_spacing_and_surrounding_prose() {
                 intent_profile: &QueryIntentProfile::default(),
                 evidence: &empty_authoritative_evidence(),
                 chunks: &[runtime_chunk(source)],
-                prompt_context: source,
                 assistant_grounding: &AssistantGroundingEvidence::default(),
             });
         assert_eq!(
@@ -165,7 +159,6 @@ fn verify_answer_accepts_exact_assignment_from_one_structured_fact() {
             }],
         },
         chunks: &[],
-        prompt_context: "",
         assistant_grounding: &AssistantGroundingEvidence::default(),
     });
 
@@ -184,7 +177,6 @@ fn verify_answer_rejects_assignment_components_separated_within_one_fragment() {
             "sendReceiptCopy controls output. {} false belongs to another setting.",
             "neutral filler ".repeat(64)
         ))],
-        prompt_context: "",
         assistant_grounding: &AssistantGroundingEvidence::default(),
     });
 
@@ -200,7 +192,6 @@ fn verify_answer_rejects_assignment_missing_its_bracket_qualifier() {
         intent_profile: &QueryIntentProfile::default(),
         evidence: &empty_authoritative_evidence(),
         chunks: &[runtime_chunk("APP_DATABASE_URL = postgres://db.example/app")],
-        prompt_context: "APP_DATABASE_URL = postgres://db.example/app",
         assistant_grounding: &AssistantGroundingEvidence::default(),
     });
 
@@ -219,7 +210,6 @@ fn verify_answer_rejects_angle_url_as_placeholder() {
         intent_profile: &QueryIntentProfile::default(),
         evidence: &empty_authoritative_evidence(),
         chunks: &[runtime_chunk("The toolctl command accepts a target argument.")],
-        prompt_context: "The toolctl command accepts a target argument.",
         assistant_grounding: &AssistantGroundingEvidence::default(),
     });
 
@@ -237,7 +227,6 @@ fn verify_answer_accepts_shared_prefix_slash_alternatives_from_same_fragment() {
         chunks: &[runtime_chunk(
             "Documented keys include messages.alpha.connection.timeout.user and messages.alpha.connection.timeout.password.",
         )],
-        prompt_context: "Documented keys include messages.alpha.connection.timeout.user and messages.alpha.connection.timeout.password.",
         assistant_grounding: &AssistantGroundingEvidence::default(),
     });
 
@@ -255,7 +244,6 @@ fn verify_answer_accepts_slash_separated_code_value_lists_from_same_fragment() {
         chunks: &[runtime_chunk(
             "The service commands are start, stop, restart, and status. Export status values are OPEN, CLOSED, and ALL.",
         )],
-        prompt_context: "The service commands are start, stop, restart, and status. Export status values are OPEN, CLOSED, and ALL.",
         assistant_grounding: &AssistantGroundingEvidence::default(),
     });
 
@@ -271,7 +259,6 @@ fn verify_answer_rejects_slash_separated_list_when_an_alternative_is_missing() {
         intent_profile: &QueryIntentProfile::default(),
         evidence: &empty_authoritative_evidence(),
         chunks: &[runtime_chunk("The service commands are start and stop.")],
-        prompt_context: "The service commands are start and stop.",
         assistant_grounding: &AssistantGroundingEvidence::default(),
     });
 
@@ -289,7 +276,6 @@ fn verify_answer_accepts_decorated_version_literal_when_numeric_version_is_suppo
         chunks: &[runtime_chunk(
             "The release note identifies 7.8.9 as the supported build for this feature.",
         )],
-        prompt_context: "The release note identifies 7.8.9 as the supported build for this feature.",
         assistant_grounding: &AssistantGroundingEvidence::default(),
     });
 
@@ -307,7 +293,6 @@ fn verify_answer_rejects_decorated_version_literal_when_numeric_version_is_missi
         chunks: &[runtime_chunk(
             "The release note identifies 7.8.9 as the supported build for this feature.",
         )],
-        prompt_context: "The release note identifies 7.8.9 as the supported build for this feature.",
         assistant_grounding: &AssistantGroundingEvidence::default(),
     });
 
@@ -323,7 +308,6 @@ fn verify_answer_rejects_decorated_version_when_only_the_number_is_grounded() {
         intent_profile: &QueryIntentProfile::default(),
         evidence: &empty_authoritative_evidence(),
         chunks: &[runtime_chunk("The release note identifies 7.8.9 as the supported build.")],
-        prompt_context: "The release note identifies 7.8.9 as the supported build.",
         assistant_grounding: &AssistantGroundingEvidence::default(),
     });
 
@@ -341,7 +325,6 @@ fn verify_answer_accepts_structural_command_placeholders_when_command_is_support
         chunks: &[runtime_chunk(
             "The toolctl command accepts a target and an optional mode argument.",
         )],
-        prompt_context: "The toolctl command accepts a target and an optional mode argument.",
         assistant_grounding: &AssistantGroundingEvidence::default(),
     });
 
@@ -359,7 +342,6 @@ fn verify_answer_rejects_simple_assignment_without_exact_support() {
         chunks: &[runtime_chunk(
             "The status field can be CLOSED. Identifier 1 appears in a separate example.",
         )],
-        prompt_context: "The status field can be CLOSED. Identifier 1 appears in a separate example.",
         assistant_grounding: &AssistantGroundingEvidence::default(),
     });
 
@@ -382,7 +364,6 @@ fn verify_answer_accepts_quoted_literals_grounded_by_decoded_read_document_conte
         intent_profile: &QueryIntentProfile::default(),
         evidence: &empty_authoritative_evidence(),
         chunks: &[],
-        prompt_context: "",
         assistant_grounding: &grounding,
     });
 
@@ -403,7 +384,6 @@ fn verify_answer_accepts_markdown_escaped_path_literals() {
         intent_profile: &QueryIntentProfile::default(),
         evidence: &empty_authoritative_evidence(),
         chunks: &[],
-        prompt_context: "",
         assistant_grounding: &grounding,
     });
 
@@ -421,7 +401,6 @@ fn verify_answer_accepts_literals_grounded_by_html_entity_equivalent_context() {
         chunks: &[runtime_chunk(
             "Example:\nSELECT name, age\nFROM students\nWHERE age &gt; 18\nORDER BY name ASC;",
         )],
-        prompt_context: "Example:\nSELECT name, age\nFROM students\nWHERE age &gt; 18\nORDER BY name ASC;",
         assistant_grounding: &AssistantGroundingEvidence::default(),
     });
 
@@ -437,7 +416,6 @@ fn verify_answer_accepts_named_decimal_and_hex_html_entities() {
         intent_profile: &QueryIntentProfile::default(),
         evidence: &empty_authoritative_evidence(),
         chunks: &[runtime_chunk("Use &quot;alpha&quot;, beta&#39;s, and &#x2F;v1&#x2F;items.")],
-        prompt_context: "Use &quot;alpha&quot;, beta&#39;s, and &#x2F;v1&#x2F;items.",
         assistant_grounding: &AssistantGroundingEvidence::default(),
     });
 
@@ -456,7 +434,6 @@ fn verify_answer_rejects_structural_config_literals_spread_too_far_apart() {
             "Configuration section [AlphaFeature] contains enableFlag. {} The value true belongs to a separate note.",
             "filler ".repeat(500)
         ))],
-        prompt_context: "",
         assistant_grounding: &AssistantGroundingEvidence::default(),
     });
 
@@ -472,7 +449,6 @@ fn verify_answer_does_not_decode_malformed_html_entity_without_semicolon() {
         intent_profile: &QueryIntentProfile::default(),
         evidence: &empty_authoritative_evidence(),
         chunks: &[runtime_chunk("Use AT&ampT.")],
-        prompt_context: "Use AT&ampT.",
         assistant_grounding: &AssistantGroundingEvidence::default(),
     });
 

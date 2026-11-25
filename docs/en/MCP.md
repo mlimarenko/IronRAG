@@ -133,6 +133,20 @@ On unambiguous answers `clarification.required` is `false`, `clarification.quest
 | `view_document_image` | Fetch the original image bytes (PNG/JPEG/etc.) backing an image-attachment document so a vision-capable model can inspect it directly. Only advertised when the active Agent binding points at a multimodal model. | `documentId` |
 | `list_documents` | List documents in a library, optionally filtered by processing status. | `library` (optional) |
 
+`list_documents` and library descriptor counts cover the same authorized document
+set, including document-only grants. `statusFilter` uses the document lifecycle
+(`queued`, `processing`, `ready`, `failed`, `canceled`, `empty`, `paused`,
+`pending_materialization`). Use `readableOnly: true` for current readable
+revisions; readability is independent of an enrichment attempt's status.
+Descriptors expose every lifecycle bucket in `documentCountsByStatus`, whose sum
+is `documentCount`. `ingestionReadiness` describes configured bindings, not corpus
+readiness.
+
+Follow `continuationToken` while `hasMore` is true, keeping the library and
+filters unchanged. `count` is the page size; `totalCount` covers the matching
+authorized set. If the inventory changes, the continuation returns a conflict:
+discard it and restart once rather than retrying the same token.
+
 `read_document.content` is an exact window of the published canonical revision
 text. `sliceStartOffset`, `sliceEndOffset` and `totalContentLength` count Unicode
 characters in that same text, including whitespace. Image descriptions remain

@@ -18,7 +18,7 @@ from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation, localcontext
 from pathlib import Path
-from typing import Any, Mapping, Sequence, TypedDict
+from typing import Any, Mapping, Sequence, TypedDict, cast
 from uuid import UUID
 
 import requests
@@ -413,6 +413,48 @@ TURN_EXPECTATIONS = {
 }
 
 
+def preceding_turn_schema_valid(turn: Any) -> bool:
+    return isinstance(turn, dict) and not set(turn) - (
+        {"id", "question", "expectedFacts", "mandatoryCaveats"}
+        | TURN_EXPECTATIONS.keys()
+    )
+
+
+def turn_regex_expectations(key: str, values: list[str]) -> None:
+    """Regex expectations must compile and must not match empty text."""
+    if "Regex" not in key:
+        return
+    for pattern in values:
+        try:
+            compiled = re.compile(pattern, re.IGNORECASE)
+        except re.error as error:
+            raise ValueError("invalid turn regex") from error
+        if compiled.search(""):
+            raise ValueError("turn regex matches empty text")
+
+
+def validate_turn_expectations(turn: dict[str, Any]) -> None:
+    for key in TURN_EXPECTATIONS:
+        values = turn.get(key, [])
+        if not isinstance(values, list) or any(
+            not isinstance(value, str) or not value.strip() for value in values
+        ):
+            raise ValueError("turn expectations must be arrays of nonempty strings")
+        turn_regex_expectations(key, values)
+    if "allowedVerificationStates" in turn and (
+        not turn["allowedVerificationStates"]
+        or set(turn["allowedVerificationStates"])
+        - {"verified", "partially_supported"}
+    ):
+        raise ValueError("turn verification expectations must be successful states")
+    if not any(
+        turn.get(key)
+        for key in TURN_EXPECTATIONS
+        if key != "allowedVerificationStates"
+    ) and not (turn.get("expectedFacts") or turn.get("mandatoryCaveats")):
+        raise ValueError("preceding turn requires answer expectations")
+
+
 def validate_preceding_turns(
     turns: Any,
     *,
@@ -424,10 +466,7 @@ def validate_preceding_turns(
         raise ValueError("precedingTurns must be an array")
     seen = {final_id}
     for turn in turns:
-        if not isinstance(turn, dict) or set(turn) - (
-            {"id", "question", "expectedFacts", "mandatoryCaveats"}
-            | TURN_EXPECTATIONS.keys()
-        ):
+        if not preceding_turn_schema_valid(turn):
             raise ValueError("invalid preceding turn schema")
         turn_id = turn.get("id")
         if not isinstance(turn_id, str) or not turn_id.strip() or turn_id in seen:
@@ -435,32 +474,7 @@ def validate_preceding_turns(
         seen.add(turn_id)
         if not isinstance(turn.get("question"), str) or not turn["question"].strip():
             raise ValueError("empty turn question")
-        for key in TURN_EXPECTATIONS:
-            values = turn.get(key, [])
-            if not isinstance(values, list) or any(
-                not isinstance(value, str) or not value.strip() for value in values
-            ):
-                raise ValueError("turn expectations must be arrays of nonempty strings")
-            if "Regex" in key:
-                for pattern in values:
-                    try:
-                        compiled = re.compile(pattern, re.IGNORECASE)
-                    except re.error as error:
-                        raise ValueError("invalid turn regex") from error
-                    if compiled.search(""):
-                        raise ValueError("turn regex matches empty text")
-        if "allowedVerificationStates" in turn and (
-            not turn["allowedVerificationStates"]
-            or set(turn["allowedVerificationStates"])
-            - {"verified", "partially_supported"}
-        ):
-            raise ValueError("turn verification expectations must be successful states")
-        if not any(
-            turn.get(key)
-            for key in TURN_EXPECTATIONS
-            if key != "allowedVerificationStates"
-        ) and not (turn.get("expectedFacts") or turn.get("mandatoryCaveats")):
-            raise ValueError("preceding turn requires answer expectations")
+        validate_turn_expectations(turn)
         validate_answer_items(
             turn.get("expectedFacts", []),
             turn.get("mandatoryCaveats", []),
@@ -471,7 +485,7 @@ def validate_preceding_turns(
 
 def preceding_turn_case(case: BenchmarkCase, turn: dict[str, Any]) -> BenchmarkCase:
     """Use the canonical case evaluator, without the final question's retrieval policy."""
-    return replace(
+    return cast(BenchmarkCase, replace(
         case,
         case_id=turn["id"],
         question=turn["question"],
@@ -497,7 +511,66 @@ def preceding_turn_case(case: BenchmarkCase, turn: dict[str, Any]) -> BenchmarkC
             )
             for key, attribute in TURN_EXPECTATIONS.items()
         },
-    )
+    ))
+
+
+def validate_answer_item_schema(item: Any, seen: set[str]) -> None:
+    if not isinstance(item, dict) or set(item) != set(AnswerItem.__annotations__):
+        raise ValueError("incomplete answer item schema")
+    item_id = item["id"]
+    if not isinstance(item_id, str) or not item_id.strip() or item_id in seen:
+        raise ValueError("empty or duplicate answer item id")
+    seen.add(item_id)
+    for key in ("fixture", "sourceExcerpt", "sourceSha256"):
+        if not isinstance(item[key], str) or not item[key].strip():
+            raise ValueError(f"missing answer item {key}")
+
+
+def answer_item_source_text(
+    item: dict[str, Any], root: Path, documents: list[Path] | None
+) -> str:
+    """Read the cited fixture bytes and return their decoded text."""
+    relative = Path(item["fixture"])
+    if (
+        relative.is_absolute()
+        or ".." in relative.parts
+        or relative.parts[:1] != ("corpus",)
+    ):
+        raise ValueError("answer item fixture must be a corpus-relative path")
+    source = (root / relative).resolve()
+    if not source.is_relative_to(root.resolve() / "corpus"):
+        raise ValueError("answer item fixture escapes corpus")
+    if documents is not None and source not in documents:
+        raise ValueError("answer item fixture is outside suite documents")
+    try:
+        raw = source.read_bytes()
+        text = raw.decode("utf-8")
+    except (OSError, UnicodeError) as error:
+        raise ValueError("answer item fixture must be readable UTF-8 text") from error
+    if hashlib.sha256(raw).hexdigest() != item["sourceSha256"]:
+        raise ValueError("answer item source digest mismatch")
+    if item["sourceExcerpt"] not in text:
+        raise ValueError("answer item source excerpt is not verbatim fixture text")
+    return text
+
+
+def validate_answer_item_matchers(item: dict[str, Any]) -> None:
+    for key in ("requiredAll", "requiredAny", "requiredRegexAny"):
+        matchers = item[key]
+        if not isinstance(matchers, list) or any(
+            not isinstance(value, str) or not normalize_match_text(value)
+            for value in matchers
+        ):
+            raise ValueError("answer item matchers must be nonempty strings")
+    if not any(item[key] for key in ("requiredAll", "requiredAny", "requiredRegexAny")):
+        raise ValueError("answer item has no matchers")
+    for pattern in item["requiredRegexAny"]:
+        try:
+            compiled = re.compile(pattern, re.IGNORECASE)
+        except re.error as error:
+            raise ValueError("invalid answer item regex") from error
+        if compiled.search(""):
+            raise ValueError("answer item regex matches empty text")
 
 
 def validate_answer_items(
@@ -513,52 +586,9 @@ def validate_answer_items(
         if not isinstance(items, list):
             raise TypeError("answer items must be arrays")
         for item in items:
-            if not isinstance(item, dict) or set(item) != set(AnswerItem.__annotations__):
-                raise ValueError("incomplete answer item schema")
-            item_id = item["id"]
-            if not isinstance(item_id, str) or not item_id.strip() or item_id in seen:
-                raise ValueError("empty or duplicate answer item id")
-            seen.add(item_id)
-            for key in ("fixture", "sourceExcerpt", "sourceSha256"):
-                if not isinstance(item[key], str) or not item[key].strip():
-                    raise ValueError(f"missing answer item {key}")
-            relative = Path(item["fixture"])
-            if (
-                relative.is_absolute()
-                or ".." in relative.parts
-                or relative.parts[:1] != ("corpus",)
-            ):
-                raise ValueError("answer item fixture must be a corpus-relative path")
-            source = (root / relative).resolve()
-            if not source.is_relative_to(root.resolve() / "corpus"):
-                raise ValueError("answer item fixture escapes corpus")
-            if documents is not None and source not in documents:
-                raise ValueError("answer item fixture is outside suite documents")
-            try:
-                raw = source.read_bytes()
-                text = raw.decode("utf-8")
-            except (OSError, UnicodeError) as error:
-                raise ValueError("answer item fixture must be readable UTF-8 text") from error
-            if hashlib.sha256(raw).hexdigest() != item["sourceSha256"]:
-                raise ValueError("answer item source digest mismatch")
-            if item["sourceExcerpt"] not in text:
-                raise ValueError("answer item source excerpt is not verbatim fixture text")
-            for key in ("requiredAll", "requiredAny", "requiredRegexAny"):
-                matchers = item[key]
-                if not isinstance(matchers, list) or any(
-                    not isinstance(value, str) or not normalize_match_text(value)
-                    for value in matchers
-                ):
-                    raise ValueError("answer item matchers must be nonempty strings")
-            if not any(item[key] for key in ("requiredAll", "requiredAny", "requiredRegexAny")):
-                raise ValueError("answer item has no matchers")
-            for pattern in item["requiredRegexAny"]:
-                try:
-                    compiled = re.compile(pattern, re.IGNORECASE)
-                except re.error as error:
-                    raise ValueError("invalid answer item regex") from error
-                if compiled.search(""):
-                    raise ValueError("answer item regex matches empty text")
+            validate_answer_item_schema(item, seen)
+            answer_item_source_text(item, root, documents)
+            validate_answer_item_matchers(item)
 
 
 def evaluate_answer_items(
@@ -1685,11 +1715,19 @@ def fetch_library_summary(client: BenchmarkClient, library_id: str) -> dict[str,
     return client.get_json(f"/knowledge/libraries/{library_id}/summary")
 
 
-def fetch_topology_counts(client: BenchmarkClient, library_id: str) -> dict[str, int]:
-    base = f"{client.base_url}/knowledge/libraries/{library_id}/graph/preparations"
-    response = client.http.post(base, timeout=120, allow_redirects=False)
-    client._require_2xx(response)
-    preparation = response.json()
+GRAPH_FRAME_SECTIONS = {
+    "docs": "documents", "nodes": "entities", "edges": "relations", "doc_links": "documentLinks",
+}
+GRAPH_FRAME_ORDER = {
+    name: index
+    for index, name in enumerate(("meta", "id_map", "docs", "nodes", "edges", "doc_links", "end"))
+}
+GRAPH_PENDING_STATUSES = frozenset({"queued", "validating", "building", "publishing", "retrying"})
+GRAPH_FAILED_STATUSES = frozenset({"failed", "superseded", "expired"})
+
+
+def graph_preparation_identity(preparation: dict[str, Any], library_id: str) -> dict[str, Any]:
+    """Bind the admitted preparation receipt to its library and versions."""
     preparation_id = preparation["id"]
     identity = {
         "libraryId": library_id,
@@ -1704,10 +1742,21 @@ def fetch_topology_counts(client: BenchmarkClient, library_id: str) -> dict[str,
         for key in ("projectionVersion", "topologyGeneration", "sourceTruthVersion")
     ) or any(preparation.get(key) != value for key, value in identity.items()):
         raise RuntimeError("Invalid graph preparation receipt")
+    return identity
+
+
+def wait_for_graph_preparation(
+    client: BenchmarkClient,
+    base: str,
+    preparation: dict[str, Any],
+    identity: dict[str, Any],
+) -> None:
+    """Poll until ready; failure states, unknown states and identity drift are terminal."""
+    preparation_id = identity["id"]
     while preparation["status"] != "ready":
-        if preparation["status"] in {"failed", "superseded", "expired"}:
+        if preparation["status"] in GRAPH_FAILED_STATUSES:
             raise RuntimeError(f"Graph preparation {preparation['status']}: {preparation.get('errorCode')}")
-        if preparation["status"] not in {"queued", "validating", "building", "publishing", "retrying"}:
+        if preparation["status"] not in GRAPH_PENDING_STATUSES:
             raise RuntimeError(f"Unknown graph preparation status: {preparation['status']}")
         time.sleep(max(0.1, min(preparation["retryAfterMs"] / 1000, 30)))
         response = client.http.get(f"{base}/{preparation_id}", timeout=120, allow_redirects=False)
@@ -1715,6 +1764,72 @@ def fetch_topology_counts(client: BenchmarkClient, library_id: str) -> dict[str,
         preparation = response.json()
         if any(preparation.get(key) != value for key, value in identity.items()):
             raise RuntimeError("Graph preparation identity changed")
+
+
+def graph_frame_position(section: Any, previous: int, ended: bool) -> int:
+    """Frames must arrive once, in canonical order, starting with metadata."""
+    if ended or section not in GRAPH_FRAME_ORDER or GRAPH_FRAME_ORDER[section] < previous or (previous == -1 and section != "meta"):
+        raise RuntimeError("Invalid graph frame order")
+    return GRAPH_FRAME_ORDER[section]
+
+
+def validate_graph_meta(frame: dict[str, Any], identity: dict[str, Any], meta: Any) -> None:
+    if meta is not None or any(frame.get(field) != identity[key] for field, key in (
+        ("v", "formatVersion"), ("library_id", "libraryId"), ("preparation_id", "id"),
+        ("projection_version", "projectionVersion"), ("topology_generation", "topologyGeneration"),
+        ("source_truth_version", "sourceTruthVersion"),
+    )) or any(type(frame.get(key)) is not int or frame[key] < 0 for key in ("node_count", "edge_count", "document_count")):
+        raise RuntimeError("Invalid graph metadata")
+
+
+def validate_graph_terminal(
+    frame: dict[str, Any], meta: Any, preparation_id: str, counts: dict[str, int]
+) -> None:
+    if meta is None or frame.get("preparation_id") != preparation_id or any(
+        frame.get(key) != meta[key] for key in ("node_count", "edge_count", "document_count")
+    ) or meta["node_count"] != counts["documents"] + counts["entities"] or meta["edge_count"] != counts["relations"] + counts["documentLinks"] or meta["document_count"] != counts["documents"]:
+        raise RuntimeError("Invalid graph terminal counts")
+
+
+def collect_graph_counts(
+    response: Any, preparation_id: str, identity: dict[str, Any]
+) -> dict[str, int]:
+    """Consume the NDJSON result stream and prove the terminal counts."""
+    counts = {"documents": 0, "entities": 0, "relations": 0, "documentLinks": 0}
+    previous = -1
+    meta = None
+    ended = False
+    for line in response.iter_lines():
+        if not line.strip():
+            raise RuntimeError("Empty graph frame")
+        frame = json.loads(line)
+        if not isinstance(frame, dict):
+            raise RuntimeError("Invalid graph frame")
+        section = frame.get("s")
+        previous = graph_frame_position(section, previous, ended)
+        if section == "meta":
+            validate_graph_meta(frame, identity, meta)
+            meta = frame
+        elif section in GRAPH_FRAME_SECTIONS:
+            if not isinstance(frame.get("d"), list):
+                raise RuntimeError("Invalid graph rows")
+            counts[GRAPH_FRAME_SECTIONS[section]] += len(frame["d"])
+        elif section == "end":
+            validate_graph_terminal(frame, meta, preparation_id, counts)
+            ended = True
+    if not ended:
+        raise RuntimeError("Graph terminal frame missing")
+    return counts
+
+
+def fetch_topology_counts(client: BenchmarkClient, library_id: str) -> dict[str, int]:
+    base = f"{client.base_url}/knowledge/libraries/{library_id}/graph/preparations"
+    response = client.http.post(base, timeout=120, allow_redirects=False)
+    client._require_2xx(response)
+    preparation = response.json()
+    identity = graph_preparation_identity(preparation, library_id)
+    preparation_id = identity["id"]
+    wait_for_graph_preparation(client, base, preparation, identity)
     response = client.http.get(
         f"{base}/{preparation_id}/result",
         headers={"Accept": "application/x-ndjson"},
@@ -1724,43 +1839,7 @@ def fetch_topology_counts(client: BenchmarkClient, library_id: str) -> dict[str,
     )
     try:
         client._require_2xx(response)
-        counts = {"documents": 0, "entities": 0, "relations": 0, "documentLinks": 0}
-        sections = {"docs": "documents", "nodes": "entities", "edges": "relations", "doc_links": "documentLinks"}
-        order = {name: index for index, name in enumerate(("meta", "id_map", "docs", "nodes", "edges", "doc_links", "end"))}
-        previous = -1
-        meta = None
-        ended = False
-        for line in response.iter_lines():
-            if not line.strip():
-                raise RuntimeError("Empty graph frame")
-            frame = json.loads(line)
-            if not isinstance(frame, dict):
-                raise RuntimeError("Invalid graph frame")
-            section = frame.get("s")
-            if ended or section not in order or order[section] < previous or (previous == -1 and section != "meta"):
-                raise RuntimeError("Invalid graph frame order")
-            previous = order[section]
-            if section == "meta":
-                if meta is not None or any(frame.get(field) != identity[key] for field, key in (
-                    ("v", "formatVersion"), ("library_id", "libraryId"), ("preparation_id", "id"),
-                    ("projection_version", "projectionVersion"), ("topology_generation", "topologyGeneration"),
-                    ("source_truth_version", "sourceTruthVersion"),
-                )) or any(type(frame.get(key)) is not int or frame[key] < 0 for key in ("node_count", "edge_count", "document_count")):
-                    raise RuntimeError("Invalid graph metadata")
-                meta = frame
-            elif section in sections:
-                if not isinstance(frame.get("d"), list):
-                    raise RuntimeError("Invalid graph rows")
-                counts[sections[section]] += len(frame["d"])
-            elif section == "end":
-                if meta is None or frame.get("preparation_id") != preparation_id or any(
-                    frame.get(key) != meta[key] for key in ("node_count", "edge_count", "document_count")
-                ) or meta["node_count"] != counts["documents"] + counts["entities"] or meta["edge_count"] != counts["relations"] + counts["documentLinks"] or meta["document_count"] != counts["documents"]:
-                    raise RuntimeError("Invalid graph terminal counts")
-                ended = True
-        if not ended:
-            raise RuntimeError("Graph terminal frame missing")
-        return counts
+        return collect_graph_counts(response, preparation_id, identity)
     finally:
         response.close()
 
@@ -2151,7 +2230,7 @@ def cost_decimal(value: Any) -> Decimal:
     """Read a nonnegative decimal string without binary floating-point loss."""
     if not isinstance(value, str) or not value or len(value) > 100:
         raise ValueError("cost must be a decimal string")
-    if not re.fullmatch(r"[0-9]+(?:\.[0-9]+)?", value):
+    if not re.fullmatch(r"\d+(?:\.\d+)?", value, re.ASCII):
         raise ValueError("cost must use plain nonnegative decimal notation")
     try:
         amount = Decimal(value)
@@ -2162,16 +2241,29 @@ def cost_decimal(value: Any) -> Decimal:
     return amount
 
 
-def validate_execution_cost(payload: Any, execution_id: str) -> dict[str, Any]:
-    if not isinstance(execution_id, str) or not execution_id:
-        raise ValueError("cost evidence requires an execution identity")
-    if not isinstance(payload, dict):
-        raise TypeError("cost evidence must be an object")
+def cost_coverage(calls: int, unpriced: int) -> str:
+    """Complete when every provider call is priced, unknown when none is."""
+    if unpriced == 0:
+        return "complete"
+    if unpriced == calls:
+        return "unknown"
+    return "partial"
+
+
+def validate_cost_ownership(payload: dict[str, Any], execution_id: str) -> None:
     if (
         payload.get("owningExecutionKind") != "query_execution"
         or payload.get("owningExecutionId") != execution_id
     ):
         raise ValueError("cost evidence belongs to another execution")
+
+
+def validate_execution_cost(payload: Any, execution_id: str) -> dict[str, Any]:
+    if not isinstance(execution_id, str) or not execution_id:
+        raise ValueError("cost evidence requires an execution identity")
+    if not isinstance(payload, dict):
+        raise TypeError("cost evidence must be an object")
+    validate_cost_ownership(payload, execution_id)
     amount = cost_decimal(payload.get("totalCost"))
     currency = payload.get("currencyCode")
     if not isinstance(currency, str) or not re.fullmatch(r"[A-Z]{3}", currency):
@@ -2182,10 +2274,7 @@ def validate_execution_cost(payload: Any, execution_id: str) -> dict[str, Any]:
         raise ValueError("invalid provider call counts")
     if unpriced > calls:
         raise ValueError("unpriced provider call count exceeds provider call count")
-    coverage = (
-        "complete" if unpriced == 0 else ("unknown" if unpriced >= calls else "partial")
-    )
-    if payload.get("costCoverage") != coverage:
+    if payload.get("costCoverage") != cost_coverage(calls, unpriced):
         raise ValueError("cost coverage contradicts call counts")
     if calls == 0 and (amount != 0 or unpriced != 0):
         raise ValueError("zero-call execution must have complete zero cost")
@@ -2212,6 +2301,48 @@ def cost_timestamp(value: Any) -> datetime:
     return timestamp
 
 
+def validate_cost_snapshot(
+    snapshot: Any, execution_id: str, execution: dict[str, Any], detail: dict[str, Any]
+) -> None:
+    """The captured snapshot must belong to this execution and lie inside its lifetime."""
+    start = cost_timestamp(execution["startedAt"])
+    end = cost_timestamp(detail["runtimeSummary"]["completedAt"])
+    if (
+        not isinstance(snapshot, dict)
+        or snapshot.get("executionId") != execution_id
+        or snapshot.get("libraryId") != execution["libraryId"]
+        or not start <= cost_timestamp(snapshot.get("capturedAt")) <= end
+    ):
+        raise ValueError("snapshot attribution is unavailable")
+
+
+def cost_snapshot_children(snapshot: dict[str, Any]) -> list[str]:
+    """Typed child execution references of one captured llm-context snapshot."""
+    iterations = snapshot.get("iterations")
+    if (
+        not isinstance(iterations, list)
+        or len(iterations) > MAX_COST_REFERENCES
+        or type(snapshot.get("totalIterations")) is not int
+        or snapshot["totalIterations"] != len(iterations)
+    ):
+        raise ValueError("incomplete snapshot iterations")
+    children: list[str] = []
+    for number, iteration in enumerate(iterations, 1):
+        if (
+            not isinstance(iteration, dict)
+            or type(iteration.get("iteration")) is not int
+            or iteration["iteration"] != number
+        ):
+            raise ValueError("invalid snapshot iteration")
+        references = iteration.get("childQueryExecutionIds")
+        if not isinstance(references, list) or len(references) > MAX_COST_REFERENCES:
+            raise ValueError("missing or excessive typed child references")
+        children.extend(cost_execution_id(child) for child in references)
+        if len(children) > MAX_COST_REFERENCES:
+            raise ValueError("excessive typed child references")
+    return children
+
+
 def cost_component_lineage(component: Any, execution_id: str) -> list[str]:
     """Accept only typed snapshot edges, never IDs in messages or tool results."""
     if not isinstance(component, dict):
@@ -2231,40 +2362,74 @@ def cost_component_lineage(component: Any, execution_id: str) -> list[str]:
         or detail["responseTurn"]["id"] != execution["responseTurnId"]
     ):
         raise ValueError("replayed execution has ambiguous incurred cost")
-    start = cost_timestamp(execution["startedAt"])
-    end = cost_timestamp(detail["runtimeSummary"]["completedAt"])
     snapshot = component["llmContext"]
-    if (
-        not isinstance(snapshot, dict)
-        or snapshot.get("executionId") != execution_id
-        or snapshot.get("libraryId") != execution["libraryId"]
-        or not start <= cost_timestamp(snapshot.get("capturedAt")) <= end
-    ):
-        raise ValueError("snapshot attribution is unavailable")
-    iterations = snapshot.get("iterations")
-    if (
-        not isinstance(iterations, list)
-        or len(iterations) > MAX_COST_REFERENCES
-        or type(snapshot.get("totalIterations")) is not int
-        or snapshot["totalIterations"] != len(iterations)
-    ):
-        raise ValueError("incomplete snapshot iterations")
-    children = []
-    for number, iteration in enumerate(iterations, 1):
-        if (
-            not isinstance(iteration, dict)
-            or type(iteration.get("iteration")) is not int
-            or iteration["iteration"] != number
-        ):
-            raise ValueError("invalid snapshot iteration")
-        references = iteration.get("childQueryExecutionIds")
-        if not isinstance(references, list) or len(references) > MAX_COST_REFERENCES:
-            raise ValueError("missing or excessive typed child references")
-        children.extend(cost_execution_id(child) for child in references)
-        if len(children) > MAX_COST_REFERENCES:
-            raise ValueError("excessive typed child references")
+    validate_cost_snapshot(snapshot, execution_id, execution, detail)
+    children = cost_snapshot_children(snapshot)
     validate_execution_cost(component["billing"], execution_id)
     return children
+
+
+def index_cost_components(
+    components: list[Any],
+) -> tuple[dict[str, Any], dict[str, list[str]]]:
+    """Index native components by identity and their typed child edges."""
+    indexed: dict[str, Any] = {}
+    edges: dict[str, list[str]] = {}
+    for component in components:
+        child_id = cost_execution_id(component["billing"]["owningExecutionId"])
+        if child_id in indexed:
+            raise ValueError("duplicate native component")
+        indexed[child_id] = component
+        edges[child_id] = cost_component_lineage(component, child_id)
+    return indexed, edges
+
+
+def validate_cost_child(
+    child: str, execution: dict[str, Any], parent: dict[str, Any], indexed: dict[str, Any]
+) -> None:
+    """A typed child edge must resolve and fall inside this turn's attested window."""
+    if child not in indexed:
+        raise ValueError("unavailable or excessive cost lineage")
+    child_detail = indexed[child]["executionDetail"]
+    if not (
+        cost_timestamp(execution["startedAt"])
+        <= cost_timestamp(child_detail["execution"]["startedAt"])
+        <= cost_timestamp(child_detail["runtimeSummary"]["completedAt"])
+        <= cost_timestamp(parent["runtimeSummary"]["completedAt"])
+    ):
+        raise ValueError("historical child is not attributable to this turn")
+
+
+def walk_cost_lineage(
+    execution_id: str, indexed: dict[str, Any], edges: dict[str, list[str]]
+) -> set[str]:
+    """Walk every typed edge and return the components the tree actually reaches."""
+    root = indexed[execution_id]["executionDetail"]["execution"]
+    visited: set[str] = set()
+    references = 0
+
+    def visit(current: str, ancestors: set[str]) -> None:
+        nonlocal references
+        if current in ancestors or len(ancestors) > MAX_COST_DEPTH:
+            raise ValueError("cyclic or excessive cost lineage depth")
+        if current not in indexed:
+            raise ValueError("missing descendant cost component")
+        parent = indexed[current]["executionDetail"]
+        execution = parent["execution"]
+        if any(execution[key] != root[key] for key in ("workspaceId", "libraryId")):
+            raise ValueError("cross-scope cost component")
+        # Check every path, including repeated edges, so a diamond cannot hide
+        # an excessive depth or a back edge behind a previously visited node.
+        visited.add(current)
+        for child in edges[current]:
+            references += 1
+            if references > MAX_COST_REFERENCES:
+                raise ValueError("unavailable or excessive cost lineage")
+            validate_cost_child(child, execution, parent, indexed)
+            visit(child, ancestors | {current})
+
+    visit(execution_id, set())
+    return visited
 
 
 def validate_cost_observation(
@@ -2283,50 +2448,10 @@ def validate_cost_observation(
         or not 0 < len(components) <= MAX_COST_EXECUTIONS
     ):
         raise ValueError("missing or excessive cost components")
-    indexed = {}
-    edges = {}
-    for component in components:
-        child_id = cost_execution_id(component["billing"]["owningExecutionId"])
-        if child_id in indexed:
-            raise ValueError("duplicate native component")
-        indexed[child_id] = component
-        edges[child_id] = cost_component_lineage(component, child_id)
+    indexed, edges = index_cost_components(components)
     if execution_id not in indexed:
         raise ValueError("missing root component")
-    root = indexed[execution_id]["executionDetail"]["execution"]
-    visited = set()
-    references = 0
-
-    def visit(current, ancestors):
-        nonlocal references
-        if current in ancestors or len(ancestors) > MAX_COST_DEPTH:
-            raise ValueError("cyclic or excessive cost lineage depth")
-        if current not in indexed:
-            raise ValueError("missing descendant cost component")
-        parent = indexed[current]["executionDetail"]
-        execution = parent["execution"]
-        if any(execution[key] != root[key] for key in ("workspaceId", "libraryId")):
-            raise ValueError("cross-scope cost component")
-        # Check every path, including repeated edges, so a diamond cannot hide
-        # an excessive depth or a back edge behind a previously visited node.
-        visited.add(current)
-        for child in edges[current]:
-            references += 1
-            if references > MAX_COST_REFERENCES or child not in indexed:
-                raise ValueError("unavailable or excessive cost lineage")
-            child_execution = indexed[child]["executionDetail"]["execution"]
-            if not (
-                cost_timestamp(execution["startedAt"])
-                <= cost_timestamp(child_execution["startedAt"])
-                <= cost_timestamp(
-                    indexed[child]["executionDetail"]["runtimeSummary"]["completedAt"]
-                )
-                <= cost_timestamp(parent["runtimeSummary"]["completedAt"])
-            ):
-                raise ValueError("historical child is not attributable to this turn")
-            visit(child, ancestors | {current})
-
-    visit(execution_id, set())
+    visited = walk_cost_lineage(execution_id, indexed, edges)
     if visited != indexed.keys():
         raise ValueError("unreferenced native cost component")
     return indexed
@@ -2381,82 +2506,110 @@ def fetch_execution_cost(
     return {"status": "measured", "evidence": evidence, "error": None}
 
 
-def build_cost_summary(cases: list[dict[str, Any]]) -> dict[str, Any]:
-    counts = dict.fromkeys(
-        ("complete", "partial", "unknown", "unavailable", "not_measured"), 0
+COST_STATUSES = ("complete", "partial", "unknown", "unavailable", "not_measured")
+
+
+def classify_cost_case(case: dict[str, Any]) -> tuple[str, dict[str, Any] | None]:
+    """Return the case cost status and its validated components, when measured."""
+    observation = case.get("executionCost")
+    if observation is None:
+        return "not_measured", None
+    if not isinstance(observation, dict):
+        raise TypeError("invalid cost observation")
+    status = observation.get("status")
+    if status in ("unavailable", "not_measured"):
+        return status, None
+    if status != "measured":
+        raise ValueError("invalid cost status")
+    components = validate_cost_observation(
+        observation.get("evidence"), case.get("executionId")
     )
+    root = case["executionId"]
+    evaluated_detail = case.get("rawEvaluationEvidence", {}).get(
+        "executionDetail"
+    )
+    if evaluated_detail is not None and (
+        components[root]["executionDetail"]["execution"]
+        != evaluated_detail["execution"]
+    ):
+        raise ValueError("cost root differs from evaluated execution")
+    return status, components
+
+
+def merge_shared_cost_components(
+    components: dict[str, Any], shared: dict[str, Any], conflicting: set[str]
+) -> None:
+    for identity, component in components.items():
+        if identity in shared and shared[identity] != component:
+            conflicting.add(identity)
+        shared[identity] = component
+
+
+def accumulate_cost_totals(
+    components: dict[str, Any], included: set[str], totals: dict[str, Decimal]
+) -> None:
+    """Add every not-yet-included component to its currency total."""
+    for identity, component in components.items():
+        if identity in included:
+            continue
+        included.add(identity)
+        billing = component["billing"]
+        currency = billing["currencyCode"]
+        with localcontext() as context:
+            context.prec = 256
+            totals[currency] = totals.get(currency, Decimal(0)) + cost_decimal(
+                billing["totalCost"]
+            )
+
+
+def valid_cost_case_coverage(
+    case: dict[str, Any],
+    components: dict[str, Any],
+    roots: dict[str, int],
+    conflicting: set[str],
+) -> str | None:
+    """Coverage of one valid case, or None when its evidence cannot be attributed."""
+    if roots[case["executionId"]] > 1 or conflicting.intersection(components):
+        return None
+    calls = sum(
+        item["billing"]["providerCallCount"] for item in components.values()
+    )
+    unpriced = sum(
+        item["billing"]["unpricedProviderCallCount"] for item in components.values()
+    )
+    return cost_coverage(calls, unpriced)
+
+
+def build_cost_summary(cases: list[dict[str, Any]]) -> dict[str, Any]:
+    counts = dict.fromkeys(COST_STATUSES, 0)
     totals: dict[str, Decimal] = {}
     invalid: list[str] = []
-    valid = []
+    valid: list[tuple[dict[str, Any], dict[str, Any]]] = []
     roots: dict[str, int] = {}
     shared: dict[str, dict[str, Any]] = {}
-    conflicting = set()
+    conflicting: set[str] = set()
     for case in cases:
-        observation = case.get("executionCost")
-        if observation is None:
-            counts["not_measured"] += 1
-            continue
         try:
-            if not isinstance(observation, dict):
-                raise TypeError("invalid cost observation")
-            status = observation.get("status")
-            if status in ("unavailable", "not_measured"):
-                counts[status] += 1
-                continue
-            if status != "measured":
-                raise ValueError("invalid cost status")
-            components = validate_cost_observation(
-                observation.get("evidence"), case.get("executionId")
-            )
-            root = case["executionId"]
-            evaluated_detail = case.get("rawEvaluationEvidence", {}).get(
-                "executionDetail"
-            )
-            if evaluated_detail is not None and (
-                components[root]["executionDetail"]["execution"]
-                != evaluated_detail["execution"]
-            ):
-                raise ValueError("cost root differs from evaluated execution")
-            roots[root] = roots.get(root, 0) + 1
-            for identity, component in components.items():
-                if identity in shared and shared[identity] != component:
-                    conflicting.add(identity)
-                shared[identity] = component
-            valid.append((case, components))
+            status, components = classify_cost_case(case)
         except (ValueError, TypeError, KeyError, AttributeError):
             counts["unavailable"] += 1
             invalid.append(str(case.get("caseId")))
-    included = set()
+            continue
+        if components is None:
+            counts[status] += 1
+            continue
+        roots[case["executionId"]] = roots.get(case["executionId"], 0) + 1
+        merge_shared_cost_components(components, shared, conflicting)
+        valid.append((case, components))
+    included: set[str] = set()
     for case, components in valid:
-        if roots[case["executionId"]] > 1 or conflicting.intersection(components):
+        coverage = valid_cost_case_coverage(case, components, roots, conflicting)
+        if coverage is None:
             counts["unavailable"] += 1
             invalid.append(str(case.get("caseId")))
             continue
-        calls = sum(
-            item["billing"]["providerCallCount"] for item in components.values()
-        )
-        unpriced = sum(
-            item["billing"]["unpricedProviderCallCount"] for item in components.values()
-        )
-        coverage = (
-            "complete"
-            if unpriced == 0
-            else "unknown"
-            if unpriced == calls
-            else "partial"
-        )
         counts[coverage] += 1
-        for identity, component in components.items():
-            if identity in included:
-                continue
-            included.add(identity)
-            billing = component["billing"]
-            currency = billing["currencyCode"]
-            with localcontext() as context:
-                context.prec = 256
-                totals[currency] = totals.get(currency, Decimal(0)) + cost_decimal(
-                    billing["totalCost"]
-                )
+        accumulate_cost_totals(components, included, totals)
     return {
         "scope": "final_turn_query_execution_tree",
         "coverageCounts": counts,
@@ -2476,8 +2629,7 @@ def conversation_cost_records(cases: list[dict[str, Any]]) -> list[dict[str, Any
         if not isinstance(turns, list) or not turns:
             records.append({"caseId": case.get("caseId")})
             continue
-        for turn in turns:
-            records.append(turn)
+        records.extend(turns)
     return records
 
 
@@ -2502,6 +2654,49 @@ def build_conversation_cost_summary(
     return summary
 
 
+def history_turn_matches(
+    index: int,
+    turn: dict[str, Any],
+    definitions: list[dict[str, Any]],
+    case: dict[str, Any],
+    seen: set[str],
+) -> bool:
+    """One recorded turn must be the expected turn, execution and session."""
+    expected_id = (
+        definitions[index]["id"] if index < len(definitions) else case.get("caseId")
+    )
+    expected_question = (
+        definitions[index]["question"]
+        if index < len(definitions)
+        else case.get("question")
+    )
+    if turn.get("caseExecutionError") or turn.get("caseId") != expected_id:
+        return False
+    try:
+        raw = turn["rawEvaluationEvidence"]
+        canonical = canonical_turn_payload(
+            raw["turnPayload"], expected_question=expected_question
+        )
+        detail = canonical_turn_payload(
+            raw["executionDetail"], expected_question=expected_question
+        )
+        execution_id = canonical["executionId"]
+        if (
+            execution_id in seen
+            or execution_id != turn.get("executionId")
+            or detail["executionId"] != execution_id
+        ):
+            return False
+        if definitions and raw["turnPayload"]["execution"][
+            "conversationId"
+        ] != case.get("querySessionId"):
+            return False
+        seen.add(execution_id)
+    except (KeyError, ValueError, TypeError):
+        return False
+    return True
+
+
 def conversation_history_complete(case: dict[str, Any]) -> bool:
     policy = case.get("casePolicy") or {}
     definitions = policy.get("preceding_turns", [])
@@ -2514,39 +2709,42 @@ def conversation_history_complete(case: dict[str, Any]) -> bool:
         return False
     seen: set[str] = set()
     for index, turn in enumerate(history):
-        expected_id = (
-            definitions[index]["id"] if index < len(definitions) else case.get("caseId")
-        )
-        expected_question = (
-            definitions[index]["question"]
-            if index < len(definitions)
-            else case.get("question")
-        )
-        if turn.get("caseExecutionError") or turn.get("caseId") != expected_id:
-            return False
-        try:
-            raw = turn["rawEvaluationEvidence"]
-            canonical = canonical_turn_payload(
-                raw["turnPayload"], expected_question=expected_question
-            )
-            detail = canonical_turn_payload(
-                raw["executionDetail"], expected_question=expected_question
-            )
-            execution_id = canonical["executionId"]
-            if (
-                execution_id in seen
-                or execution_id != turn.get("executionId")
-                or detail["executionId"] != execution_id
-            ):
-                return False
-            if definitions and raw["turnPayload"]["execution"][
-                "conversationId"
-            ] != case.get("querySessionId"):
-                return False
-            seen.add(execution_id)
-        except (KeyError, ValueError, TypeError):
+        if not history_turn_matches(index, turn, definitions, case, seen):
             return False
     return history[-1].get("executionId") == case.get("executionId")
+
+
+def validate_actual_turn(
+    result: dict[str, Any], case: BenchmarkCase, session_id: str, history: list[dict[str, Any]]
+) -> None:
+    """A preceding turn must belong to this session and never repeat an execution."""
+    if not case.preceding_turns:
+        return
+    execution = result["rawEvaluationEvidence"]["turnPayload"]["execution"]
+    if execution["conversationId"] != session_id:
+        raise ValueError("turn belongs to another query session")
+    if any(turn.get("executionId") == result["executionId"] for turn in history):
+        raise ValueError("duplicate actual turn execution")
+
+
+def failed_case_turns(
+    case: BenchmarkCase,
+    policy: BenchmarkCase,
+    error: Exception,
+    progress: dict[str, Any],
+    *,
+    final_policy: bool,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Preserve the failed turn and the case-level result for a broken conversation."""
+    error_name = type(error).__name__
+    turn = failed_case_result(policy, error)
+    turn.update(progress)
+    turn["caseExecutionError"] = error_name
+    final = failed_case_result(case, error)
+    if final_policy:
+        final.update(progress)
+    final["caseExecutionError"] = error_name
+    return turn, final
 
 
 def run_case(
@@ -2579,27 +2777,16 @@ def run_case(
                 progress=progress,
                 probe_search=index == len(policies) - 1,
             )
-            if case.preceding_turns:
-                execution = result["rawEvaluationEvidence"]["turnPayload"]["execution"]
-                if execution["conversationId"] != session_id:
-                    raise ValueError("turn belongs to another query session")
-                if any(
-                    turn.get("executionId") == result["executionId"] for turn in history
-                ):
-                    raise ValueError("duplicate actual turn execution")
+            validate_actual_turn(result, case, session_id, history)
         except Exception as error:  # noqa: BLE001 - retain partial conversation evidence
             if not case.preceding_turns and not isinstance(
                 error, requests.RequestException
             ):
                 raise
-            result = failed_case_result(policy, error)
-            result.update(progress)
-            result["caseExecutionError"] = type(error).__name__
+            result, final = failed_case_turns(
+                case, policy, error, progress, final_policy=index == len(policies) - 1
+            )
             history.append(result)
-            final = failed_case_result(case, error)
-            if index == len(policies) - 1:
-                final.update(progress)
-            final["caseExecutionError"] = type(error).__name__
             break
         history.append(result)
     else:
@@ -2729,6 +2916,33 @@ def run_turn(
     }
 
 
+def answer_requirement_checks(case: BenchmarkCase, answer_text: str) -> dict[str, Any]:
+    """Literal, regex and completeness gates on the answer text."""
+    opening = first_answer_sentence(answer_text)
+    completeness = evaluate_answer_items(
+        answer_text, case.expected_facts, case.mandatory_caveats
+    )
+    return {
+        "hasRequired": contains_all(answer_text, case.answer_required_all)
+        and (
+            not case.answer_required_any
+            or contains_any(answer_text, case.answer_required_any)
+        )
+        and (
+            not case.answer_required_regex_any
+            or matches_any_regex(answer_text, case.answer_required_regex_any)
+        ),
+        "opening": opening,
+        "openingHasRequired": not case.answer_opening_required_any
+        or contains_any(opening, case.answer_opening_required_any),
+        "hasForbidden": contains_any_whole_word(
+            answer_text, case.answer_forbidden_any
+        ) or matches_any_regex(answer_text, case.answer_forbidden_regex_any),
+        "completeness": completeness,
+        "completenessFailures": answer_item_failures(completeness),
+    }
+
+
 def evaluate_execution_detail(
     case: BenchmarkCase,
     execution_detail: Mapping[str, Any],
@@ -2770,27 +2984,13 @@ def evaluate_execution_detail(
     if search_payload is None:
         rank_metrics = {}
 
-    answer_has_required = contains_all(answer_text, case.answer_required_all) and (
-        True if not case.answer_required_any else contains_any(answer_text, case.answer_required_any)
-    ) and (
-        True
-        if not case.answer_required_regex_any
-        else matches_any_regex(answer_text, case.answer_required_regex_any)
-    )
-    answer_opening = first_answer_sentence(answer_text)
-    answer_opening_has_required = (
-        True
-        if not case.answer_opening_required_any
-        else contains_any(answer_opening, case.answer_opening_required_any)
-    )
-    answer_has_forbidden = contains_any_whole_word(
-        answer_text,
-        case.answer_forbidden_any,
-    ) or matches_any_regex(answer_text, case.answer_forbidden_regex_any)
-    completeness = evaluate_answer_items(
-        answer_text, case.expected_facts, case.mandatory_caveats
-    )
-    completeness_failures = answer_item_failures(completeness)
+    answers = answer_requirement_checks(case, answer_text)
+    answer_has_required = answers["hasRequired"]
+    answer_opening = answers["opening"]
+    answer_opening_has_required = answers["openingHasRequired"]
+    answer_has_forbidden = answers["hasForbidden"]
+    completeness = answers["completeness"]
+    completeness_failures = answers["completenessFailures"]
     clarification_matches = clarification_expectation_matches(
         case.expected_clarification, execution_detail
     )

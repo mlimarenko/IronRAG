@@ -1,3 +1,4 @@
+use super::evidence_reproduction::answer_reproduces_evidence;
 use super::literal_coverage::{
     answer_has_partial_coverage_warning, answer_needs_literal_revision,
     answer_omits_expected_technical_literals,
@@ -469,6 +470,12 @@ pub(super) fn single_shot_answer_is_acceptable(
         return false;
     }
     if trimmed != verified {
+        return false;
+    }
+    // Evidence handed back as prose is not an answer: escalate so a later
+    // attempt synthesizes, and let the finalize boundary refuse a body that
+    // still reproduces its context instead of publishing the dump.
+    if answer_reproduces_evidence(trimmed, grounding_context) {
         return false;
     }
     if answer_chars < SINGLE_SHOT_CONFIDENT_ANSWER_CHARS

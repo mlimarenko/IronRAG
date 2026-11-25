@@ -31,6 +31,13 @@ def write_new(path: Path, value: object) -> None:
         os.fsync(stream.fileno())
 
 
+def record_jsonl(path: Path, value: dict) -> None:
+    with path.open("a", encoding="utf-8") as stream:
+        stream.write(json.dumps(value, ensure_ascii=False, allow_nan=False) + "\n")
+        stream.flush()
+        os.fsync(stream.fileno())
+
+
 def load_input(path: Path, expected: str) -> dict:
     if path.stat().st_size > 64 * 1024 * 1024 or sha256(path) != expected:
         raise ValueError("canonical input identity or byte bound failed")
@@ -81,6 +88,80 @@ def runtime_owner():
     return module, sha256(path)
 
 
+def select_case_blocks(data: dict, tokenizer) -> list[tuple[dict, list[dict]]]:
+    selected = []
+    for case in data["cases"]:
+        blocks = [
+            block
+            for block in case["blocks"]
+            if not block["isBoilerplate"] and block["blockKind"] != "table"
+        ]
+        if len(blocks) < 2:
+            raise ValueError("not enough canonical units for semantic boundaries")
+        for block in blocks:
+            count = len(
+                tokenizer.encode(block["normalizedText"], add_special_tokens=True)
+            )
+            if not 1 <= count <= 8192:
+                raise ValueError("canonical unit exceeds token budget; no truncation")
+        selected.append((case, blocks))
+    return selected
+
+
+def encode_dense_vectors(journal: Path, case: dict, blocks: list[dict], model, np):
+    vectors = []
+    before = time.perf_counter()
+    for block in blocks:
+        vector = model.encode_corpus(
+            [block["normalizedText"]],
+            batch_size=1,
+            max_length=8192,
+            return_dense=True,
+            return_sparse=False,
+            return_colbert_vecs=False,
+        )["dense_vecs"][0]
+        if vector.shape != (1024,) or not np.isfinite(vector).all():
+            raise ValueError("invalid BGE-M3 dense vector")
+        if not np.isclose(np.linalg.norm(vector), 1, atol=1e-4):
+            raise ValueError("dense vector is not unit normalized")
+        vectors.append(vector)
+        record_jsonl(
+            journal,
+            {
+                "event": "block_observed",
+                "caseId": case["caseId"],
+                "ordinal": block["ordinal"],
+                "textSha256": hashlib.sha256(
+                    block["normalizedText"].encode()
+                ).hexdigest(),
+            },
+        )
+    return vectors, before
+
+
+def case_boundaries(
+    output: Path, journal: Path, case: dict, blocks: list[dict], model, np, quantile
+) -> dict:
+    vectors, before = encode_dense_vectors(journal, case, blocks, model, np)
+    matrix = np.stack(vectors)
+    vector_file = output / (case["caseId"] + "-dense.npy")
+    with vector_file.open("xb") as stream:
+        np.save(stream, matrix, allow_pickle=False)
+    distances = [float(1 - np.dot(left, right)) for left, right in pairwise(matrix)]
+    ordinals = [block["ordinal"] for block in blocks]
+    return {
+        "caseId": case["caseId"],
+        "normalizedSha256": case["normalizedSha256"],
+        "encodedBlockOrdinals": ordinals,
+        "adjacentCosineDistances": distances,
+        "breakBeforeOrdinals": choose_breaks(ordinals, distances, quantile),
+        "encodingMs": (time.perf_counter() - before) * 1000,
+        "vectorFile": str(vector_file),
+        "vectorSha256": sha256(vector_file),
+        "vectorBytes": matrix.nbytes,
+    }
+
+
 def run(args: argparse.Namespace) -> None:
     owner, owner_hash = runtime_owner()
     owner.require_network_isolation()
@@ -90,12 +171,6 @@ def run(args: argparse.Namespace) -> None:
     )
     args.output.mkdir(exist_ok=False)
     journal = args.output / "events.jsonl"
-
-    def record(value: dict) -> None:
-        with journal.open("a", encoding="utf-8") as stream:
-            stream.write(json.dumps(value, ensure_ascii=False, allow_nan=False) + "\n")
-            stream.flush()
-            os.fsync(stream.fileno())
 
     write_new(
         args.output / "admission.json",
@@ -130,24 +205,7 @@ def run(args: argparse.Namespace) -> None:
         tokenizer = AutoTokenizer.from_pretrained(
             model_path, local_files_only=True, trust_remote_code=False
         )
-        selected = []
-        for case in data["cases"]:
-            blocks = [
-                block
-                for block in case["blocks"]
-                if not block["isBoilerplate"] and block["blockKind"] != "table"
-            ]
-            if len(blocks) < 2:
-                raise ValueError("not enough canonical units for semantic boundaries")
-            for block in blocks:
-                count = len(
-                    tokenizer.encode(block["normalizedText"], add_special_tokens=True)
-                )
-                if not 1 <= count <= 8192:
-                    raise ValueError(
-                        "canonical unit exceeds token budget; no truncation"
-                    )
-            selected.append((case, blocks))
+        selected = select_case_blocks(data, tokenizer)
         load_started = time.perf_counter()
         model = BGEM3FlagModel(
             model_path,
@@ -166,57 +224,14 @@ def run(args: argparse.Namespace) -> None:
         load_ms = (time.perf_counter() - load_started) * 1000
         cases = []
         for case, blocks in selected:
-            record({"event": "case_started", "caseId": case["caseId"]})
-            vectors = []
-            before = time.perf_counter()
-            for block in blocks:
-                vector = model.encode_corpus(
-                    [block["normalizedText"]],
-                    batch_size=1,
-                    max_length=8192,
-                    return_dense=True,
-                    return_sparse=False,
-                    return_colbert_vecs=False,
-                )["dense_vecs"][0]
-                if vector.shape != (1024,) or not np.isfinite(vector).all():
-                    raise ValueError("invalid BGE-M3 dense vector")
-                if not np.isclose(np.linalg.norm(vector), 1, atol=1e-4):
-                    raise ValueError("dense vector is not unit normalized")
-                vectors.append(vector)
-                record(
-                    {
-                        "event": "block_observed",
-                        "caseId": case["caseId"],
-                        "ordinal": block["ordinal"],
-                        "textSha256": hashlib.sha256(
-                            block["normalizedText"].encode()
-                        ).hexdigest(),
-                    }
-                )
-            matrix = np.stack(vectors)
-            vector_file = args.output / (case["caseId"] + "-dense.npy")
-            with vector_file.open("xb") as stream:
-                np.save(stream, matrix, allow_pickle=False)
-            distances = [
-                float(1 - np.dot(left, right)) for left, right in pairwise(matrix)
-            ]
-            ordinals = [block["ordinal"] for block in blocks]
+            record_jsonl(journal, {"event": "case_started", "caseId": case["caseId"]})
             cases.append(
-                {
-                    "caseId": case["caseId"],
-                    "normalizedSha256": case["normalizedSha256"],
-                    "encodedBlockOrdinals": ordinals,
-                    "adjacentCosineDistances": distances,
-                    "breakBeforeOrdinals": choose_breaks(
-                        ordinals, distances, args.quantile
-                    ),
-                    "encodingMs": (time.perf_counter() - before) * 1000,
-                    "vectorFile": str(vector_file),
-                    "vectorSha256": sha256(vector_file),
-                    "vectorBytes": matrix.nbytes,
-                }
+                case_boundaries(
+                    args.output, journal, case, blocks, model, np, args.quantile
+                )
             )
-            record({"event": "case_completed", "caseId": case["caseId"]})
+            record_jsonl(journal, {"event": "case_completed", "caseId": case["caseId"]})
+
         write_new(
             args.output / "boundaries.json",
             {
@@ -242,12 +257,13 @@ def run(args: argparse.Namespace) -> None:
             },
         )
     except BaseException as error:
-        record(
+        record_jsonl(
+            journal,
             {
                 "event": "failed",
                 "exceptionType": type(error).__name__,
                 "message": str(error),
-            }
+            },
         )
         raise
 

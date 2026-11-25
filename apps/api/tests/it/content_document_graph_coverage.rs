@@ -280,6 +280,18 @@ impl GraphCoverageFixture {
         .map_err(Into::into)
     }
 
+    /// Overrides the current revision's graph state. The fixture seeds
+    /// `graph_degraded`, so a test that needs a *complete* graph must say so.
+    async fn set_graph_state(&self, revision_id: Uuid, graph_state: &str) -> Result<()> {
+        sqlx::query("update knowledge_revision set graph_state = $2 where revision_id = $1")
+            .bind(revision_id)
+            .bind(graph_state)
+            .execute(&self.pool)
+            .await
+            .context("failed to set graph coverage revision graph state")?;
+        Ok(())
+    }
+
     async fn create_document_node(&self, document_id: Uuid, label: &str) -> Result<Uuid> {
         let node = repositories::upsert_runtime_graph_document_node(
             &self.pool,
@@ -388,6 +400,15 @@ impl GraphCoverageFixture {
             &format!("{label}.txt"),
         )
         .await?;
+        sqlx::query(
+            "update knowledge_revision
+             set vector_state = 'ready', vector_ready_at = now()
+             where revision_id = $1",
+        )
+        .bind(revision_id)
+        .execute(&self.pool)
+        .await
+        .context("failed to seed replacement graph coverage vectors")?;
         Ok(RenderableDocument { document_id: document.document_id, revision_id })
     }
 
@@ -442,9 +463,13 @@ async fn dashboard_metrics_keep_one_snapshot_across_concurrent_graph_publication
 
     let result = async {
         let stable = fixture.create_renderable_revision("snapshot-stable", "active").await?;
+        // Complete graphs: only full readiness may end up in the graph-ready
+        // counter, so a `graph_degraded` fixture would be sparse forever.
+        fixture.set_graph_state(stable.revision_id, "ready").await?;
         let transitioning = fixture
             .create_renderable_revision("snapshot-transitioning", "active")
             .await?;
+        fixture.set_graph_state(transitioning.revision_id, "ready").await?;
         let transitioning_job = fixture
             .create_job(transitioning, "leased", "snapshot-transitioning")
             .await?;
@@ -547,6 +572,7 @@ async fn dashboard_metrics_keep_one_snapshot_across_concurrent_graph_publication
         assert_eq!(after.metrics.processing, 0);
         assert_eq!(after.metrics.graph_ready, 2);
         assert_eq!(after.metrics.graph_sparse, 0);
+        assert_eq!(after.metrics.graph_ready + after.metrics.graph_sparse, after.metrics.ready);
         assert_eq!(after.graph_snapshot.as_ref().map(|row| row.node_count), Some(2));
         assert_eq!(after.typed_fact_document_count, 1);
         Ok(())
@@ -564,6 +590,7 @@ async fn dashboard_metrics_do_not_reacquire_the_pool_inside_their_snapshot() -> 
 
     let result = async {
         let document = fixture.create_renderable_revision("single-connection", "active").await?;
+        fixture.set_graph_state(document.revision_id, "ready").await?;
         fixture.create_document_node(document.document_id, "Single connection document").await?;
         fixture.publish_snapshot(1).await?;
 
@@ -600,7 +627,10 @@ async fn stale_document_node_cannot_compensate_for_missing_ready_document() -> R
     let fixture = GraphCoverageFixture::create().await?;
 
     let result = async {
-        let projected_ready = fixture.create_renderable_document("projected", "active").await?;
+        let projected_ready_revision =
+            fixture.create_renderable_revision("projected", "active").await?;
+        let projected_ready = projected_ready_revision.document_id;
+        fixture.set_graph_state(projected_ready_revision.revision_id, "ready").await?;
         let _missing_ready = fixture.create_renderable_document("missing", "active").await?;
         let stale_deleted = fixture.create_renderable_document("stale", "deleted").await?;
 
@@ -664,6 +694,7 @@ async fn graph_coverage_requires_evidence_from_the_exact_readable_revision() -> 
         fixture.publish_snapshot(1).await?;
 
         let revision_b = fixture.replace_readable_revision(revision_a, "revision-b").await?;
+        fixture.set_graph_state(revision_b.revision_id, "ready").await?;
 
         let stale_count =
             content_document_list_repository::count_library_ready_documents_in_graph_projection(
@@ -754,6 +785,7 @@ async fn provenance_coverage_counts_share_one_repeatable_read_snapshot() -> Resu
 
     let result = async {
         let document = fixture.create_renderable_revision("snapshot-race", "active").await?;
+        fixture.set_graph_state(document.revision_id, "ready").await?;
         let (ready_read_tx, ready_read_rx) = tokio::sync::oneshot::channel();
         let (continue_tx, continue_rx) = tokio::sync::oneshot::channel();
         let pool = fixture.pool.clone();
@@ -846,6 +878,7 @@ async fn graph_publication_computes_exact_ten_percent_and_excludes_active_reproc
             "one projected ready identity out of ten must publish exactly 10%, not its complement"
         );
 
+        fixture.set_graph_state(documents[1].revision_id, "ready").await?;
         fixture.create_document_node(documents[1].document_id, "Failed reprocess document").await?;
         fixture.create_document_node(documents[2].document_id, "Leased reprocess document").await?;
         fixture.publish_snapshot(3).await?;
@@ -883,6 +916,8 @@ async fn graph_publication_computes_exact_ten_percent_and_excludes_active_reproc
         let second_publishing_attempt =
             fixture.create_leased_attempt(second_publishing_job.id, "second-publisher", 90).await?;
         let second_completed_at = Utc::now();
+        // A complete graph publication: `graph_degraded` here would be partial
+        // coverage and must never be counted as full graph-ready.
         let second_publication = ingest_repository::publish_graph_refresh_success(
             &fixture.pool,
             &ingest_repository::PublishGraphRefreshSuccess {
@@ -891,8 +926,8 @@ async fn graph_publication_computes_exact_ten_percent_and_excludes_active_reproc
                 document_id: documents[3].document_id,
                 revision_id: documents[3].revision_id,
                 attempt_id: second_publishing_attempt.id,
-                graph_state: "graph_degraded".to_string(),
-                graph_ready_at: None,
+                graph_state: "ready".to_string(),
+                graph_ready_at: Some(second_completed_at),
                 completed_at: second_completed_at,
             },
         )
@@ -956,9 +991,15 @@ async fn graph_coverage_filters_match_the_dashboard_counters() -> Result<()> {
     let result = async {
         let covered = fixture.create_renderable_revision("covered", "active").await?;
         fixture.create_document_node(covered.document_id, "covered").await?;
+        // The only fully graph-ready document: complete graph plus exact evidence.
+        fixture.set_graph_state(covered.revision_id, "ready").await?;
+        // Capable but partially degraded, *with* projection evidence: it must
+        // stay in the gap set and never reach the full graph-ready set.
+        let degraded = fixture.create_renderable_revision("degraded", "active").await?;
+        fixture.create_document_node(degraded.document_id, "degraded").await?;
         let graphless = fixture.create_renderable_revision("graphless", "active").await?;
         let retired = fixture.create_renderable_revision("retired", "deleted").await?;
-        fixture.publish_snapshot(1).await?;
+        fixture.publish_snapshot(2).await?;
 
         let graph_ready = content_document_list_repository::list_library_documents_graph_ready(
             &fixture.pool,
@@ -977,14 +1018,81 @@ async fn graph_coverage_filters_match_the_dashboard_counters() -> Result<()> {
         .await?;
 
         assert_eq!(graph_ready, vec![covered.document_id]);
-        assert_eq!(graph_gap, vec![graphless.document_id]);
+        assert_eq!(
+            graph_gap,
+            vec![degraded.document_id, graphless.document_id],
+            "a degraded graph with exact projection evidence is a gap, not full coverage"
+        );
         assert_eq!(i64::try_from(graph_ready.len()).unwrap(), metrics.graph_ready);
         assert_eq!(i64::try_from(graph_gap.len()).unwrap(), metrics.graph_sparse);
+        assert_eq!(
+            graph_gap.len() as i64,
+            metrics.ready - metrics.graph_ready,
+            "the gap selector is the broad ready-minus-graph-ready deficit"
+        );
         assert!(
             !graph_ready.contains(&retired.document_id)
                 && !graph_gap.contains(&retired.document_id),
             "a retired document must stay outside both exact graph-coverage sets"
         );
+        Ok(())
+    }
+    .await;
+
+    fixture.cleanup().await?;
+    result
+}
+
+/// IRG-361: a `graph_degraded` current revision with a document node and exact
+/// revision evidence serves graph lanes, but it is partial coverage. It must stay
+/// in the sparse population and out of the full graph-ready counter — the Rust
+/// capability helper reports `GraphSparse` for the same revision, so a degraded
+/// graph must never be counted as fully ready by the SQL side.
+#[tokio::test]
+#[ignore = "requires local postgres service"]
+async fn degraded_graph_revision_with_exact_projection_evidence_stays_sparse() -> Result<()> {
+    let fixture = GraphCoverageFixture::create().await?;
+
+    let result = async {
+        let document = fixture.create_renderable_revision("degraded-projected", "active").await?;
+        fixture.create_document_node(document.document_id, "Degraded projected document").await?;
+        fixture.publish_snapshot(1).await?;
+
+        let graph_ready =
+            content_document_list_repository::count_library_ready_documents_in_graph_projection(
+                &fixture.pool,
+                fixture.library_id,
+                PROJECTION_VERSION,
+            )
+            .await?;
+        assert_eq!(
+            graph_ready, 0,
+            "a degraded graph is not full coverage even with exact projection evidence"
+        );
+
+        let metrics = content_document_list_repository::aggregate_library_document_metrics(
+            &fixture.pool,
+            fixture.library_id,
+        )
+        .await?;
+        assert_eq!(metrics.ready, 1);
+        assert_eq!(metrics.graph_ready, 0);
+        assert_eq!(metrics.graph_sparse, 1, "capable but partial coverage is sparse");
+        assert_eq!(metrics.graph_ready + metrics.graph_sparse, metrics.ready);
+
+        let graph_ready_documents =
+            content_document_list_repository::list_library_documents_graph_ready(
+                &fixture.pool,
+                fixture.library_id,
+            )
+            .await?;
+        let graph_gap = content_document_list_repository::list_library_documents_with_graph_gap(
+            &fixture.pool,
+            fixture.library_id,
+        )
+        .await?;
+        assert!(graph_ready_documents.is_empty());
+        assert_eq!(graph_gap, vec![document.document_id]);
         Ok(())
     }
     .await;

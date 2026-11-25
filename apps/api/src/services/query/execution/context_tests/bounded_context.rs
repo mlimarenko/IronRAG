@@ -430,15 +430,131 @@ fn procedure_context_model_ignores_scoped_previous_question_terms() {
 }
 
 #[test]
-fn retrieved_document_brief_preview_keeps_near_intro_identifiers() {
-    let source = format!(
-        "{}GatewayModuleAlpha is the installable module for Subject Alpha.",
-        "Introductory setup context. ".repeat(12)
-    );
-    let chunk = ordinary_chunk("Subject Alpha setup overview.", &source);
-    let preview = focused_preview_from_bundle_chunks(&[&chunk]).unwrap();
+fn retrieved_document_briefs_only_use_retained_readable_source_text() {
+    use crate::infra::knowledge_rows::{KnowledgeChunkRow, KnowledgeDocumentRow};
+    use crate::services::query::execution::{RetrievalBundle, truncate_bundle};
+    use std::collections::HashMap;
 
-    assert!(preview.contains("GatewayModuleAlpha"));
+    let mut retained = ordinary_chunk(
+        "Synthetic summary with an invented definition.",
+        "Overlay only: violet means arrival.",
+    );
+    retained.chunk_index = 30;
+    let document = KnowledgeDocumentRow {
+        document_id: retained.document_id,
+        workspace_id: Uuid::now_v7(),
+        library_id: Uuid::now_v7(),
+        external_key: "record".into(),
+        file_name: None,
+        title: Some("Record".into()),
+        source_uri: None,
+        document_hint: None,
+        document_state: "active".into(),
+        active_revision_id: Some(retained.revision_id),
+        readable_revision_id: Some(retained.revision_id),
+        latest_revision_no: Some(1),
+        parent_document_id: None,
+        document_role: crate::domains::content::DOCUMENT_ROLE_PRIMARY.into(),
+        created_at: Utc::now(),
+        updated_at: Utc::now(),
+        deleted_at: None,
+    };
+    let mut unselected = retained.clone();
+    unselected.chunk_id = Uuid::now_v7();
+    unselected.chunk_index = 0;
+    unselected.score = Some(0.0);
+    retained.score = Some(10.0);
+    unselected.source_text =
+        format!("Definition: amber means departure. {}", "record material ".repeat(300));
+    let mut stale = unselected.clone();
+    stale.revision_id = Uuid::now_v7();
+    let index = HashMap::from([(document.document_id, document)]);
+
+    let mut bundle = RetrievalBundle {
+        entities: vec![],
+        relationships: vec![],
+        chunks: vec![unselected, retained.clone()],
+    };
+    truncate_bundle(&mut bundle, 1, None, &Default::default());
+    assert_eq!(bundle.chunks.len(), 1);
+    assert_eq!(bundle.chunks[0].chunk_id, retained.chunk_id);
+    stale.score = Some(20.0);
+    bundle.chunks.push(stale);
+    let candidates = select_brief_candidates(&bundle.chunks, &index, 16, None);
+    assert_eq!(candidates.len(), 1);
+    assert_eq!(candidates[0].1.len(), 1);
+    let row = KnowledgeChunkRow {
+        chunk_id: retained.chunk_id,
+        workspace_id: candidates[0].0.workspace_id,
+        library_id: candidates[0].0.library_id,
+        document_id: retained.document_id,
+        revision_id: retained.revision_id,
+        chunk_index: retained.chunk_index,
+        chunk_kind: retained.chunk_kind.clone(),
+        content_text: "Retained passage describes the preparation.".into(),
+        normalized_text: "Retained passage describes the preparation.".into(),
+        span_start: None,
+        span_end: None,
+        token_count: None,
+        support_block_ids: vec![],
+        section_path: vec![],
+        heading_trail: vec![],
+        literal_digest: None,
+        chunk_state: "ready".into(),
+        text_generation: None,
+        vector_generation: None,
+        quality_score: None,
+        window_text: None,
+        occurred_at: None,
+        occurred_until: None,
+    };
+    let preview = canonical_brief_preview(
+        candidates[0].0,
+        candidates[0].0,
+        &candidates[0].1,
+        std::slice::from_ref(&row),
+    )
+    .unwrap();
+    assert_eq!(preview, row.content_text);
+    assert!(!preview.contains("amber"));
+    assert!(!preview.contains("violet"));
+    assert!(!preview.contains("invented"));
+    assert!(
+        canonical_brief_preview(candidates[0].0, candidates[0].0, &candidates[0].1, &[]).is_none()
+    );
+    let mut mismatched = row.clone();
+    mismatched.library_id = Uuid::now_v7();
+    assert!(
+        canonical_brief_preview(candidates[0].0, candidates[0].0, &candidates[0].1, &[mismatched])
+            .is_none()
+    );
+
+    let focused = select_brief_candidates(&bundle.chunks, &index, 16, Some(retained.document_id));
+    assert_eq!(
+        canonical_brief_preview(
+            focused[0].0,
+            focused[0].0,
+            &focused[0].1,
+            std::slice::from_ref(&row)
+        )
+        .unwrap(),
+        preview
+    );
+    let mut earlier = retained.clone();
+    earlier.chunk_id = Uuid::now_v7();
+    earlier.chunk_index = 2;
+    let mut earlier_row = row.clone();
+    earlier_row.chunk_id = earlier.chunk_id;
+    earlier_row.chunk_index = earlier.chunk_index;
+    earlier_row.content_text = "Earlier passage.".into();
+    earlier_row.normalized_text = earlier_row.content_text.clone();
+    let focused_chunks = vec![retained.clone(), earlier];
+    let focused = select_brief_candidates(&focused_chunks, &index, 16, Some(retained.document_id));
+    assert_eq!(
+        canonical_brief_preview(focused[0].0, focused[0].0, &focused[0].1, &[row, earlier_row])
+            .unwrap(),
+        "Earlier passage. Retained passage describes the preparation."
+    );
 }
 
 #[test]

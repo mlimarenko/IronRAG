@@ -195,7 +195,7 @@ impl UnifiedGateway {
         request: reqwest::RequestBuilder,
         context: &crate::shared::provider_http::ProviderDispatchContext,
         operation: &str,
-    ) -> Result<reqwest::Response, ProviderCallError> {
+    ) -> Result<crate::shared::provider_http::ProviderSendResponse, ProviderCallError> {
         send_provider_http_request(request, context, self.admission.as_ref(), operation)
             .await
             .map_err(dispatch_error_to_call_error)

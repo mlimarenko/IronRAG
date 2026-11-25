@@ -37,6 +37,23 @@ pub(super) struct GraphExtractionOutcome {
     pub(super) terminal_stage_event: Option<ingest_repository::NewIngestStageEvent>,
 }
 
+impl GraphExtractionOutcome {
+    /// The graph stage did not run because the admitted plan did not ask for it.
+    ///
+    /// Nothing is claimed about the graph: no readiness, no degradation, no
+    /// pending refresh and no publication guard, so the graph state keeps the
+    /// value base publication already wrote.
+    pub(super) const fn not_requested() -> Self {
+        Self {
+            graph_ready: false,
+            graph_degraded: false,
+            pending_summary_refresh: None,
+            publication_guard: None,
+            terminal_stage_event: None,
+        }
+    }
+}
+
 impl RecordStageEventCommand {
     pub(crate) fn for_graph_materialization(
         attempt_id: Uuid,
@@ -424,16 +441,23 @@ pub(super) async fn extract_revision_graph(
             graph_failure = Some(format!("graph candidate extraction failed: {error:#}"));
             log_graph_candidate_failure(context, &error);
             let extract_graph_elapsed_ms = Some(extract_graph_start.elapsed().as_millis() as i64);
+            let mut details = serde_json::json!({
+                "graphReady": false,
+                "error": error.to_string(),
+            });
+            if let crate::services::content::error::ContentServiceError::Internal(source) = &error
+                && let Some(id) =
+                    source.downcast_ref::<crate::services::graph::extract::GraphProviderCallId>()
+            {
+                details["providerCallId"] = serde_json::json!(id.0);
+            }
             terminal_graph_stage_event =
                 Some(ingest_repository::NewIngestStageEvent::from(RecordStageEventCommand {
                     attempt_id,
                     stage_name: INGEST_STAGE_EXTRACT_GRAPH.to_string(),
                     stage_state: "failed".to_string(),
                     message: Some("graph candidate extraction failed".to_string()),
-                    details_json: serde_json::json!({
-                        "graphReady": false,
-                        "error": error.to_string(),
-                    }),
+                    details_json: details,
                     provider_kind: None,
                     model_name: None,
                     prompt_tokens: None,

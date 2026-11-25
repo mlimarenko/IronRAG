@@ -597,6 +597,15 @@ async fn load_payload_intent_identity(
     Ok(Some(identity))
 }
 
+pub(crate) fn unbound_visibility_intent_required(
+    current: Option<Uuid>,
+    bound: Option<Uuid>,
+    operation_kind: &str,
+    has_revision: bool,
+) -> bool {
+    current.is_some() && bound.is_none() && (has_revision || operation_kind != "delete")
+}
+
 async fn validate_current_payload_binding(
     transaction: &mut Transaction<'_, Postgres>,
     request: &ContentAdmissionRequest,
@@ -609,13 +618,20 @@ async fn validate_current_payload_binding(
     .fetch_one(&mut **transaction)
     .await?;
     let Some(revision) = request.revision.as_ref() else {
-        if current.is_some() && request.operation_kind != "delete" {
+        if unbound_visibility_intent_required(current, None, &request.operation_kind, false) {
             return Err(AdmissionError::VisibilityIntentRequired { document_id });
         }
         return Ok(());
     };
+    if unbound_visibility_intent_required(
+        current,
+        revision.visibility_intent_id,
+        &request.operation_kind,
+        true,
+    ) {
+        return Err(AdmissionError::VisibilityIntentRequired { document_id });
+    }
     match (current, revision.visibility_intent_id) {
-        (Some(_), None) => return Err(AdmissionError::VisibilityIntentRequired { document_id }),
         (current, Some(bound)) if current != Some(bound) => {
             return Err(AdmissionError::VisibilityIntentSuperseded { document_id });
         }
@@ -1226,6 +1242,26 @@ async fn load_content_bundle(
 mod tests {
     use super::*;
 
+    #[test]
+    fn unbound_visibility_intent_guard_preserves_delete_exception() {
+        let intent = Uuid::now_v7();
+        let other_intent = Uuid::now_v7();
+        assert!(!unbound_visibility_intent_required(None, None, "reprocess", false));
+        assert!(!unbound_visibility_intent_required(None, Some(intent), "replace", true));
+        assert!(unbound_visibility_intent_required(Some(intent), None, "reprocess", false));
+        assert!(unbound_visibility_intent_required(Some(intent), None, "reprocess", true));
+        assert!(!unbound_visibility_intent_required(Some(intent), Some(intent), "replace", true));
+        // A different binding is rejected later as superseded, not by this predicate.
+        assert!(!unbound_visibility_intent_required(
+            Some(intent),
+            Some(other_intent),
+            "replace",
+            true,
+        ));
+        assert!(!unbound_visibility_intent_required(Some(intent), None, "delete", false));
+        assert!(unbound_visibility_intent_required(Some(intent), None, "delete", true));
+    }
+
     fn new_request() -> ContentAdmissionRequest {
         ContentAdmissionRequest {
             workspace_id: Uuid::nil(),
@@ -1258,6 +1294,7 @@ mod tests {
             }),
             parent_async_operation_id: None,
             priority: 0,
+            enrichment_scope: None,
         }
     }
 

@@ -120,7 +120,7 @@ impl UnifiedGateway {
                 let dispatch = call.resolved.dispatch.as_ref().ok_or_else(|| {
                     ProviderCallError::protocol("provider dispatch authority is missing")
                 })?;
-                let response = self
+                let send = self
                     .send_provider_request(
                         request_builder.json(&Self::embedding_request_body(
                             call.model_name,
@@ -131,11 +131,14 @@ impl UnifiedGateway {
                         call.operation,
                     )
                     .await?;
+                let (response, mut permit) = send.into_parts();
 
                 let (status, headers, body_bytes) =
                     read_provider_response_body(response, call.provider_kind, call.operation)
                         .await?;
                 if !status.is_success() {
+                    // A retryable provider reply owns its own terminal row.
+                    permit.fail_send();
                     return Err(provider_status_error_from_read(
                         call.provider_kind,
                         status,
@@ -143,6 +146,7 @@ impl UnifiedGateway {
                         body_bytes,
                     ));
                 }
+                permit.complete_send();
                 let body_bytes = body_bytes.unwrap_or_default();
                 parse_provider_json_body(&body_bytes, call.provider_kind, call.operation)
             },

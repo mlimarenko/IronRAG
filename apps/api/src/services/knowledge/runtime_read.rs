@@ -4,7 +4,6 @@ use std::{
     time::{Duration, Instant},
 };
 
-use anyhow::Context;
 use tokio::sync::{Mutex, RwLock};
 use uuid::Uuid;
 
@@ -187,6 +186,25 @@ async fn pause_library_read(pending: &Mutex<Option<LibraryReadPause>>, library_i
     }
 }
 
+#[derive(Debug, thiserror::Error)]
+#[error("runtime graph projection store unavailable")]
+pub(crate) struct RuntimeGraphStoreUnavailable;
+
+fn graph_projection_read_error(error: sqlx::Error) -> KnowledgeServiceError {
+    let operational = match &error {
+        sqlx::Error::Io(_) | sqlx::Error::PoolTimedOut | sqlx::Error::PoolClosed => true,
+        sqlx::Error::Database(database) => {
+            database.code().is_some_and(|code| code.starts_with("08") || code == "57P03")
+        }
+        _ => false,
+    };
+    if operational {
+        KnowledgeServiceError::Internal(RuntimeGraphStoreUnavailable.into())
+    } else {
+        KnowledgeServiceError::Repository(error)
+    }
+}
+
 pub(crate) async fn load_active_runtime_graph_projection(
     state: &AppState,
     library_id: Uuid,
@@ -234,7 +252,7 @@ async fn load_current_graph_projection(
     let snapshot =
         repositories::get_runtime_graph_snapshot(&state.persistence.postgres, library_id)
             .await
-            .context("failed to load runtime graph snapshot")?;
+            .map_err(graph_projection_read_error)?;
     let Some(snapshot_row) = snapshot else {
         // A library whose graph was never published — empty, still ingesting,
         // or graph extraction disabled — is a routine state, not an integrity
@@ -317,7 +335,7 @@ async fn load_graph_projection_from_postgres(
         projection_version,
     )
     .await
-    .context("failed to load admitted runtime graph edges")?;
+    .map_err(graph_projection_read_error)?;
     let mut connected_node_ids = HashSet::with_capacity(edges.len().saturating_mul(2));
     for edge in &edges {
         connected_node_ids.insert(edge.from_node_id);
@@ -331,7 +349,7 @@ async fn load_graph_projection_from_postgres(
         &connected_node_ids,
     )
     .await
-    .context("failed to load admitted runtime graph nodes")?;
+    .map_err(graph_projection_read_error)?;
     let elapsed_ms = load_started.elapsed().as_millis();
 
     let projection = Arc::new(ActiveRuntimeGraphProjection { nodes, edges });
@@ -354,6 +372,19 @@ mod tests {
     use chrono::Utc;
 
     use super::*;
+
+    #[test]
+    fn graph_projection_marker_is_limited_to_operational_fetch_failures() {
+        assert!(matches!(
+            graph_projection_read_error(sqlx::Error::PoolTimedOut),
+            KnowledgeServiceError::Internal(error)
+                if error.downcast_ref::<RuntimeGraphStoreUnavailable>().is_some()
+        ));
+        assert!(matches!(
+            graph_projection_read_error(sqlx::Error::RowNotFound),
+            KnowledgeServiceError::Repository(sqlx::Error::RowNotFound)
+        ));
+    }
 
     fn snapshot(
         status: &str,

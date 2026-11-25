@@ -85,6 +85,17 @@ export function serverTurnDurationMs(result: AssistantTurnExecutionResponse): nu
   return Number.isFinite(start) && Number.isFinite(end) && end >= start ? end - start : undefined
 }
 
+export function finalizedUserMessageFromResult(
+  message: AssistantMessage,
+  result: AssistantTurnExecutionResponse,
+): AssistantMessage {
+  return {
+    ...message,
+    id: result.execution?.requestTurnId ?? message.id,
+    timestamp: result.runtimeSummary?.acceptedAt ?? message.timestamp,
+  }
+}
+
 /**
  * Replaces the optimistic pending assistant message with the finalized turn.
  *
@@ -100,6 +111,7 @@ export function serverTurnDurationMs(result: AssistantTurnExecutionResponse): nu
 export function applyTurnResultToMessages(
   messages: AssistantMessage[],
   pendingId: string,
+  userId: string,
   result: AssistantTurnExecutionResponse,
   emptyAnswerText: string,
 ): AssistantMessage[] {
@@ -107,11 +119,7 @@ export function applyTurnResultToMessages(
   const evidence = mapAssistantTurnToEvidence(result)
   const durationMs = serverTurnDurationMs(result)
   const answerTimestamp = result.runtimeSummary?.completedAt ?? result.responseTurn?.createdAt
-  const questionTimestamp = result.runtimeSummary?.acceptedAt
 
-  // The user turn that triggered this answer is the nearest message preceding
-  // the pending placeholder; restamp it from the server so the question and
-  // answer share one clock.
   const executionId = result.execution?.id
   const pendingIndex = messages.findIndex(
     (message) =>
@@ -121,13 +129,11 @@ export function applyTurnResultToMessages(
         !message.content &&
         message.executionId === executionId),
   )
-  let userIndex = -1
-  for (let i = pendingIndex - 1; i >= 0; i -= 1) {
-    if (messages[i]?.role === 'user') {
-      userIndex = i
-      break
-    }
-  }
+  const userIndex = messages.findIndex(
+    (message) =>
+      message.role === 'user' &&
+      (message.id === userId || message.id === result.execution?.requestTurnId),
+  )
 
   return messages.map((message, index) => {
     if (index === pendingIndex) {
@@ -141,8 +147,8 @@ export function applyTurnResultToMessages(
         evidence,
       }
     }
-    if (index === userIndex && questionTimestamp) {
-      return { ...message, timestamp: questionTimestamp }
+    if (index === userIndex) {
+      return finalizedUserMessageFromResult(message, result)
     }
     return message
   })

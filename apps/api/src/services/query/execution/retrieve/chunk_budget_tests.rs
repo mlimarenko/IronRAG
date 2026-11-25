@@ -96,6 +96,7 @@ fn truncate_bundle_uses_semantic_rank_before_raw_score_within_the_same_safe_lane
         None,
         &HashSet::new(),
         &semantic_ranks,
+        &HashMap::new(),
     );
 
     assert_eq!(bundle.chunks.len(), 1);
@@ -128,6 +129,7 @@ fn truncate_bundle_keeps_safety_lane_priority_ahead_of_semantic_rank() {
         None,
         &HashSet::new(),
         &semantic_ranks,
+        &HashMap::new(),
     );
 
     assert_eq!(bundle.chunks[0].chunk_id, graph_evidence_id);

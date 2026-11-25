@@ -8,14 +8,16 @@
 const MAX_SANITIZED_TEXT_LENGTH = 512
 const MAX_ATTRIBUTE_LENGTH = 256
 
-const EMAIL_PATTERN = /[\p{L}\p{N}._%+-]+@[\p{L}\p{N}.-]+\.[\p{L}]{2,}/gu
-const CREDENTIAL_PATTERN = /\b(?:Bearer|Basic)\s+[A-Za-z0-9._~+/=-]{8,}/gi
+// The mandatory domain dot stays: only a lookbehind boundary is what removes the
+// super-linear suffix rescan, and dropping the dot would redact `a@bc`.
+const EMAIL_PATTERN = /(?<![\p{L}\p{N}._%+-])[\p{L}\p{N}._%+-]+@[\p{L}\p{N}.-]+\.\p{L}{2,}/gu
+const CREDENTIAL_PATTERN = /\b(?:Bearer|Basic)\s+[a-z0-9._~+/=-]{8,}/gi
 const JWT_PATTERN = /\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b/g
 const SECRET_QUERY_PARAMETER_PATTERN =
   /([?&](?:access_token|refresh_token|id_token|token|api[_-]?key|key|secret|password|passwd|code|state)=)[^&#\s]*/gi
 const URL_QUERY_PATTERN = /(\bhttps?:\/\/[^\s"'<>)]+?)[?#][^\s"'<>)]*/gi
 const FILE_URL_PATTERN = /\bfile:\/\/\/[^\s"'<>)]+/gi
-const WINDOWS_PATH_PATTERN = /\b[A-Za-z]:\\Users\\[^\s"'<>)]+/gi
+const WINDOWS_PATH_PATTERN = /\b[a-z]:\\Users\\[^\s"'<>)]+/gi
 // Long digit runs are phone-number shaped. Keep line:column pairs and hashes,
 // which never reach seven consecutive digits in a stack frame.
 const PHONE_PATTERN = /(?<!\p{N})(?:\+?\d[\s().-]?){6,}\d(?!\p{N})/gu
@@ -26,9 +28,21 @@ const ATTRIBUTE_NAME_PATTERN = /^[a-z][a-z0-9._-]{0,63}$/
 const FORBIDDEN_ATTRIBUTE_NAME_PATTERN =
   /authorization|cookie|email|login|password|passwd|phone|secret|token|user(name|_id)?$|query|content|document|prompt/i
 
+/**
+ * Text form of a telemetry input. Only primitives carry text worth redacting;
+ * an arbitrary object would stringify to its useless `[object Object]` form.
+ */
+function textOf(input: unknown): string {
+  if (typeof input === 'string') return input
+  if (typeof input === 'number' || typeof input === 'boolean' || typeof input === 'bigint') {
+    return String(input)
+  }
+  return ''
+}
+
 export function redactText(input: unknown, limit = MAX_SANITIZED_TEXT_LENGTH): string {
   if (input === null || input === undefined) return ''
-  const raw = typeof input === 'string' ? input : String(input)
+  const raw = textOf(input)
   const redacted = raw
     .replace(CREDENTIAL_PATTERN, '[redacted-credential]')
     .replace(JWT_PATTERN, '[redacted-token]')

@@ -229,7 +229,6 @@ impl QueryService {
             .bundle_refs
             .as_ref()
             .map_or_else(Vec::new, map_chunk_references);
-        super::chunk_reference_detail::enrich_chunk_references(state, &mut chunk_references).await;
         let mut prepared_segment_references = build_prepared_segment_references(
             prepared_reference_context.bundle_refs.as_ref(),
             &prepared_reference_context.structured_block_rows,
@@ -271,6 +270,18 @@ impl QueryService {
             &mut graph_node_references,
             &mut graph_edge_references,
         );
+        super::chunk_reference_detail::enrich_chunk_references(
+            state,
+            &mut chunk_references,
+            &super::chunk_reference_detail::ReferenceSelectionInputs {
+                prepared_segment_references: &prepared_segment_references,
+                technical_fact_references: &technical_fact_references,
+                entity_references: &graph_node_references,
+                relation_references: &graph_edge_references,
+                semantic_verification: semantic_verification.as_ref(),
+            },
+        )
+        .await;
         if answer_disposition.is_factual_ready()
             && !is_system_statement
             && chunk_references.is_empty()

@@ -15,6 +15,7 @@ mod runtime;
 mod web_jobs;
 
 pub use attempt::WorkerAttemptAbortGuard;
+pub(crate) use attempt::execute_ingest_job;
 pub use runtime::spawn_ingestion_worker;
 
 #[cfg(feature = "test-support")]

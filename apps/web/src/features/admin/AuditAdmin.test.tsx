@@ -194,6 +194,8 @@ describe('AuditAdmin', () => {
             totalCost: '9007199254740993.125',
             currencyCode: 'USD',
             providerCallCount: 2,
+            unpricedProviderCallCount: 0,
+            costCoverage: 'complete',
           },
         }),
         auditEvent({
@@ -203,6 +205,8 @@ describe('AuditAdmin', () => {
             models: [],
             totalCost: null,
             providerCallCount: 1,
+            unpricedProviderCallCount: 0,
+            costCoverage: null,
           },
         }),
       ],
@@ -212,10 +216,10 @@ describe('AuditAdmin', () => {
     renderAudit()
     expect(screen.getByText('openai_compatible:atlas')).toBeInTheDocument()
     expect(screen.getByText(/USD 9,007,199,254,740,993\.125/)).toBeInTheDocument()
-    expect(screen.getByText(/2 calls/)).toBeInTheDocument()
+    expect(screen.getByText(/2 completed calls/)).toBeInTheDocument()
     expect(screen.getByText('No billed model')).toBeInTheDocument()
     expect(screen.getByText(/Cost unavailable/)).toBeInTheDocument()
-    expect(screen.getByText(/1 call/)).toBeInTheDocument()
+    expect(screen.getByText(/1 recorded call/)).toBeInTheDocument()
   })
 
   it('hides assistant details when inclusion is disabled, without exposing cached metadata', async () => {
@@ -229,6 +233,8 @@ describe('AuditAdmin', () => {
             totalCost: '0.125',
             currencyCode: 'USD',
             providerCallCount: 2,
+            unpricedProviderCallCount: 0,
+            costCoverage: 'complete',
           },
         }),
       ],
@@ -254,6 +260,8 @@ describe('AuditAdmin', () => {
             models: [],
             totalCost: '0.125',
             providerCallCount: 0,
+            unpricedProviderCallCount: 0,
+            costCoverage: 'complete',
           },
         }),
       ],

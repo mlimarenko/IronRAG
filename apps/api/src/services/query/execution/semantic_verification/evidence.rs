@@ -1,6 +1,7 @@
 use super::super::types::{AuthoritativeAnswerEvidence, RuntimeMatchedChunk};
 use super::{
-    AuthorizedSemanticSource, CompleteDocumentProof, MAX_SOURCE_ENTRIES, SemanticPreparationError,
+    AuthorizedSemanticSource, CompleteDocumentProof, SemanticPreparationError,
+    measure_selected_evidence,
 };
 use crate::{
     app::state::AppState,
@@ -44,26 +45,13 @@ pub(crate) async fn load_semantic_sources(
     })?
 }
 
-async fn load_sources_inner(
+/// Loads the persisted reference bundle of this execution and proves it still
+/// belongs to the execution scope and is current.
+async fn load_current_reference_bundle(
     state: &AppState,
-    execution: QueryProviderExecutionContext,
-    chunks: &[RuntimeMatchedChunk],
-    evidence: &AuthoritativeAnswerEvidence,
+    execution: &QueryProviderExecutionContext,
     grounding: &AssistantGroundingEvidence,
-) -> anyhow::Result<Result<Vec<AuthorizedSemanticSource>, SemanticPreparationError>> {
-    let ids = chunks
-        .iter()
-        .map(|chunk| chunk.chunk_id)
-        .chain(evidence.chunk_rows.iter().map(|chunk| chunk.chunk_id))
-        .collect::<BTreeSet<_>>();
-    let block_ids =
-        evidence.structured_blocks.iter().map(|block| block.block_id).collect::<BTreeSet<_>>();
-    if ids.len() + block_ids.len() + grounding.document_references.len() > MAX_SOURCE_ENTRIES {
-        return Ok(Err(SemanticPreparationError::TooManySources));
-    }
-    if ids.is_empty() && block_ids.is_empty() && grounding.document_references.is_empty() {
-        return Ok(Ok(Vec::new()));
-    }
+) -> anyhow::Result<crate::infra::knowledge_rows::KnowledgeContextBundleReferenceSetRow> {
     let references = state
         .context_store
         .get_bundle_reference_set_by_query_execution(execution.query_execution_id)
@@ -90,6 +78,15 @@ async fn load_sources_inner(
             || references.bundle.assembly_diagnostics.is_object(),
         "selected document references cannot be recorded in malformed bundle diagnostics"
     );
+    Ok(references)
+}
+
+/// Proves every retained chunk is still readable inside this execution scope.
+async fn prove_retained_chunk_scope(
+    state: &AppState,
+    execution: &QueryProviderExecutionContext,
+    references: &crate::infra::knowledge_rows::KnowledgeContextBundleReferenceSetRow,
+) -> anyhow::Result<(BTreeSet<Uuid>, Vec<(Uuid, Uuid, Uuid)>)> {
     let query_chunks = sqlx::query_scalar::<_, Uuid>(
         "select chunk_id from query_chunk_reference where execution_id = $1",
     )
@@ -108,6 +105,16 @@ async fn load_sources_inner(
         retained_chunk_scopes.len() == retained_chunks.len(),
         "retained semantic source reference disappeared or crossed scope"
     );
+    Ok((retained_chunks, retained_chunk_scopes))
+}
+
+/// Loads the selected evidence rows and proves they stay inside the execution
+/// scope.
+async fn load_scoped_semantic_evidence(
+    state: &AppState,
+    execution: &QueryProviderExecutionContext,
+    references: &crate::infra::knowledge_rows::KnowledgeContextBundleReferenceSetRow,
+) -> anyhow::Result<Vec<crate::infra::knowledge_rows::KnowledgeEvidenceRow>> {
     let selected_evidence = state
         .graph_store
         .list_evidence_by_ids(
@@ -123,6 +130,19 @@ async fn load_sources_inner(
             && row.library_id == execution.library_id),
         "semantic evidence references crossed execution scope"
     );
+    Ok(selected_evidence)
+}
+
+/// Loads the selected and retained technical facts and proves they stay inside
+/// the execution scope.
+async fn load_scoped_semantic_facts(
+    state: &AppState,
+    execution: &QueryProviderExecutionContext,
+    references: &crate::infra::knowledge_rows::KnowledgeContextBundleReferenceSetRow,
+    retained_chunks: &BTreeSet<Uuid>,
+    selected_evidence: &[crate::infra::knowledge_rows::KnowledgeEvidenceRow],
+) -> anyhow::Result<(BTreeSet<Uuid>, Vec<crate::infra::knowledge_rows::KnowledgeTechnicalFactRow>)>
+{
     let fact_ids = references
         .bundle
         .selected_fact_ids
@@ -149,30 +169,141 @@ async fn load_sources_inner(
             && fact.library_id == execution.library_id),
         "semantic fact reference crossed execution scope"
     );
-    let stable_reference_scopes = retained_chunk_scopes
-        .iter()
-        .map(|(_, document, revision)| (*document, *revision))
-        .chain(
-            selected_evidence
-                .iter()
-                .map(|reference| (reference.document_id, reference.revision_id)),
-        )
-        .chain(
-            selected_facts
-                .iter()
-                .filter(|fact| fact_ids.contains(&fact.fact_id))
-                .map(|fact| (fact.document_id, fact.revision_id)),
-        )
-        .chain(grounding.document_references.iter().filter_map(|reference| {
-            reference.revision_id.map(|revision| (reference.document_id, revision))
-        }))
-        .collect::<BTreeSet<_>>();
-    let allowed_chunks =
-        allowed_semantic_chunk_ids(&ids, &retained_chunks, &selected_evidence, &selected_facts);
-    anyhow::ensure!(
-        ids.is_subset(&allowed_chunks),
-        "semantic chunk lacks a selected authoritative reference"
+    Ok((fact_ids, selected_facts))
+}
+
+/// Reports the measured selection without touching its content.
+fn log_selected_semantic_evidence(
+    execution_id: Uuid,
+    source_entries: usize,
+    evidence_utf8_bytes: usize,
+) {
+    tracing::debug!(
+        execution_id = %execution_id,
+        source_entries,
+        evidence_utf8_bytes,
+        "semantic verification evidence selected"
     );
+}
+
+/// True when the execution selected no chunk and no segment, and records no
+/// document reference worth proving.
+fn has_no_selected_evidence(
+    ids: &BTreeSet<Uuid>,
+    block_ids: &BTreeSet<Uuid>,
+    grounding: &AssistantGroundingEvidence,
+) -> bool {
+    ids.is_empty() && block_ids.is_empty() && grounding.document_references.is_empty()
+}
+
+/// The proven reference rows of one execution: its retained chunks, their
+/// scopes, the selected evidence and the selected and retained technical facts.
+struct ProvenReferences {
+    retained_chunks: BTreeSet<Uuid>,
+    retained_chunk_scopes: Vec<(Uuid, Uuid, Uuid)>,
+    selected_evidence: Vec<crate::infra::knowledge_rows::KnowledgeEvidenceRow>,
+    selected_facts: Vec<crate::infra::knowledge_rows::KnowledgeTechnicalFactRow>,
+    fact_ids: BTreeSet<Uuid>,
+}
+
+/// Loads and proves every reference row the selected evidence will be checked
+/// against.
+async fn load_proven_references(
+    state: &AppState,
+    execution: &QueryProviderExecutionContext,
+    grounding: &AssistantGroundingEvidence,
+) -> anyhow::Result<ProvenReferences> {
+    let references = load_current_reference_bundle(state, execution, grounding).await?;
+    let (retained_chunks, retained_chunk_scopes) =
+        prove_retained_chunk_scope(state, execution, &references).await?;
+    let selected_evidence = load_scoped_semantic_evidence(state, execution, &references).await?;
+    let (fact_ids, selected_facts) = load_scoped_semantic_facts(
+        state,
+        execution,
+        &references,
+        &retained_chunks,
+        &selected_evidence,
+    )
+    .await?;
+    Ok(ProvenReferences {
+        retained_chunks,
+        retained_chunk_scopes,
+        selected_evidence,
+        selected_facts,
+        fact_ids,
+    })
+}
+
+/// Everything the source-owner proof needs, carried in one value.
+struct ReferenceScopeProof<'a> {
+    ids: &'a BTreeSet<Uuid>,
+    retained_chunks: &'a BTreeSet<Uuid>,
+    retained_chunk_scopes: &'a [(Uuid, Uuid, Uuid)],
+    selected_evidence: &'a [crate::infra::knowledge_rows::KnowledgeEvidenceRow],
+    selected_facts: &'a [crate::infra::knowledge_rows::KnowledgeTechnicalFactRow],
+    fact_ids: &'a BTreeSet<Uuid>,
+    evidence: &'a AuthoritativeAnswerEvidence,
+    grounding: &'a AssistantGroundingEvidence,
+    chunks: &'a [RuntimeMatchedChunk],
+}
+
+impl ReferenceScopeProof<'_> {
+    /// Every scope the selected material claims to belong to, for the ownership
+    /// proof that runs after all text reads.
+    fn stable_scopes(&self) -> BTreeSet<(Uuid, Uuid)> {
+        self.retained_chunk_scopes
+            .iter()
+            .map(|(_, document, revision)| (*document, *revision))
+            .chain(
+                self.selected_evidence
+                    .iter()
+                    .map(|reference| (reference.document_id, reference.revision_id)),
+            )
+            .chain(
+                self.selected_facts
+                    .iter()
+                    .filter(|fact| self.fact_ids.contains(&fact.fact_id))
+                    .map(|fact| (fact.document_id, fact.revision_id)),
+            )
+            .chain(self.grounding.document_references.iter().filter_map(|reference| {
+                reference.revision_id.map(|revision| (reference.document_id, revision))
+            }))
+            // Typed agent-manifest chunks are authorized sources admitted before
+            // generation; their exact owners are still rechecked below.
+            .chain(self.chunks.iter().map(|chunk| (chunk.document_id, chunk.revision_id)))
+            // Exact typed child passthrough may select segments from its report,
+            // not from the current bundle; reload/currentness checks below remain.
+            .chain(
+                self.evidence
+                    .structured_blocks
+                    .iter()
+                    .map(|block| (block.document_id, block.revision_id)),
+            )
+            .collect()
+    }
+
+    /// The chunk ids the selected material authorizes.
+    fn allowed_chunk_ids(&self) -> BTreeSet<Uuid> {
+        allowed_semantic_chunk_ids(
+            self.ids,
+            self.retained_chunks,
+            self.selected_evidence,
+            self.selected_facts,
+        )
+    }
+}
+
+/// Loads the selected chunk rows and structured blocks, proving each is covered
+/// by a selected authoritative reference and keeps its selected identity.
+async fn load_proven_selected_scope(
+    state: &AppState,
+    ids: &BTreeSet<Uuid>,
+    block_ids: &BTreeSet<Uuid>,
+    proof: &ReferenceScopeProof<'_>,
+) -> anyhow::Result<(
+    Vec<crate::infra::knowledge_rows::KnowledgeChunkRow>,
+    Vec<crate::infra::knowledge_rows::KnowledgeStructuredBlockRow>,
+)> {
     let rows =
         state.document_store.list_chunks_by_ids(&ids.iter().copied().collect::<Vec<_>>()).await?;
     anyhow::ensure!(rows.len() == ids.len(), "selected semantic chunk disappeared");
@@ -180,13 +311,14 @@ async fn load_sources_inner(
         rows.iter().all(|row| ids.contains(&row.chunk_id)),
         "semantic chunk owner returned an unselected identity"
     );
-    let allowed_blocks = evidence
+    let allowed_blocks = proof
+        .evidence
         .structured_blocks
         .iter()
         .map(|block| block.block_id)
         .chain(rows.iter().flat_map(|row| row.support_block_ids.iter().copied()))
-        .chain(selected_evidence.iter().filter_map(|row| row.block_id))
-        .chain(selected_facts.iter().flat_map(|fact| fact.support_block_ids.iter().copied()))
+        .chain(proof.selected_evidence.iter().filter_map(|row| row.block_id))
+        .chain(proof.selected_facts.iter().flat_map(|fact| fact.support_block_ids.iter().copied()))
         .collect::<BTreeSet<_>>();
     anyhow::ensure!(
         block_ids.is_subset(&allowed_blocks),
@@ -201,20 +333,86 @@ async fn load_sources_inner(
         blocks.iter().all(|row| block_ids.contains(&row.block_id)),
         "semantic segment owner returned an unselected identity"
     );
-    let mut owners: HashMap<(Uuid, Uuid), (KnowledgeDocumentRow, KnowledgeRevisionRow)> =
-        HashMap::new();
+    Ok((rows, blocks))
+}
+
+/// Loads and authors the selected chunk sources, proving each is covered by its
+/// selected source reference and keeps its selected owner.
+async fn collect_chunk_sources(
+    state: &AppState,
+    execution: QueryProviderExecutionContext,
+    rows: Vec<crate::infra::knowledge_rows::KnowledgeChunkRow>,
+    proof: &ReferenceScopeProof<'_>,
+    owners: &mut HashMap<(Uuid, Uuid), (KnowledgeDocumentRow, KnowledgeRevisionRow)>,
+) -> anyhow::Result<Vec<AuthorizedSemanticSource>> {
     let mut sources = Vec::new();
     for row in rows {
-        validate_selected_chunk(&row, execution, chunks, evidence)?;
-        let referenced = ids.contains(&row.chunk_id)
-            || chunk_is_referenced(&row, &retained_chunks, &selected_evidence, &selected_facts);
+        validate_selected_chunk(&row, execution, proof.chunks, proof.evidence)?;
+        let referenced = proof.ids.contains(&row.chunk_id)
+            || chunk_is_referenced(
+                &row,
+                proof.retained_chunks,
+                proof.selected_evidence,
+                proof.selected_facts,
+            );
         anyhow::ensure!(
             referenced,
             "semantic chunk document/revision is not covered by its selected source reference"
         );
-        load_owner(state, execution, row.document_id, row.revision_id, &mut owners).await?;
+        load_owner(state, execution, row.document_id, row.revision_id, owners).await?;
         sources.push(selected_chunk_source(&row));
     }
+    Ok(sources)
+}
+
+async fn load_sources_inner(
+    state: &AppState,
+    execution: QueryProviderExecutionContext,
+    chunks: &[RuntimeMatchedChunk],
+    evidence: &AuthoritativeAnswerEvidence,
+    grounding: &AssistantGroundingEvidence,
+) -> anyhow::Result<Result<Vec<AuthorizedSemanticSource>, SemanticPreparationError>> {
+    let selection = match measure_selected_evidence(chunks, evidence, grounding) {
+        Ok(selection) => selection,
+        Err(error) => return Ok(Err(error)),
+    };
+    let measurement = selection.measurement;
+    let ids = selection.chunk_ids;
+    let block_ids = selection.block_ids;
+    log_selected_semantic_evidence(
+        execution.query_execution_id,
+        measurement.source_entries,
+        measurement.evidence_utf8_bytes,
+    );
+    if has_no_selected_evidence(&ids, &block_ids, grounding) {
+        return Ok(Ok(Vec::new()));
+    }
+    let proven = load_proven_references(state, &execution, grounding).await?;
+    let retained_chunks = proven.retained_chunks;
+    let retained_chunk_scopes = proven.retained_chunk_scopes;
+    let selected_evidence = proven.selected_evidence;
+    let selected_facts = proven.selected_facts;
+    let fact_ids = proven.fact_ids;
+    let proof = ReferenceScopeProof {
+        ids: &ids,
+        retained_chunks: &retained_chunks,
+        retained_chunk_scopes: &retained_chunk_scopes,
+        selected_evidence: &selected_evidence,
+        selected_facts: &selected_facts,
+        fact_ids: &fact_ids,
+        evidence,
+        grounding,
+        chunks,
+    };
+    let stable_reference_scopes = proof.stable_scopes();
+    anyhow::ensure!(
+        ids.is_subset(&proof.allowed_chunk_ids()),
+        "semantic chunk lacks a selected authoritative reference"
+    );
+    let (rows, blocks) = load_proven_selected_scope(state, &ids, &block_ids, &proof).await?;
+    let mut owners: HashMap<(Uuid, Uuid), (KnowledgeDocumentRow, KnowledgeRevisionRow)> =
+        HashMap::new();
+    let mut sources = collect_chunk_sources(state, execution, rows, &proof, &mut owners).await?;
     append_segment_sources(
         state,
         execution,
@@ -258,7 +456,7 @@ async fn append_segment_sources(
             document_id: block.document_id,
             document_revision_id: block.revision_id,
             locator: SemanticSourceLocator::Segment { segment_id: block.block_id },
-            text: block.text,
+            text: super::super::chunk_support::bounded_evidence_text(&block.text),
             complete_document: None,
         });
     }
@@ -299,6 +497,9 @@ fn validate_selected_chunk(
 
 /// Selected canonical windows and table projections are the same evidence the
 /// answer consumer sees. A single chunk still grants no complete-document proof.
+/// The attributed text is the chunk's own projection only: the answer context
+/// may additionally carry a containing window, and crediting that window to this
+/// chunk id would cite text the cited chunk does not hold.
 pub(super) fn selected_chunk_source(
     row: &crate::infra::knowledge_rows::KnowledgeChunkRow,
 ) -> AuthorizedSemanticSource {
@@ -306,7 +507,7 @@ pub(super) fn selected_chunk_source(
         document_id: row.document_id,
         document_revision_id: row.revision_id,
         locator: SemanticSourceLocator::Chunk { chunk_id: row.chunk_id },
-        text: super::super::chunk_support::chunk_answer_source_text(row),
+        text: super::super::chunk_support::chunk_own_source_text(row),
         complete_document: None,
     }
 }

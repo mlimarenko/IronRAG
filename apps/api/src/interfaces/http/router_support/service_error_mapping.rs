@@ -131,7 +131,8 @@ impl From<QueryServiceError> for ApiError {
             QueryServiceError::NotFound { message } => Self::NotFound(message),
             QueryServiceError::BindingNotConfigured { message }
             | QueryServiceError::StateConflict { message } => Self::Conflict(message),
-            QueryServiceError::Provider(failure) => {
+            QueryServiceError::Provider(failure)
+            | QueryServiceError::EmbeddingProvider { failure, .. } => {
                 Self::ProviderFailure(failure.message().to_string())
             }
             QueryServiceError::CacheUnavailable { message } => {

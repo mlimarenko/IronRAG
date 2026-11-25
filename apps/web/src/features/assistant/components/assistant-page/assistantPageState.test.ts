@@ -45,7 +45,13 @@ describe('assistant page turn state', () => {
 
     const user = createUserMessage('Question', Date.parse('2026-08-09T09:58:00Z'))
     const pending = createPendingAssistantMessage(Date.parse('2026-08-09T09:58:00Z'))
-    const messages = applyTurnResultToMessages([user, pending], pending.id, result, 'No answer')
+    const messages = applyTurnResultToMessages(
+      [user, pending],
+      pending.id,
+      user.id,
+      result,
+      'No answer',
+    )
 
     expect(messages[0]?.timestamp).toBe('2026-08-09T10:00:01Z')
     expect(messages[1]?.timestamp).toBe('2026-08-09T10:00:04Z')

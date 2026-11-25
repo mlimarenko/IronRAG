@@ -1,7 +1,8 @@
 use super::*;
 
-#[test]
-fn grounded_answer_tool_result_is_compact_for_model_messages() {
+/// The completion envelope with one twelve-reference execution detail, together
+/// with the two execution ids the compaction must preserve.
+fn compaction_fixture() -> (Value, Uuid, Uuid) {
     let execution_id = Uuid::now_v7();
     let runtime_execution_id = Uuid::now_v7();
     let structured_content = with_test_completion_envelope(serde_json::json!({
@@ -15,26 +16,44 @@ fn grounded_answer_tool_result_is_compact_for_model_messages() {
         "finalAnswerReady": true,
         "finalizable": true,
         "mustPreserveSpans": ["/etc/alpha.ini"],
-        "executionDetail": {
-            "execution": {
-                "id": execution_id,
-                "runtimeExecutionId": runtime_execution_id
-            },
-            "verificationState": "verified",
-            "verificationWarnings": [],
-            "chunkReferences": (0..12)
-                .map(|index| serde_json::json!({
-                    "chunkId": Uuid::now_v7(),
-                    "rank": index + 1,
-                    "score": 1.0
-                }))
-                .collect::<Vec<_>>(),
-            "preparedSegmentReferences": [],
-            "technicalFactReferences": [],
-            "entityReferences": [],
-            "relationReferences": []
-        }
+        "executionDetail": compaction_execution_detail(execution_id, runtime_execution_id),
     }));
+    (structured_content, execution_id, runtime_execution_id)
+}
+
+/// One verified execution detail carrying twelve chunk references.
+fn compaction_execution_detail(execution_id: Uuid, runtime_execution_id: Uuid) -> Value {
+    serde_json::json!({
+        "execution": {
+            "id": execution_id,
+            "runtimeExecutionId": runtime_execution_id
+        },
+        "verificationState": "verified",
+        "verificationWarnings": [],
+        "chunkReferences": compaction_chunk_references(),
+        "preparedSegmentReferences": [],
+        "technicalFactReferences": [],
+        "entityReferences": [],
+        "relationReferences": []
+    })
+}
+
+/// Twelve chunk references whose rank follows their position.
+fn compaction_chunk_references() -> Vec<Value> {
+    (0..12)
+        .map(|index| {
+            serde_json::json!({
+                "chunkId": Uuid::from_u128(index as u128 + 1),
+                "rank": index + 1,
+                "score": 1.0
+            })
+        })
+        .collect()
+}
+
+#[test]
+fn grounded_answer_tool_result_is_compact_for_model_messages() {
+    let (structured_content, execution_id, runtime_execution_id) = compaction_fixture();
     let result = crate::interfaces::http::mcp::McpToolResult {
         content: vec![crate::interfaces::http::mcp::McpContentBlock {
             content_type: "text",
@@ -45,7 +64,24 @@ fn grounded_answer_tool_result_is_compact_for_model_messages() {
     };
 
     let message = tool_result_model_message(GROUNDED_ANSWER_TOOL_NAME, &result);
+    assert_model_message_keeps_durable_spans(&message, execution_id, runtime_execution_id);
+    assert_projected_references_are_bounded(&message);
 
+    assert!(
+        crate::interfaces::http::mcp::tools::source_evidence::admitted_source_texts(
+            GROUNDED_ANSWER_TOOL_NAME,
+            &result
+        )
+        .is_empty()
+    );
+}
+
+/// The model message keeps the durable spans and ids and drops the raw payload.
+fn assert_model_message_keeps_durable_spans(
+    message: &str,
+    execution_id: Uuid,
+    runtime_execution_id: Uuid,
+) {
     assert!(message.contains("grounded answer body"));
     assert!(message.contains("mustPreserveSpans"));
     assert!(message.contains("/etc/alpha.ini"));
@@ -54,14 +90,20 @@ fn grounded_answer_tool_result_is_compact_for_model_messages() {
     assert!(message.contains(&runtime_execution_id.to_string()));
     assert!(message.contains("\"referenceCounts\""));
     assert!(message.contains("\"chunkReferences\":12"));
-    assert!(message.contains("\"omittedCount\":12"));
-    assert!(!message.contains("\"rank\":1"));
     assert!(!message.contains("\"executionDetail\""));
+}
 
-    let verification_text =
-        tool_result_verification_text(GROUNDED_ANSWER_TOOL_NAME, &result).unwrap();
-    assert!(verification_text.contains("\"omittedCount\": 4"));
-    assert!(verification_text.contains("\"rank\": 1"));
+/// The projected references stay bounded and report the omitted remainder.
+fn assert_projected_references_are_bounded(message: &str) {
+    let model_result: Value = serde_json::from_str(message).expect("model tool result");
+    let references = model_result["structuredContent"]["references"]["chunkReferences"]
+        .as_array()
+        .expect("bounded chunk references");
+    assert_eq!(references.len(), 9);
+    assert_eq!(references[0]["chunkId"], serde_json::json!(Uuid::from_u128(1)));
+    assert_eq!(references[0]["rank"], 1);
+    assert_eq!(references[7]["rank"], 8);
+    assert_eq!(references[8]["omittedCount"], 4);
 }
 
 #[test]
@@ -136,6 +178,159 @@ fn already_compact_grounded_answer_keeps_references_and_candidates_for_ui_agent(
     assert_eq!(compacted["answerCandidateSummary"]["returnedCount"], serde_json::json!(1));
     assert_eq!(compacted["answerCandidateSummary"]["candidates"][0]["label"], "Variant Alpha");
     assert_eq!(compacted["verificationState"], "verified");
+}
+
+#[test]
+fn compact_projection_marks_upstream_attribution_when_sources_are_omitted() {
+    let references = (0..8)
+        .map(|index| {
+            serde_json::json!({
+                "kind": "chunk",
+                "chunkId": format!("chunk-{index}"),
+                "documentId": format!("document-{index}"),
+                "revisionId": format!("revision-{index}"),
+                "excerpt": format!("Supported passage {index}."),
+                "claimUnitIds": [format!("claim-{index}")],
+                "sourceIds": [format!("source-{index}")]
+            })
+        })
+        .collect::<Vec<_>>();
+    let attribution = serde_json::json!({
+        "basis": "semantic_verification",
+        "attributedUnitCount": 8,
+        "projectedSourceCount": 8
+    });
+    let content = with_test_completion_envelope(serde_json::json!({
+        "responseProfile": "compact",
+        "answerBody": "Supported answer.",
+        "finalAnswerReady": true,
+        "clarification": {"required": false},
+        "referenceSummary": {
+            "totalCount": 8, "returnedCount": 8, "truncated": false,
+            "attribution": attribution, "references": references
+        }
+    }));
+    let compacted = compact_existing_grounded_answer_profile(
+        &content,
+        2,
+        TOOL_MODEL_STRUCTURED_JSON_CHAR_LIMIT,
+    );
+    let summary = &compacted["referenceSummary"];
+    assert_eq!(summary["references"].as_array().expect("references").len(), 2);
+    assert_eq!(summary["attribution"], attribution);
+    assert_eq!(summary["attributionScope"], "upstream_reference_projection");
+    assert_eq!(summary["secondaryTruncated"], true);
+    assert_eq!(summary["attributionOmitted"], false);
+    assert_eq!(summary["returnedCount"], 2);
+}
+
+#[test]
+fn compact_grounded_source_attribution_survives_model_budget() {
+    use crate::services::query::{
+        assistant_grounding::AgentEvidenceManifest,
+        execution::semantic_verification::{AuthorizedSemanticSource, EvidenceBudget, prepare},
+    };
+    use ironrag_contracts::assistant::semantic_verification::{
+        SemanticAssessment, SemanticByteSpan, SemanticClaimSupport, SemanticCompleteness,
+        SemanticEvidenceLink, SemanticNotRunReason, SemanticResponseClassification,
+        SemanticSourceLocator, SemanticUnitVerdict, SemanticVerificationOutcome,
+    };
+    let chunk_id = Uuid::from_u128(101);
+    let document_id = Uuid::from_u128(102);
+    let revision_id = Uuid::from_u128(103);
+    let text = "The release shipped the frontend, while the API remained planned.";
+    let prepared = prepare(
+        "What shipped?",
+        text,
+        vec![AuthorizedSemanticSource {
+            document_id,
+            document_revision_id: revision_id,
+            locator: SemanticSourceLocator::Chunk { chunk_id },
+            text: text.to_string(),
+            complete_document: None,
+        }],
+    )
+    .expect("canonical source preparation");
+    let mut report = prepared.not_run(SemanticNotRunReason::Disabled, 0);
+    let source_id = report.sources[0].source_id.clone();
+    let unit_id = report.answer_units[0].unit_id.clone();
+    report.outcome = SemanticVerificationOutcome::Completed {
+        assessment: SemanticAssessment {
+            claim_support: SemanticClaimSupport::Supported,
+            completeness: SemanticCompleteness::Complete,
+            response_classification: SemanticResponseClassification::FactualAnswer,
+            missing_caveats: Vec::new(),
+            units: vec![SemanticUnitVerdict {
+                unit_id: unit_id.clone(),
+                support: SemanticClaimSupport::Supported,
+                asserts_document_absence: false,
+                evidence: vec![SemanticEvidenceLink {
+                    source_id: source_id.clone(),
+                    span: SemanticByteSpan { start: 0, end: text.len() },
+                    quote: text.to_string(),
+                }],
+            }],
+        },
+    };
+    let mut budget = EvidenceBudget::new();
+    let mut manifest = AgentEvidenceManifest::default();
+    assert!(super::iteration::child_source_evidence_gate(Some(&report), Some(true)).is_some());
+    assert_eq!(
+        super::iteration::admit_child_report_sources(&mut budget, &mut manifest, &report),
+        ChildReportAdmission::Admitted
+    );
+    assert_eq!(manifest.sources.len(), 1);
+    assert_eq!(budget.measurement().source_entries, 1);
+    assert_eq!(budget.measurement().evidence_utf8_bytes, report.sources[0].text.len());
+    let reference = serde_json::json!({
+        "kind": "chunk",
+        "chunkId": chunk_id,
+        "documentId": document_id,
+        "revisionId": revision_id,
+        "documentTitle": "Release notes",
+        "excerpt": text,
+        "claimUnitIds": [unit_id],
+        "sourceIds": [source_id]
+    });
+    let attribution = serde_json::json!({
+        "basis": "semantic_verification",
+        "claimSupportAvailable": true,
+        "claimUnitCount": 1,
+        "attributedUnitCount": 1,
+        "unattributedUnitCount": 0,
+        "projectedSourceCount": 1,
+        "semanticStatus": "completed",
+        "semanticReason": null
+    });
+    let content = with_test_completion_envelope(serde_json::json!({
+        "responseProfile": "compact",
+        "answerBody": "The release shipped the frontend; the API was planned.",
+        "finalAnswerReady": true,
+        "clarification": {"required": false},
+        "verifier": {"state": "verified"},
+        "warnings": [{"code": "partial_coverage", "message": "x".repeat(12000)}],
+        "referenceSummary": {
+            "totalCount": 1, "returnedCount": 1, "truncated": false,
+            "attribution": attribution, "references": [reference]
+        }
+    }));
+    let compacted = compact_grounded_answer_structured_content_for_model(
+        &content,
+        TOOL_MODEL_STRUCTURED_JSON_CHAR_LIMIT,
+    );
+    assert!(grounded_json_size_for_test(&compacted) <= TOOL_MODEL_STRUCTURED_JSON_CHAR_LIMIT);
+    assert_eq!(
+        compacted["referenceSummary"]["attribution"],
+        content["referenceSummary"]["attribution"]
+    );
+    assert_eq!(compacted["referenceSummary"]["references"][0], reference);
+    assert_eq!(compacted["referenceSummary"]["returnedCount"], 1);
+    assert_eq!(compacted["referenceSummary"]["attributionScope"], "upstream_reference_projection");
+    assert_eq!(compacted["referenceSummary"]["secondaryTruncated"], true);
+}
+
+fn grounded_json_size_for_test(value: &Value) -> usize {
+    serde_json::to_string(value).expect("serialize").chars().count()
 }
 
 #[test]

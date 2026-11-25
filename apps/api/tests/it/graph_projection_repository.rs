@@ -141,6 +141,31 @@ async fn targeted_admission_requires_every_source_and_scopes_incident_edges() ->
         let stale = seed_admission_source(&pool, &fixture, "stale").await?;
         let suppressed = seed_admission_source(&pool, &fixture, "suppressed").await?;
         let foreign_source = seed_admission_source(&pool, &other, "foreign").await?;
+        let graph_pending = seed_admission_source(&pool, &fixture, "graph-pending").await?;
+        let graph_failed = seed_admission_source(&pool, &fixture, "graph-failed").await?;
+        let graph_degraded = seed_admission_source(&pool, &fixture, "graph-degraded").await?;
+        for (source, graph_state) in [
+            (graph_pending, "processing"),
+            (graph_failed, "failed"),
+            (graph_degraded, "graph_degraded"),
+        ] {
+            sqlx::query(
+                "update knowledge_revision set graph_state = $2,
+                 vector_state = 'processing', vector_ready_at = null
+                 where revision_id = $1",
+            )
+            .bind(source.1)
+            .bind(graph_state)
+            .execute(&pool)
+            .await?;
+            assert_eq!(
+                repositories::content_fingerprint_repository::get_current_revision_id(
+                    &pool, source.0,
+                ).await?,
+                Some(source.1),
+                "text publication must survive independent channel state {graph_state}",
+            );
+        }
         // A readable head alone is insufficient: remove the knowledge closure.
         sqlx::query("update knowledge_revision set text_readable_at = null where revision_id = $1")
             .bind(stale.1)
@@ -170,7 +195,7 @@ async fn targeted_admission_requires_every_source_and_scopes_incident_edges() ->
         let mut expected_nodes = vec![document_id];
         let mut expected_edges = Vec::new();
         let mut expected_current_nodes = vec![document_id];
-        for source in [stale, suppressed] {
+        for source in [stale, suppressed, graph_pending, graph_failed] {
             let rejected_document_id = sqlx::query_scalar::<_, Uuid>(
                 "insert into runtime_graph_node
                  (library_id, canonical_key, label, node_type, document_id, projection_version)
@@ -193,6 +218,9 @@ async fn targeted_admission_requires_every_source_and_scopes_incident_edges() ->
             ("incoming", true, None, "related", false, 1),
             ("outgoing", true, None, "related", false, 1),
             ("mixed-stale", true, Some((Some(stale.0), Some(stale.1))), "related", false, 1),
+            ("graph-pending", true, Some((Some(graph_pending.0), Some(graph_pending.1))), "related", false, 1),
+            ("graph-failed", true, Some((Some(graph_failed.0), Some(graph_failed.1))), "related", false, 1),
+            ("graph-degraded", true, Some((Some(graph_degraded.0), Some(graph_degraded.1))), "related", false, 1),
             ("null-lineage", true, Some((None, None)), "related", false, 1),
             ("missing-document", true, Some((None, Some(current.1))), "related", false, 1),
             ("missing-revision", true, Some((Some(current.0), None)), "related", false, 1),
@@ -262,11 +290,11 @@ async fn targeted_admission_requires_every_source_and_scopes_incident_edges() ->
             requested_edges.push(edge_id);
             if has_current {
                 expected_current_nodes.push(peer_id);
-                if extra_source.is_none() {
+                if extra_source.is_none() || name == "graph-degraded" {
                     expected_current_nodes.push(node_id);
                 }
             }
-            if matches!(name, "incoming" | "outgoing") {
+            if matches!(name, "incoming" | "outgoing" | "graph-degraded") {
                 expected_nodes.extend([node_id, peer_id]);
                 expected_edges.push(edge_id);
             }

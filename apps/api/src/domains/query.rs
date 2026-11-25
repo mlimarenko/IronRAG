@@ -339,14 +339,18 @@ pub struct QueryExecution {
 ///
 /// One number for two decisions that must agree: the HTTP layer projects this
 /// many references, and the service reads back detail for this many chunks.
-/// Reading detail for the whole set and then projecting twelve of it meant
-/// every answer and every history page pulled chunk bodies nobody would see.
+/// Reference selection may consider every persisted chunk candidate so a
+/// document-diverse source is not hidden, but callers still see only this many.
 pub const VISIBLE_REFERENCE_LIMIT: usize = 12;
 
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct QueryChunkReference {
     pub execution_id: Uuid,
     pub chunk_id: Uuid,
+    /// Immutable revision the hydrated chunk belonged to. Absent when the
+    /// chunk no longer exists or the detail predates this field.
+    #[serde(default)]
+    pub revision_id: Option<Uuid>,
     pub rank: i32,
     pub score: f64,
     /// Document the chunk was read from, so a reader can open the source.

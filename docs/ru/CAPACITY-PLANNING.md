@@ -321,16 +321,16 @@ from pg_statio_user_tables;
 Меньше ~95% означает, что рабочий набор не помещается и каждый запрос платит
 задержкой диска.
 
-### Асинхронный ввод-вывод PostgreSQL 18
+### Асинхронный ввод-вывод PostgreSQL 19
 
-PostgreSQL 18 читает последовательные сканы, **bitmap heap scan** и vacuum
-асинхронно. Триграммные и полнотекстовые дорожки IronRAG — это как раз bitmap
-heap scan, а поставляемые дефолты (`io_method=worker`, `io_workers=3`,
-`effective_io_concurrency=16`) рассчитаны на небольшой хост.
+Асинхронное чтение помогает триграммному и полнотекстовому поиску IronRAG:
+оба используют bitmap heap scan. При `io_method=worker` PostgreSQL 19
+увеличивает пул по нагрузке. По умолчанию действуют `io_min_workers=2` и
+`io_max_workers=8`. Параметр `io_workers` удален; не переносите его из версии 18.
 
 | Параметр | Дефолт | Для узла, упирающегося в диск | Почему |
 | --- | --- | --- | --- |
-| `io_workers` | 3 | 8 | Три воркера не держат очередь чтений заполненной под конкурентной нагрузкой. |
+| `io_min_workers` / `io_max_workers` | 2 / 8 | Оставьте по умолчанию до замера | Пул и так растет при одновременном чтении. |
 | `effective_io_concurrency` | 16 | 256 (SSD/NVMe) | Глубина упреждающего чтения для bitmap heap scan. |
 | `maintenance_io_concurrency` | 16 | 64 | То же для vacuum и построения индексов. |
 | `random_page_cost` | 4.0 | 1.1 (SSD/NVMe) | Значение 4.0 кодирует время позиционирования **вращающегося** диска и уводит планировщик от индексных сканов. Сначала проверьте устройство: `lsblk -d -o NAME,ROTA` (`ROTA=0` — твердотельный). |
@@ -339,8 +339,7 @@ heap scan, а поставляемые дефолты (`io_method=worker`, `io_w
 `io_method=io_uring` отличается от `worker`, но **seccomp-профиль Docker
 по умолчанию блокирует системные вызовы io_uring**: Postgres не стартует с
 `could not setup io_uring queue: Operation not permitted`. Для него нужен
-собственный seccomp-профиль — это осознанное решение по безопасности, тогда
-как `worker` с увеличенным `io_workers` исключений не требует.
+собственный seccomp-профиль. Пул `worker` такого исключения не требует.
 
 Откат неудачного `io_method` неудобен: сервер не поднимется, чтобы принять
 отменяющий `ALTER SYSTEM`. Правьте `postgresql.auto.conf` в томе данных при
@@ -414,9 +413,9 @@ helm upgrade --install ironrag charts/ironrag \
 
 По умолчанию chart деплоит API, worker и web с тегом `v<appVersion>` из
 `Chart.appVersion`. Переопределяйте `api.image.tag`, `worker.image.tag` и
-`web.image.tag` только при pin на другой published image. Bundled
-зависимости совпадают с Docker Compose: `pgvector/pgvector:pg18` и
-`redis:8.10.1`.
+`web.image.tag` только для другого опубликованного образа. Встроенные
+PostgreSQL и Redis используют те же версии образов, что и
+[Docker Compose](../../docker-compose.yml).
 
 См. также: [AI bindings](./AI-BINDINGS.md), [Установка](./INSTALL.md),
 [Helm chart](../../charts/ironrag/values.yaml).

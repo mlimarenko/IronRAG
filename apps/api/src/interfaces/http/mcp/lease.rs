@@ -27,7 +27,7 @@ use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
-use super::{McpJsonRpcResponse, McpToolSurface, error_response, session, tools};
+use super::{McpJsonRpcResponse, error_response, session, tools};
 use crate::{app::state::AppState, interfaces::http::auth::AuthContext};
 
 /// Absolute lifetime of one externally-issued tool call. The execution owner
@@ -92,6 +92,13 @@ return 0
 ";
 #[derive(Debug, Clone, Copy, Eq, Hash, PartialEq)]
 pub(super) struct McpSessionScope(pub(super) [u8; 32]);
+
+impl McpSessionScope {
+    /// The session digest the financial caller fence admits by exact key.
+    pub(super) const fn digest(self) -> [u8; 32] {
+        self.0
+    }
+}
 
 #[derive(Debug, Clone, Eq, Hash, PartialEq)]
 pub(super) enum McpRequestIdKey {
@@ -173,6 +180,10 @@ struct McpRegisteredToolCall<F> {
     deadline_at: tokio::time::Instant,
     sender: oneshot::Sender<McpJsonRpcResponse>,
     mutating: bool,
+    /// The caller captured while the request scope still held it. Both spawns
+    /// below start with an empty ambient scope, so the paid work is re-scoped
+    /// explicitly instead of losing its caller to `Unattributed`.
+    caller: crate::shared::provider_http::DispatchCaller,
 }
 
 impl<F> McpRegisteredToolCall<F>
@@ -197,6 +208,7 @@ where
             deadline_at,
             sender,
             mutating: dispatch.mutating,
+            caller: crate::shared::provider_http::current_dispatch_caller(),
         }
     }
 }
@@ -794,12 +806,9 @@ where
 pub(super) async fn handle_owned_mcp_tool_call(
     auth: AuthContext,
     state: AppState,
-    request_id: String,
-    id: Option<Value>,
-    params: Option<Value>,
-    surface: McpToolSurface,
+    call: tools::McpToolCallInput,
 ) -> McpJsonRpcResponse {
-    tools::handle_tools_call(&auth, &state, &request_id, id, params, surface).await
+    tools::handle_tools_call(&auth, &state, call).await
 }
 
 async fn release_uncertain_mcp_tool_call_admission(lease: &McpDistributedToolCallLease) {
@@ -900,10 +909,17 @@ where
             deadline_at,
             sender,
             mutating,
+            caller,
         } = self;
         let cancellation = registration.cancellation.clone();
         tokio::spawn(async move {
-            let guarded_future = AssertUnwindSafe(response_future).catch_unwind();
+            // The in-task scope is empty after `tokio::spawn`; reinstate the
+            // caller around the work itself so every nested spawn below (the
+            // detached mutating dispatch included) attests the real caller.
+            let guarded_future = crate::shared::provider_http::with_dispatch_caller(
+                caller,
+                AssertUnwindSafe(response_future).catch_unwind(),
+            );
             let panic_response_id = response_id.clone();
             let deadline_response_id = response_id.clone();
             let coordination_response_id = response_id;

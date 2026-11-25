@@ -1,5 +1,4 @@
 use std::collections::BTreeMap;
-use std::future::Future;
 use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
@@ -962,6 +961,11 @@ fn take_log_appender() -> Option<tracing_appender::non_blocking::WorkerGuard> {
     log_appender_slot().lock().ok().and_then(|mut guard| guard.take())
 }
 
+#[must_use]
+pub fn current_provider_call_id() -> Option<String> {
+    crate::shared::provider_send::current_send_id().map(|id| id.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1154,19 +1158,4 @@ mod tests {
             started.elapsed(),
         );
     }
-}
-tokio::task_local! {
-    static PROVIDER_CALL_ID: String;
-}
-
-pub async fn with_provider_call_id<T>(
-    provider_call_id: Uuid,
-    future: impl Future<Output = T>,
-) -> T {
-    PROVIDER_CALL_ID.scope(provider_call_id.to_string(), future).await
-}
-
-#[must_use]
-pub fn current_provider_call_id() -> Option<String> {
-    PROVIDER_CALL_ID.try_with(Clone::clone).ok()
 }

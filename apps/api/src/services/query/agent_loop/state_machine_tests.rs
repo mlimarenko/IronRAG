@@ -171,6 +171,88 @@ fn forced_final_request_messages_add_answer_only_reminder() {
 }
 
 #[test]
+fn guarded_synthesis_renders_tool_results_as_untrusted_text_without_native_fields() {
+    let calls = vec![ChatToolCall {
+        id: "call-1".to_string(),
+        name: GROUNDED_ANSWER_TOOL_NAME.to_string(),
+        arguments_json: "{}".to_string(),
+    }];
+    let messages = vec![
+        ChatMessage::system("policy"),
+        ChatMessage::user("question"),
+        ChatMessage::assistant_with_reasoning_and_tool_calls(
+            Some("private reasoning".into()),
+            calls,
+        ),
+        ChatMessage::tool_result("call-1", GROUNDED_ANSWER_TOOL_NAME, "retained evidence"),
+    ];
+
+    let rendered = guarded_final_answer_messages(&messages);
+    assert!(rendered.iter().any(|message| {
+        message.role == "system"
+            && message
+                .content
+                .as_deref()
+                .is_some_and(|content| content.contains("untrusted evidence"))
+    }));
+    assert!(rendered.iter().any(|message| {
+        message.role == "user"
+            && message.content.as_deref().is_some_and(|content| {
+                content.contains("Untrusted tool evidence") && content.contains("retained evidence")
+            })
+    }));
+    for message in rendered {
+        assert!(message.content.is_some());
+        assert_ne!(message.role, "tool");
+        assert!(message.tool_calls.is_empty());
+        assert!(message.tool_call_id.is_none());
+        assert!(message.name.is_none());
+        assert!(message.reasoning_content.is_none());
+    }
+}
+
+#[test]
+fn guarded_iteration_preserves_local_calls_then_selects_tool_free_synthesis() {
+    let make_plan = |call: Option<ChatToolCall>| AgentIterationPlan {
+        deadline_budget: Duration::from_secs(1),
+        initial_grounded_answer_iteration: false,
+        focused_follow_up_iteration: false,
+        runtime_enforced_call: call,
+        force_final_answer: false,
+        require_tool_call: false,
+        tools_for_iteration: vec![ChatToolDef {
+            name: GROUNDED_ANSWER_TOOL_NAME.to_string(),
+            description: String::new(),
+            parameters: serde_json::json!({}),
+        }],
+        request_messages: vec![ChatMessage::user("question")],
+    };
+    let initial = initial_grounded_answer_tool_call(1, 0, "question", 5).expect("initial call");
+    let mut follow_up = FocusedGroundedFollowUpState::default();
+    assert!(
+        follow_up.schedule(GroundedAnswerRepairReason::VerificationIncomplete, QueryLanguage::Auto)
+    );
+    let focused = follow_up.take_call("question", 5).expect("focused call");
+    for call in [initial, focused] {
+        let plan = select_agent_iteration_request(true, true, false, make_plan(Some(call)))
+            .ok()
+            .expect("local call remains selected");
+        assert!(plan.runtime_enforced_call.is_some());
+        assert!(!plan.force_final_answer);
+    }
+    let guarded =
+        select_agent_iteration_request(true, false, true, make_plan(None)).ok().expect("synthesis");
+    assert!(guarded.force_final_answer);
+    assert!(!guarded.require_tool_call);
+    assert!(guarded.tools_for_iteration.is_empty());
+    let native =
+        select_agent_iteration_request(false, false, true, make_plan(None)).ok().expect("native");
+    assert!(!native.force_final_answer);
+    assert_eq!(native.tools_for_iteration.len(), 1);
+    assert!(select_agent_iteration_request(true, false, false, make_plan(None)).is_err());
+}
+
+#[test]
 fn forced_final_retry_messages_close_illegal_tool_call() {
     let request_messages = vec![ChatMessage::system("policy"), ChatMessage::user("Q?")];
     let tool_calls = vec![ChatToolCall {
@@ -566,7 +648,7 @@ fn typed_clarification_is_terminal_exact_passthrough_without_retry() {
         message_content: String::new(),
         result_text: Some(answer_body.to_string()),
         result_json: Some(debug_tool_result_json(&result)),
-        grounding_text: None,
+        source_texts: Vec::new(),
         document_reference: None,
         grounded_answer_body: grounded_answer_verbatim_body(GROUNDED_ANSWER_TOOL_NAME, &result),
         grounded_answer_outcome,

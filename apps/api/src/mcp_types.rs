@@ -83,6 +83,7 @@ pub struct McpWorkspaceDescriptor {
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct McpLibraryIngestionReadiness {
+    /// Required bindings are configured; this does not describe corpus contents.
     pub ready: bool,
     pub missing_binding_purposes: Vec<AiBindingPurpose>,
 }
@@ -103,7 +104,8 @@ pub struct McpLibraryDescriptor {
     pub readable_document_count: usize,
     pub processing_document_count: usize,
     pub failed_document_count: usize,
-    pub document_counts_by_readiness: BTreeMap<String, usize>,
+    /// Non-overlapping operational buckets using `DocumentStatus` values.
+    pub document_counts_by_status: BTreeMap<String, usize>,
     pub graph_ready_document_count: usize,
     pub graph_sparse_document_count: usize,
     pub typed_fact_document_count: usize,
@@ -298,6 +300,20 @@ pub struct McpDocumentHit {
     pub evidence_references: Vec<McpEvidenceReference>,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum McpSearchDegradationReason {
+    EmbeddingProviderUnavailable,
+    VectorStoreUnavailable,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct McpSearchDegradation {
+    pub library: String,
+    pub reason: McpSearchDegradationReason,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct McpSearchDocumentsResponse {
@@ -305,6 +321,8 @@ pub struct McpSearchDocumentsResponse {
     pub limit: usize,
     pub libraries: Vec<String>,
     pub hits: Vec<McpDocumentHit>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub degradations: Vec<McpSearchDegradation>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
@@ -452,7 +470,10 @@ pub struct McpListDocumentsRequest {
     /// When omitted, auto-filled from the token's sole library grant.
     pub library: Option<String>,
     pub limit: Option<usize>,
-    pub status_filter: Option<String>,
+    pub status_filter: Option<ironrag_contracts::documents::DocumentStatus>,
+    /// Select current readable publication independently of operational status.
+    pub readable_only: Option<bool>,
+    pub continuation_token: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, utoipa::ToSchema)]
@@ -632,9 +653,9 @@ mod tests {
     use super::{
         McpCancelWebIngestRunRequest, McpGetOperationRequest, McpGetRuntimeExecutionRequest,
         McpGetRuntimeExecutionTraceRequest, McpGetWebIngestRunRequest,
-        McpListWebIngestRunPagesRequest, McpReadDocumentRequest, McpSearchDocumentsRequest,
-        McpSubmitWebIngestRunRequest, McpUpdateDocumentRequest, McpUploadDocumentInput,
-        McpUploadDocumentsRequest,
+        McpListWebIngestRunPagesRequest, McpReadDocumentRequest, McpSearchDegradationReason,
+        McpSearchDocumentsRequest, McpSearchDocumentsResponse, McpSubmitWebIngestRunRequest,
+        McpUpdateDocumentRequest, McpUploadDocumentInput, McpUploadDocumentsRequest,
     };
     use serde_json::json;
     use uuid::Uuid;
@@ -649,6 +670,55 @@ mod tests {
         .expect("request should deserialize");
 
         assert_eq!(request.requested_library_refs(), Some(vec!["default/alpha".to_string()]));
+    }
+
+    #[test]
+    fn search_documents_response_preserves_typed_operational_degradations() {
+        let value = json!({
+            "query": "alpha",
+            "limit": 3,
+            "libraries": ["default/alpha"],
+            "hits": [],
+            "degradations": [
+                {"library": "default/alpha", "reason": "embedding_provider_unavailable"},
+                {"library": "default/alpha", "reason": "vector_store_unavailable"}
+            ]
+        });
+        let response: McpSearchDocumentsResponse =
+            serde_json::from_value(value.clone()).expect("typed degradation response");
+        assert!(matches!(
+            response.degradations[0].reason,
+            McpSearchDegradationReason::EmbeddingProviderUnavailable
+        ));
+        assert!(matches!(
+            response.degradations[1].reason,
+            McpSearchDegradationReason::VectorStoreUnavailable
+        ));
+        assert_eq!(serde_json::to_value(response).expect("serialized response"), value);
+    }
+
+    #[test]
+    fn search_documents_response_omits_absent_degradations() {
+        let value = json!({
+            "query": "alpha",
+            "limit": 3,
+            "libraries": ["default/alpha"],
+            "hits": []
+        });
+        let response: McpSearchDocumentsResponse =
+            serde_json::from_value(value.clone()).expect("response without degradation");
+        assert!(response.degradations.is_empty());
+        assert_eq!(serde_json::to_value(response).expect("serialized response"), value);
+    }
+
+    #[test]
+    fn search_degradation_reason_rejects_admission_and_integrity_failures() {
+        for reason in ["admission_refused", "allowance_exhausted", "source_changed"] {
+            assert!(
+                serde_json::from_value::<McpSearchDegradationReason>(json!(reason)).is_err(),
+                "{reason} must not be accepted as operational degradation"
+            );
+        }
     }
 
     #[test]

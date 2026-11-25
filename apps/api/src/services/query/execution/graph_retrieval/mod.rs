@@ -11,10 +11,11 @@ pub(crate) use relevance::query_relevant_graph_evidence_target_hits;
 // Preserve the crate-visible function surface across the mechanical split.
 #[allow(unused_imports)]
 pub(crate) use retrieval::{
-    GraphRetrievalRequest, associative_edges_for_entities, entities_from_relationships,
-    map_edge_hit, merge_primary_then_expanded_entities, merge_relationships,
-    retrieve_global_bundle, retrieve_local_bundle, retrieve_mixed_graph_bundle,
-    retrieve_relationship_hits, score_desc_entities, score_desc_relationships,
+    GraphBundleOutcome, GraphRetrievalRequest, associative_edges_for_entities,
+    entities_from_relationships, map_edge_hit, merge_primary_then_expanded_entities,
+    merge_relationships, retrieve_global_bundle, retrieve_local_bundle,
+    retrieve_mixed_graph_bundle, retrieve_relationship_hits, score_desc_entities,
+    score_desc_relationships,
 };
 pub(crate) use target_profiles::{
     GraphTargetEntityCoverageField, GraphTargetEntityCoverageFieldKind, GraphTargetEntityProfile,

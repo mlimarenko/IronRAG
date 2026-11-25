@@ -23,27 +23,117 @@ use crate::{
         },
         provider_profiles::ProviderUsagePolicy,
     },
-    infra::repositories::{
-        self, ai_repository, billing_repository, catalog_repository, ingest_repository,
-        query_repository, runtime_repository,
-    },
+    infra::repositories::billing_repository,
     interfaces::http::router_support::ApiError,
-    shared::database::error_is_unique_violation as database_error_is_unique_violation,
 };
+
+#[cfg(feature = "test-support")]
+use crate::infra::repositories::runtime_repository;
 
 const EXECUTION_COST_ROLLUP_RETRY_DELAYS_MS: [u64; 2] = [10, 50];
 const PROVIDER_CALL_COMPLETION_RETRY_DELAYS_MS: [u64; 2] = [10, 50];
 const MIXED_CURRENCY_TERMINAL_ERROR_CODE: &str = "mixed_currency";
 
+/// Call kind of one ingest chunk-embedding provider request. The late capture
+/// command and the reservation constructor share this single literal so the
+/// ledger cannot record two different names for the same paid stage.
+pub(crate) const EMBED_CHUNK_CALL_KIND: &str = "embed_chunk";
+
+/// Pricing completeness of one derived rollup row, from the observations the
+/// rollup stores.
+///
+/// `unpriced_provider_call_count` covers completed calls with no usage or no
+/// price *and* reservations that never completed, so it cannot be compared with
+/// the settled (completed) call count: one priced call plus one unresolved
+/// reservation is `partial`, not `unknown`. The rollup does not store the priced
+/// count, so `partial` is claimed only when a nonzero charge proves that some
+/// call was priced; a zero total with unresolved observations stays `unknown`
+/// instead of reading as free.
+#[must_use]
+pub(crate) fn derived_cost_coverage(
+    unpriced_provider_call_count: i64,
+    total_cost: Decimal,
+) -> CostCoverageStatus {
+    if unpriced_provider_call_count <= 0 {
+        CostCoverageStatus::Complete
+    } else if total_cost > Decimal::ZERO {
+        CostCoverageStatus::Partial
+    } else {
+        CostCoverageStatus::Unknown
+    }
+}
+
+/// Cost fields for one rolled-up scope, derived from the derived row and its
+/// call counts.
+///
+/// A stored derived row is not itself evidence that a price was observed:
+/// [`CostCoverageStatus::from_call_counts`] reports `complete` for a scope with
+/// no calls, and historical rows were written that way. So the projection
+/// requires positive measurement evidence of its own:
+///
+/// - `has_derived_cost == false`, or a row reporting no settled and no unpriced
+///   call: nothing was observed, so no total, currency or coverage is reported;
+/// - a nonzero charged total: a real charge was observed, so the row is at least
+///   `partial` even while other calls in scope stay unresolved;
+/// - no unpriced observation at all: every settled call is priced, which includes
+///   a genuine zero from a price catalog that prices at zero.
+///
+/// A scope with unresolved or unpriced observations and no observed charge stays
+/// `None` with `unknown` coverage instead of reading as free.
+#[must_use]
+pub(crate) fn measured_scope_cost(
+    has_derived_cost: bool,
+    total_cost: Decimal,
+    currency_code: &str,
+    provider_call_count: i64,
+    unpriced_provider_call_count: i64,
+) -> (Option<Decimal>, Option<String>, Option<CostCoverageStatus>) {
+    if !has_derived_cost {
+        return (None, None, None);
+    }
+    if provider_call_count == 0 && unpriced_provider_call_count == 0 {
+        // The derived row exists but records no dispatch and no liability:
+        // that is an absent measurement, not a measured free scope.
+        return (None, None, None);
+    }
+    let coverage = derived_cost_coverage(unpriced_provider_call_count, total_cost);
+    if coverage == CostCoverageStatus::Unknown {
+        return (None, None, Some(coverage));
+    }
+    (Some(total_cost), Some(currency_code.to_string()), Some(coverage))
+}
+
+/// Whether a mapped execution cost records any provider-call observation.
+///
+/// Neither a settled nor an unpriced call means the derived rollup observed
+/// nothing. That is not evidence that a provider price was observed, so it
+/// cannot be served as a cost — and it is not a measured zero either.
+#[must_use]
+fn execution_cost_has_observation(
+    provider_call_count: i32,
+    unpriced_provider_call_count: i32,
+) -> bool {
+    provider_call_count > 0 || unpriced_provider_call_count > 0
+}
+
 #[derive(Debug, Clone, serde::Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct DocumentCostSummary {
     pub document_id: Uuid,
-    pub total_cost: Decimal,
-    pub currency_code: String,
+    /// Cost measured by this document's ledger charges. `None` when the document
+    /// has no derived cost row or when no call in it carries a price;
+    /// `cost_coverage` distinguishes the two.
+    pub total_cost: Option<Decimal>,
+    pub currency_code: Option<String>,
+    /// Calls whose call state is `completed`: a settled observation, not proof
+    /// that a price was observed.
     pub provider_call_count: i64,
+    /// Calls whose liability no charge proves, including reservations that never
+    /// completed.
     pub unpriced_provider_call_count: i64,
-    pub cost_coverage: CostCoverageStatus,
+    /// Pricing completeness of the document's calls. `None` when no execution
+    /// produced a derived cost row for it at all.
+    pub cost_coverage: Option<CostCoverageStatus>,
 }
 
 /// Library document-cost list with the freshness of its owning rollup. When
@@ -98,6 +188,9 @@ pub struct LibraryCostSummary {
     /// stale aggregate is never served as exact and a fake zero is never
     /// substituted.
     pub cost_rollup_freshness: CostRollupFreshness,
+    /// Charged cost of the library. `None` when no execution in it has a
+    /// derived cost row, or when every dispatchable call is unpriced:
+    /// `cost_coverage` distinguishes unmeasured from unknown.
     pub total_cost: Option<Decimal>,
     pub currency_code: Option<String>,
     pub document_count: Option<i64>,
@@ -112,6 +205,8 @@ pub struct WorkspaceCostSummary {
     /// Freshness of the owning workspace rollup: any one dirty library makes
     /// the workspace aggregate stale. See [`LibraryCostSummary`].
     pub cost_rollup_freshness: CostRollupFreshness,
+    /// Charged cost of the workspace. `None` under the same rule as
+    /// [`LibraryCostSummary::total_cost`].
     pub total_cost: Option<Decimal>,
     pub currency_code: Option<String>,
     pub library_count: Option<i64>,
@@ -178,31 +273,6 @@ pub struct CaptureIngestAttemptBillingCommand {
     pub usage_json: Value,
 }
 
-impl CaptureIngestAttemptBillingCommand {
-    pub(crate) fn for_chunk_embedding(
-        workspace_id: Uuid,
-        library_id: Uuid,
-        attempt_id: Uuid,
-        outcome: &crate::services::query::search::EmbedChunksStageOutcome,
-    ) -> Option<Self> {
-        let (Some(provider_kind), Some(model_name), Some(usage_json)) =
-            (outcome.provider_kind.clone(), outcome.model_name.clone(), outcome.usage_json.clone())
-        else {
-            return None;
-        };
-        Some(Self {
-            workspace_id,
-            library_id,
-            attempt_id,
-            binding_id: None,
-            provider_kind,
-            model_name,
-            call_kind: "embed_chunk".to_string(),
-            usage_json,
-        })
-    }
-}
-
 #[derive(Debug, Clone)]
 pub struct CaptureGraphExtractionBillingCommand {
     pub workspace_id: Uuid,
@@ -218,6 +288,13 @@ pub struct CaptureGraphExtractionBillingCommand {
 #[derive(Clone, Default)]
 pub struct BillingService;
 
+/// Workspace, library and optional document of one billing owning execution.
+struct BillingExecutionScope {
+    workspace_id: Uuid,
+    library_id: Uuid,
+    knowledge_document_id: Option<Uuid>,
+}
+
 impl BillingService {
     #[must_use]
     pub const fn new() -> Self {
@@ -229,6 +306,7 @@ impl BillingService {
     /// # Errors
     ///
     /// Returns an [`ApiError`] when attribution or persistence fails.
+    #[cfg(feature = "test-support")]
     pub async fn capture_query_execution(
         &self,
         state: &AppState,
@@ -258,6 +336,7 @@ impl BillingService {
     /// # Errors
     ///
     /// Returns an [`ApiError`] when attribution or persistence fails.
+    #[cfg(feature = "test-support")]
     pub async fn capture_ingest_attempt(
         &self,
         state: &AppState,
@@ -287,6 +366,7 @@ impl BillingService {
     /// # Errors
     ///
     /// Returns an [`ApiError`] when attribution or persistence fails.
+    #[cfg(feature = "test-support")]
     pub async fn capture_graph_extraction(
         &self,
         state: &AppState,
@@ -310,33 +390,8 @@ impl BillingService {
         )
         .await
     }
-}
 
-fn provider_call_matches_reservation(
-    existing: &billing_repository::BillingProviderCallRow,
-    expected: &billing_repository::NewBillingProviderCall<'_>,
-) -> bool {
-    existing.id == expected.id
-        && existing.workspace_id == expected.workspace_id
-        && existing.library_id == expected.library_id
-        && existing.binding_id == expected.binding_id
-        && existing.owning_execution_kind == expected.owning_execution_kind
-        && existing.owning_execution_id == expected.owning_execution_id
-        && existing.runtime_execution_id == expected.runtime_execution_id
-        && existing.runtime_task_kind.as_deref() == expected.runtime_task_kind
-        && existing.provider_catalog_id == expected.provider_catalog_id
-        && existing.model_catalog_id == expected.model_catalog_id
-        && existing.call_kind == expected.call_kind
-}
-
-#[derive(Debug, Clone, Copy)]
-struct BillingExecutionScope {
-    workspace_id: Uuid,
-    library_id: Uuid,
-    knowledge_document_id: Option<Uuid>,
-}
-
-impl BillingService {
+    #[cfg(feature = "test-support")]
     async fn validate_runtime_attribution(
         &self,
         state: &AppState,
@@ -397,134 +452,26 @@ impl BillingService {
         execution_kind: BillingExecutionOwnerKind,
         execution_id: Uuid,
     ) -> Result<BillingExecutionScope, ApiError> {
-        match execution_kind {
-            BillingExecutionOwnerKind::KnowledgeSearch => {
-                let search = billing_repository::get_knowledge_search(
-                    &state.persistence.postgres,
-                    execution_id,
-                )
-                .await
-                .map_err(|error| {
-                    ApiError::internal_with_log(
-                        error,
-                        "knowledge search billing scope lookup failed",
-                    )
-                })?
-                .ok_or_else(|| ApiError::resource_not_found("knowledge_search", execution_id))?;
-                Ok(BillingExecutionScope {
-                    workspace_id: search.workspace_id,
-                    library_id: search.library_id,
-                    knowledge_document_id: None,
-                })
-            }
-            BillingExecutionOwnerKind::McpDocumentRead => {
-                resolve_document_read_scope(state, execution_id).await
-            }
-            BillingExecutionOwnerKind::QueryExecution => {
-                resolve_query_execution_scope(state, execution_id).await
-            }
-            BillingExecutionOwnerKind::GraphExtractionAttempt => {
-                let extraction = repositories::runtime_graph_repository::get_runtime_graph_extraction_record_by_id(
-                    &state.persistence.postgres,
-                    execution_id,
-                )
-                .await
-                .map_err(|e| ApiError::internal_with_log(e, "internal"))?
-                .ok_or_else(|| {
-                    ApiError::resource_not_found("runtime_graph_extraction", execution_id)
-                })?;
-                let library = catalog_repository::get_library_by_id(
-                    &state.persistence.postgres,
-                    extraction.library_id,
-                )
-                .await
-                .map_err(|e| ApiError::internal_with_log(e, "internal"))?
-                .ok_or_else(|| ApiError::resource_not_found("library", extraction.library_id))?;
-                Ok(BillingExecutionScope {
-                    workspace_id: library.workspace_id,
-                    library_id: extraction.library_id,
-                    knowledge_document_id: Some(extraction.document_id),
-                })
-            }
-            BillingExecutionOwnerKind::IngestAttempt => {
-                let attempt = ingest_repository::get_ingest_attempt_by_id(
-                    &state.persistence.postgres,
-                    execution_id,
-                )
-                .await
-                .map_err(|e| ApiError::internal_with_log(e, "internal"))?
-                .ok_or_else(|| ApiError::resource_not_found("ingest_attempt", execution_id))?;
-                let job = ingest_repository::get_ingest_job_by_id(
-                    &state.persistence.postgres,
-                    attempt.job_id,
-                )
-                .await
-                .map_err(|e| ApiError::internal_with_log(e, "internal"))?
-                .ok_or_else(|| ApiError::resource_not_found("ingest_job", attempt.job_id))?;
-                Ok(BillingExecutionScope {
-                    workspace_id: job.workspace_id,
-                    library_id: job.library_id,
-                    knowledge_document_id: job.knowledge_document_id,
-                })
-            }
-        }
-    }
-}
-
-async fn resolve_document_read_scope(
-    state: &AppState,
-    execution_id: Uuid,
-) -> Result<BillingExecutionScope, ApiError> {
-    let read = billing_repository::get_document_read(&state.persistence.postgres, execution_id)
+        let kind = execution_kind.as_str();
+        let resolved = billing_repository::resolve_billing_execution_scope(
+            &state.persistence.postgres,
+            kind,
+            execution_id,
+        )
         .await
-        .map_err(|error| {
-            ApiError::internal_with_log(error, "document read billing scope lookup failed")
-        })?
-        .ok_or_else(|| ApiError::resource_not_found("mcp_document_read", execution_id))?;
-    Ok(BillingExecutionScope {
-        workspace_id: read.workspace_id,
-        library_id: read.library_id,
-        knowledge_document_id: Some(read.document_id),
-    })
-}
-
-async fn resolve_query_execution_scope(
-    state: &AppState,
-    execution_id: Uuid,
-) -> Result<BillingExecutionScope, ApiError> {
-    let execution =
-        query_repository::get_execution_by_id(&state.persistence.postgres, execution_id)
-            .await
-            .map_err(|error| ApiError::internal_with_log(error, "internal"))?;
-    if let Some(execution) = execution {
-        return Ok(BillingExecutionScope {
-            workspace_id: execution.workspace_id,
-            library_id: execution.library_id,
-            knowledge_document_id: None,
-        });
+        .map_err(|error| ApiError::internal_with_log(error, "internal"))?
+        .ok_or_else(|| {
+            ApiError::resource_not_found(
+                billing_repository::billing_scope_not_found_resource(kind),
+                execution_id,
+            )
+        })?;
+        Ok(BillingExecutionScope {
+            workspace_id: resolved.workspace_id,
+            library_id: resolved.library_id,
+            knowledge_document_id: resolved.knowledge_document_id,
+        })
     }
-
-    // Conversation retention removes completed queries but preserves their
-    // billing history. The durable rollup cursor retains the original scope.
-    let retained_scope = billing_repository::get_execution_cost_rollup_state(
-        &state.persistence.postgres,
-        execution_owner_kind_key(BillingExecutionOwnerKind::QueryExecution),
-        execution_id,
-    )
-    .await
-    .map_err(|error| ApiError::internal_with_log(error, "internal"))?
-    .ok_or_else(|| ApiError::resource_not_found("query_execution", execution_id))?;
-    tracing::debug!(
-        %execution_id,
-        workspace_id = %retained_scope.workspace_id,
-        library_id = %retained_scope.library_id,
-        "resolving retained query billing from its durable rollup scope",
-    );
-    Ok(BillingExecutionScope {
-        workspace_id: retained_scope.workspace_id,
-        library_id: retained_scope.library_id,
-        knowledge_document_id: None,
-    })
 }
 
 fn invalid_execution_owner_kind(value: &str) -> ApiError {
@@ -680,12 +627,15 @@ fn map_execution_cost_row(
         owning_execution_id: row.owning_execution_id,
         total_cost: row.total_cost,
         currency_code: row.currency_code,
+        // The rollup mixes settled calls with unresolved reservations in its
+        // unpriced count; derive coverage from the observations, not from a
+        // settled-call denominator.
+        cost_coverage: derived_cost_coverage(
+            i64::from(row.unpriced_provider_call_count),
+            row.total_cost,
+        ),
         provider_call_count: row.provider_call_count,
         unpriced_provider_call_count: row.unpriced_provider_call_count,
-        cost_coverage: CostCoverageStatus::from_call_counts(
-            i64::from(row.provider_call_count),
-            i64::from(row.unpriced_provider_call_count),
-        ),
         updated_at: row.updated_at,
     })
 }

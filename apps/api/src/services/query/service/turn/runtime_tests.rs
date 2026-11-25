@@ -152,9 +152,112 @@ fn provider_failure_detail_survives_to_the_redacted_summary() {
     let summary_redacted = summary.summary_redacted.expect("redacted summary");
     assert_eq!(
         summary_redacted,
-        "query_provider_failed: provider=openai http_status=429 quota_exhausted"
+        "query_provider_quota_exhausted: provider=openai http_status=429 quota_exhausted"
     );
     assert!(!summary_redacted.contains("secret-body-diagnostic"));
+}
+
+#[test]
+fn admission_and_allowance_keep_safe_runtime_codes() {
+    use crate::integrations::provider_budget::ProviderBudgetError;
+    use crate::integrations::retry::ProviderCallError;
+    use crate::shared::provider_http::ProviderDispatchRefusal;
+
+    for (refusal, code, detail) in [
+        (
+            ProviderDispatchRefusal::Authority,
+            "query_provider_admission_refused",
+            "dispatch_authority",
+        ),
+        (
+            ProviderDispatchRefusal::Exhausted,
+            "query_provider_allowance_exhausted",
+            "dispatch_exhausted",
+        ),
+    ] {
+        let error = anyhow::Error::new(QueryServiceError::from(ProviderCallError::admission(
+            ProviderBudgetError::Dispatch(refusal),
+        )));
+        assert_eq!(anyhow_failure_code(&error, "fallback"), code);
+        assert_eq!(redacted_failure_detail(&error).as_deref(), Some(detail));
+    }
+}
+
+#[test]
+fn embedding_provider_preserves_runtime_refusal_code_and_detail() {
+    use crate::integrations::{provider_budget::ProviderBudgetError, retry::ProviderCallError};
+    use crate::shared::provider_http::ProviderDispatchRefusal;
+
+    let failure =
+        crate::shared::provider_failure::ProviderFailure::from(ProviderCallError::admission(
+            ProviderBudgetError::Dispatch(ProviderDispatchRefusal::Exhausted),
+        ));
+    let error = anyhow::Error::new(QueryServiceError::EmbeddingProvider {
+        provider_call_id: Uuid::from_u128(21),
+        failure,
+    });
+    assert_eq!(anyhow_failure_code(&error, "fallback"), "query_provider_allowance_exhausted");
+    assert_eq!(redacted_failure_detail(&error).as_deref(), Some("dispatch_exhausted"));
+}
+
+#[test]
+fn provider_terminal_codes_reach_service_unavailable_boundary() {
+    for code in [
+        "query_provider_admission_refused",
+        "query_provider_allowance_exhausted",
+        "query_provider_quota_exhausted",
+        "query_provider_request_rejected",
+    ] {
+        assert_eq!(
+            query_execution_api_failure(code),
+            QueryExecutionApiFailure::ServiceUnavailable(code)
+        );
+    }
+}
+
+#[test]
+fn nested_anyhow_preserves_terminal_service_unavailable_codes() {
+    for code in [
+        "query_provider_admission_refused",
+        "query_provider_allowance_exhausted",
+        "query_provider_quota_exhausted",
+        "query_provider_request_rejected",
+        "query_state_conflict",
+        "unrelated_dependency_failure",
+    ] {
+        let api_error = if code.starts_with("query_provider_") || code == "query_state_conflict" {
+            map_query_execution_failure(
+                &Uuid::now_v7(),
+                "private query",
+                &QueryAnswerTaskFailure::new(code, "private detail"),
+            )
+        } else {
+            ApiError::service_unavailable("private detail", code)
+        };
+        if code == "query_state_conflict" {
+            assert!(matches!(
+                &api_error,
+                ApiError::ServiceUnavailable { kind: "query_state_conflict", .. }
+            ));
+        }
+        let inner = anyhow::Error::new(api_error).context("inner context");
+        let nested =
+            anyhow::Error::new(QueryServiceError::Internal(inner)).context("outer context");
+        let expected = if code == "unrelated_dependency_failure" {
+            "query_dependency_unavailable"
+        } else {
+            code
+        };
+        assert_eq!(anyhow_failure_code(&nested, "fallback"), expected);
+    }
+    assert!(matches!(
+        map_query_execution_failure(
+            &Uuid::now_v7(),
+            "private query",
+            &QueryAnswerTaskFailure::new("query_cancelled", "private detail"),
+        ),
+        ApiError::Conflict(_)
+    ));
 }
 
 #[test]

@@ -429,7 +429,7 @@ fn map_chunk_hit_drops_active_revision_when_another_revision_is_readable() {
 }
 
 #[test]
-fn map_chunk_hit_preserves_structured_literals_from_window_and_content() {
+fn map_chunk_hit_keeps_own_structured_literals_without_neighbor_window() {
     let document = sample_document_row("sample-guide.md", "Sample Guide");
     let document_index = HashMap::from([(document.document_id, document.clone())]);
     let mut chunk = knowledge_chunk_row(
@@ -448,10 +448,10 @@ fn map_chunk_hit_preserves_structured_literals_from_window_and_content() {
 
     assert!(mapped.source_text.contains("[Main]"));
     assert!(mapped.source_text.contains("alphaMode = strict"));
-    assert!(mapped.source_text.contains("samplectl reload alpha-plugin"));
+    assert!(!mapped.source_text.contains("samplectl reload alpha-plugin"));
     assert!(mapped.excerpt.contains("[Main]"));
     assert!(mapped.excerpt.contains("alphaMode = strict"));
-    assert!(mapped.excerpt.contains("samplectl reload alpha-plugin"));
+    assert!(!mapped.excerpt.contains("samplectl reload alpha-plugin"));
 }
 
 #[test]

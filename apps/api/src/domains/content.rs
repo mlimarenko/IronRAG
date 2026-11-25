@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -92,6 +92,20 @@ pub struct ContentRevisionReadiness {
     pub text_readable_at: Option<DateTime<Utc>>,
     pub vector_ready_at: Option<DateTime<Utc>>,
     pub graph_ready_at: Option<DateTime<Utc>>,
+}
+
+/// Which enrichment the admitted mutation asked for.
+///
+/// `Full` is the behaviour every existing request has: base publication,
+/// embedding, document summary and graph extraction. `TextAndEmbedding` is an
+/// explicit bounded plan: base publication, embedding and execution-profile
+/// validation only, with no summary, graph or provider-backed enrichment.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum EnrichmentScope {
+    #[default]
+    Full,
+    TextAndEmbedding,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
@@ -382,18 +396,6 @@ pub struct DocumentReadinessSummary {
     pub typed_fact_coverage: Option<f64>,
     pub last_mutation_id: Option<Uuid>,
     pub last_job_stage: Option<String>,
-    pub updated_at: DateTime<Utc>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
-#[serde(rename_all = "camelCase")]
-pub struct LibraryKnowledgeCoverage {
-    pub library_id: Uuid,
-    pub document_counts_by_readiness: BTreeMap<String, i64>,
-    pub graph_ready_document_count: i64,
-    pub graph_sparse_document_count: i64,
-    pub typed_fact_document_count: i64,
-    pub last_generation_id: Option<Uuid>,
     pub updated_at: DateTime<Utc>,
 }
 

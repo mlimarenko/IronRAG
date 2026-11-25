@@ -246,10 +246,10 @@ test('boots an authenticated shell and navigates without browser or API errors',
 const routes = [
   { label: /^Ready for answers/, bucket: 'ready', key: 'status', value: 'ready' },
   {
-    label: /^Not ready for answers/,
+    label: /^Other statuses/,
     bucket: 'notready',
     key: 'status',
-    value: 'processing,queued,failed,canceled,empty',
+    value: 'processing,queued,paused,pending_materialization,failed,canceled,empty',
   },
   {
     label: /^With fact relationships/,

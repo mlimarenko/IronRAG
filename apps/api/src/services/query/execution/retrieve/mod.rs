@@ -5,6 +5,8 @@ use futures::{future::join_all, stream};
 use uuid::Uuid;
 
 use super::chunk_support::chunk_answer_source_text;
+#[cfg(test)]
+use super::chunk_support::chunk_own_source_text;
 pub(crate) use super::chunk_support::{
     chunk_is_setup_focus_command_path_anchor, command_dense_excerpt_for,
     current_document_revision_id, excerpt_for, focused_excerpt_for, map_chunk_hit,
@@ -38,6 +40,7 @@ use super::tuning::{DOCUMENT_IDENTITY_SCORE_FLOOR, FOCUS_BROADEN_MIN_CHUNKS};
 use super::types::{
     QueryGraphIndex, RetrievalBundle, RuntimeChunkScoreKind, RuntimeMatchedChunk,
     RuntimeMatchedEntity, RuntimeMatchedRelationship, RuntimeVectorSearchContext,
+    SelectedGraphContextLine,
 };
 use super::{
     GraphTargetEntityCoverageField, GraphTargetEntityCoverageFieldKind, GraphTargetEntityProfile,
@@ -177,12 +180,12 @@ use graph_evidence_context::{
     score_graph_evidence_context_candidates,
 };
 pub(crate) use graph_evidence_context::{
-    GraphEvidenceContextRequest, apply_graph_evidence_texts_to_chunks, graph_evidence_context_line,
-    graph_evidence_targets_for_query, rank_graph_evidence_context_rows,
+    GraphEvidenceContextRequest, graph_evidence_context_line, graph_evidence_targets_for_query,
+    rank_graph_evidence_context_rows,
 };
 use graph_evidence_loading::{
-    GraphEvidenceChunkHits, GraphEvidenceSourceDocumentCandidate, GraphEvidenceTextsByChunk,
-    RankedGraphEvidenceRows, load_entity_bio_chunks,
+    GraphEvidenceChunkHits, GraphEvidenceSourceDocumentCandidate, RankedGraphEvidenceRows,
+    load_entity_bio_chunks,
 };
 pub(crate) use graph_evidence_loading::{
     content_anchor_chunk_score, graph_evidence_chunk_score, graph_evidence_context_top_k,
@@ -223,7 +226,7 @@ use indexes::{
     GRAPH_EVIDENCE_CONTEXT_LINE_CAP, GRAPH_EVIDENCE_CONTEXT_LINE_CHARS,
     GRAPH_EVIDENCE_CONTEXT_SCORE_TOKEN_MIN_CHARS, GRAPH_EVIDENCE_CONTEXT_SOURCE_FIELD_WEIGHT,
     GRAPH_EVIDENCE_CONTEXT_TARGET_FIELD_WEIGHT, GRAPH_EVIDENCE_SOURCE_DOCUMENT_PRIORITY_CAP,
-    GRAPH_EVIDENCE_TARGET_CAP, GRAPH_EVIDENCE_TEXTS_PER_CHUNK, LATEST_VERSION_SEMANTIC_CHUNK_CAP,
+    GRAPH_EVIDENCE_TARGET_CAP, LATEST_VERSION_SEMANTIC_CHUNK_CAP,
     LATEST_VERSION_SEMANTIC_CHUNK_SCAN_LIMIT, LATEST_VERSION_SEMANTIC_DEEP_CHUNK_SCAN_LIMIT,
     LATEST_VERSION_SEMANTIC_DEEP_DOCUMENT_CAP, LATEST_VERSION_SEMANTIC_DOCUMENT_CANDIDATE_CAP,
     LATEST_VERSION_SEMANTIC_UNSCOPED_IDENTITY_DOCUMENT_CAP_MULTIPLIER,
@@ -267,7 +270,8 @@ pub(crate) use indexes::{
     load_document_index, load_graph_index, load_latest_library_generation, query_graph_status,
 };
 pub(crate) use lane_execution::{
-    DocumentChunkRetrievalRequest, retrieve_document_chunks, should_broaden_focus,
+    DocumentChunkRetrievalOutcome, DocumentChunkRetrievalRequest, retrieve_document_chunks,
+    should_broaden_focus,
 };
 use lane_execution::{
     FinalChunkShapingRequest, InitialCompanionChunks, InitialCompanionRequest,
@@ -343,7 +347,7 @@ use vector_context::batch_hydrate_hits;
 #[cfg(test)]
 use vector_context::is_answer_driving_search_chunk_row;
 pub(crate) use vector_context::{
-    expanded_candidate_limit, prepare_runtime_vector_search_context, should_skip_vector_search,
+    expanded_candidate_limit, prepare_runtime_vector_search_context,
     validate_runtime_vector_search_context,
 };
 pub(in crate::services::query::execution) use versioned_update::query_ir_requests_versioned_update_procedure_context;
@@ -384,18 +388,17 @@ mod test_prelude {
         RuntimeMatchedEntity, RuntimeMatchedRelationship, RuntimeQueryPlan,
         SETUP_FOCUS_DOCUMENT_CANDIDATE_CAP, SETUP_FOCUS_DOCUMENT_CHUNK_CAP,
         SETUP_FOCUS_DOCUMENT_SCORE_BASE, SETUP_VARIANT_CHUNKS_PER_DOCUMENT, Utc, Uuid,
-        apply_graph_evidence_texts_to_chunks, artifact_sibling_source_chunk_score,
-        artifact_sibling_source_document_ids, artifact_sibling_source_revision_ids,
-        build_lexical_queries, chunk_answer_source_text, combine_chunk_retrieval_lanes,
-        combine_lexical_query_results, combine_query_ir_focus_search_results,
-        command_dense_excerpt_for, compare_version_desc, content_anchor_revision_ids,
-        content_anchor_row_score, current_document_revision_id, dedupe_latest_version_documents,
-        diversify_chunks_by_document, document_evidence_anchor_candidate_document_ids,
-        document_identity_chunk_score, document_identity_focus_terms, entity_bio_chunk_score,
-        entity_bio_target_mentions, extract_semver_like_version,
-        graph_evidence_chunk_hits_from_rows, graph_evidence_chunk_score,
-        graph_evidence_context_line, graph_evidence_source_document_ids,
-        graph_evidence_source_document_ids_from_scored_targets,
+        artifact_sibling_source_chunk_score, artifact_sibling_source_document_ids,
+        artifact_sibling_source_revision_ids, build_lexical_queries, chunk_answer_source_text,
+        chunk_own_source_text, combine_chunk_retrieval_lanes, combine_lexical_query_results,
+        combine_query_ir_focus_search_results, command_dense_excerpt_for, compare_version_desc,
+        content_anchor_revision_ids, content_anchor_row_score, current_document_revision_id,
+        dedupe_latest_version_documents, diversify_chunks_by_document,
+        document_evidence_anchor_candidate_document_ids, document_identity_chunk_score,
+        document_identity_focus_terms, entity_bio_chunk_score, entity_bio_target_mentions,
+        extract_semver_like_version, graph_evidence_chunk_hits_from_rows,
+        graph_evidence_chunk_score, graph_evidence_context_line,
+        graph_evidence_source_document_ids, graph_evidence_source_document_ids_from_scored_targets,
         graph_evidence_source_document_ids_with_priority, graph_evidence_targets,
         graph_evidence_targets_for_query, graph_evidence_text_search_document_scope,
         is_answer_driving_search_chunk_row, latest_version_chunk_score,
@@ -424,9 +427,8 @@ mod test_prelude {
         setup_focus_document_candidate_score, setup_focus_document_chunk_score,
         setup_focus_document_label_identity_score, setup_focus_query_identity_terms,
         setup_focus_row_score, setup_variant_candidate_document_ids, setup_variant_document_family,
-        setup_variant_family_model, setup_variant_query_terms, should_skip_vector_search,
-        text_has_release_version_marker, truncate_bundle,
-        truncate_bundle_with_semantic_chunk_ranks, truncate_chunks_for_context,
+        setup_variant_family_model, setup_variant_query_terms, text_has_release_version_marker,
+        truncate_bundle, truncate_bundle_with_semantic_chunk_ranks, truncate_chunks_for_context,
         versioned_update_exact_target_runbook_score,
         versioned_update_procedure_evidence_supports_runbook,
         versioned_update_procedure_focus_model, versioned_update_procedure_text_evidence,
@@ -441,7 +443,7 @@ mod test_prelude {
         RuntimeGraphEvidenceRow, RuntimeGraphQueryNodeRow,
     };
     pub(super) use crate::services::knowledge::runtime_read::ActiveRuntimeGraphProjection;
-    pub(super) use crate::services::query::planner::{QueryIntentProfile, build_query_plan};
+    pub(super) use crate::services::query::planner::build_query_plan;
 
     pub(super) use super::content_anchors_tests::{
         comparison_query_ir, exact_error_code_query_ir, release_query_ir,

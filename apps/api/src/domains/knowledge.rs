@@ -73,7 +73,7 @@ pub struct KnowledgeLibraryGeneration {
 #[serde(rename_all = "camelCase")]
 pub struct KnowledgeLibrarySummary {
     pub library_id: Uuid,
-    pub document_counts_by_readiness: BTreeMap<String, i64>,
+    pub document_counts_by_status: BTreeMap<String, i64>,
     pub graph_status: ironrag_contracts::graph::GraphStatus,
     pub node_count: i64,
     pub edge_count: i64,

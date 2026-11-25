@@ -3,7 +3,12 @@ import { GraphRuntime } from './graphRuntime'
 import type { GraphSceneModel } from './sceneModel'
 
 vi.mock('./webglRenderer', () => ({
-  createGraphRenderer: () => ({ dispose: vi.fn() }),
+  createGraphRenderer: () => ({
+    resize: vi.fn(),
+    render: vi.fn(() => false),
+    targetPositions: new Float32Array(),
+    dispose: vi.fn(),
+  }),
 }))
 
 const originalFonts = Object.getOwnPropertyDescriptor(document, 'fonts')
@@ -20,7 +25,7 @@ it('redraws when fonts finish loading and stops observing them after disposal', 
   const fonts = new EventTarget() as FontFaceSet
   fonts.load = vi.fn(() => new Promise<FontFace[]>((resolve) => finishLoads.push(resolve)))
   Object.defineProperty(document, 'fonts', { configurable: true, value: fonts })
-  const requestFrame = vi.fn(() => 1)
+  const requestFrame = vi.fn((_callback: FrameRequestCallback) => 1)
   vi.stubGlobal('requestAnimationFrame', requestFrame)
   vi.stubGlobal('cancelAnimationFrame', vi.fn())
 
@@ -51,17 +56,28 @@ it('redraws when fonts finish loading and stops observing them after disposal', 
     callbacks: { onSelect: vi.fn(), onLayoutBusyChange: vi.fn(), onFirstFrame: vi.fn() },
   }
   const runtime = new GraphRuntime(options)
+  expect(fonts.load).not.toHaveBeenCalled()
+  expect(requestFrame).not.toHaveBeenCalled()
+  runtime.resize(320, 200, 1)
   expect(fonts.load).toHaveBeenCalledWith('11px "Example Canvas Family", serif')
+  expect(requestFrame).toHaveBeenCalledTimes(1)
+
+  // Run the frame the measurement queued, so the runtime is idle again and the
+  // font completion has to request its own repaint.
+  requestFrame.mock.calls[0]![0](0)
 
   finishLoads[0]!([])
   await Promise.resolve()
-  expect(requestFrame).toHaveBeenCalledTimes(1)
+  expect(requestFrame).toHaveBeenCalledTimes(2)
   runtime.dispose()
 
   const disposedRuntime = new GraphRuntime(options)
+  disposedRuntime.resize(320, 200, 1)
+  expect(fonts.load).toHaveBeenCalledTimes(2)
   disposedRuntime.dispose()
+  const framesAfterDispose = requestFrame.mock.calls.length
   fonts.dispatchEvent(new Event('loadingdone'))
   finishLoads[1]!([])
   await Promise.resolve()
-  expect(requestFrame).toHaveBeenCalledTimes(1)
+  expect(requestFrame).toHaveBeenCalledTimes(framesAfterDispose)
 })

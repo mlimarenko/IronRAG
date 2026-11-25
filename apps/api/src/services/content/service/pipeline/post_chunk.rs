@@ -26,21 +26,51 @@ fn warn_inline_graph_degradation(revision_id: Uuid, reason: &str) {
     );
 }
 
-async fn capture_inline_embed_chunk_billing(
-    state: &AppState,
-    context: &InlineMutationContext,
-    attempt_id: Uuid,
-    outcome: &crate::services::query::search::EmbedChunksStageOutcome,
-) {
-    if let Some(command) = CaptureIngestAttemptBillingCommand::for_chunk_embedding(
-        context.workspace_id,
-        context.library_id,
-        attempt_id,
-        outcome,
-    ) && let Err(error) =
-        state.application_services.billing.capture_ingest_attempt(state, command).await
-    {
-        warn!(%attempt_id, ?error, "embed_chunk billing capture failed; continuing ingest");
+/// Classifies a chunk-embedding failure after the base mutation is already
+/// applied. Only provider unavailability is an operational post-base failure
+/// that leaves the applied result with a failed enrichment channel. Financial,
+/// admission, configuration and state refusals stay typed terminal; they must
+/// not be reported as a successful enrichment or flattened into an outage.
+fn inline_enrichment_failure(
+    error: &crate::services::query::error::QueryServiceError,
+) -> (ApiError, bool) {
+    use crate::services::query::error::QueryServiceError;
+    use crate::shared::provider_failure::ProviderFailureKind;
+
+    if let Some(failure) = error.provider_failure() {
+        return match failure.kind() {
+            ProviderFailureKind::Unavailable => {
+                (ApiError::ProviderFailure(failure.message().to_string()), true)
+            }
+            ProviderFailureKind::AllowanceExhausted | ProviderFailureKind::QuotaExhausted => (
+                ApiError::RateLimited {
+                    message: failure.message().to_string(),
+                    kind: "provider_allowance_exhausted",
+                    retry_after_seconds: 3600,
+                },
+                false,
+            ),
+            ProviderFailureKind::AdmissionRefused => (
+                ApiError::ServiceUnavailable {
+                    message: failure.message().to_string(),
+                    kind: "provider_admission_refused",
+                },
+                false,
+            ),
+            ProviderFailureKind::RequestRejected => {
+                (ApiError::ProviderFailure(failure.message().to_string()), false)
+            }
+        };
+    }
+    match error {
+        QueryServiceError::BindingNotConfigured { message }
+        | QueryServiceError::StateConflict { message } => {
+            (ApiError::Conflict(message.clone()), false)
+        }
+        QueryServiceError::Cancelled => {
+            (ApiError::Conflict("query operation cancelled".to_string()), false)
+        }
+        other => (ApiError::internal_with_log(other, "inline chunk embedding failed"), false),
     }
 }
 
@@ -117,7 +147,7 @@ struct InlineGraphStageContext<'a> {
     extract_elapsed_ms: i64,
 }
 
-/// Inputs for [`ContentService::run_inline_graph_and_publish`]: the inline
+/// Inputs for [`ContentService::run_inline_graph_and_finalize`]: the inline
 /// attempt's identity plus the embedding fence/profile the publication must
 /// carry. Grouped so the publication step reads as one cohesive unit.
 struct InlineGraphPublicationInput<'a> {
@@ -166,6 +196,44 @@ impl ContentService {
         if cancellation_token.is_cancelled() {
             return Ok(InlineContentPipelineOutcome::AuthorityLost);
         }
+        // --- Stage: base publication --------------------------------------
+        // Same order as the queued worker: the prepared text, structure and
+        // lexical material become readable before any optional enrichment. A
+        // withheld revision (superseded payload or revocation fence) is completed
+        // by this step and is never enriched or exposed.
+        let base = ingest_repository::publish_content_ingest_base(
+            &state.persistence.postgres,
+            &ingest_repository::PublishContentIngestBase {
+                workspace_id: context.workspace_id,
+                library_id: context.library_id,
+                document_id: context.document_id,
+                revision_id: context.revision_id,
+                mutation_id: context.mutation_id,
+                mutation_item_id: context.item_id,
+                attempt_id,
+                completed_at: Utc::now(),
+            },
+        )
+        .await
+        .map_err(|error| {
+            InlinePipelineFailure::new(
+                ApiError::internal_with_log(error, "failed to publish inline content base"),
+                false,
+            )
+        })?;
+        match base {
+            ingest_repository::PublishContentIngestSuccessOutcome::Applied {
+                publicly_visible: true,
+                ..
+            } => {}
+            ingest_repository::PublishContentIngestSuccessOutcome::Applied {
+                publicly_visible: false,
+                ..
+            } => return Ok(InlineContentPipelineOutcome::Applied),
+            ingest_repository::PublishContentIngestSuccessOutcome::AuthorityLost { .. } => {
+                return Ok(InlineContentPipelineOutcome::AuthorityLost);
+            }
+        }
         // --- Stage: embed_chunk ------------------------------------------
         // Mirrors the background-ingest worker: embed this revision's
         // chunks synchronously using the library's EmbedChunk binding so
@@ -205,23 +273,22 @@ impl ContentService {
         .await
         .map_err(|error| ApiError::internal_with_log(error, "internal"))?;
         let embed_chunk_start = Instant::now();
-        let embed_chunk_result = state
-            .application_services
-            .search
-            .embed_chunks_for_revision(crate::services::query::search::EmbedRevisionChunksInput {
-                state,
-                library_id: context.library_id,
-                revision_id: context.revision_id,
-                attempt_id,
-                vector_write_source_truth_version,
-                cancellation_token,
-            })
+        let embed_chunk_result =
+            Box::pin(state.application_services.search.embed_chunks_for_revision(
+                crate::services::query::search::EmbedRevisionChunksInput {
+                    state,
+                    library_id: context.library_id,
+                    revision_id: context.revision_id,
+                    attempt_id,
+                    vector_write_source_truth_version,
+                    cancellation_token,
+                },
+            ))
             .await;
         let embed_chunk_elapsed_ms = Some(embed_chunk_start.elapsed().as_millis() as i64);
-        let mut embed_chunk_failure: Option<String> = None;
+        let mut embed_chunk_failure: Option<(ApiError, bool)> = None;
         match &embed_chunk_result {
             Ok(outcome) => {
-                capture_inline_embed_chunk_billing(state, context, attempt_id, outcome).await;
                 state
                     .application_services
                     .ingest
@@ -240,7 +307,7 @@ impl ContentService {
                 if cancellation_token.is_cancelled() {
                     return Ok(InlineContentPipelineOutcome::AuthorityLost);
                 }
-                embed_chunk_failure = Some(format!("chunk embedding failed: {error:#}"));
+                embed_chunk_failure = Some(inline_enrichment_failure(error));
                 warn_inline_embedding_failure(attempt_id, context.revision_id, error);
                 state
                     .application_services
@@ -254,6 +321,9 @@ impl ContentService {
                             message: Some("chunk embedding failed".to_string()),
                             details_json: serde_json::json!({
                                 "error": format!("{error:#}"),
+                                "providerCallId": error.provider_call_id(),
+                                "providerDetailRedacted": error.provider_failure()
+                                    .and_then(|failure| failure.detail_redacted()),
                             }),
                             provider_kind: None,
                             model_name: None,
@@ -276,14 +346,20 @@ impl ContentService {
             .and_then(|outcome| outcome.embedding_profile_key.clone());
         drop(embed_chunk_result);
 
-        if let Some(reason) = embed_chunk_failure {
+        if let Some((error, operational)) = embed_chunk_failure {
             // `embed_chunks_for_revision` owns terminal exact-ID cleanup.
             // Repeating a revision-wide delete here could let an expired
             // attempt erase vectors committed by its replacement attempt.
-            return Err(InlinePipelineFailure::new(
-                ApiError::internal_with_log(&reason, "inline chunk embedding failed"),
-                false,
-            ));
+            if operational {
+                // Base publication already applied the mutation. An operational
+                // enrichment outage must return the canonical applied admission
+                // with the failed channel recorded, not a base-write failure.
+                return Ok(InlineContentPipelineOutcome::AppliedWithEnrichmentFailure {
+                    failure_code: "inline_enrichment_provider_unavailable",
+                    failure_message: error.to_string(),
+                });
+            }
+            return Err(InlinePipelineFailure::new(error, false));
         }
 
         // From this point chunk vectors exist. Any later hard failure must
@@ -292,7 +368,7 @@ impl ContentService {
         // reconcile failures are intentionally converted to a degraded success
         // below and therefore do not enter this cleanup path.
         let post_embed_result = self
-            .run_inline_graph_and_publish(
+            .run_inline_graph_and_finalize(
                 state,
                 InlineGraphPublicationInput {
                     context,
@@ -401,7 +477,7 @@ impl ContentService {
         })
     }
 
-    async fn run_inline_graph_and_publish(
+    async fn run_inline_graph_and_finalize(
         &self,
         state: &AppState,
         input: InlineGraphPublicationInput<'_>,
@@ -439,7 +515,9 @@ impl ContentService {
                 },
             )
             .await?;
-        let revision = state
+        // Base publication already proved this revision exists in the store; the
+        // remaining stages address it by identity rather than by row value.
+        state
             .document_store
             .get_revision(context.revision_id)
             .await
@@ -516,7 +594,7 @@ impl ContentService {
         } else {
             graph_state_after_successful_extract(graph_ready)
         };
-        let publication_input = ingest_repository::PublishContentIngestSuccess {
+        let enrichment_input = ingest_repository::FinalizeContentIngestEnrichment {
             workspace_id: context.workspace_id,
             library_id: context.library_id,
             document_id: context.document_id,
@@ -526,10 +604,8 @@ impl ContentService {
             attempt_id,
             expected_source_truth_version: vector_write_source_truth_version,
             embedding_profile_key: embed_chunk_profile_key,
-            text_state: revision.text_state,
             graph_state: graph_state.to_string(),
-            text_readable_at: revision.text_readable_at,
-            graph_ready_at: revision.graph_ready_at.or_else(|| graph_ready.then_some(now)),
+            graph_ready_at: graph_ready.then_some(now),
             completed_at: now,
         };
         let effects = ingest_repository::ContentIngestPublicationEffects {
@@ -548,19 +624,21 @@ impl ContentService {
                     )
                 })?;
             }
+            // The base publication already made the text readable; a cancel stops
+            // enrichment and leaves the truthful pending channel states in place.
             return Ok(InlineContentPipelineOutcome::AuthorityLost);
         }
         let publication = (if let Some(publication_guard) = publication_guard {
-            ingest_repository::publish_content_ingest_success_revision_fenced_with_graph_guard(
+            ingest_repository::finalize_content_ingest_enrichment_with_graph_guard(
                 publication_guard,
-                &publication_input,
+                &enrichment_input,
                 &effects,
             )
             .await
         } else {
-            ingest_repository::publish_content_ingest_success_revision_fenced_with_effects(
+            ingest_repository::finalize_content_ingest_enrichment(
                 &state.persistence.postgres,
-                &publication_input,
+                &enrichment_input,
                 &effects,
                 state,
             )
@@ -568,7 +646,7 @@ impl ContentService {
         })
         .map_err(|error| {
             InlinePipelineFailure::new(
-                ApiError::internal_with_log(error, "failed to publish inline content ingest"),
+                ApiError::internal_with_log(error, "failed to finalize inline content enrichment"),
                 true,
             )
         })?;
@@ -622,5 +700,49 @@ impl ContentService {
                 "inline content lifecycle committed but active graph summary refresh failed",
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::inline_enrichment_failure;
+    use crate::interfaces::http::router_support::ApiError;
+    use crate::services::query::error::QueryServiceError;
+    use crate::shared::provider_failure::ProviderFailure;
+
+    #[test]
+    fn operational_provider_outage_is_the_only_post_base_degradation() {
+        let (error, operational) = inline_enrichment_failure(&QueryServiceError::Provider(
+            ProviderFailure::unavailable("provider unreachable"),
+        ));
+        assert!(operational, "provider unavailability may leave the applied text readable");
+        assert!(matches!(error, ApiError::ProviderFailure(_)));
+
+        let (error, operational) = inline_enrichment_failure(&QueryServiceError::Provider(
+            ProviderFailure::quota_exhausted("budget exhausted"),
+        ));
+        assert!(!operational, "financial refusal must stay terminal, not successful enrichment");
+        assert!(matches!(error, ApiError::RateLimited { .. }));
+
+        let provider_call_id = uuid::Uuid::from_u128(42);
+        for (failure, expected_operational) in [
+            (ProviderFailure::unavailable("provider unreachable"), true),
+            (ProviderFailure::quota_exhausted("budget exhausted"), false),
+        ] {
+            let (error, operational) =
+                inline_enrichment_failure(&QueryServiceError::EmbeddingProvider {
+                    provider_call_id,
+                    failure,
+                });
+            assert_eq!(operational, expected_operational);
+            assert_eq!(matches!(error, ApiError::RateLimited { .. }), !expected_operational);
+        }
+
+        let (error, operational) =
+            inline_enrichment_failure(&QueryServiceError::BindingNotConfigured {
+                message: "missing binding".to_string(),
+            });
+        assert!(!operational, "configuration refusal must stay terminal");
+        assert!(matches!(error, ApiError::Conflict(_)));
     }
 }

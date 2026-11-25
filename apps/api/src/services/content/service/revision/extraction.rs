@@ -2,9 +2,106 @@ use super::*;
 use crate::integrations::{extraction_protocol::Extraction, xberg};
 use crate::shared::extraction::file_extract::{
     VisualRecognitionInput, VisualRecognitionReceipt, build_model_free_file_extraction_plan,
-    build_plan_from_extraction, recognize_native_visuals, xberg_failure_class,
+    build_plan_from_extraction, recognize_native_visuals_with_ledger, xberg_failure_class,
     xberg_owned_recognition_profile, xberg_source_format,
 };
+
+use crate::services::ops::billing::provider_reservation::ProviderCallReservation;
+use crate::shared::extraction::image::{VisionCallLedger, VisionLedgerRequest};
+use crate::shared::provider_send::ProviderSendScope;
+
+/// Reservation owner of the paid Vision attempts of one ingest attempt.
+///
+/// The guards are the canonical [`ProviderCallReservation`], keyed by the exact
+/// provider-call id reported to the recognition boundary. Each guard owns the
+/// recovery state of its row: reserved-but-unused, or observed with the exact
+/// usage payload.
+struct IngestVisionLedger<'a> {
+    state: &'a AppState,
+    authority: IngestRevisionWriteAuthority,
+    binding: &'a ResolvedRuntimeBinding,
+    reservations: std::sync::Mutex<std::collections::HashMap<Uuid, ProviderCallReservation>>,
+}
+
+impl<'a> IngestVisionLedger<'a> {
+    fn new(
+        state: &'a AppState,
+        authority: IngestRevisionWriteAuthority,
+        binding: &'a ResolvedRuntimeBinding,
+    ) -> Self {
+        Self {
+            state,
+            authority,
+            binding,
+            reservations: std::sync::Mutex::new(std::collections::HashMap::new()),
+        }
+    }
+
+    /// Takes the guard that owns `provider_call_id`, transferring recovery to
+    /// the caller.
+    ///
+    /// The guard leaves the map before its completion await, so the local
+    /// binding still owns the exact usage or the pre-response terminal state if
+    /// that await is cancelled or fails. An id this ledger never reserved is
+    /// refused instead of being fabricated or replayed.
+    fn take_reservation(&self, provider_call_id: Uuid) -> Result<ProviderCallReservation, String> {
+        self.reservations
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&provider_call_id)
+            .ok_or_else(|| {
+                format!("provider call {provider_call_id} has no active Vision reservation")
+            })
+    }
+}
+
+#[async_trait::async_trait]
+impl VisionCallLedger for IngestVisionLedger<'_> {
+    async fn reserve(
+        &self,
+        request: VisionLedgerRequest<'_>,
+    ) -> Result<(Uuid, ProviderSendScope), String> {
+        if request.provider_kind != self.binding.provider_kind
+            || request.model_name != self.binding.model_name
+        {
+            return Err("Vision request does not match the resolved binding".to_owned());
+        }
+        // One durable reservation per physical attempt, owned by the ingest
+        // attempt itself. The constructor derives the closed ingest call kind
+        // from the resolved binding purpose, so an unsupported purpose is
+        // refused before a row exists.
+        let reservation = ProviderCallReservation::reserve_ingest_attempt(
+            self.state,
+            self.authority.attempt_id,
+            self.authority.workspace_id,
+            self.authority.library_id,
+            self.binding,
+        )
+        .await
+        .map_err(|error| error.to_string())?;
+        let provider_call_id = reservation.provider_call_id();
+        let scope = reservation.send_scope();
+        self.reservations
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(provider_call_id, reservation);
+        Ok((provider_call_id, scope))
+    }
+
+    async fn settle(
+        &self,
+        provider_call_id: Uuid,
+        usage: &serde_json::Value,
+    ) -> Result<(), String> {
+        let mut reservation = self.take_reservation(provider_call_id)?;
+        reservation.complete(usage).await.map_err(|error| error.to_string())
+    }
+
+    async fn fail(&self, provider_call_id: Uuid) -> Result<(), String> {
+        let mut reservation = self.take_reservation(provider_call_id)?;
+        reservation.fail().await.map_err(|error| error.to_string())
+    }
+}
 
 async fn resolve_library_recognition_policy(
     state: &AppState,
@@ -15,6 +112,26 @@ async fn resolve_library_recognition_policy(
         .map_err(|_| "failed to load library recognition policy".to_owned())?
         .ok_or_else(|| format!("library {library_id} was not found"))?;
     LibraryRecognitionPolicy::from_json(row.recognition_policy)
+}
+
+/// The uploaded bytes a runtime extraction plan is built for, with the exact
+/// revision authority the plan will run under.
+pub struct RuntimeExtractionUpload<'a> {
+    pub library_id: Uuid,
+    pub authority: IngestRevisionWriteAuthority,
+    pub file_name: &'a str,
+    pub mime_type: Option<&'a str>,
+    pub file_bytes: &'a [u8],
+}
+
+/// A native extraction this recognition pass reads, together with the identity
+/// it must still match.
+pub struct NativeRecognitionTarget<'a> {
+    pub library_id: Uuid,
+    pub kind: UploadFileKind,
+    pub native: &'a mut Extraction,
+    pub expected_identity: Option<&'a serde_json::Value>,
+    pub authority: Option<IngestRevisionWriteAuthority>,
 }
 
 impl ContentService {
@@ -36,12 +153,11 @@ impl ContentService {
 
     pub async fn build_runtime_extraction_plan(
         state: &AppState,
-        library_id: Uuid,
-        file_name: &str,
-        mime_type: Option<&str>,
-        file_bytes: &[u8],
+        upload: RuntimeExtractionUpload<'_>,
         cancellation_token: &tokio_util::sync::CancellationToken,
     ) -> Result<FileExtractionPlan, UploadAdmissionError> {
+        let RuntimeExtractionUpload { library_id, authority, file_name, mime_type, file_bytes } =
+            upload;
         let size = u64::try_from(file_bytes.len()).unwrap_or(u64::MAX);
         let rejection = |error: FileExtractError| {
             UploadAdmissionError::from_file_extract_error(file_name, mime_type, size, &error)
@@ -61,10 +177,13 @@ impl ContentService {
                 })?;
             let receipt = Self::recognize_runtime_native_output(
                 state,
-                library_id,
-                kind,
-                &mut native,
-                None,
+                NativeRecognitionTarget {
+                    library_id,
+                    kind,
+                    native: &mut native,
+                    expected_identity: None,
+                    authority: Some(authority),
+                },
                 cancellation_token,
             )
             .await
@@ -76,6 +195,7 @@ impl ContentService {
                     class: ExtractionFailureClass::OperationalTerminal,
                     message: "native extraction projection failed".into(),
                     calls: calls.clone(),
+                    provider_call_id: None,
                 })
             })?;
             receipt.apply(&mut output);
@@ -85,6 +205,7 @@ impl ContentService {
                     class: ExtractionFailureClass::ContentInvalid,
                     message: "document contains no usable native or recognized text".into(),
                     calls,
+                    provider_call_id: None,
                 }));
             }
             return Ok(build_plan_from_extraction(
@@ -137,7 +258,10 @@ impl ContentService {
                 },
             )?;
         let dispatch = binding.as_ref().map(|binding| binding.dispatch_authority());
+        let ledger =
+            binding.as_ref().map(|binding| IngestVisionLedger::new(state, authority, binding));
         let mut plan = build_runtime_file_extraction_plan(FileExtractionRequest {
+            vision_ledger: ledger.as_ref().map(|ledger| ledger as &dyn VisionCallLedger),
             vision_dispatch: dispatch.as_ref(),
             max_output_tokens_override: binding
                 .as_ref()
@@ -174,12 +298,11 @@ impl ContentService {
 
     pub async fn recognize_runtime_native_output(
         state: &AppState,
-        library_id: Uuid,
-        kind: UploadFileKind,
-        native: &mut Extraction,
-        expected_identity: Option<&serde_json::Value>,
+        target: NativeRecognitionTarget<'_>,
         cancellation_token: &tokio_util::sync::CancellationToken,
     ) -> Result<VisualRecognitionReceipt, FileExtractError> {
+        let NativeRecognitionTarget { library_id, kind, native, expected_identity, authority } =
+            target;
         // Native-only documents must not require model readiness or an active binding.
         if native.visual_inputs.is_empty() {
             return Ok(VisualRecognitionReceipt::default());
@@ -221,7 +344,8 @@ impl ContentService {
             model_name: binding.model_name.clone(),
         };
         let dispatch = binding.dispatch_authority();
-        let mut receipt = recognize_native_visuals(
+        let ledger = authority.map(|authority| IngestVisionLedger::new(state, authority, &binding));
+        let mut receipt = recognize_native_visuals_with_ledger(
             native,
             kind,
             VisualRecognitionInput {
@@ -234,6 +358,7 @@ impl ContentService {
                 extra_parameters_json: Some(&binding.extra_parameters_json),
                 cancellation_token: Some(cancellation_token),
             },
+            ledger.as_ref().map(|ledger| ledger as &dyn VisionCallLedger),
         )
         .await?;
         for outcome in &mut receipt.outcomes {

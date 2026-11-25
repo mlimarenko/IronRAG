@@ -1023,11 +1023,53 @@ pub(crate) const REQUIRED_BASELINE_OBJECT_GROUPS_USER_PREFERENCE: &[&[(&str, &st
     REQUIRED_BASELINE_OBJECTS_USER_PREFERENCE,
 ];
 
-/// Readiness validates the current revision, including unchanged document-read
-/// attribution, the exact current enum, and the account telemetry preference
-/// table. Frozen predecessors stay exact.
+// Preserve all historical intent guards except the frozen whole-schema digest,
+// which necessarily changes when the current view changes.
+const REQUIRED_BASELINE_OBJECTS_TEXT_PUBLICATION_INTENT: &[(&str, &str)] = &[
+    REQUIRED_BASELINE_OBJECTS_CONTENT_VISIBILITY_INTENT[0],
+    REQUIRED_BASELINE_OBJECTS_CONTENT_VISIBILITY_INTENT[1],
+    REQUIRED_BASELINE_OBJECTS_CONTENT_VISIBILITY_INTENT[2],
+    REQUIRED_BASELINE_OBJECTS_CONTENT_VISIBILITY_INTENT[3],
+    REQUIRED_BASELINE_OBJECTS_CONTENT_VISIBILITY_INTENT[4],
+    REQUIRED_BASELINE_OBJECTS_CONTENT_VISIBILITY_INTENT[5],
+    REQUIRED_BASELINE_OBJECTS_CONTENT_VISIBILITY_INTENT[6],
+    REQUIRED_BASELINE_OBJECTS_CONTENT_VISIBILITY_INTENT[7],
+    REQUIRED_BASELINE_OBJECTS_CONTENT_VISIBILITY_INTENT[8],
+    (
+        "text publication canonical mutation and current-view certificate",
+        "with owned as (
+            select oid,relname,relkind from pg_class where relnamespace='public'::regnamespace
+            and relname in ('content_document','content_revision','content_mutation_reference','content_mutation_predecessor_audit','content_mutation','content_mutation_item','content_document_head','content_visibility_intent','content_current_revision','ingest_job','content_web_ingest_run')
+        ), definitions as (
+            select 'column:'||o.relname||':'||a.attname as key, format_type(a.atttypid,a.atttypmod)||':'||a.attnotnull::text||':'||coalesce(pg_get_expr(d.adbin,d.adrelid),'') as definition
+            from owned o join pg_attribute a on a.attrelid=o.oid and a.attnum>0 and not a.attisdropped left join pg_attrdef d on d.adrelid=o.oid and d.adnum=a.attnum
+            union all select 'constraint:'||o.relname||':'||c.conname,pg_get_constraintdef(c.oid)||':'||c.convalidated::text from owned o join pg_constraint c on c.conrelid=o.oid
+            union all select 'index:'||o.relname||':'||i.indexrelid::regclass::text,pg_get_indexdef(i.indexrelid)||':'||i.indisvalid::text from owned o join pg_index i on i.indrelid=o.oid
+            union all select 'trigger:'||o.relname||':'||t.tgname,pg_get_triggerdef(t.oid)||':'||t.tgenabled::text from owned o join pg_trigger t on t.tgrelid=o.oid where not t.tgisinternal
+            union all select 'view:'||o.relname,pg_get_viewdef(o.oid) from owned o where o.relkind='v'
+            union all select 'function:'||p.proname,pg_get_functiondef(p.oid) from pg_proc p where p.pronamespace='public'::regnamespace and p.proname in ('preserve_content_request_identity','preserve_content_mutation_reference','verify_content_mutation_representation','preserve_content_lineage_owner','verify_content_mutation_lineage','preserve_revision_admission_identity','verify_head_revision_admission')
+        ) select encode(digest(jsonb_agg(jsonb_build_array(key,definition) order by key)::text,'sha256'),'hex') = '9f4b04d0e081d6bfc0bb51c6fed64a675acf87fe363fb22bc40db91c3335d548' from definitions",
+    ),
+];
+
+pub(crate) const REQUIRED_BASELINE_OBJECT_GROUPS_TEXT_PUBLICATION: &[&[(&str, &str)]] = &[
+    REQUIRED_BASELINE_OBJECTS_IRG75,
+    REQUIRED_BASELINE_OBJECTS_PROVISIONING,
+    REQUIRED_BASELINE_OBJECTS_IRG112,
+    REQUIRED_BASELINE_OBJECTS_IRG173,
+    REQUIRED_BASELINE_OBJECTS_QUERY_RERANK,
+    REQUIRED_BASELINE_OBJECTS_DECISION_CATALOG,
+    REQUIRED_BASELINE_OBJECTS_TEXT_PUBLICATION_INTENT,
+    REQUIRED_BASELINE_OBJECTS_VISION_RECOGNITION,
+    REQUIRED_BASELINE_OBJECTS_DOCUMENT_READ_ATTRIBUTION,
+    REQUIRED_BASELINE_OBJECTS_BILLING_KNOWLEDGE_SEARCH,
+    REQUIRED_BASELINE_OBJECTS_USER_PREFERENCE,
+];
+
+/// Readiness validates text-readable publication and all retained admission,
+/// billing and account-preference guards. Frozen predecessors stay exact.
 pub(crate) const REQUIRED_BASELINE_OBJECT_GROUPS: &[&[(&str, &str)]] =
-    REQUIRED_BASELINE_OBJECT_GROUPS_USER_PREFERENCE;
+    REQUIRED_BASELINE_OBJECT_GROUPS_TEXT_PUBLICATION;
 
 /// Fails when the recorded baseline checksum is current but an object that
 /// baseline declares is absent.

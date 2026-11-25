@@ -19,6 +19,8 @@ use sqlx::postgres::PgPoolOptions;
 use std::time::Duration;
 use tokio::time::timeout;
 
+mod embedding_reservations;
+
 #[test]
 fn low_level_vector_write_requires_active_execution_profile_provenance() {
     let library_id = Uuid::from_u128(42);

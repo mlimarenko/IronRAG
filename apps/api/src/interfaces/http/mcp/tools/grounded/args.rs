@@ -10,6 +10,7 @@ pub(super) struct GroundedAnswerArgs {
     pub(super) include_debug: Option<bool>,
     pub(super) response_profile: Option<McpGroundedAnswerResponseProfile>,
     pub(super) max_references: Option<usize>,
+    pub(super) sequence_attempt: Option<u8>,
 }
 
 pub(super) struct PreparedGroundedAnswerRequest {
@@ -20,6 +21,7 @@ pub(super) struct PreparedGroundedAnswerRequest {
     pub(super) include_debug: bool,
     pub(super) response_profile: McpGroundedAnswerResponseProfile,
     pub(super) compact_reference_limit: Option<usize>,
+    pub(super) sequence_attempt: u8,
 }
 
 pub(super) fn prepare_grounded_answer_request(
@@ -45,6 +47,7 @@ pub(super) fn prepare_grounded_answer_request(
         include_debug: parsed.include_debug.unwrap_or(false),
         response_profile,
         compact_reference_limit,
+        sequence_attempt: parsed.sequence_attempt.unwrap_or(0),
     })
 }
 
@@ -57,6 +60,9 @@ pub(super) fn validate_and_normalize_grounded_answer_args(
     }
     parsed.query = parsed.query.trim().to_string();
     validate_non_empty_bounded_text("query", &parsed.query, MCP_GROUNDED_MAX_QUERY_CHARS)?;
+    if parsed.sequence_attempt.is_some_and(|attempt| attempt > 1) {
+        return Err(ApiError::invalid_mcp_tool_call("sequenceAttempt must be 0 or 1"));
+    }
     if parsed.top_k.is_some_and(|top_k| !(1..=MAX_TOP_K).contains(&top_k)) {
         return Err(ApiError::invalid_mcp_tool_call(format!(
             "topK must be between 1 and {MAX_TOP_K}",

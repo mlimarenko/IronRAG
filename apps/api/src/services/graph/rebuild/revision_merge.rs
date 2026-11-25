@@ -67,14 +67,37 @@ pub(super) fn classify_pure_append_chunks(
     Some(PureAppendDelta { kept, added_chunk_ids })
 }
 
+/// Admission of a stored chunk's text as graph relation evidence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum RevisionMergeChunkAdmission {
+    /// The text is admissible source material for relation extraction.
+    Merge,
+    /// The text is low-confidence or structurally unstable; merging its stored
+    /// candidates would present OCR noise as verified relations.
+    LowConfidenceText,
+}
+
+pub(super) fn revision_merge_chunk_admission(text: &str) -> RevisionMergeChunkAdmission {
+    if is_graph_reconcile_chunk_text_eligible(text) {
+        RevisionMergeChunkAdmission::Merge
+    } else {
+        RevisionMergeChunkAdmission::LowConfidenceText
+    }
+}
+
 pub(super) struct RevisionGraphMergeSummary {
     pub(super) graph_contribution_count: usize,
+    /// Chunks whose stored candidates were withheld because their text is not
+    /// admissible relation evidence. Reported in the existing graph stage
+    /// details; it never changes `graph_ready`.
+    pub(super) text_ineligible_chunk_count: usize,
     pub(super) changed_node_ids: Vec<Uuid>,
     pub(super) changed_edge_ids: Vec<Uuid>,
 }
 
 fn summarize_revision_graph_merges(
     merge_results: Vec<ChunkMergeOutcome>,
+    text_ineligible_chunk_count: usize,
     cancellation_token: &CancellationToken,
 ) -> Result<RevisionGraphMergeSummary, GraphServiceError> {
     let mut graph_contribution_count = 0usize;
@@ -88,6 +111,7 @@ fn summarize_revision_graph_merges(
     }
     Ok(RevisionGraphMergeSummary {
         graph_contribution_count,
+        text_ineligible_chunk_count,
         changed_node_ids: changed_node_ids.into_iter().collect(),
         changed_edge_ids: changed_edge_ids.into_iter().collect(),
     })
@@ -152,13 +176,17 @@ pub(super) async fn merge_revision_graph_records_with_connection(
 ) -> Result<RevisionGraphMergeSummary, GraphServiceError> {
     let RevisionMergeRecordsInput { document, chunk_rows_by_id, merge_scope, records } = input;
     let mut outcomes = Vec::with_capacity(records.len());
+    let mut text_ineligible_chunk_count = 0usize;
     for mut record in records.into_values() {
         ensure_not_cancelled(cancellation_token)?;
         let chunk_id = record.chunk_id;
         let Some(chunk_row) = chunk_rows_by_id.get(&chunk_id) else {
             continue;
         };
-        if !is_graph_reconcile_chunk_text_eligible(&chunk_row.content) {
+        if revision_merge_chunk_admission(&chunk_row.content)
+            == RevisionMergeChunkAdmission::LowConfidenceText
+        {
+            text_ineligible_chunk_count = text_ineligible_chunk_count.saturating_add(1);
             continue;
         }
         let normalized = std::mem::take(&mut record.normalized_output_json);
@@ -197,7 +225,8 @@ pub(super) async fn merge_revision_graph_records_with_connection(
             edge_ids: merge_outcome.summary_refresh_edge_ids(),
         });
     }
-    let summary = summarize_revision_graph_merges(outcomes, cancellation_token)?;
+    let summary =
+        summarize_revision_graph_merges(outcomes, text_ineligible_chunk_count, cancellation_token)?;
     repositories::recalculate_runtime_graph_support_counts_by_ids_with_executor(
         connection,
         merge_scope.library_id,

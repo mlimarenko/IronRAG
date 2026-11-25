@@ -8,6 +8,7 @@ use crate::{
     app::config::PublicOriginSettings,
     interfaces::http::{
         mcp::{MCP_PROTOCOL_HEADER, MCP_SESSION_HEADER},
+        query::QUERY_EXECUTION_ID_HEADER,
         router_support::REQUEST_ID_HEADER,
     },
 };
@@ -39,6 +40,7 @@ where
             ])
             .expose_headers([
                 header::HeaderName::from_static(MCP_SESSION_HEADER),
+                header::HeaderName::from_static(QUERY_EXECUTION_ID_HEADER),
                 header::HeaderName::from_static(
                     crate::interfaces::http::middleware::tracing_layer::TRACE_ID_HEADER,
                 ),

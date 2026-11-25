@@ -114,62 +114,86 @@ async function prepareGraphTopology(
   signal?: AbortSignal,
 ): Promise<GraphPreparation> {
   const base = graphPreparationUrl(libraryId)
-  let response = await fetchGraphTopology(base, signal, 'application/json', 'POST')
-  let initial: GraphPreparation | undefined
-  while (true) {
-    const value: unknown = await response.json()
-    if (!value || typeof value !== 'object') throw new Error('Invalid graph preparation')
-    const p = value as GraphPreparation
-    if (
-      typeof p.id !== 'string' ||
-      !p.id ||
-      p.libraryId !== libraryId ||
-      p.formatVersion !== 1 ||
-      (p.expiresAt !== null && typeof p.expiresAt !== 'string') ||
-      (p.errorCode !== null && typeof p.errorCode !== 'string') ||
-      ![
-        p.projectionVersion,
-        p.topologyGeneration,
-        p.sourceTruthVersion,
-        p.attempts,
-        p.retryAfterMs,
-      ].every((n) => Number.isSafeInteger(n) && n >= 0) ||
-      (initial &&
-        (p.id !== initial.id ||
-          p.formatVersion !== initial.formatVersion ||
-          p.projectionVersion !== initial.projectionVersion ||
-          p.topologyGeneration !== initial.topologyGeneration ||
-          p.sourceTruthVersion !== initial.sourceTruthVersion))
-    )
-      throw new Error('Invalid graph preparation receipt')
-    initial ??= p
-    signal?.throwIfAborted()
-    if (p.status === 'ready') return p
-    if (p.status === 'failed' || p.status === 'expired' || p.status === 'superseded')
-      throw new GraphPreparationError(p.status)
-    if (!['queued', 'validating', 'building', 'publishing', 'retrying'].includes(p.status))
-      throw new Error('Invalid graph preparation status')
-    await new Promise<void>((resolve, reject) => {
-      const abort = () => {
-        clearTimeout(timer)
-        reject(
-          signal?.reason instanceof Error
-            ? signal.reason
-            : new DOMException('Aborted', 'AbortError'),
-        )
-      }
-      const timer = setTimeout(
-        () => {
-          signal?.removeEventListener('abort', abort)
-          resolve()
-        },
-        Math.max(MIN_PREPARATION_POLL_MS, Math.min(p.retryAfterMs, 30000)),
+  const response = await fetchGraphTopology(base, signal, 'application/json', 'POST')
+  return pollGraphPreparation(base, libraryId, response, undefined, signal)
+}
+
+/**
+ * Follows the preparation receipt until it reaches a terminal state. Recursion
+ * rather than a loop keeps each poll a single awaited step: the next request is
+ * issued only after the receipt arrives and the advertised retry delay elapses.
+ */
+async function pollGraphPreparation(
+  base: string,
+  libraryId: string,
+  response: Response,
+  initial: GraphPreparation | undefined,
+  signal?: AbortSignal,
+): Promise<GraphPreparation> {
+  const value: unknown = await response.json()
+  const p = parseGraphPreparation(value, libraryId, initial)
+  const receipt = initial ?? p
+  signal?.throwIfAborted()
+  if (p.status === 'ready') return p
+  if (p.status === 'failed' || p.status === 'expired' || p.status === 'superseded')
+    throw new GraphPreparationError(p.status)
+  if (!['queued', 'validating', 'building', 'publishing', 'retrying'].includes(p.status))
+    throw new Error('Invalid graph preparation status')
+  await waitForPreparation(p.retryAfterMs, signal)
+  const next = await fetchGraphTopology(`${base}/${encodeURIComponent(p.id)}`, signal)
+  return pollGraphPreparation(base, libraryId, next, receipt, signal)
+}
+
+function parseGraphPreparation(
+  value: unknown,
+  libraryId: string,
+  initial: GraphPreparation | undefined,
+): GraphPreparation {
+  if (!value || typeof value !== 'object') throw new Error('Invalid graph preparation')
+  const p = value as GraphPreparation
+  if (
+    typeof p.id !== 'string' ||
+    !p.id ||
+    p.libraryId !== libraryId ||
+    p.formatVersion !== 1 ||
+    (p.expiresAt !== null && typeof p.expiresAt !== 'string') ||
+    (p.errorCode !== null && typeof p.errorCode !== 'string') ||
+    ![
+      p.projectionVersion,
+      p.topologyGeneration,
+      p.sourceTruthVersion,
+      p.attempts,
+      p.retryAfterMs,
+    ].every((n) => Number.isSafeInteger(n) && n >= 0) ||
+    (initial &&
+      (p.id !== initial.id ||
+        p.formatVersion !== initial.formatVersion ||
+        p.projectionVersion !== initial.projectionVersion ||
+        p.topologyGeneration !== initial.topologyGeneration ||
+        p.sourceTruthVersion !== initial.sourceTruthVersion))
+  )
+    throw new Error('Invalid graph preparation receipt')
+  return p
+}
+
+function waitForPreparation(retryAfterMs: number, signal?: AbortSignal): Promise<void> {
+  return new Promise<void>((resolve, reject) => {
+    const abort = () => {
+      clearTimeout(timer)
+      reject(
+        signal?.reason instanceof Error ? signal.reason : new DOMException('Aborted', 'AbortError'),
       )
-      signal?.addEventListener('abort', abort, { once: true })
-      if (signal?.aborted) abort()
-    })
-    response = await fetchGraphTopology(`${base}/${encodeURIComponent(p.id)}`, signal)
-  }
+    }
+    const timer = setTimeout(
+      () => {
+        signal?.removeEventListener('abort', abort)
+        resolve()
+      },
+      Math.max(MIN_PREPARATION_POLL_MS, Math.min(retryAfterMs, 30000)),
+    )
+    signal?.addEventListener('abort', abort, { once: true })
+    if (signal?.aborted) abort()
+  })
 }
 
 async function getGraphTopologyProblemDetails(
@@ -307,14 +331,22 @@ async function consumeTopologyResponse(
   }
 }
 
+type MetaTopologyFrame = {
+  s: 'meta'
+  node_count?: number
+  edge_count?: number
+  [key: string]: unknown
+}
+type EndTopologyFrame = { s: 'end'; [key: string]: unknown }
+
 type TopologyFrame =
-  | { s: 'meta'; node_count?: number; edge_count?: number; [key: string]: unknown }
+  | MetaTopologyFrame
   | { s: 'id_map'; m: Record<string, unknown> }
   | { s: 'docs'; d: unknown }
   | { s: 'nodes'; d: unknown }
   | { s: 'edges'; d: unknown }
   | { s: 'doc_links'; d: unknown }
-  | { s: 'end'; [key: string]: unknown }
+  | EndTopologyFrame
 
 interface CompactDocRow {
   i: number
@@ -470,37 +502,60 @@ function applyDocumentLinkRows(state: TopologyState, data: unknown): void {
   }
 }
 
-function applyTopologyFrame(state: TopologyState, frame: TopologyFrame): void {
-  if (!frame || typeof frame !== 'object' || state.ended) throw new Error('Invalid graph frame')
-  const sections = ['meta', 'id_map', 'docs', 'nodes', 'edges', 'doc_links', 'end']
-  const section = sections.indexOf(frame.s)
+const TOPOLOGY_SECTIONS = ['meta', 'id_map', 'docs', 'nodes', 'edges', 'doc_links', 'end']
+
+function assertFrameOrder(section: number, previous: number): void {
   if (
     section < 0 ||
-    section < state.section ||
-    (section === state.section && (section === 0 || section === 6)) ||
-    (state.section === -1 && section !== 0) ||
-    (section > 1 && state.section < 1)
+    section < previous ||
+    (section === previous && (section === 0 || section === TOPOLOGY_SECTIONS.length - 1)) ||
+    (previous === -1 && section !== 0) ||
+    (section > 1 && previous < 1)
   )
     throw new Error('Invalid graph frame order')
+}
+
+function applyMetaFrame(state: TopologyState, frame: MetaTopologyFrame): void {
+  if (
+    frame.v !== state.receipt.formatVersion ||
+    frame.library_id !== state.receipt.libraryId ||
+    frame.preparation_id !== state.receipt.id ||
+    frame.projection_version !== state.receipt.projectionVersion ||
+    frame.topology_generation !== state.receipt.topologyGeneration ||
+    frame.source_truth_version !== state.receipt.sourceTruthVersion ||
+    typeof frame.generated_at !== 'string' ||
+    ![frame.node_count, frame.edge_count, frame.document_count].every(
+      (n) => typeof n === 'number' && Number.isSafeInteger(n) && n >= 0,
+    )
+  )
+    throw new Error('Invalid graph metadata')
+  state.expectedNodes = frame.node_count as number
+  state.expectedEdges = frame.edge_count as number
+  state.expectedDocuments = frame.document_count as number
+}
+
+function applyTerminalFrame(state: TopologyState, frame: EndTopologyFrame): void {
+  if (
+    frame.preparation_id !== state.receipt.id ||
+    frame.node_count !== state.expectedNodes ||
+    frame.edge_count !== state.expectedEdges ||
+    frame.document_count !== state.expectedDocuments ||
+    state.documents.length !== state.expectedDocuments ||
+    state.documents.length + state.entities.length !== state.expectedNodes ||
+    state.relations.length + state.documentLinks.length !== state.expectedEdges
+  )
+    throw new Error('Invalid graph terminal counts')
+  state.ended = true
+}
+
+function applyTopologyFrame(state: TopologyState, frame: TopologyFrame): void {
+  if (!frame || typeof frame !== 'object' || state.ended) throw new Error('Invalid graph frame')
+  const section = TOPOLOGY_SECTIONS.indexOf(frame.s)
+  assertFrameOrder(section, state.section)
   state.section = section
   switch (frame.s) {
     case 'meta':
-      if (
-        frame.v !== state.receipt.formatVersion ||
-        frame.library_id !== state.receipt.libraryId ||
-        frame.preparation_id !== state.receipt.id ||
-        frame.projection_version !== state.receipt.projectionVersion ||
-        frame.topology_generation !== state.receipt.topologyGeneration ||
-        frame.source_truth_version !== state.receipt.sourceTruthVersion ||
-        typeof frame.generated_at !== 'string' ||
-        ![frame.node_count, frame.edge_count, frame.document_count].every(
-          (n) => typeof n === 'number' && Number.isSafeInteger(n) && n >= 0,
-        )
-      )
-        throw new Error('Invalid graph metadata')
-      state.expectedNodes = frame.node_count as number
-      state.expectedEdges = frame.edge_count as number
-      state.expectedDocuments = frame.document_count as number
+      applyMetaFrame(state, frame)
       return
     case 'id_map':
       if (!frame.m || typeof frame.m !== 'object' || Array.isArray(frame.m))
@@ -532,17 +587,7 @@ function applyTopologyFrame(state: TopologyState, frame: TopologyFrame): void {
       applyDocumentLinkRows(state, frame.d)
       return
     case 'end':
-      if (
-        frame.preparation_id !== state.receipt.id ||
-        frame.node_count !== state.expectedNodes ||
-        frame.edge_count !== state.expectedEdges ||
-        frame.document_count !== state.expectedDocuments ||
-        state.documents.length !== state.expectedDocuments ||
-        state.documents.length + state.entities.length !== state.expectedNodes ||
-        state.relations.length + state.documentLinks.length !== state.expectedEdges
-      )
-        throw new Error('Invalid graph terminal counts')
-      state.ended = true
+      applyTerminalFrame(state, frame)
       return
   }
 }

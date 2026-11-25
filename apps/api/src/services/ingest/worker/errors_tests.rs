@@ -371,3 +371,28 @@ fn terminal_extractor_fault_is_operational_not_content_unsupported() {
     assert_eq!(classification.failure_disposition, OpsFailureDisposition::OperationalTerminal);
     assert!(!classification.is_retryable());
 }
+#[test]
+fn vision_provider_failure_id_survives_admission_conversion() {
+    use crate::shared::extraction::file_extract::{
+        ExtractionFailureClass, FileExtractError, UploadAdmissionError, UploadFileKind,
+    };
+
+    let id = uuid::Uuid::now_v7();
+    for provider_call_id in [Some(id), None] {
+        let failure = FileExtractError::VisionFailed {
+            file_kind: UploadFileKind::Image,
+            class: ExtractionFailureClass::OperationalRetryable,
+            message: "provider failed".to_owned(),
+            calls: Vec::new(),
+            provider_call_id,
+        };
+        let rejection = UploadAdmissionError::from_file_extract_error(
+            "image.png",
+            Some("image/png"),
+            1,
+            &failure,
+        );
+        let error = ContentExtractionError::from_upload_rejection(&rejection);
+        assert_eq!(error.provider_call_id, provider_call_id);
+    }
+}

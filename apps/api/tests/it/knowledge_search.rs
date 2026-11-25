@@ -4484,10 +4484,10 @@ async fn chunk_and_entity_vectors_roundtrip_with_generation_order() -> Result<()
                     image_checksum: None,
                     text_state: "text_readable".to_string(),
                     vector_state: "ready".to_string(),
-                    graph_state: "accepted".to_string(),
+                    graph_state: "ready".to_string(),
                     text_readable_at: Some(now),
                     vector_ready_at: Some(now),
-                    graph_ready_at: None,
+                    graph_ready_at: Some(now),
                     superseded_by_revision_id: None,
                     created_at: now,
                 })
@@ -5760,10 +5760,10 @@ async fn staged_vector_promotion_is_atomic_across_chunk_and_entity_lanes() -> Re
                 image_checksum: None,
                 text_state: "text_readable".to_string(),
                 vector_state: "ready".to_string(),
-                graph_state: "accepted".to_string(),
+                graph_state: "ready".to_string(),
                 text_readable_at: Some(now),
                 vector_ready_at: Some(now),
-                graph_ready_at: None,
+                graph_ready_at: Some(now),
                 superseded_by_revision_id: None,
                 created_at: now,
             })
@@ -6418,6 +6418,675 @@ async fn staged_vector_promotion_is_atomic_across_chunk_and_entity_lanes() -> Re
         .fetch_all(&fixture.postgres)
         .await?;
         assert_eq!(manifest_profiles, vec![active_profile.clone(), active_profile]);
+        Ok(())
+    }
+    .await;
+
+    fixture.cleanup().await?;
+    result
+}
+
+struct ChannelReadinessStates<'a> {
+    vector_state: &'a str,
+    vector_ready_at: Option<DateTime<Utc>>,
+    graph_state: &'a str,
+    graph_ready_at: Option<DateTime<Utc>>,
+}
+
+struct ChannelReadinessPublication {
+    document_id: Uuid,
+    chunk_id: Uuid,
+    entity_id: Uuid,
+    relation_id: Uuid,
+}
+
+const CHANNEL_READINESS_TEXT: &str = "channel readiness anchor";
+
+/// The document identity a channel-readiness revision is seeded on.
+struct ChannelReadinessTarget {
+    workspace_id: Uuid,
+    library_id: Uuid,
+    document_id: Uuid,
+    revision_id: Uuid,
+    revision_number: i64,
+}
+
+/// Seeds one text-readable revision on an existing document. The caller
+/// supplies the optional enrichment states, so the same fixture can express a
+/// pending, failed, timestamp-less or fully published channel.
+async fn seed_channel_readiness_revision(
+    fixture: &KnowledgeSearchFixture,
+    target: ChannelReadinessTarget,
+    states: ChannelReadinessStates<'_>,
+) -> Result<Uuid> {
+    let ChannelReadinessTarget {
+        workspace_id,
+        library_id,
+        document_id,
+        revision_id,
+        revision_number,
+    } = target;
+    let now = Utc::now();
+    let chunk_id = Uuid::now_v7();
+    let span_end = i32::try_from(CHANNEL_READINESS_TEXT.chars().count())?;
+    fixture
+        .document_store
+        .upsert_document(&KnowledgeDocumentRow {
+            document_id,
+            workspace_id,
+            library_id,
+            external_key: format!("channel-readiness-{document_id}"),
+            file_name: None,
+            title: Some("Channel Readiness".to_string()),
+            source_uri: Some("memory://channel-readiness/source".to_string()),
+            document_hint: None,
+            document_state: "active".to_string(),
+            active_revision_id: Some(revision_id),
+            readable_revision_id: Some(revision_id),
+            latest_revision_no: Some(revision_number),
+            created_at: now,
+            updated_at: now,
+            deleted_at: None,
+            parent_document_id: None,
+            document_role: "primary".to_string(),
+        })
+        .await?;
+    fixture
+        .document_store
+        .upsert_revision(&KnowledgeRevisionRow {
+            revision_id,
+            workspace_id,
+            library_id,
+            document_id,
+            revision_number,
+            revision_state: "active".to_string(),
+            revision_kind: "upload".to_string(),
+            storage_ref: Some("memory://channel-readiness".to_string()),
+            source_uri: Some("memory://channel-readiness/source".to_string()),
+            document_hint: None,
+            mime_type: "text/plain".to_string(),
+            checksum: crate::content_lifecycle_support::fixture_checksum(&format!(
+                "channel-readiness-{revision_id}"
+            )),
+            title: Some("Channel Readiness".to_string()),
+            byte_size: i64::try_from(CHANNEL_READINESS_TEXT.len())?,
+            normalized_text: Some(CHANNEL_READINESS_TEXT.to_string()),
+            text_checksum: Some(format!("channel-readiness-text-{revision_id}")),
+            image_checksum: None,
+            text_state: "text_readable".to_string(),
+            vector_state: states.vector_state.to_string(),
+            graph_state: states.graph_state.to_string(),
+            text_readable_at: Some(now),
+            vector_ready_at: states.vector_ready_at,
+            graph_ready_at: states.graph_ready_at,
+            superseded_by_revision_id: None,
+            created_at: now,
+        })
+        .await?;
+    fixture
+        .document_store
+        .upsert_chunk(&KnowledgeChunkRow {
+            chunk_id,
+            workspace_id,
+            library_id,
+            document_id,
+            revision_id,
+            chunk_index: 0,
+            content_text: CHANNEL_READINESS_TEXT.to_string(),
+            normalized_text: CHANNEL_READINESS_TEXT.to_string(),
+            span_start: Some(0),
+            span_end: Some(span_end),
+            token_count: Some(3),
+            chunk_kind: Some("paragraph".to_string()),
+            support_block_ids: Vec::new(),
+            section_path: vec!["channel-readiness".to_string()],
+            heading_trail: vec!["Channel Readiness".to_string()],
+            literal_digest: None,
+            chunk_state: "ready".to_string(),
+            text_generation: Some(1),
+            vector_generation: Some(1),
+            quality_score: None,
+            window_text: None,
+            occurred_at: None,
+            occurred_until: None,
+        })
+        .await?;
+    seed_prepared_structured_revision(
+        &fixture.document_store,
+        PreparedStructuredRevisionSeed {
+            workspace_id,
+            library_id,
+            document_id,
+            revision_id,
+            source_text: CHANNEL_READINESS_TEXT,
+            chunk_count: 1,
+        },
+    )
+    .await?;
+    publish_search_source(&fixture.postgres, revision_id, "channel-readiness.txt").await?;
+    Ok(chunk_id)
+}
+
+/// Seeds a published text source plus the graph projection it anchors. Vector
+/// rows are written even for not-ready channel states, so each lane has to
+/// reject them rather than rely on their physical absence.
+async fn seed_channel_readiness_document(
+    fixture: &KnowledgeSearchFixture,
+    workspace_id: Uuid,
+    library_id: Uuid,
+    embedding_profile_key: &str,
+    states: ChannelReadinessStates<'_>,
+) -> Result<ChannelReadinessPublication> {
+    let document_id = Uuid::now_v7();
+    let revision_id = Uuid::now_v7();
+    let entity_id = Uuid::now_v7();
+    let relation_id = Uuid::now_v7();
+    let now = Utc::now();
+    let chunk_id = seed_channel_readiness_revision(
+        fixture,
+        ChannelReadinessTarget {
+            workspace_id,
+            library_id,
+            document_id,
+            revision_id,
+            revision_number: 1,
+        },
+        states,
+    )
+    .await?;
+    fixture
+        .graph_store
+        .upsert_entity(&NewKnowledgeEntity {
+            entity_id,
+            workspace_id,
+            library_id,
+            primary_label: "channel readiness entity".to_string(),
+            aliases: Vec::new(),
+            entity_type: "concept".to_string(),
+            entity_sub_type: None,
+            summary: Some("channel readiness entity summary".to_string()),
+            confidence: Some(0.9),
+            support_count: 1,
+            freshness_generation: 1,
+            entity_state: "active".to_string(),
+            created_at: Some(now),
+            updated_at: Some(now),
+        })
+        .await?;
+    fixture
+        .graph_store
+        .upsert_relation_with_endpoints(
+            &ironrag_backend::infra::knowledge_rows::NewKnowledgeRelation {
+                relation_id,
+                workspace_id,
+                library_id,
+                predicate: "channel readiness relation".to_string(),
+                normalized_assertion: "channel readiness relation".to_string(),
+                confidence: Some(0.9),
+                support_count: 1,
+                contradiction_state: "none".to_string(),
+                freshness_generation: 1,
+                relation_state: "active".to_string(),
+                created_at: Some(now),
+                updated_at: Some(now),
+            },
+            Some(entity_id),
+            Some(entity_id),
+            library_id,
+        )
+        .await?;
+    fixture.graph_store.upsert_relation_subject_edge(relation_id, entity_id, library_id).await?;
+    fixture.graph_store.upsert_relation_object_edge(relation_id, entity_id, library_id).await?;
+    fixture
+        .search_store
+        .upsert_chunk_vector(&KnowledgeChunkVectorRow {
+            vector_id: Uuid::now_v7(),
+            workspace_id,
+            library_id,
+            chunk_id,
+            revision_id,
+            embedding_model_key: embedding_profile_key.to_string(),
+            vector_kind: KNOWLEDGE_CHUNK_VECTOR_KIND.to_string(),
+            dimensions: 3,
+            vector: vec![0.9, 0.8, 0.7],
+            freshness_generation: 1,
+            created_at: now,
+            occurred_at: None,
+            occurred_until: None,
+        })
+        .await?;
+    fixture
+        .search_store
+        .upsert_entity_vector(&KnowledgeEntityVectorRow {
+            vector_id: Uuid::now_v7(),
+            workspace_id,
+            library_id,
+            entity_id,
+            embedding_model_key: embedding_profile_key.to_string(),
+            vector_kind: KNOWLEDGE_ENTITY_VECTOR_KIND.to_string(),
+            dimensions: 3,
+            vector: vec![0.9, 0.8, 0.7],
+            freshness_generation: 1,
+            created_at: now,
+        })
+        .await?;
+    fixture
+        .graph_store
+        .upsert_evidence_with_edges(
+            &NewKnowledgeEvidence {
+                evidence_id: Uuid::now_v7(),
+                workspace_id,
+                library_id,
+                document_id,
+                revision_id,
+                chunk_id: Some(chunk_id),
+                block_id: None,
+                fact_id: None,
+                span_start: Some(0),
+                span_end: Some(24),
+                quote_text: CHANNEL_READINESS_TEXT.to_string(),
+                literal_spans_json: json!([]),
+                evidence_kind: "chunk_quote".to_string(),
+                extraction_method: "seed".to_string(),
+                confidence: Some(0.99),
+                evidence_state: "active".to_string(),
+                freshness_generation: 1,
+                created_at: Some(now),
+                updated_at: Some(now),
+            },
+            EvidenceEdgeTargets {
+                source_revision_id: Some(revision_id),
+                supporting_entity_id: Some(entity_id),
+                supporting_relation_id: Some(relation_id),
+                supporting_fact_id: None,
+                library_id,
+            },
+        )
+        .await?;
+    Ok(ChannelReadinessPublication { document_id, chunk_id, entity_id, relation_id })
+}
+
+#[tokio::test]
+#[ignore = "requires local postgres service with required extensions"]
+async fn vector_lanes_require_ready_vector_channel_on_the_current_revision() -> Result<()> {
+    let fixture = KnowledgeSearchFixture::create().await?;
+    let result = async {
+        let now = Utc::now();
+        for (label, vector_state, vector_ready_at, admitted) in [
+            ("channel-vector-processing", "processing", None, false),
+            ("channel-vector-failed", "failed", None, false),
+            ("channel-vector-ready-without-timestamp", "ready", None, false),
+            ("channel-vector-ready", "ready", Some(now), true),
+        ] {
+            let (workspace_id, library_id) =
+                create_empty_vector_test_library(&fixture, label).await?;
+            let embedding_profile_key = synthetic_embedding_profile_key(Uuid::now_v7());
+            let healthy = ChannelReadinessStates {
+                vector_state: "ready",
+                vector_ready_at: Some(now),
+                graph_state: "ready",
+                graph_ready_at: Some(now),
+            };
+            let anchor = seed_channel_readiness_document(
+                &fixture,
+                workspace_id,
+                library_id,
+                &embedding_profile_key,
+                healthy,
+            )
+            .await
+            .context("failed to seed the represented anchor document")?;
+            let candidate = seed_channel_readiness_document(
+                &fixture,
+                workspace_id,
+                library_id,
+                &embedding_profile_key,
+                ChannelReadinessStates {
+                    vector_state,
+                    vector_ready_at,
+                    graph_state: "ready",
+                    graph_ready_at: Some(now),
+                },
+            )
+            .await?;
+
+            assert_eq!(
+                fixture.search_store.list_chunk_vectors_by_chunk(candidate.chunk_id).await?.len(),
+                1,
+                "the fixture must leave a physical chunk vector row for {label}"
+            );
+            assert_eq!(
+                fixture
+                    .search_store
+                    .list_entity_vectors_by_entity(candidate.entity_id)
+                    .await?
+                    .len(),
+                1,
+                "the fixture must leave a physical entity vector row for {label}"
+            );
+
+            let query_vector = [0.9_f32, 0.8, 0.7];
+            let input = || VectorSimilaritySearchInput {
+                dim: 3,
+                library_id,
+                embedding_model_key: &embedding_profile_key,
+                query_vector: &query_vector,
+                n_probe: None,
+            };
+            let chunk_hits = fixture
+                .search_store
+                .search_chunk_vectors_by_similarity(input(), 8, None, None)
+                .await?;
+            let rescue_hits = fixture
+                .search_store
+                .search_chunk_vectors_by_document_similarity(input(), 4, None, None)
+                .await?;
+            let entity_hits =
+                fixture.search_store.search_entity_vectors_by_similarity(input(), 8).await?;
+            let lexical_hits = fixture
+                .search_store
+                .search_chunks(ChunkLexicalQuery {
+                    library_id,
+                    query: CHANNEL_READINESS_TEXT,
+                    query_origin: LexicalQueryOrigin::UserQuery,
+                    limit: 8,
+                    temporal_start: None,
+                    temporal_end: None,
+                    text_search_config: None,
+                })
+                .await?;
+
+            assert!(
+                chunk_hits.iter().any(|row| row.chunk_id == anchor.chunk_id),
+                "the healthy anchor vector must stay visible for {label}"
+            );
+            assert!(
+                rescue_hits.iter().any(|row| row.chunk_id == anchor.chunk_id),
+                "the healthy anchor must survive document-diversity rescue for {label}"
+            );
+            assert_eq!(
+                chunk_hits.iter().any(|row| row.chunk_id == candidate.chunk_id),
+                admitted,
+                "chunk vector admission for {label}"
+            );
+            assert_eq!(
+                rescue_hits.iter().any(|row| row.chunk_id == candidate.chunk_id),
+                admitted,
+                "document vector rescue admission for {label}"
+            );
+            assert_eq!(
+                entity_hits.iter().any(|row| row.entity_id == candidate.entity_id),
+                admitted,
+                "entity vector admission for {label}"
+            );
+            assert!(
+                lexical_hits.iter().any(|hit| hit.chunk_id == candidate.chunk_id),
+                "readable text stays lexical-searchable while vector enrichment is {label}"
+            );
+        }
+        Ok(())
+    }
+    .await;
+
+    fixture.cleanup().await?;
+    result
+}
+
+#[tokio::test]
+#[ignore = "requires local postgres service with required extensions"]
+async fn graph_lanes_require_an_eligible_current_graph_projection() -> Result<()> {
+    let fixture = KnowledgeSearchFixture::create().await?;
+    let result = async {
+        let now = Utc::now();
+        for (label, graph_state, graph_ready_at, admitted) in [
+            ("channel-graph-processing", "processing", None, false),
+            ("channel-graph-failed", "failed", None, false),
+            ("channel-graph-degraded", "graph_degraded", Some(now), true),
+            ("channel-graph-ready", "ready", Some(now), true),
+        ] {
+            let (workspace_id, library_id) =
+                create_empty_vector_test_library(&fixture, label).await?;
+            let embedding_profile_key = synthetic_embedding_profile_key(Uuid::now_v7());
+            let publication = seed_channel_readiness_document(
+                &fixture,
+                workspace_id,
+                library_id,
+                &embedding_profile_key,
+                ChannelReadinessStates {
+                    vector_state: "ready",
+                    vector_ready_at: Some(now),
+                    graph_state,
+                    graph_ready_at,
+                },
+            )
+            .await?;
+
+            let entities = fixture
+                .search_store
+                .search_entities(library_id, "channel readiness entity", 8)
+                .await?;
+            let relations = fixture
+                .search_store
+                .search_relations(library_id, "channel readiness relation", 8)
+                .await?;
+            let entity_hits = fixture
+                .search_store
+                .search_entity_vectors_by_similarity(
+                    VectorSimilaritySearchInput {
+                        dim: 3,
+                        library_id,
+                        embedding_model_key: &embedding_profile_key,
+                        query_vector: &[0.9, 0.8, 0.7],
+                        n_probe: None,
+                    },
+                    8,
+                )
+                .await?;
+
+            assert_eq!(
+                entities.iter().any(|row| row.entity_id == publication.entity_id),
+                admitted,
+                "entity lexical admission for {label}"
+            );
+            assert_eq!(
+                relations.iter().any(|row| row.relation_id == publication.relation_id),
+                admitted,
+                "relation lexical admission for {label}"
+            );
+            assert_eq!(
+                entity_hits.iter().any(|row| row.entity_id == publication.entity_id),
+                admitted,
+                "entity vector admission for {label}"
+            );
+        }
+        Ok(())
+    }
+    .await;
+
+    fixture.cleanup().await?;
+    result
+}
+
+#[tokio::test]
+#[ignore = "requires local postgres service with required extensions"]
+async fn aggregate_entity_rejects_a_pending_contribution_even_with_ready_support() -> Result<()> {
+    let fixture = KnowledgeSearchFixture::create().await?;
+    let result = async {
+        let now = Utc::now();
+        for (label, vector_state, graph_state, graph_visible) in [
+            ("aggregate-vector-pending", "processing", "ready", true),
+            ("aggregate-graph-pending", "ready", "processing", false),
+        ] {
+            let (workspace_id, library_id) =
+                create_empty_vector_test_library(&fixture, label).await?;
+            let profile = synthetic_embedding_profile_key(Uuid::now_v7());
+            let ready = seed_channel_readiness_document(
+                &fixture,
+                workspace_id,
+                library_id,
+                &profile,
+                ChannelReadinessStates {
+                    vector_state: "ready",
+                    vector_ready_at: Some(now),
+                    graph_state: "ready",
+                    graph_ready_at: Some(now),
+                },
+            )
+            .await?;
+            let pending_revision = Uuid::now_v7();
+            let pending_chunk = seed_channel_readiness_revision(
+                &fixture,
+                ChannelReadinessTarget {
+                    workspace_id,
+                    library_id,
+                    document_id: Uuid::now_v7(),
+                    revision_id: pending_revision,
+                    revision_number: 1,
+                },
+                ChannelReadinessStates {
+                    vector_state,
+                    vector_ready_at: (vector_state == "ready").then_some(now),
+                    graph_state,
+                    graph_ready_at: (graph_state == "ready").then_some(now),
+                },
+            )
+            .await?;
+            seed_entity_source_support(&fixture, pending_revision, ready.entity_id).await?;
+
+            let entity_vectors = fixture
+                .search_store
+                .search_entity_vectors_by_similarity(
+                    VectorSimilaritySearchInput {
+                        dim: 3,
+                        library_id,
+                        embedding_model_key: &profile,
+                        query_vector: &[0.9, 0.8, 0.7],
+                        n_probe: None,
+                    },
+                    8,
+                )
+                .await?;
+            assert!(
+                entity_vectors.iter().all(|row| row.entity_id != ready.entity_id),
+                "a ready source cannot authorize the pending contribution for {label}"
+            );
+            let entities = fixture
+                .search_store
+                .search_entities(library_id, "channel readiness entity", 8)
+                .await?;
+            assert_eq!(
+                entities.iter().any(|row| row.entity_id == ready.entity_id),
+                graph_visible,
+                "graph eligibility is independent of vector completion for {label}"
+            );
+            let chunks = fixture
+                .search_store
+                .search_chunks(ChunkLexicalQuery {
+                    library_id,
+                    query: CHANNEL_READINESS_TEXT,
+                    query_origin: LexicalQueryOrigin::UserQuery,
+                    limit: 8,
+                    temporal_start: None,
+                    temporal_end: None,
+                    text_search_config: None,
+                })
+                .await?;
+            assert!(chunks.iter().any(|row| row.chunk_id == pending_chunk));
+        }
+        Ok(())
+    }
+    .await;
+    fixture.cleanup().await?;
+    result
+}
+
+#[tokio::test]
+#[ignore = "requires local postgres service with required extensions"]
+async fn graph_and_vector_lanes_reject_superseded_current_revision_evidence() -> Result<()> {
+    let fixture = KnowledgeSearchFixture::create().await?;
+    let result = async {
+        let now = Utc::now();
+        let (workspace_id, library_id) =
+            create_empty_vector_test_library(&fixture, "channel-currentness").await?;
+        let embedding_profile_key = synthetic_embedding_profile_key(Uuid::now_v7());
+        let publication = seed_channel_readiness_document(
+            &fixture,
+            workspace_id,
+            library_id,
+            &embedding_profile_key,
+            ChannelReadinessStates {
+                vector_state: "ready",
+                vector_ready_at: Some(now),
+                graph_state: "ready",
+                graph_ready_at: Some(now),
+            },
+        )
+        .await?;
+        let replacement_revision_id = Uuid::now_v7();
+        let replacement_chunk_id = seed_channel_readiness_revision(
+            &fixture,
+            ChannelReadinessTarget {
+                workspace_id,
+                library_id,
+                document_id: publication.document_id,
+                revision_id: replacement_revision_id,
+                revision_number: 2,
+            },
+            ChannelReadinessStates {
+                vector_state: "ready",
+                vector_ready_at: Some(now),
+                graph_state: "ready",
+                graph_ready_at: Some(now),
+            },
+        )
+        .await?;
+        assert_ne!(replacement_chunk_id, publication.chunk_id);
+
+        let chunk_hits = fixture
+            .search_store
+            .search_chunk_vectors_by_similarity(
+                VectorSimilaritySearchInput {
+                    dim: 3,
+                    library_id,
+                    embedding_model_key: &embedding_profile_key,
+                    query_vector: &[0.9, 0.8, 0.7],
+                    n_probe: None,
+                },
+                8,
+                None,
+                None,
+            )
+            .await?;
+        let entity_hits = fixture
+            .search_store
+            .search_entity_vectors_by_similarity(
+                VectorSimilaritySearchInput {
+                    dim: 3,
+                    library_id,
+                    embedding_model_key: &embedding_profile_key,
+                    query_vector: &[0.9, 0.8, 0.7],
+                    n_probe: None,
+                },
+                8,
+            )
+            .await?;
+        let entities =
+            fixture.search_store.search_entities(library_id, "channel readiness entity", 8).await?;
+        let relations = fixture
+            .search_store
+            .search_relations(library_id, "channel readiness relation", 8)
+            .await?;
+
+        assert!(
+            chunk_hits.is_empty(),
+            "a superseded revision's chunk vector must not stay current"
+        );
+        assert!(
+            entity_hits.is_empty(),
+            "a superseded revision's entity vector must not stay current"
+        );
+        assert!(entities.is_empty(), "graph targets require current evidence");
+        assert!(relations.is_empty(), "graph targets require current evidence");
         Ok(())
     }
     .await;

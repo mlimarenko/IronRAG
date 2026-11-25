@@ -65,8 +65,10 @@ from .ironrag import (
     IronRagOperationFailedError,
     IronRagVisibilityConflictError,
     OperationHandle,
+    OperationStatus,
     OperationStatusValue,
     ReplacementIdentity,
+    RevisionFile,
     RevisionProvenance,
 )
 from .observability import get_logger
@@ -94,6 +96,7 @@ from .state import (
     CursorRow,
     DocumentLocation,
     MaterializationAttempt,
+    MaterializationObservation,
     MemberTarget,
     PayloadIdentity,
     StateStore,
@@ -117,6 +120,10 @@ OutcomeAction = Literal[
     "fetch_deferred",
 ]
 
+#: One wording for a deferred create: the admission exists, publication is not
+#: terminal yet, and the retry must reuse that exact admission.
+CREATE_NOT_TERMINAL = "create admission accepted; publication not terminal yet"
+
 
 @dataclass(frozen=True)
 class OrchestrationOutcome:
@@ -130,6 +137,7 @@ class OrchestrationOutcome:
     deferred: bool = False
     dependent_outcomes: tuple[OrchestrationOutcome, ...] = field(default_factory=tuple)
     exclusion: SourceExclusion = SourceExclusion.NONE
+    admission: OperationHandle | None = None
 
 
 class OrchestrationFailedError(IronRagOperationFailedError):
@@ -436,12 +444,21 @@ class Orchestrator:
             deleted_document_id = outcome.ironrag_document_id
         return deleted_document_id
 
-    async def push_ref(self, ref: SourceItemRef) -> OrchestrationOutcome:
-        """Resolve route, fetch payload, push under the kind's policy."""
+    async def push_ref(
+        self, ref: SourceItemRef, *, enrichment_scope: str | None = None
+    ) -> OrchestrationOutcome:
+        """Resolve route, fetch payload, push under the kind's policy.
+
+        ``enrichment_scope`` is an explicit per-item admission plan. ``None``
+        keeps today's default (no field sent, Full on the server); an explicit
+        value is validated and must be supported by the request shape.
+        """
         self._validate_ref_identity(ref)
+        if enrichment_scope is not None and enrichment_scope not in {"full", "text_and_embedding"}:
+            raise ValueError(f"unsupported enrichment scope: {enrichment_scope}")
         await self._ironrag.ensure_visibility_contract()
         async with self._identity_lock(ref):
-            return await self._push_ref_locked(ref)
+            return await self._push_ref_locked(ref, enrichment_scope=enrichment_scope)
 
     async def _resolve_ref_route(
         self,
@@ -615,9 +632,17 @@ class Orchestrator:
         *,
         enforcement: SourceMaterializationEnforcement,
         target_absence_confirmed: bool,
+        enrichment_scope: str | None = None,
     ) -> OrchestrationOutcome:
         if enforcement is SourceMaterializationEnforcement.REQUIRED:
-            return await self._push_required(item, route, effective_policy)
+            return await self._push_required(
+                item, route, effective_policy, enrichment_scope=enrichment_scope
+            )
+        if enrichment_scope is not None and enrichment_scope != "full":
+            raise ValueError(
+                "explicit enrichment scope is not supported by the POLICY source path: "
+                "its admission is a multipart file push"
+            )
         return await self._push_item_locked(
             item,
             route,
@@ -671,12 +696,231 @@ class Orchestrator:
             raise IronRagError("historical route copy is readable despite its retirement intent")
         return None
 
+    async def _accept_historical_copies(
+        self,
+        item: SourceItem,
+        route: ResolvedRoute,
+        observation: MaterializationObservation,
+        snapshot: _ExactTargetSnapshot,
+    ) -> tuple[MaterializationAttempt, ...]:
+        """Accept and prove retirement for every non-current exact copy."""
+        accepted: list[MaterializationAttempt] = []
+        for library_id, document_id in snapshot.documents.items():
+            if library_id == route.library_id:
+                continue
+            attempt = self._state.prepare_materialization_attempt(
+                observation,
+                document_id=document_id,
+                library_id=str(library_id),
+            )
+            if attempt.phase == "intent_superseded":
+                raise IronRagError("historical copy intent is superseded")
+            result = await self._accept_required_intent(attempt)
+            if isinstance(result, Exception):
+                raise result
+            reason = await self._reconcile_required_copy(item.ref, route, library_id, result)
+            if reason is not None:
+                raise IronRagError(reason)
+            accepted.append(result)
+        return tuple(accepted)
+
+    async def _reconcile_pending_created_admission(
+        self,
+        item: SourceItem,
+        route: ResolvedRoute,
+        document_id: str,
+        observation: MaterializationObservation,
+        pending: MaterializationAttempt,
+        enrichment_scope: str | None,
+        historical_attempts: tuple[MaterializationAttempt, ...],
+    ) -> OrchestrationOutcome:
+        """Complete or defer the exact persisted create admission, never latch it."""
+        handle = pending.payload_receipt
+        if handle is None:
+            raise IronRagError("pending create admission lost its receipt")
+        wanted_scope = None if enrichment_scope in (None, "full") else enrichment_scope
+        recorded_scope = (
+            pending.payload_identity.enrichment_scope
+            if pending.payload_identity is not None
+            else None
+        )
+        if recorded_scope != wanted_scope:
+            raise IronRagError(
+                "queued create admission belongs to a different enrichment plan; "
+                "refusing to reclassify it"
+            )
+        settled = await self._settle_created_operation(
+            item=item,
+            route=route,
+            document_id=document_id,
+            handle=handle,
+            pending=pending,
+            mismatched_operation="create retry returned a mismatched operation identity",
+        )
+        if isinstance(settled, OrchestrationOutcome):
+            return settled
+        head = await self._ironrag.get_document(document_id)
+        if (
+            head is None
+            or head.readable_revision_id != handle.result_revision_id
+            or head.visibility_intent_id != handle.visibility_intent_id
+            or handle.result_checksum != item.payload_checksum
+        ):
+            return _outcome(
+                item.ref,
+                route,
+                "skipped_new",
+                document_id,
+                "create admission is not READY at the current public head",
+                deferred=True,
+                admission=handle,
+            )
+        _validated_document_id(
+            head, library_id=route.library_id, external_key=item.ref.external_key
+        )
+        if not await self._required_copy_closure(item, route, document_id, historical_attempts):
+            return _outcome(
+                item.ref,
+                route,
+                "skipped_new",
+                document_id,
+                "target membership changed during creation; reconcile next sweep",
+                deferred=True,
+                admission=handle,
+            )
+        self._state.finalize_created_admission(pending)
+        self._state.upsert(
+            kind=item.ref.kind,
+            item_id=item.ref.item_id,
+            change_token=item.ref.change_token,
+            external_key=item.ref.external_key,
+            ironrag_document_id=document_id,
+            ironrag_library_id=str(route.library_id),
+            expected_visibility_episode=observation.episode_id,
+            expected_materialization_attempts=historical_attempts,
+            expected_copy_membership=self._required_copy_membership(
+                item, route, document_id, historical_attempts
+            ),
+        )
+        self._sweep_pushed[(route.library_id, item.ref.external_key)] = _SweepPushMemo(
+            item.ref.change_token, document_id
+        )
+        return _outcome(
+            item.ref,
+            route,
+            "created",
+            document_id,
+            "create admission completed at the current public head",
+            admission=handle,
+        )
+
+    def _record_created_admission(
+        self,
+        item: SourceItem,
+        route: ResolvedRoute,
+        handle: OperationHandle,
+        document_id: str,
+        observation: MaterializationObservation | None,
+        enrichment_scope: str | None,
+    ) -> MaterializationAttempt | None:
+        """Persist the provider-free create admission unless an intent owns it.
+
+        A visibility-bound create keeps the intent-required path, where the
+        receipt is owned by the accepted intent, so it persists nothing here.
+        """
+        if handle.visibility_intent_id is not None:
+            return None
+        if observation is None:
+            raise IronRagError(
+                "create admission persistence requires the recorded source observation"
+            )
+        descriptor = ReplacementIdentity(
+            checksum=item.payload_checksum,
+            byte_size=len(item.payload),
+            mime_type=item.mime_type,
+            file_name=item.file_name,
+            title=item.title,
+            document_hint=item.document_hint,
+        )
+        bound_observation = replace(
+            observation,
+            payload_identity=PayloadIdentity(
+                document_id=UUID(document_id),
+                operation="create",
+                replacement=descriptor,
+                caller_key=item.idempotency_key,
+                enrichment_scope=(None if enrichment_scope in (None, "full") else enrichment_scope),
+            ),
+        )
+        return self._state.record_created_admission(
+            document_id=document_id,
+            library_id=str(route.library_id),
+            observation=bound_observation,
+            handle=handle,
+        )
+
+    async def _settle_created_operation(
+        self,
+        *,
+        item: SourceItem,
+        route: ResolvedRoute,
+        document_id: str,
+        handle: OperationHandle,
+        pending: MaterializationAttempt | None,
+        mismatched_operation: str,
+    ) -> OperationStatus | OrchestrationOutcome:
+        """Wait for one created admission and settle exactly its own journal row.
+
+        Returns the READY status, or the deferred outcome that tells the next
+        sweep to reuse this admission. A terminal failure or a foreign operation
+        raises after the row that proves it was finalised.
+        """
+        try:
+            status = await self._ironrag.wait_for_operation(handle.operation_id)
+        except IronRagMutationTimeoutError:
+            return _outcome(
+                item.ref,
+                route,
+                "skipped_new",
+                document_id,
+                CREATE_NOT_TERMINAL,
+                deferred=True,
+                admission=handle,
+            )
+        except IronRagOperationFailedError as exc:
+            if (
+                pending is not None
+                and exc.status.id == handle.operation_id
+                and exc.status.status is OperationStatusValue.FAILED
+            ):
+                self._state.finalize_created_admission(pending)
+            raise
+        if status.id != handle.operation_id:
+            raise IronRagError(mismatched_operation)
+        if status.status in (OperationStatusValue.CANCELED, OperationStatusValue.SUPERSEDED):
+            if pending is not None:
+                self._state.finalize_created_admission(pending)
+            raise IronRagError("create admission ended without publication")
+        if status.status is not OperationStatusValue.READY:
+            return _outcome(
+                item.ref,
+                route,
+                "skipped_new",
+                document_id,
+                CREATE_NOT_TERMINAL,
+                deferred=True,
+                admission=handle,
+            )
+        return status
+
     async def _push_required(
         self,
         item: SourceItem,
         route: ResolvedRoute,
         policy: PushPolicy,
         parent_external_key: str | None = None,
+        *,
+        enrichment_scope: str | None = None,
     ) -> OrchestrationOutcome:
         """Accept independent denial for every exact copy before payload admission."""
         snapshot = await self._discover_exact_targets(item.ref, route)
@@ -700,32 +944,24 @@ class Orchestrator:
             materialization_token=item.ref.change_token,
             replacement=descriptor,
         )
-        attempts: dict[UUID, MaterializationAttempt] = {}
-        unresolved: list[str] = []
-        failures: list[Exception] = []
-        for library_id, document_id in snapshot.documents.items():
-            attempt = self._state.prepare_materialization_attempt(
-                observation,
-                document_id=document_id,
-                library_id=str(library_id),
-            )
-            if attempt.phase == "intent_superseded":
-                unresolved.append("visibility intent superseded; new source observation required")
-                continue
-            accepted = await self._accept_required_intent(attempt)
-            if isinstance(accepted, Exception):
-                # Failure on one copy must not starve independent denial of later copies.
-                failures.append(accepted)
-                continue
-            attempt = accepted
-            attempts[library_id] = attempt
-            try:
-                reason = await self._reconcile_required_copy(item.ref, route, library_id, attempt)
-            except (IronRagError, httpx.HTTPError) as exc:
-                failures.append(exc)
-                continue
-            if reason is not None:
-                unresolved.append(reason)
+        if current_id is not None:
+            pending = self._state.pending_created_admission(current_id, descriptor)
+            if pending is not None and pending.payload_receipt is not None:
+                historical = await self._accept_historical_copies(
+                    item, route, observation, snapshot
+                )
+                return await self._reconcile_pending_created_admission(
+                    item,
+                    route,
+                    current_id,
+                    observation,
+                    pending,
+                    enrichment_scope,
+                    historical,
+                )
+        attempts, unresolved, failures = await self._admit_required_copies(
+            item, route, observation, snapshot
+        )
         if failures:
             raise failures[0]
         if unresolved:
@@ -745,6 +981,8 @@ class Orchestrator:
                 parent_external_key,
                 historical_attempts=historical,
                 visibility_episode=observation.episode_id,
+                enrichment_scope=enrichment_scope,
+                observation=observation,
             )
         return await self._revise(
             item,
@@ -754,7 +992,48 @@ class Orchestrator:
             parent_external_key,
             visibility_attempt=attempts[route.library_id],
             historical_attempts=historical,
+            enrichment_scope=enrichment_scope,
         )
+
+    async def _admit_required_copies(
+        self,
+        item: SourceItem,
+        route: ResolvedRoute,
+        observation: MaterializationObservation,
+        snapshot: _ExactTargetSnapshot,
+    ) -> tuple[dict[UUID, MaterializationAttempt], list[str], list[Exception]]:
+        """Admit every exact copy independently and collect per-copy evidence.
+
+        Returns the accepted attempts, the unresolved reasons and the failures;
+        the caller decides which one wins, so one copy's failure never starves
+        independent denial of the later copies.
+        """
+        attempts: dict[UUID, MaterializationAttempt] = {}
+        unresolved: list[str] = []
+        failures: list[Exception] = []
+        for library_id, document_id in snapshot.documents.items():
+            attempt = self._state.prepare_materialization_attempt(
+                observation,
+                document_id=document_id,
+                library_id=str(library_id),
+            )
+            if attempt.phase == "intent_superseded":
+                unresolved.append("visibility intent superseded; new source observation required")
+                continue
+            accepted = await self._accept_required_intent(attempt)
+            if isinstance(accepted, Exception):
+                failures.append(accepted)
+                continue
+            attempt = accepted
+            attempts[library_id] = attempt
+            try:
+                reason = await self._reconcile_required_copy(item.ref, route, library_id, attempt)
+            except (IronRagError, httpx.HTTPError) as exc:
+                failures.append(exc)
+                continue
+            if reason is not None:
+                unresolved.append(reason)
+        return attempts, unresolved, failures
 
     async def _required_copy_closure(
         self,
@@ -930,7 +1209,9 @@ class Orchestrator:
             deferred=True,
         )
 
-    async def _push_ref_locked(self, ref: SourceItemRef) -> OrchestrationOutcome:
+    async def _push_ref_locked(
+        self, ref: SourceItemRef, *, enrichment_scope: str | None = None
+    ) -> OrchestrationOutcome:
         """Apply one validated ref while holding its identity mutation lock."""
         policy = self._policies.for_kind(ref.kind)
         route_result = await self._resolve_ref_route(ref, policy)
@@ -1001,25 +1282,15 @@ class Orchestrator:
             # It produced something: any previously established absence is no
             # longer true for this source identity.
             self._state.clear_empty_fetch(ref.kind, ref.item_id)
-            try:
-                primary = await self._push_materialized_primary(
-                    item,
-                    route,
-                    effective_policy,
-                    enforcement=fetch_result.enforcement,
-                    target_absence_confirmed=target_absence_confirmed,
-                )
-            except OrchestrationFailedError as failure:
-                completed: list[OrchestrationOutcome] = []
-                try:
-                    await self._settle_dependents(item, ref, route, completed)
-                except Exception as dependent_error:
-                    raise OrchestrationFailedError(
-                        failure.primary_error, tuple(completed), dependent_error
-                    ) from failure.primary_error
-                raise OrchestrationFailedError(
-                    failure.primary_error, tuple(completed)
-                ) from failure.primary_error
+            primary = await self._push_primary_settling_dependents(
+                item,
+                ref,
+                route,
+                effective_policy,
+                enforcement=fetch_result.enforcement,
+                target_absence_confirmed=target_absence_confirmed,
+                enrichment_scope=enrichment_scope,
+            )
         if _primary_deferred(primary):
             log.info(
                 "orchestrator.dependents_deferred",
@@ -1032,6 +1303,43 @@ class Orchestrator:
         if not self._dependent_kinds:
             return primary
         return await self._apply_dependents(item, ref, route, primary, parent_cursor_before_push)
+
+    async def _push_primary_settling_dependents(
+        self,
+        item: SourceItem,
+        ref: SourceItemRef,
+        route: ResolvedRoute,
+        effective_policy: PushPolicy,
+        *,
+        enforcement: SourceMaterializationEnforcement,
+        target_absence_confirmed: bool,
+        enrichment_scope: str | None,
+    ) -> OrchestrationOutcome:
+        """Push the primary; a validated failure still settles completed dependents.
+
+        The dependents are settled here rather than by the caller so a failing
+        primary never discards the work its siblings already completed.
+        """
+        try:
+            return await self._push_materialized_primary(
+                item,
+                route,
+                effective_policy,
+                enforcement=enforcement,
+                target_absence_confirmed=target_absence_confirmed,
+                enrichment_scope=enrichment_scope,
+            )
+        except OrchestrationFailedError as failure:
+            completed: list[OrchestrationOutcome] = []
+            try:
+                await self._settle_dependents(item, ref, route, completed)
+            except Exception as dependent_error:
+                raise OrchestrationFailedError(
+                    failure.primary_error, tuple(completed), dependent_error
+                ) from failure.primary_error
+            raise OrchestrationFailedError(
+                failure.primary_error, tuple(completed)
+            ) from failure.primary_error
 
     async def _apply_dependents(
         self,
@@ -1422,6 +1730,8 @@ class Orchestrator:
         route: ResolvedRoute,
         document: DocumentResource,
         historical_attempts: tuple[MaterializationAttempt, ...],
+        observation: MaterializationObservation | None = None,
+        enrichment_scope: str | None = None,
     ) -> OrchestrationOutcome | None:
         """A create admission is not proof of READY publication or copy closure."""
         new_id = str(document.id)
@@ -1440,12 +1750,26 @@ class Orchestrator:
             or handle.mutation_item_id is None
         ):
             raise IronRagError("new required document returned no complete payload admission")
-        status = await self._ironrag.wait_for_operation(handle.operation_id)
+        # Persist the provider-free admission before any publication wait so a
+        # restart can correlate this exact mutation/job instead of creating a
+        # second document. A visibility-bound create keeps the intent-required
+        # path, where the receipt is owned by the accepted intent.
+        created_admission = self._record_created_admission(
+            item, route, handle, new_id, observation, enrichment_scope
+        )
+        settled = await self._settle_created_operation(
+            item=item,
+            route=route,
+            document_id=new_id,
+            handle=handle,
+            pending=created_admission,
+            mismatched_operation="create admission returned a mismatched operation identity",
+        )
+        if isinstance(settled, OrchestrationOutcome):
+            return settled
         head = await self._ironrag.get_document(new_id)
         if (
-            status.id != handle.operation_id
-            or status.status is not OperationStatusValue.READY
-            or head is None
+            head is None
             or head.readable_revision_id != handle.result_revision_id
             or head.visibility_intent_id != handle.visibility_intent_id
             or handle.result_checksum != item.payload_checksum
@@ -1457,6 +1781,7 @@ class Orchestrator:
                 new_id,
                 "new document is not proven READY at the current public head",
                 deferred=True,
+                admission=handle,
             )
         _validated_document_id(
             head, library_id=route.library_id, external_key=item.ref.external_key
@@ -1470,6 +1795,8 @@ class Orchestrator:
                 "target membership changed during creation; reconcile next sweep",
                 deferred=True,
             )
+        if created_admission is not None:
+            self._state.finalize_created_admission(created_admission)
         return None
 
     async def _create(
@@ -1482,6 +1809,8 @@ class Orchestrator:
         *,
         historical_attempts: tuple[MaterializationAttempt, ...] = (),
         visibility_episode: str | None = None,
+        enrichment_scope: str | None = None,
+        observation: MaterializationObservation | None = None,
     ) -> OrchestrationOutcome:
         if policy.on_new is UpsertAction.SKIP:
             return _outcome(item.ref, route, "skipped_new", None, "policy on_new=skip")
@@ -1495,6 +1824,7 @@ class Orchestrator:
                 title=item.title,
                 document_hint=item.document_hint,
                 parent_external_key=parent_external_key,
+                enrichment_scope=enrichment_scope,
             )
         except IronRagDuplicateContentError as exc:
             return await self._handle_create_duplicate(item, route, policy, cache_key, exc)
@@ -1506,7 +1836,7 @@ class Orchestrator:
         )
         if item.ref.materialization_enforcement is SourceMaterializationEnforcement.REQUIRED:
             deferred = await self._prove_created_required_head(
-                item, route, document, historical_attempts
+                item, route, document, historical_attempts, observation, enrichment_scope
             )
             if deferred is not None:
                 return deferred
@@ -1534,6 +1864,7 @@ class Orchestrator:
             "created",
             new_id,
             f"created {len(item.payload)} bytes ({item.mime_type})",
+            admission=document.admission,
         )
 
     def _prepare_revision_attempt(
@@ -1600,6 +1931,8 @@ class Orchestrator:
         replacement: ReplacementIdentity,
         bound: bool,
         historical_attempts: tuple[MaterializationAttempt, ...],
+        *,
+        enrichment_scope: str | None = None,
     ) -> tuple[OperationHandle, MaterializationAttempt] | OrchestrationOutcome:
         """Submit the durable payload key and persist acceptance before polling."""
         document_id = attempt.document_id
@@ -1611,9 +1944,11 @@ class Orchestrator:
             handle = await self._ironrag.create_revision(
                 document_id,
                 mode="replace",
-                file_bytes=item.payload,
-                file_name=replacement.file_name,
-                mime_type=replacement.mime_type,
+                file=RevisionFile(
+                    name=replacement.file_name,
+                    mime_type=replacement.mime_type,
+                    data=item.payload,
+                ),
                 idempotency_key=attempt.payload_key,
                 visibility_intent_id=(
                     attempt.receipt.visibility_intent_id if attempt.receipt is not None else None
@@ -1624,6 +1959,7 @@ class Orchestrator:
                     language_code=replacement.language_code,
                     source_uri=replacement.source_uri,
                 ),
+                enrichment_scope=enrichment_scope,
             )
             if bound:
                 self._validate_bound_payload_receipt(attempt, handle)
@@ -1721,6 +2057,7 @@ class Orchestrator:
                 document_id,
                 "revision operation did not reach a terminal state; retry next sweep",
                 deferred=True,
+                admission=handle,
             )
         except IronRagOperationFailedError as exc:
             if exc.status.id != handle.operation_id:
@@ -1829,6 +2166,7 @@ class Orchestrator:
         *,
         visibility_attempt: MaterializationAttempt | None = None,
         historical_attempts: tuple[MaterializationAttempt, ...] = (),
+        enrichment_scope: str | None = None,
     ) -> OrchestrationOutcome:
         bound = visibility_attempt is not None
         visibility_attempt, replacement = self._prepare_revision_attempt(
@@ -1848,6 +2186,7 @@ class Orchestrator:
             replacement,
             bound,
             historical_attempts,
+            enrichment_scope=enrichment_scope,
         )
         if isinstance(submission, OrchestrationOutcome):
             return submission
@@ -1894,6 +2233,7 @@ class Orchestrator:
             ),
             document_id,
             f"replaced {len(item.payload)} bytes ({item.mime_type})",
+            admission=handle,
         )
 
     @staticmethod
@@ -2173,6 +2513,7 @@ def _outcome(
     detail: str,
     *,
     deferred: bool = False,
+    admission: OperationHandle | None = None,
 ) -> OrchestrationOutcome:
     return OrchestrationOutcome(
         ref=ref,
@@ -2183,4 +2524,5 @@ def _outcome(
         ironrag_document_id=document_id,
         detail=detail,
         deferred=deferred,
+        admission=admission,
     )

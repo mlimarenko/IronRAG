@@ -82,8 +82,8 @@ pub struct GraphGenerationSummary {
 pub struct GraphReadinessSummary {
     /// Library whose source revisions were counted.
     pub library_id: Uuid,
-    /// Document totals grouped by readiness state.
-    pub document_counts_by_readiness: Vec<(String, i64)>,
+    /// Document totals grouped by canonical document status.
+    pub document_counts_by_status: Vec<(String, i64)>,
     /// Documents with graph materialization complete.
     pub graph_ready_document_count: i64,
     /// Documents represented by too little graph evidence for full readiness.

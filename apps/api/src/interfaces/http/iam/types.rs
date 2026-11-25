@@ -541,6 +541,12 @@ pub struct MeResponse {
     pub user: Option<UserResponse>,
     pub workspace_memberships: Vec<WorkspaceMembershipResponse>,
     pub effective_grants: Vec<GrantResponse>,
+    /// The authenticated browser session row this request proved, present only
+    /// for cookie-session callers. It is the value the financial caller fence
+    /// admits as `IamSession`, so a client can register itself without reading
+    /// or echoing its cookie. An API-token caller has no session and omits it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<Uuid>,
 }
 
 #[derive(Deserialize, utoipa::ToSchema)]

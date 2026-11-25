@@ -583,7 +583,10 @@ fn map_ingest_queue_item(row: ingest_repository::IngestQueueItemRow) -> IngestQu
     }
 }
 
-async fn map_job_handle(
+/// The per-job DTO every job read returns. `GET /v1/ingest/jobs/{jobId}`,
+/// the job list and the exact-job execute handler in `ops` all answer with it,
+/// so each of them reports the same record for the same job.
+pub(crate) async fn map_job_handle(
     state: &AppState,
     handle: crate::services::ingest::service::IngestJobHandle,
 ) -> Result<IngestJobResponse, ApiError> {

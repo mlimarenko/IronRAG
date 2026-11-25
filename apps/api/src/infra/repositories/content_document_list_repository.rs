@@ -4,11 +4,13 @@ use chrono::{DateTime, Utc};
 use sqlx::{Executor, FromRow, PgPool, Postgres};
 use uuid::Uuid;
 
-/// Shared CASE expression that derives the six status buckets the
+/// Shared CASE expression that derives the eight status buckets the
 /// documents surface exposes (`canceled` / `empty` / `failed` /
-/// `processing` / `queued` / `ready`) from Postgres-only signals. One
-/// source of truth so the list page, the status-count aggregate, and
-/// every ad-hoc caller stay aligned.
+/// `paused` / `pending_materialization` / `processing` / `queued` /
+/// `ready`) from Postgres-only signals. One source of truth so the list
+/// page, the status-count aggregate, and every ad-hoc caller stay
+/// aligned; `DocumentStatus::ALL` is the transport-side vocabulary for
+/// the exact same set.
 ///
 /// Priority (top row wins):
 /// 1. Mutation is terminally failed → `failed`.
@@ -22,8 +24,8 @@ use uuid::Uuid;
 ///    can see the pipeline moving even during bulk re-ingest.
 /// 5. `content_current_revision.revision_id` is set → `ready`.
 ///    The document has a usable revision the user can consume
-///    right now. `ready` wins over `canceled` / `queued`:
-///    a canceled or queued re-ingest over a still-readable
+///    right now. `ready` wins over `canceled` / `queued` / `paused`:
+///    withdrawn, waiting or held work over a still-readable
 ///    document should not hide it from the ready bucket. Otherwise
 ///    canceled fan-out jobs can dominate the pick during bulk
 ///    re-ingest.
@@ -36,40 +38,48 @@ use uuid::Uuid;
 ///    (`pause_ingest_job`) never touches `content_mutation`, so a job
 ///    paused mid-run still has its mutation `running` — that document
 ///    is actively being worked, not merely held.
-/// 9. Latest `ingest_job` is `paused` → `queued`. Held, not dropped:
-///    the baseline schema's own `idx_ingest_job_active_queue_rank`
-///    groups `queued` / `leased` / `paused` as one active-queue class.
-///    It does not resume on its own — `resume_ingest_job` and
-///    `retry_or_requeue_ingest_job` are reachable only through
-///    explicit, permission-gated operator endpoints — but it is held
-///    work waiting on that operator action, not the "nothing will
-///    ever move without new content" case `empty` names below.
+/// 9. Latest `ingest_job` is `paused` → `paused`. Held, not waiting:
+///    no worker will claim it and only an explicit, permission-gated
+///    resume moves it. Reporting it as `queued` claimed a worker-side
+///    wait that does not exist.
 /// 10. Latest `ingest_job` is `completed` but no readable → `failed`
 ///     (post-completion head update did not land; surface the anomaly).
-/// 11. Everything else → `empty`. By construction this is only reached
+/// 11. An unresolved publication commitment → `pending_materialization`:
+///     the head carries a visibility intent and no current readable
+///     revision exists. This is exactly `unresolved_head_suppression!()`,
+///     the fact `ContentDocumentReadSnapshot.suppressed` publishes — the
+///     connector owns the intent's phase in its own journal, so the
+///     catalog names the pending materialization instead of inventing an
+///     ingest or reporting a finished `empty` document.
+/// 12. Everything else → `empty`. By construction this is only reached
 ///     with no `ingest_job` row at all (every `ingest_job.queue_state`
-///     value is matched above) and a mutation that is neither
-///     actively working (`accepted` / `running`) nor terminally
-///     failed / canceled — i.e. `applied` (metadata-only admission,
+///     value is matched above), a mutation that is neither actively
+///     working (`accepted` / `running`) nor terminally failed /
+///     canceled — i.e. `applied` (metadata-only admission,
 ///     `settle_metadata_only_admission`, IRG-107), `conflicted`, or
 ///     absent (`latest_mutation_id is null`, pre-2026-07-15 legacy
-///     rows predating the atomic-admission head write). None of these
-///     is "waiting for a worker": nothing will move without a new
-///     mutation supplying content.
+///     rows predating the atomic-admission head write) — and no pending
+///     publication commitment. None of these is "waiting for a worker":
+///     nothing will move without a new mutation supplying content.
 ///
-/// Requires the hosting query to expose `ij.queue_state`,
-/// `m.mutation_state`, and `current_revision.revision_id` under exactly
-/// those aliases (both current callers do). `ij.queue_state` must
-/// be picked from this document's newest mutation, with state
-/// priority only as a retry tie-breaker inside that mutation — see
-/// `list_document_page_rows` for the reference implementation.
+/// Requires the hosting query to expose `h.visibility_intent_id`,
+/// `ij.job_kind`, `ij.queue_state`, `m.mutation_state`, and
+/// `current_revision.revision_id` under exactly those aliases (every
+/// caller does). `ij.queue_state` must be picked from this document's
+/// newest mutation, with state priority only as a retry tie-breaker
+/// inside that mutation — see `list_document_page_rows` for the
+/// reference implementation.
 ///
 /// This ordering must stay in lockstep with `document_status()` in
 /// `services/content/service/document/mod.rs`, which computes the
-/// same six buckets per-row from Rust-side signals for the API
+/// same buckets per-row from Rust-side signals for the API
 /// response. Both fall through the same `accepted`/`running` check
-/// before the `paused` check for the reason in step 8.
-pub(crate) const DERIVED_STATUS_CASE_SQL: &str = "case
+/// before the `paused` check for the reason in step 8, both treat an
+/// enrichment-only failure (`DOCUMENT_ENRICHMENT_JOB_KINDS`) over
+/// readable content as `ready`, and both close with the same
+/// suppression-then-`empty` residual.
+pub(crate) const DERIVED_STATUS_CASE_SQL: &str = concat!(
+    "case
     when m.mutation_state = 'failed' then 'failed'
     when ij.queue_state = 'failed'
          and ij.job_kind in ('graph_refresh','reembed')
@@ -81,10 +91,29 @@ pub(crate) const DERIVED_STATUS_CASE_SQL: &str = "case
     when m.mutation_state = 'canceled' then 'canceled'
     when ij.queue_state = 'queued' then 'queued'
     when m.mutation_state in ('accepted','running') then 'processing'
-    when ij.queue_state = 'paused' then 'queued'
+    when ij.queue_state = 'paused' then 'paused'
     when ij.queue_state = 'completed' then 'failed'
+    when ",
+    crate::infra::repositories::content_document_head_repository::unresolved_head_suppression!(),
+    " then 'pending_materialization'
     else 'empty'
-end";
+end"
+);
+
+/// Job kinds that only enrich material already published by an earlier
+/// revision. A failure or pause of one of these never invalidates readable
+/// content, so the status derivation keeps such a document `ready`.
+///
+/// `DERIVED_STATUS_CASE_SQL` embeds the same two literals in its `in (...)`
+/// list; this array is the Rust half of that one vocabulary and is consumed by
+/// `document_status()` so the SQL filter and the API payload cannot classify
+/// the same document differently.
+pub(crate) const DOCUMENT_ENRICHMENT_JOB_KINDS: [&str; 2] = ["graph_refresh", "reembed"];
+
+#[must_use]
+pub(crate) fn is_document_enrichment_job_kind(job_kind: Option<&str>) -> bool {
+    job_kind.is_some_and(|kind| DOCUMENT_ENRICHMENT_JOB_KINDS.contains(&kind))
+}
 
 /// Publication supplies metadata, never operational document membership.
 /// Scope all callers of the shared status decision to the same canonical view.
@@ -166,6 +195,13 @@ pub struct ContentDocumentListRow {
     pub revision_document_hint: Option<String>,
     pub revision_content_source_kind: Option<String>,
     pub revision_storage_key: Option<String>,
+    /// Enrichment channel state of that exact current revision, from
+    /// `knowledge_revision`. Readable text is already proven by
+    /// `readable_revision_id` (the canonical view fences `text_readable`), so
+    /// only optional capability is carried here. `None` while the projection row
+    /// is absent or lagging: that never removes readable presence.
+    pub knowledge_vector_state: Option<String>,
+    pub knowledge_graph_state: Option<String>,
 
     // latest mutation
     pub mutation_id: Option<Uuid>,
@@ -175,6 +211,10 @@ pub struct ContentDocumentListRow {
 
     // latest ingest job (only one per mutation)
     pub job_id: Option<Uuid>,
+    /// `ingest_job.job_kind`: the Rust status mirror needs the exact kind to
+    /// tell an enrichment refresh over readable content from a materializing
+    /// ingest, the same distinction the SQL CASE makes.
+    pub job_kind: Option<String>,
     pub job_queue_state: Option<String>,
     pub job_queued_at: Option<DateTime<Utc>>,
     pub job_completed_at: Option<DateTime<Utc>>,
@@ -208,10 +248,18 @@ pub struct ContentDocumentListRow {
     // Surfaced on the primary list response so the frontend never has
     // to issue a library-wide `/billing/library-document-costs` fetch to
     // fill in the cost column.
-    /// `None` is a fail-closed mixed-currency sentinel. The service rejects
-    /// the complete page instead of presenting a dimensionally invalid sum.
+    /// `None` when the document has no measured provider price — no evidenced
+    /// execution cost row, every call unpriced, or a fail-closed mixed-currency
+    /// aggregate. A document with no measurement is never shown as a free `0`,
+    /// and the cost filter excludes it unless the caller asks for null values.
     pub cost_total: Option<rust_decimal::Decimal>,
+    /// Currency of the measured total; `None` whenever `cost_total` is `None`.
     pub cost_currency_code: Option<String>,
+    /// `true` when this document's derived execution costs span more than one
+    /// currency. That is a fail-closed sentinel: the page is rejected instead of
+    /// presenting a dimensionally invalid sum. It is distinct from an unmeasured
+    /// document, whose cost fields are simply `None`.
+    pub billing_cost_mixed_currency: bool,
     /// Scope health is selected in the same Postgres statement snapshot as
     /// the per-document cost, preventing a clean-check/stale-total race.
     pub billing_rollup_dirty: bool,
@@ -290,6 +338,13 @@ pub struct DocumentListFilters {
     pub cost: FilterValues<rust_decimal::Decimal>,
     pub pipeline_time: FilterValues<i64>,
     pub finished_at: FilterValues<DateTime<Utc>>,
+    /// Readable-content predicate, not a grid column: `Some(true)` keeps only
+    /// documents with a current readable revision (the same canonical
+    /// `content_current_revision` identity the status CASE reads),
+    /// `Some(false)` keeps only documents without one, and `None` imposes no
+    /// constraint. Applied inside the shared base CTE so the page, its total
+    /// and the status counts always describe the same row set.
+    pub readable: Option<bool>,
 }
 
 /// Typed extra search hints. Each present range is an OR alternative to the
@@ -507,7 +562,19 @@ const DOCUMENT_LIST_BILLING_HEALTH_CTE_SQL: &str = "billing_health as materializ
 /// `$31` id-filter-active, `$32` id filter, `$33/$34` file-size `[min,max)`,
 /// `$35/$36` pipeline-time `[min,max)`, `$37/$38` date `[min,max)` (all NULL
 /// when the caller sent no such range).
-fn document_list_base_cte_sql() -> String {
+///
+/// `filters.readable` is a three-state row constraint, not a typed value
+/// filter, so it is rendered into the statement text instead of taking a bind:
+/// the fixed `$1..$38` layout stays valid for every consumer and no caller has
+/// to renumber its own parameters. Every caller passes the same `filters` value
+/// it binds through `bind_document_list_base!`, so rows, total and status
+/// counts always describe the same readable membership.
+fn document_list_base_cte_sql(filters: &DocumentListFilters) -> String {
+    let readable_sql = match filters.readable {
+        None => "",
+        Some(true) => "and j.readable_revision_id is not null",
+        Some(false) => "and j.readable_revision_id is null",
+    };
     let search_sql = format!(
         "and (
                 ($3::text is null and $4::text is null and cardinality($5::text[]) = 0
@@ -529,23 +596,39 @@ fn document_list_base_cte_sql() -> String {
     );
     format!(
         "with {DOCUMENT_LIST_BILLING_HEALTH_CTE_SQL}, document_costs as materialized (
+            -- A derived execution-cost row is not evidence that a provider price was
+            -- observed: rows without a settled or an unpriced call record nothing, and
+            -- unpriced calls carry no charge. This grid DTO has no coverage field, so it
+            -- must not label a partially or unreliably measured sum as a total: the cost
+            -- is exposed only when the document holds at least one settled call, no
+            -- unpriced or unresolved call, and a single currency. That keeps a genuinely
+            -- priced zero visible while withholding every sum the billing detail
+            -- surfaces would serve alongside partial/unknown coverage.
             select
-                bec.knowledge_document_id,
-                case
-                    when count(distinct bec.currency_code) <= 1
-                    then sum(bec.total_cost)
-                end as cost_total,
-                case
-                    when count(distinct bec.currency_code) <= 1
-                    then min(bec.currency_code)
-                end as cost_currency_code
-            from billing_health
-            join billing_execution_cost bec
-              on not billing_health.rollup_dirty
-             and billing_health.terminal_error_code is null
-             and bec.library_id = $1
-             and bec.knowledge_document_id is not null
-            group by bec.knowledge_document_id
+                document_cost.knowledge_document_id,
+                document_cost.cost_mixed_currency,
+                case when document_cost.measured then document_cost.cost_total end
+                    as cost_total,
+                case when document_cost.measured then document_cost.cost_currency_code end
+                    as cost_currency_code
+            from (
+                select
+                    bec.knowledge_document_id,
+                    count(distinct bec.currency_code) > 1 as cost_mixed_currency,
+                    count(distinct bec.currency_code) <= 1
+                      and coalesce(sum(bec.unpriced_provider_call_count), 0) = 0
+                      and coalesce(sum(bec.provider_call_count), 0) > 0 as measured,
+                    coalesce(sum(bec.total_cost), 0) as cost_total,
+                    min(bec.currency_code) as cost_currency_code
+                from billing_health
+                join billing_execution_cost bec
+                  on not billing_health.rollup_dirty
+                 and billing_health.terminal_error_code is null
+                 and bec.library_id = $1
+                 and bec.knowledge_document_id is not null
+                 and (bec.provider_call_count > 0 or bec.unpriced_provider_call_count > 0)
+                group by bec.knowledge_document_id
+            ) document_cost
         ), joined as (
             select
                 d.id,
@@ -571,7 +654,10 @@ fn document_list_base_cte_sql() -> String {
                 r.document_hint as revision_document_hint,
                 r.content_source_kind::text as revision_content_source_kind,
                 r.storage_key as revision_storage_key,
+                kr.vector_state as knowledge_vector_state,
+                kr.graph_state as knowledge_graph_state,
                 ij.id as job_id,
+                ij.job_kind::text as job_kind,
                 ij.queue_state::text as job_queue_state,
                 ij.queued_at as job_queued_at,
                 ij.completed_at as job_completed_at,
@@ -586,15 +672,14 @@ fn document_list_base_cte_sql() -> String {
                 case
                     when billing_health.rollup_dirty
                       or billing_health.terminal_error_code is not null then null
-                    when c.knowledge_document_id is null then 0
                     else c.cost_total
                 end as cost_total,
                 case
                     when billing_health.rollup_dirty
                       or billing_health.terminal_error_code is not null then null
-                    when c.knowledge_document_id is null then 'USD'
                     else c.cost_currency_code
                 end as cost_currency_code,
+                coalesce(c.cost_mixed_currency, false) as billing_cost_mixed_currency,
                 billing_health.rollup_dirty as billing_rollup_dirty,
                 billing_health.terminal_error_code as billing_rollup_terminal_error_code,
                 case
@@ -616,6 +701,11 @@ fn document_list_base_cte_sql() -> String {
             left join content_document_head h on h.document_id = d.id
             left join content_revision r
                 on r.id = current_revision.revision_id
+            left join knowledge_revision kr
+                on kr.revision_id = current_revision.revision_id
+               and kr.document_id = d.id
+               and kr.workspace_id = d.workspace_id
+               and kr.library_id = d.library_id
             left join content_mutation m on m.id = h.latest_mutation_id
             left join lateral (
                 {LATEST_DOCUMENT_INGEST_JOB_SQL}
@@ -636,6 +726,7 @@ fn document_list_base_cte_sql() -> String {
             where true
               {search_sql}
               {DOCUMENT_LIST_FILTERS_SQL}
+              {readable_sql}
               and (not $31::bool or j.id = any($32::uuid[]))
         )",
     )
@@ -1083,11 +1174,14 @@ where
             p.revision_document_hint,
             p.revision_content_source_kind,
             p.revision_storage_key,
+            p.knowledge_vector_state,
+            p.knowledge_graph_state,
             p.mutation_id,
             p.mutation_state,
             p.mutation_failure_code,
             p.mutation_requested_at,
             p.job_id,
+            p.job_kind,
             p.job_queue_state,
             p.job_queued_at,
             p.job_completed_at,
@@ -1103,11 +1197,12 @@ where
             p.pipeline_time_ms,
             p.cost_total,
             p.cost_currency_code,
+            p.billing_cost_mixed_currency,
             p.billing_rollup_dirty,
             p.billing_rollup_terminal_error_code
         from page p
         order by {page_order_sql}",
-        base = document_list_base_cte_sql(),
+        base = document_list_base_cte_sql(filters),
     );
 
     // Bind order: the fixed base layout $1..$38
@@ -1166,22 +1261,27 @@ where
 
 /// Per-bucket counts matching the `derived_status` column the list CTE
 /// emits. Used by the documents page filter strip to populate pill
-/// badges without an extra endpoint round-trip.
+/// badges without an extra endpoint round-trip. `readable` is the one
+/// non-status number: documents in this same filtered set that carry a
+/// current readable revision, whatever operational bucket they landed in.
 #[derive(Debug, Clone, Default, FromRow)]
 pub struct DocumentListStatusCountsRow {
     pub total: Option<i64>,
     pub ready: Option<i64>,
     pub processing: Option<i64>,
     pub queued: Option<i64>,
+    pub paused: Option<i64>,
     pub failed: Option<i64>,
     pub canceled: Option<i64>,
+    pub pending_materialization: Option<i64>,
     pub empty: Option<i64>,
+    pub readable: Option<i64>,
 }
 
 /// One pass over the same CASE derivation used by `list_document_page_rows`
-/// producing the 6 bucket counts plus the overall total. Called only when
-/// the caller opts in via `includeTotal=true` — otherwise every page-flip
-/// would pay for an unbounded aggregate.
+/// producing the eight bucket counts plus the overall total and the readable
+/// intersection. Called only when the caller opts in via `includeTotal=true` —
+/// otherwise every page-flip would pay for an unbounded aggregate.
 pub async fn aggregate_document_list_status_counts(
     postgres: &PgPool,
     query: DocumentListCountQuery<'_>,
@@ -1222,12 +1322,15 @@ where
             count(*) filter (where derived_status = 'ready')::bigint as ready,
             count(*) filter (where derived_status = 'processing')::bigint as processing,
             count(*) filter (where derived_status = 'queued')::bigint as queued,
+            count(*) filter (where derived_status = 'paused')::bigint as paused,
             count(*) filter (where derived_status = 'failed')::bigint as failed,
             count(*) filter (where derived_status = 'canceled')::bigint as canceled,
-            count(*) filter (where derived_status = 'empty')::bigint as empty
+            count(*) filter (where derived_status = 'pending_materialization')::bigint as pending_materialization,
+            count(*) filter (where derived_status = 'empty')::bigint as empty,
+            count(*) filter (where (cardinality($39::text[]) = 0 or derived_status = any($39)) and readable_revision_id is not null)::bigint as readable
         from base
         where (cardinality($39::text[]) = 0 or derived_status = any($39))",
-        base = document_list_base_cte_sql(),
+        base = document_list_base_cte_sql(filters),
     );
     let query = sqlx::query_as::<_, DocumentListStatusCountsRow>(sqlx::AssertSqlSafe(&*sql));
     let query = bind_document_list_base!(
@@ -1248,24 +1351,32 @@ where
 }
 
 /// One statement's worth of scope facts for a document-list or facet read:
-/// the library rollup health, the whole-scope NULL-cost probe, the scope row
-/// count, and the six derived-status bucket counts. Read in the same
+/// the library rollup health, the whole-scope NULL-cost probe, the eight
+/// derived-status bucket counts, the readable intersection, and the ephemeral
+/// `scope_fingerprint` of every allowed row identity. Read in the same
 /// REPEATABLE READ snapshot as the rows it describes, so health is observable
-/// even when the page has zero rows and a concurrent dirty generation cannot
-/// be observed by only part of one response.
+/// even when the page has zero rows and a concurrent dirty generation cannot be
+/// observed by only part of one response.
+///
+/// `scope_fingerprint` is a snapshot identity, not persisted state and not a
+/// second read model: a continuation token can carry it to prove that the
+/// population it was created against is still the population being paged.
 #[derive(Debug, Clone, FromRow)]
 pub struct DocumentListScopeRead {
     pub rollup_dirty: bool,
     pub terminal_error_code: Option<String>,
-    pub row_count: i64,
-    pub has_null_cost: bool,
+    pub has_mixed_currency_cost: bool,
     pub total: Option<i64>,
     pub ready: Option<i64>,
     pub processing: Option<i64>,
     pub queued: Option<i64>,
+    pub paused: Option<i64>,
     pub failed: Option<i64>,
     pub canceled: Option<i64>,
+    pub pending_materialization: Option<i64>,
     pub empty: Option<i64>,
+    pub readable: Option<i64>,
+    pub scope_fingerprint: String,
 }
 
 impl DocumentListScopeRead {
@@ -1276,16 +1387,19 @@ impl DocumentListScopeRead {
             ready: self.ready,
             processing: self.processing,
             queued: self.queued,
+            paused: self.paused,
             failed: self.failed,
             canceled: self.canceled,
+            pending_materialization: self.pending_materialization,
             empty: self.empty,
+            readable: self.readable,
         }
     }
 }
 
 /// Runs the scope aggregate through an executor. `exclude` disables exactly
 /// the selected facet column's own filter (as the facet read does); the list
-/// path passes `None` so the cost filter is honored in its row count and the
+/// path passes `None` so the cost filter is honored in its total and the
 /// returned page can never be advertised with a total that ignored it.
 async fn document_list_scope_read_with_executor<'e, E>(
     executor: E,
@@ -1310,10 +1424,10 @@ where
     let search_pattern = normalize_search_pattern(search);
     let normalized_search_pattern = normalize_search_pattern(normalized_search);
     // `document_list_base_cte_sql` already embeds `billing_health`. The
-    // aggregate selects that health, the scope-wide row count, the derived
-    // status buckets (the status pill narrows them exactly as it narrows the
-    // page) and the whole-scope NULL-cost probe in one statement. `exclude`
-    // keeps the selected facet column's filter out of its own NULL-cost scan.
+    // aggregate selects that health, the derived status buckets (the status
+    // pill narrows them exactly as it narrows the page) and the whole-scope
+    // NULL-cost probe in one statement. `exclude` keeps the selected facet
+    // column's filter out of its own NULL-cost scan.
     let sql = format!(
         "{base},
         scope_health as (
@@ -1321,31 +1435,47 @@ where
         ),
         scope_facts as (
             select
-                count(*)::bigint as row_count,
                 count(*) filter (where cardinality($39::text[]) = 0 or derived_status = any($39))::bigint as total,
                 count(*) filter (where (cardinality($39::text[]) = 0 or derived_status = any($39)) and derived_status = 'ready')::bigint as ready,
                 count(*) filter (where (cardinality($39::text[]) = 0 or derived_status = any($39)) and derived_status = 'processing')::bigint as processing,
                 count(*) filter (where (cardinality($39::text[]) = 0 or derived_status = any($39)) and derived_status = 'queued')::bigint as queued,
+                count(*) filter (where (cardinality($39::text[]) = 0 or derived_status = any($39)) and derived_status = 'paused')::bigint as paused,
                 count(*) filter (where (cardinality($39::text[]) = 0 or derived_status = any($39)) and derived_status = 'failed')::bigint as failed,
                 count(*) filter (where (cardinality($39::text[]) = 0 or derived_status = any($39)) and derived_status = 'canceled')::bigint as canceled,
+                count(*) filter (where (cardinality($39::text[]) = 0 or derived_status = any($39)) and derived_status = 'pending_materialization')::bigint as pending_materialization,
                 count(*) filter (where (cardinality($39::text[]) = 0 or derived_status = any($39)) and derived_status = 'empty')::bigint as empty,
-                exists (select 1 from base j where j.cost_total is null) as has_null_cost
+                count(*) filter (where (cardinality($39::text[]) = 0 or derived_status = any($39)) and readable_revision_id is not null)::bigint as readable,
+                md5(coalesce(string_agg(
+                    concat_ws(
+                        ':',
+                        id::text,
+                        derived_status,
+                        coalesce(readable_revision_id::text, ''),
+                        coalesce(visibility_intent_id::text, '')
+                    ),
+                    ',' order by id
+                ), '')) as scope_fingerprint,
+                exists (select 1 from base j where j.billing_cost_mixed_currency)
+                    as has_mixed_currency_cost
             from base
         )
         select
             scope_health.rollup_dirty,
             scope_health.terminal_error_code,
-            scope_facts.row_count,
-            scope_facts.has_null_cost,
+            scope_facts.has_mixed_currency_cost,
             scope_facts.total,
             scope_facts.ready,
             scope_facts.processing,
             scope_facts.queued,
+            scope_facts.paused,
             scope_facts.failed,
             scope_facts.canceled,
-            scope_facts.empty
+            scope_facts.pending_materialization,
+            scope_facts.empty,
+            scope_facts.readable,
+            scope_facts.scope_fingerprint
         from scope_health cross join scope_facts",
-        base = document_list_base_cte_sql(),
+        base = document_list_base_cte_sql(filters),
     );
     let query = sqlx::query_as::<_, DocumentListScopeRead>(sqlx::AssertSqlSafe(&*sql));
     let query = bind_document_list_base!(
@@ -1410,13 +1540,14 @@ where
 }
 
 /// One page of facet values with the library rollup health from the same
-/// REPEATABLE READ snapshot. `has_null_cost` is the whole-scope mixed-currency
-/// probe the cost facet still fails closed on.
+/// REPEATABLE READ snapshot. `has_mixed_currency_cost` is the whole-scope
+/// mixed-currency probe the cost facet still fails closed on; an unmeasured
+/// document is not part of it.
 pub struct DocumentFacetRead {
     pub page: DocumentFacetPage,
     pub rollup_dirty: bool,
     pub terminal_error_code: Option<String>,
-    pub has_null_cost: bool,
+    pub has_mixed_currency_cost: bool,
 }
 
 pub async fn read_document_facet_page(
@@ -1440,7 +1571,7 @@ pub async fn read_document_facet_page(
         page,
         rollup_dirty: scope.rollup_dirty,
         terminal_error_code: scope.terminal_error_code,
-        has_null_cost: scope.has_null_cost,
+        has_mixed_currency_cost: scope.has_mixed_currency_cost,
     })
 }
 
@@ -1518,7 +1649,7 @@ where
           {keyset_sql}
         order by {order_sql}
         limit $42",
-        base = document_list_base_cte_sql(),
+        base = document_list_base_cte_sql(filters),
         value_text = facet.value_text,
         value_number = facet.value_number,
         value_timestamp = facet.value_timestamp,
@@ -1598,6 +1729,7 @@ pub async fn count_library_ready_documents_in_graph_projection(
         postgres,
         library_id,
         projection_version,
+        None,
     )
     .await
 }
@@ -1719,20 +1851,47 @@ where
         &mut *connection,
         library_id,
         projection_version,
+        None,
     )
     .await?
     .clamp(0, ready);
     Ok((ready, projected))
 }
 
+/// Current-revision graph capability, read from the channel-state owner
+/// (`knowledge_revision`) of the exact canonical current revision. Vector
+/// readiness is part of it: a revision whose vectors are pending or failed can
+/// serve no graph lane, so it is not a graph gap and must never be counted as
+/// one by complementary arithmetic. `graph_degraded` is capable but partial.
+const CURRENT_REVISION_GRAPH_CAPABILITY_SQL: &str =
+    "(k.vector_state = 'ready' and k.graph_state in ('ready','graph_degraded'))";
+
+/// Full graph readiness of the same revision: complete graph extraction behind
+/// ready vectors. A `graph_degraded` revision serves graph lanes but is never
+/// fully graph-ready, even when the projection carries a document node with
+/// evidence from its exact revision — `current_revision_capability` reports it
+/// as `GraphSparse`, and the counters must not disagree with it.
+const CURRENT_REVISION_FULL_GRAPH_READINESS_SQL: &str =
+    "(k.vector_state = 'ready' and k.graph_state = 'ready')";
+
 /// The ready-document population shared by the graph-ready counter and the
 /// documents-list `indexing=graph_ready|graph_gap` filters. One CTE so the
 /// counter the dashboard shows and the set an operator is sent to cannot
 /// disagree: active, canonically published, and derived `ready` under the same policy
-/// `aggregate_document_list_status_counts` uses.
-fn library_ready_documents_cte_sql() -> String {
+/// `aggregate_document_list_status_counts` uses. `graph_capable` carries the
+/// current revision's partial graph capability and `graph_fully_ready` its full
+/// graph readiness alongside the identity, so a caller can report a gap only for
+/// documents that have capability and full readiness only for complete graphs.
+///
+/// `document_scope_sql` is an optional `and (...)` clause over the `d` alias
+/// that narrows the population to an authorized document set; the caller that
+/// supplies one binds the parameter it names. An empty string keeps the
+/// whole-library population and the `$1/$2` parameter layout.
+fn library_ready_documents_cte_sql(document_scope_sql: &str) -> String {
     format!(
-        "select d.id, current_revision.revision_id as readable_revision_id
+        "select d.id, current_revision.revision_id as readable_revision_id,
+                coalesce({CURRENT_REVISION_GRAPH_CAPABILITY_SQL}, false) as graph_capable,
+                coalesce({CURRENT_REVISION_FULL_GRAPH_READINESS_SQL}, false) as graph_fully_ready
          from content_document d
          {CURRENT_DOCUMENT_REVISION_JOIN_SQL}
          left join content_document_head h on h.document_id = d.id
@@ -1740,12 +1899,23 @@ fn library_ready_documents_cte_sql() -> String {
          left join lateral (
              {LATEST_DOCUMENT_INGEST_JOB_SQL}
          ) ij on true
+         left join knowledge_revision k
+             on k.revision_id = current_revision.revision_id
+            and k.document_id = d.id
+            and k.workspace_id = d.workspace_id
+            and k.library_id = d.library_id
          where d.library_id = $1
            and d.document_state = 'active'
            and d.deleted_at is null
-           and ({DERIVED_STATUS_CASE_SQL}) = 'ready'"
+           and ({DERIVED_STATUS_CASE_SQL}) = 'ready'
+           {document_scope_sql}"
     )
 }
+
+/// Scope clause for the ready-population CTE: `None` keeps the whole library,
+/// `Some(ids)` keeps exactly those documents (an empty slice keeps none). The
+/// parameter is always `$3` of the statement that embeds the clause.
+const READY_DOCUMENT_SCOPE_SQL: &str = "and ($3::uuid[] is null or d.id = any($3))";
 
 /// Whether the active graph projection carries a document node for `ready`'s
 /// exact readable revision. The evidence join fences a node left behind by an
@@ -1789,6 +1959,7 @@ async fn count_library_ready_documents_in_graph_projection_with_executor<'e, E>(
     executor: E,
     library_id: Uuid,
     projection_version: i64,
+    document_ids: Option<&[Uuid]>,
 ) -> Result<i64, sqlx::Error>
 where
     E: Executor<'e, Database = Postgres>,
@@ -1796,24 +1967,66 @@ where
     // Keep the readiness derivation and per-document latest-job selection
     // identical to `aggregate_document_list_status_counts`. In particular, a
     // leased or failed retry must not be reported as graph-ready merely because
-    // the previous readable revision still has a projection node.
+    // the previous readable revision still has a projection node. Coverage also
+    // requires full current graph readiness: a degraded graph or a projection
+    // node without a complete current revision is not full coverage. A
+    // document-limited read narrows the population to the authorized ids inside
+    // that same CTE, so the counter can never describe rows the caller may not
+    // see.
+    let document_scope_sql = if document_ids.is_some() { READY_DOCUMENT_SCOPE_SQL } else { "" };
     let sql = format!(
         "with ready_documents as ({cte})
         select count(*)::bigint
         from ready_documents ready
-        where {projection_exists}",
-        cte = library_ready_documents_cte_sql(),
+        where ready.graph_fully_ready
+          and {projection_exists}",
+        cte = library_ready_documents_cte_sql(document_scope_sql),
         projection_exists = READY_DOCUMENT_GRAPH_PROJECTION_EXISTS_SQL,
     );
-    sqlx::query_scalar::<_, i64>(sqlx::AssertSqlSafe(&*sql))
+    let query = sqlx::query_scalar::<_, i64>(sqlx::AssertSqlSafe(&*sql))
         .bind(library_id)
-        .bind(projection_version)
-        .fetch_one(executor)
-        .await
+        .bind(projection_version);
+    let query =
+        if document_ids.is_some() { query.bind(document_ids.unwrap_or(&[])) } else { query };
+    query.fetch_one(executor).await
 }
 
-/// Ready documents the active graph projection covers, by document id. The exact
-/// set behind the dashboard's `graphReady` counter.
+/// Ready documents that reach current graph capability without full coverage —
+/// the only population `graph_sparse` may count, and disjoint from
+/// `graph_ready` by construction. That covers a `graph_degraded` revision (with
+/// or without a projection node) and a fully ready revision the active
+/// projection does not cover. A document without graph capability (vectors
+/// pending or failed, graph not extracted) is still enriching and is not a gap.
+async fn count_library_ready_documents_with_graph_gap_with_executor<'e, E>(
+    executor: E,
+    library_id: Uuid,
+    projection_version: i64,
+    document_ids: Option<&[Uuid]>,
+) -> Result<i64, sqlx::Error>
+where
+    E: Executor<'e, Database = Postgres>,
+{
+    let document_scope_sql = if document_ids.is_some() { READY_DOCUMENT_SCOPE_SQL } else { "" };
+    let sql = format!(
+        "with ready_documents as ({cte})
+        select count(*)::bigint
+        from ready_documents ready
+        where ready.graph_capable
+          and not (ready.graph_fully_ready and {projection_exists})",
+        cte = library_ready_documents_cte_sql(document_scope_sql),
+        projection_exists = READY_DOCUMENT_GRAPH_PROJECTION_EXISTS_SQL,
+    );
+    let query = sqlx::query_scalar::<_, i64>(sqlx::AssertSqlSafe(&*sql))
+        .bind(library_id)
+        .bind(projection_version);
+    let query =
+        if document_ids.is_some() { query.bind(document_ids.unwrap_or(&[])) } else { query };
+    query.fetch_one(executor).await
+}
+
+/// Ready documents the active graph projection covers with current graph
+/// capability, by document id. The exact set behind the dashboard's
+/// `graphReady` counter — one identity per metric row.
 pub async fn list_library_documents_graph_ready(
     postgres: &PgPool,
     library_id: Uuid,
@@ -1826,8 +2039,11 @@ pub async fn list_library_documents_graph_ready(
         .collect())
 }
 
-/// Ready documents the active graph projection does not cover, by document id.
-/// The exact set behind the dashboard's `graphSparse` counter.
+/// Ready documents the active projection does not fully cover, by document id:
+/// the exact `ready - graph_ready` deficit the ops coverage warning reports.
+/// Broader than the `graph_sparse` metric by design — a ready document whose
+/// current revision still lacks graph capability is part of the deficit and must
+/// appear here, while the metric keeps counting only degraded capability.
 pub async fn list_library_documents_with_graph_gap(
     postgres: &PgPool,
     library_id: Uuid,
@@ -1840,6 +2056,18 @@ pub async fn list_library_documents_with_graph_gap(
         .collect())
 }
 
+/// Graph coverage of the exact ready population, by document id.
+///
+/// `graph_ready` is the identity intersection the dashboard's `graphReady`
+/// metric counts: full current graph readiness plus a document node with
+/// evidence from the exact current readable revision — a `graph_degraded`
+/// revision is never in this set, even with a node. Everything else in this
+/// population is the coverage deficit `graphSparse`-style warnings owe their
+/// destination — `ready - graph_ready` — which includes ready documents whose
+/// current revision has no graph capability yet. The `graph_sparse` *metric*
+/// stays the narrower capability-grounded number; the selector is broad because
+/// an operator sent to a gap must see every ready document that is not fully
+/// covered.
 async fn load_library_graph_coverage_rows<'e, E>(
     executor: E,
     library_id: Uuid,
@@ -1850,10 +2078,10 @@ where
 {
     let sql = format!(
         "with ready_documents as ({cte})
-        select ready.id, ({projection_exists}) as graph_ready
+        select ready.id, (ready.graph_fully_ready and ({projection_exists})) as graph_ready
         from ready_documents ready
         order by ready.id",
-        cte = library_ready_documents_cte_sql(),
+        cte = library_ready_documents_cte_sql(""),
         projection_exists = READY_DOCUMENT_GRAPH_PROJECTION_EXISTS_SQL,
     );
     sqlx::query_as::<_, (Uuid, bool)>(sqlx::AssertSqlSafe(&*sql))
@@ -1936,17 +2164,19 @@ where
 /// Counts active documents whose current effective revision has at least one
 /// typed fact. The effective revision matches the document-summary read path:
 /// prefer the readable revision, then fall back to the active revision while a
-/// document is still being prepared.
+/// document is still being prepared. `document_ids` narrows the population to
+/// an authorized set; `None` is the whole library and `Some(&[])` is zero.
 pub async fn count_library_documents_with_typed_facts(
     postgres: &PgPool,
     library_id: Uuid,
 ) -> Result<i64, sqlx::Error> {
-    count_library_documents_with_typed_facts_with_executor(postgres, library_id).await
+    count_library_documents_with_typed_facts_with_executor(postgres, library_id, None).await
 }
 
 async fn count_library_documents_with_typed_facts_with_executor<'e, E>(
     executor: E,
     library_id: Uuid,
+    document_ids: Option<&[Uuid]>,
 ) -> Result<i64, sqlx::Error>
 where
     E: Executor<'e, Database = Postgres>,
@@ -1963,9 +2193,11 @@ where
          where d.library_id = $1
            and d.document_state <> 'deleted'
            and d.deleted_at is null
+           and ($2::uuid[] is null or d.document_id = any($2))
            and sr.typed_fact_count > 0",
     )
     .bind(library_id)
+    .bind(document_ids)
     .fetch_one(executor)
     .await
 }
@@ -1974,37 +2206,72 @@ where
 #[derive(Debug, Clone)]
 pub struct LibraryDashboardSnapshot {
     pub metrics: ironrag_contracts::documents::LibraryDocumentMetrics,
+    /// Library-level runtime graph projection row. This is deliberately NOT
+    /// document-scoped: a caller that reads the snapshot for an authorized
+    /// document subset must present `metrics`/`typed_fact_document_count` and
+    /// omit the projection's node/edge counts.
     pub graph_snapshot: Option<crate::infra::repositories::RuntimeGraphSnapshotRow>,
     pub typed_fact_document_count: i64,
     /// Oldest claimable `ingest_job` in this library, read from the same
     /// repeatable-read snapshot as the metrics above; `None` when nothing is
     /// waiting. Feeds the ops coverage notice's stalled-queue check so it cannot
-    /// be combined with counts observed at a different instant.
+    /// be combined with counts observed at a different instant. Library-level,
+    /// like `graph_snapshot`.
     pub oldest_available_queued_job_at: Option<DateTime<Utc>>,
 }
 
 /// Loads every database-backed dashboard/summary aggregate in one
-/// repeatable-read, read-only transaction.
+/// repeatable-read, read-only transaction. Same-owner convenience wrapper for
+/// the whole-library read; `load_library_dashboard_snapshot_for_documents` is
+/// the one implementation.
 pub async fn load_library_dashboard_snapshot(
     postgres: &PgPool,
     library_id: Uuid,
 ) -> Result<LibraryDashboardSnapshot, sqlx::Error> {
-    load_library_dashboard_snapshot_inner(postgres, library_id, std::future::ready(())).await
+    load_library_dashboard_snapshot_for_documents(postgres, library_id, None).await
+}
+
+/// Same snapshot, restricted to an authorized document set.
+///
+/// `document_ids`: `None` means the whole library; `Some(&[])` means an
+/// explicitly empty set and therefore zero documents in every number below.
+/// Status buckets, the readable intersection, graph coverage and the typed-fact
+/// count are all computed inside this set, from one REPEATABLE READ snapshot —
+/// so a document-limited principal never reads a whole-library count and the
+/// descriptor never needs a second, staler read model.
+pub async fn load_library_dashboard_snapshot_for_documents(
+    postgres: &PgPool,
+    library_id: Uuid,
+    document_ids: Option<&[Uuid]>,
+) -> Result<LibraryDashboardSnapshot, sqlx::Error> {
+    load_library_dashboard_snapshot_inner(
+        postgres,
+        library_id,
+        document_ids,
+        std::future::ready(()),
+    )
+    .await
 }
 
 /// Authoritative per-library document metrics row. This is the ONE
 /// function every surface (`/ops/libraries/{id}/dashboard`,
 /// `/content/libraries/{id}/documents?includeTotal=true`,
 /// `/knowledge/libraries/{id}/summary`) should route through for
-/// document-count numbers. It runs the status-bucket aggregate and
-/// the graph-ready identity intersection and preserves the invariant
-/// `graph_ready + graph_sparse == ready` always holds on the wire,
-/// even during a graph rebuild where the two halves are briefly
-/// out-of-sync.
+/// document-count numbers. It runs the status-bucket aggregate and the
+/// graph-ready identity intersection, so the graph numbers describe the same
+/// MVCC view as the buckets even during a graph rebuild.
 ///
 /// Contract:
-///   * `total == ready + processing + queued + failed + canceled + empty`
-///   * `graph_ready + graph_sparse == ready`
+///   * `total == ready + processing + queued + paused + failed + canceled
+///     + pending_materialization + empty`
+///   * `graph_ready + graph_sparse <= ready`: `graph_ready` requires a complete
+///     current graph (`graph_state = 'ready'`) plus exact projection evidence;
+///     `graph_sparse` counts graph-capable documents without that full coverage
+///     (a `graph_degraded` graph, with or without a node, or a complete graph the
+///     projection does not cover) and never overlaps `graph_ready`. A ready
+///     document whose vectors are still pending or failed is in neither number.
+///   * `readable` counts documents with a current readable revision in the
+///     same scope, independently of their bucket (`ready <= readable <= total`)
 ///
 /// Scoped to `document_state = 'active'` (deleted documents are not
 /// reflected in any of the metrics). Search filtering and
@@ -2050,12 +2317,13 @@ pub async fn load_library_dashboard_snapshot_after_status_read_for_test<F>(
 where
     F: Future<Output = ()>,
 {
-    load_library_dashboard_snapshot_inner(postgres, library_id, after_status_read).await
+    load_library_dashboard_snapshot_inner(postgres, library_id, None, after_status_read).await
 }
 
 async fn load_library_dashboard_snapshot_inner<F>(
     postgres: &PgPool,
     library_id: Uuid,
+    document_ids: Option<&[Uuid]>,
     after_status_read: F,
 ) -> Result<LibraryDashboardSnapshot, sqlx::Error>
 where
@@ -2086,7 +2354,7 @@ where
             filters: &empty_filters,
             search_ranges: &empty_ranges,
             status_filter: &[],
-            id_filter: None,
+            id_filter: document_ids,
             snapshot_at: Utc::now(),
         },
     )
@@ -2109,25 +2377,36 @@ where
         // readiness from this same MVCC view, without mutating a read path.
         snapshot.graph_status = "stale".to_owned();
     }
-    let graph_ready_raw = if let Some(snapshot) = snapshot_row.as_ref() {
-        // Document coverage is independent of whole-projection publication.
-        // Keep it aligned with graph-gap filters; graph_status gates usability.
-        if snapshot.graph_status == "empty" || snapshot.node_count <= 0 {
-            0
-        } else {
-            count_library_ready_documents_in_graph_projection_with_executor(
-                &mut *transaction,
-                library_id,
-                snapshot.projection_version.max(1),
-            )
-            .await?
-        }
-    } else {
+    // Document coverage is independent of whole-projection publication.
+    // No snapshot and an empty snapshot both lack usable graph coverage.
+    let graph_projection_version = snapshot_row
+        .as_ref()
+        .filter(|snapshot| snapshot.graph_status != "empty" && snapshot.node_count > 0)
+        .map_or(0, |snapshot| snapshot.projection_version.max(1));
+    let graph_ready_raw = if graph_projection_version == 0 {
         0
+    } else {
+        count_library_ready_documents_in_graph_projection_with_executor(
+            &mut *transaction,
+            library_id,
+            graph_projection_version,
+            document_ids,
+        )
+        .await?
     };
-    let typed_fact_document_count =
-        count_library_documents_with_typed_facts_with_executor(&mut *transaction, library_id)
-            .await?;
+    let graph_gap_raw = count_library_ready_documents_with_graph_gap_with_executor(
+        &mut *transaction,
+        library_id,
+        graph_projection_version,
+        document_ids,
+    )
+    .await?;
+    let typed_fact_document_count = count_library_documents_with_typed_facts_with_executor(
+        &mut *transaction,
+        library_id,
+        document_ids,
+    )
+    .await?;
     let oldest_available_queued_job_at =
         crate::infra::repositories::ops_repository::oldest_available_queued_job_at_with_executor(
             &mut *transaction,
@@ -2138,25 +2417,33 @@ where
     let ready = status_row.ready.unwrap_or(0);
     let processing = status_row.processing.unwrap_or(0);
     let queued = status_row.queued.unwrap_or(0);
+    let paused = status_row.paused.unwrap_or(0);
     let failed = status_row.failed.unwrap_or(0);
     let canceled = status_row.canceled.unwrap_or(0);
+    let pending_materialization = status_row.pending_materialization.unwrap_or(0);
     let empty = status_row.empty.unwrap_or(0);
+    let readable = status_row.readable.unwrap_or(0).clamp(0, total);
     // The SQL already counts a subset of the exact ready identities. Keep the
     // defensive clamp at the wire boundary so corrupted legacy rows cannot
-    // violate the published invariant.
+    // violate the published invariant. `graph_sparse` is counted, never derived
+    // as `ready - graph_ready`: a ready document whose current revision has no
+    // graph capability is not a gap.
     let graph_ready = graph_ready_raw.clamp(0, ready);
-    let graph_sparse = ready.saturating_sub(graph_ready);
+    let graph_sparse = graph_gap_raw.clamp(0, ready.saturating_sub(graph_ready));
     let snapshot = LibraryDashboardSnapshot {
         metrics: ironrag_contracts::documents::LibraryDocumentMetrics {
             total,
             ready,
             processing,
             queued,
+            paused,
             failed,
             canceled,
+            pending_materialization,
             empty,
             graph_ready,
             graph_sparse,
+            readable,
             recomputed_at: chrono::Utc::now(),
         },
         graph_snapshot: snapshot_row,

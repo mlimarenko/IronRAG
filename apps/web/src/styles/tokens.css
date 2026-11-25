@@ -139,13 +139,18 @@ textarea:focus-visible {
   border-radius: 10px;
   background-clip: padding-box;
 }
+/* A user preference reset, not a component style: the repeated `:root` raises
+   the selector above every component declaration that sets a duration (the
+   widest here is `.dashboard-metrics .metric-card`, 0-2-0), so the cascade
+   resolves the override without `!important`. */
 @media (prefers-reduced-motion: reduce) {
-  *,
-  *::before,
-  *::after {
-    animation-duration: 0.01ms !important;
-    animation-iteration-count: 1 !important;
-    transition-duration: 0.01ms !important;
-    scroll-behavior: auto !important;
+  :root:root:root,
+  :root:root:root *,
+  :root:root:root *::before,
+  :root:root:root *::after {
+    animation-duration: 0.01ms;
+    animation-iteration-count: 1;
+    transition-duration: 0.01ms;
+    scroll-behavior: auto;
   }
 }

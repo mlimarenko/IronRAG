@@ -295,25 +295,6 @@ pub(super) fn next_incomplete_grounded_answer_follow_up_required(
         || (previous_required && !iteration_had_follow_up_after_incomplete_grounded_answer)
 }
 
-#[cfg(test)]
-pub(super) fn tool_result_satisfies_incomplete_grounded_follow_up(
-    tool_name: &str,
-    is_error: bool,
-    grounded_answer_ready: bool,
-    grounding_text: Option<&str>,
-) -> bool {
-    if is_error {
-        return false;
-    }
-    if grounded_answer_ready {
-        return true;
-    }
-    if tool_name == GROUNDED_ANSWER_TOOL_NAME || !tool_result_can_ground_final_answer(tool_name) {
-        return false;
-    }
-    grounding_text.is_some_and(|text| !text.trim().is_empty())
-}
-
 pub(super) fn tool_defs_for_agent_iteration(
     tool_defs: &[ChatToolDef],
     _successful_tool_names: &BTreeSet<String>,

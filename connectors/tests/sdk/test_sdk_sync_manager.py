@@ -549,8 +549,9 @@ async def test_requested_cleanup_waits_for_manual_sweep_and_coalesces_deliveries
         assert await asyncio.wait_for(completed.get(), timeout=1) == "manual"
         for _ in range(2):
             assert await asyncio.wait_for(completed.get(), timeout=1) == "webhook-dependent-cleanup"
+        pending_completion = completed.get()
         with pytest.raises(TimeoutError):
-            await asyncio.wait_for(completed.get(), timeout=0.05)
+            await asyncio.wait_for(pending_completion, timeout=0.05)
         assert manager._run_lock.locked() is False
     finally:
         manual.cancel()

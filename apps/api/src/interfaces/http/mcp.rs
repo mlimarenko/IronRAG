@@ -584,18 +584,45 @@ pub(super) fn ok_tool_result(message: &str, structured_content: Value) -> McpToo
     // is empty. A summary-only text therefore looks like an empty result to
     // those clients, so the payload is appended to the text while
     // `structuredContent` stays for clients that consume it directly.
-    let text = if structured_content.is_null() {
-        message.to_string()
-    } else {
-        match serde_json::to_string_pretty(&structured_content) {
-            Ok(payload) => format!("{message}\n{payload}"),
-            Err(_) => message.to_string(),
-        }
-    };
+    let text = tool_result_text(message, &structured_content);
     McpToolResult {
         content: vec![McpContentBlock { content_type: "text", text }],
         structured_content,
         is_error: false,
+    }
+}
+
+fn tool_result_text(message: &str, structured_content: &Value) -> String {
+    if structured_content.is_null() {
+        return message.to_string();
+    }
+    match serde_json::to_string_pretty(structured_content) {
+        Ok(payload) => format!("{message}\n{payload}"),
+        Err(_) => message.to_string(),
+    }
+}
+
+/// Re-renders the JSON payload embedded in the text block after
+/// `structured_content` changed. Both representations of one result must carry
+/// the same fields: a text-only client that reads the appended JSON must not see
+/// an earlier sequence budget or a missing query language. `previous` is the
+/// structured content the current text block was rendered from; a block that
+/// does not end with exactly that serialization (for example one replaced by a
+/// plain refusal message) keeps its text.
+pub(super) fn resync_tool_result_text(result: &mut McpToolResult, previous: &Value) {
+    if previous.is_null() {
+        return;
+    }
+    let Ok(previous_payload) = serde_json::to_string_pretty(previous) else {
+        return;
+    };
+    let Ok(payload) = serde_json::to_string_pretty(&result.structured_content) else {
+        return;
+    };
+    for block in &mut result.content {
+        if let Some(prefix) = block.text.strip_suffix(&previous_payload) {
+            block.text = format!("{prefix}{payload}");
+        }
     }
 }
 

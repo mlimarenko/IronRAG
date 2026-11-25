@@ -15,6 +15,14 @@ use super::*;
 )]
 pub(super) async fn run_migrate(state: &AppState, command: MigrateCommand) -> Result<()> {
     match command {
+        MigrateCommand::TextPublicationSchema { apply, json } => {
+            let report = text_publication_schema::migrate_text_publication_schema(
+                &state.persistence.postgres,
+                apply,
+            )
+            .await?;
+            emit_schema_migration("migrate.text-publication-schema", json, &report)
+        }
         MigrateCommand::UserPreferenceSchema { apply, json } => {
             let report = user_preference_schema::migrate_user_preference_schema(
                 &state.persistence.postgres,
@@ -158,6 +166,18 @@ trait SchemaMigrationReport {
     fn apply(&self) -> bool;
     fn already_current(&self) -> bool;
     fn schema_applied(&self) -> bool;
+}
+
+impl SchemaMigrationReport for text_publication_schema::TextPublicationSchemaMigrationReport {
+    fn apply(&self) -> bool {
+        self.apply
+    }
+    fn already_current(&self) -> bool {
+        self.already_current
+    }
+    fn schema_applied(&self) -> bool {
+        self.schema_applied
+    }
 }
 
 impl SchemaMigrationReport for user_preference_schema::UserPreferenceSchemaMigrationReport {

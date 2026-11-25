@@ -120,71 +120,115 @@ async function readAssistantTurnStream(
   throw new Error('Assistant stream ended before completion')
 }
 
-function isRecoverableAssistantStreamError(error: unknown): boolean {
-  return !(error instanceof AssistantTurnFailedEventError) && !(error instanceof ApiError)
-}
-
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms))
 }
 
-function latestAssistantExecutionAfterQuestion(
-  conversation: AssistantHydratedConversation,
-  questionText: string,
-  minimumQuestionIndex: number,
-): string | null {
-  const normalizedQuestion = questionText.trim()
-  let lastQuestionIndex = -1
-  conversation.messages.forEach((message, index) => {
-    if (
-      index >= minimumQuestionIndex &&
-      message.role === 'user' &&
-      message.content.trim() === normalizedQuestion
-    ) {
-      lastQuestionIndex = index
-    }
-  })
-  if (lastQuestionIndex < 0) return null
+const TERMINAL_ANSWER_STATES: ReadonlySet<string> = new Set(['completed', 'recovered'])
+const TERMINAL_NO_ANSWER_STATES: ReadonlySet<string> = new Set(['failed', 'canceled'])
 
-  for (let index = conversation.messages.length - 1; index > lastQuestionIndex; index -= 1) {
-    const message = conversation.messages[index]
-    if (!message) continue
-    if (message.role === 'assistant' && message.executionId) {
-      return message.executionId
-    }
-  }
-  return null
+const QUERY_EXECUTION_ID_HEADER = 'x-ironrag-query-execution-id'
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
+
+type DurableAssistantTurn =
+  | { kind: 'answer'; detail: AssistantTurnExecutionResponse }
+  | { kind: 'pending' }
+  | { kind: 'no-answer' }
+
+function isTerminalExecutionState(state: string): boolean {
+  return TERMINAL_ANSWER_STATES.has(state) || TERMINAL_NO_ANSWER_STATES.has(state)
 }
 
-async function recoverAssistantTurnFromDurableSession(
+function readQueryExecutionId(response: Response): string | null {
+  const raw = response.headers.get(QUERY_EXECUTION_ID_HEADER)?.trim().toLowerCase()
+  if (!raw || !UUID_PATTERN.test(raw)) return null
+  return raw
+}
+
+function matchDurableAssistantTurn(
+  detail: AssistantTurnExecutionResponse,
   sessionId: string,
-  questionText: string,
-  minimumQuestionIndex: number,
+  executionId: string,
+): DurableAssistantTurn {
+  const execution = detail.execution
+  if (execution.id !== executionId || execution.conversationId !== sessionId) {
+    return { kind: 'no-answer' }
+  }
+  const requestTurn = detail.requestTurn
+  const requestTurnId = execution.requestTurnId
+  if (
+    !requestTurnId ||
+    requestTurn?.id !== requestTurnId ||
+    requestTurn.conversationId !== sessionId ||
+    requestTurn.turnKind !== 'user'
+  ) {
+    return { kind: 'no-answer' }
+  }
+  const state = execution.lifecycleState
+  const responseTurn = detail.responseTurn
+  const responseTurnId = execution.responseTurnId
+  const responseLinked =
+    !!responseTurnId &&
+    responseTurn?.id === responseTurnId &&
+    responseTurn.turnKind === 'assistant' &&
+    responseTurn.conversationId === sessionId &&
+    responseTurn.executionId === executionId &&
+    responseTurn.contentText.trim().length > 0
+  if (!responseLinked) {
+    return isTerminalExecutionState(state) ? { kind: 'no-answer' } : { kind: 'pending' }
+  }
+  if (TERMINAL_ANSWER_STATES.has(state)) return { detail, kind: 'answer' }
+  if (TERMINAL_NO_ANSWER_STATES.has(state)) return { kind: 'no-answer' }
+  return { kind: 'pending' }
+}
+
+async function recoverAssistantExecution(
+  sessionId: string,
+  executionId: string,
 ): Promise<AssistantTurnExecutionResponse | null> {
   const deadline = Date.now() + STREAM_RECOVERY_TIMEOUT_MS
-  while (Date.now() < deadline) {
-    const conversation = await queryApi.getSession(sessionId)
-    const executionId = latestAssistantExecutionAfterQuestion(
-      conversation,
-      questionText,
-      minimumQuestionIndex,
-    )
-    if (executionId) {
-      return queryApi.getExecution(executionId)
+  const signal = AbortSignal.timeout(STREAM_RECOVERY_TIMEOUT_MS)
+  let observed = false
+  while (!signal.aborted && Date.now() < deadline) {
+    let detail: AssistantTurnExecutionResponse
+    try {
+      detail = await queryApi.getExecution(executionId, signal)
+    } catch (error: unknown) {
+      if (signal.aborted) return null
+      // The stream headers can arrive before the execution row is committed.
+      if (!observed && error instanceof ApiError && error.status === 404) {
+        await delay(STREAM_RECOVERY_INTERVAL_MS)
+        continue
+      }
+      throw error
     }
+    observed = true
+    const match = matchDurableAssistantTurn(detail, sessionId, executionId)
+    if (match.kind === 'answer') return match.detail
+    // A terminal turn that does not carry the linked answer cannot be resolved
+    // by waiting; surface the transport failure.
+    if (match.kind === 'no-answer') return null
     await delay(STREAM_RECOVERY_INTERVAL_MS)
   }
   return null
 }
 
-function canRecoverAssistantTurn(error: unknown, sawActivity: boolean): boolean {
-  return sawActivity && isRecoverableAssistantStreamError(error)
+/**
+ * A turn the server accepted can lose its stream in the transport, before or
+ * after the first activity frame, and the browser then cannot tell whether the
+ * turn ran. Recovery is therefore allowed for any failure after an accepted
+ * HTTP response, but never for a rejection the server actually sent and never
+ * for a deliberate backend failure event.
+ */
+function canRecoverAssistantTurn(error: unknown): boolean {
+  return !(error instanceof AssistantTurnFailedEventError) && !(error instanceof ApiError)
 }
 
 async function createAssistantTurnStreamRequest(
   sessionId: string,
   contentText: string,
-  onActivity: AssistantTurnActivityHandler,
+  onAccepted: (executionId: string) => void,
+  onActivity?: AssistantTurnActivityHandler,
 ): Promise<AssistantTurnExecutionResponse> {
   const response = await fetch(`/v1/query/sessions/${sessionId}/turns`, {
     body: JSON.stringify({ contentText }),
@@ -196,6 +240,8 @@ async function createAssistantTurnStreamRequest(
     method: 'POST',
     signal: AbortSignal.timeout(TURN_TIMEOUT_MS),
   })
+  const executionId = readQueryExecutionId(response)
+  if (response.ok && executionId) onAccepted(executionId)
   return readAssistantTurnStream(response, onActivity)
 }
 
@@ -223,32 +269,34 @@ export const queryApi = {
   createTurnStream: async (
     sessionId: string,
     contentText: string,
-    recoveryMessageStartIndex: number,
     onActivity?: AssistantTurnActivityHandler,
+    onAccepted?: (executionId: string) => void,
   ) => {
-    let sawActivity = false
-    const handleActivity: AssistantTurnActivityHandler = (event) => {
-      sawActivity = true
-      onActivity?.(event)
-    }
+    let acceptedExecutionId: string | null = null
     try {
-      return await createAssistantTurnStreamRequest(sessionId, contentText, handleActivity)
-    } catch (error: unknown) {
-      if (!canRecoverAssistantTurn(error, sawActivity)) {
-        throw error
-      }
-      const recovered = await recoverAssistantTurnFromDurableSession(
+      return await createAssistantTurnStreamRequest(
         sessionId,
         contentText,
-        recoveryMessageStartIndex,
+        (executionId) => {
+          acceptedExecutionId = executionId
+          onAccepted?.(executionId)
+        },
+        onActivity,
       )
+    } catch (error: unknown) {
+      // Without the server-owned execution handle the browser cannot prove which
+      // submission the durable answer belongs to, so it reports the failure.
+      if (!acceptedExecutionId || !canRecoverAssistantTurn(error)) {
+        throw error
+      }
+      const recovered = await recoverAssistantExecution(sessionId, acceptedExecutionId)
       if (recovered) return recovered
       throw error
     }
   },
-  getExecution: (executionId: string) =>
-    Query.getQueryExecution({ path: { executionId } }).then((result): AssistantExecutionDetail =>
-      unwrap(result),
+  getExecution: (executionId: string, signal?: AbortSignal) =>
+    Query.getQueryExecution({ path: { executionId }, signal: signal ?? null }).then(
+      (result): AssistantExecutionDetail => unwrap(result),
     ),
   getExecutionLlmContext: (executionId: string) =>
     Query.getQueryExecutionLlmContext({ path: { executionId } }).then(

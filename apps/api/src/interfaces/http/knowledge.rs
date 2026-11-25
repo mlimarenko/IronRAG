@@ -311,7 +311,7 @@ pub struct KnowledgeRelationDetailResponse {
 #[serde(rename_all = "camelCase")]
 pub struct KnowledgeLibrarySummaryResponse {
     library_id: Uuid,
-    document_counts_by_readiness: BTreeMap<String, i64>,
+    document_counts_by_status: BTreeMap<String, i64>,
     /// Effective publication status, including denial before derived cleanup.
     graph_status: ironrag_contracts::graph::GraphStatus,
     /// Last stored count; only usable when graphStatus is ready, partial or empty.

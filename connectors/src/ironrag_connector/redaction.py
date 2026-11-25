@@ -20,10 +20,15 @@ TRUNCATION_MARKER = "[TRUNCATED]"
 # ``scheme://user:password@host``: the userinfo segment is a credential even
 # when it does not look like one.
 _URL_CREDENTIALS = re.compile(r"(?i)\b([a-z][a-z0-9+.\-]*://)[^/@\s]+@")
+# The scheme is spelled case by case on purpose: a flag over the whole pattern
+# would also cover the lookahead, whose uppercase class must stay
+# case-sensitive so a plain lowercase word after ``Bearer`` is not scrubbed.
 _BEARER = re.compile(
-    r"(?i:\bBearer\s+)(?=[A-Za-z0-9._~+/=\-]*[A-Z0-9._~+/=\-])[A-Za-z0-9._~+/=\-]{8,}"
+    r"\b[Bb][Ee][Aa][Rr][Ee][Rr]\s+"
+    r"(?=[A-Za-z0-9._~+/=\-]*[A-Z0-9._~+/=\-])"
+    r"[A-Za-z0-9._~+/=\-]{8,}"
 )
-_BASIC = re.compile(r"(?i:\bBasic\s+)(?=[A-Za-z0-9+/=]*[A-Z0-9+/=])[A-Za-z0-9+/=]{8,}")
+_BASIC = re.compile(r"\b[Bb][Aa][Ss][Ii][Cc]\s+(?=[A-Za-z0-9+/=]*[A-Z0-9+/=])[A-Za-z0-9+/=]{8,}")
 _PROVIDER_KEY = re.compile(r"\bsk-[A-Za-z0-9_\-]{8,}")
 _SECRET_ASSIGNMENT = re.compile(
     r"(?i)\b(password|passwd|secret|client_secret|token|access_token|refresh_token"
@@ -34,7 +39,9 @@ _EMAIL = re.compile(r"(?i)\b[A-Z0-9._%+\-]+@[A-Z0-9.\-]+\.[A-Z]{2,}\b")
 # Volatile parts of a message that must not split one fault class into many.
 _UUID = re.compile(r"(?i)\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b")
 _URL = re.compile(r"(?i)\b[a-z][a-z0-9+.\-]*://[^\s\"']+")
-_PATH = re.compile(r"\"[^\"]*[\\/][^\"]*\"|'[^']*[\\/][^']*'")
+# Possessive quantifiers keep a long quoted run linear: a quote with no
+# separator must fail once instead of rescanning every prefix of the run.
+_PATH = re.compile(r"\"[^\"\\/]*+[\\/][^\"]*+\"|'[^'\\/]*+[\\/][^']*+'")
 _HEX_ID = re.compile(r"\b[0-9a-fA-F]{16,}\b")
 _NUMBER = re.compile(r"\b\d+\b")
 _WHITESPACE = re.compile(r"\s+")

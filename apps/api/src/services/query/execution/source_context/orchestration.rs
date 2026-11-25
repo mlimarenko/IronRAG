@@ -127,6 +127,10 @@ pub(crate) async fn augment_structured_source_context(
             document_index,
             chunks,
         );
+    }
+    if requests_expanded_source_context
+        || query_ir.is_some_and(QueryIR::requests_document_overview_evidence)
+    {
         seed_document_head_source_context_anchors(&mut candidates);
     }
     // T2: source-slice loader now honours `temporal_constraints` via the

@@ -581,6 +581,13 @@ impl DocumentStore for PgDocumentStore {
         self.list_chunks_by_ids_impl(chunk_ids).await
     }
 
+    async fn list_chunk_reference_metadata_by_ids(
+        &self,
+        chunk_ids: &[Uuid],
+    ) -> anyhow::Result<Vec<KnowledgeChunkReferenceMetadataRow>> {
+        self.list_chunk_reference_metadata_by_ids_impl(chunk_ids).await
+    }
+
     async fn search_code_pattern_chunks_by_terms(
         &self,
         library_id: Uuid,

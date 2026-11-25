@@ -140,13 +140,17 @@ impl UnifiedGateway {
                 let dispatch = call.dispatch.ok_or_else(|| {
                     ProviderCallError::protocol("provider dispatch authority is missing")
                 })?;
-                let response = self
+                let send = self
                     .send_provider_request(request_builder.json(&body), dispatch, "native-chat")
                     .await?;
+                let (response, mut permit) = send.into_parts();
                 let (status, headers, body_bytes) =
                     read_provider_response_body(response, call.provider_kind, "native chat")
                         .await?;
                 if !status.is_success() {
+                    // The transport returned a reply that will be retried. Its
+                    // row must be terminal before the next attempt starts.
+                    permit.fail_send();
                     return Err(provider_status_error_from_read(
                         call.provider_kind,
                         status,
@@ -154,6 +158,9 @@ impl UnifiedGateway {
                         body_bytes,
                     ));
                 }
+                // The reply is accepted: the row stays open for the caller's
+                // exact usage settlement.
+                permit.complete_send();
                 let body_bytes = body_bytes.unwrap_or_default();
                 let response =
                     parse_provider_json_body(&body_bytes, call.provider_kind, "native chat")?;
@@ -211,18 +218,22 @@ impl UnifiedGateway {
                 let dispatch = request.dispatch.ok_or_else(|| {
                     ProviderCallError::protocol("provider dispatch authority is missing")
                 })?;
-                let response = self
+                let send = self
                     .send_provider_request(
                         request_builder.body(request_body.clone()),
                         dispatch,
                         "chat",
                     )
                     .await?;
+                let (response, mut permit) = send.into_parts();
 
                 let (status, headers, body_bytes) =
                     read_provider_response_body(response, request.provider_kind, "chat").await?;
 
                 if !status.is_success() {
+                    // The reply is retryable; terminalize this row first so the
+                    // next physical attempt owns its own row.
+                    permit.fail_send();
                     return Err(provider_status_error_from_read(
                         request.provider_kind,
                         status,
@@ -230,6 +241,7 @@ impl UnifiedGateway {
                         body_bytes,
                     ));
                 }
+                permit.complete_send();
                 let body_bytes = body_bytes.unwrap_or_default();
 
                 let body = parse_provider_json_body(&body_bytes, request.provider_kind, "chat")?;
@@ -275,7 +287,7 @@ impl UnifiedGateway {
             },
         )?;
 
-        let (response, _provider_guard) = with_retry(
+        let (response, _provider_guard, mut permit) = with_retry(
             || async {
                 let provider_guard =
                     self.begin_provider_attempt(request.provider_kind, request.base_url).await?;
@@ -290,25 +302,37 @@ impl UnifiedGateway {
                 let dispatch = request.dispatch.ok_or_else(|| {
                     ProviderCallError::protocol("provider dispatch authority is missing")
                 })?;
-                let response = self
+                let send = self
                     .send_provider_request(
                         request_builder.body(request_body.clone()),
                         dispatch,
                         "chat-stream",
                     )
                     .await?;
+                let (response, mut permit) = send.into_parts();
 
                 let status = response.status();
                 if status.is_success() {
-                    return Ok((response, provider_guard));
+                    return Ok((response, provider_guard, permit));
                 }
 
+                // The stream frame is retryable: its row must be terminal
+                // before the next attempt can claim a new one.
+                permit.fail_send();
                 Err(provider_http_error_from_response(response, request.provider_kind).await)
             },
             self.retry_policy,
         )
         .await?;
 
-        drain_openai_compatible_stream(response, on_delta).await
+        // The row is accepted only when the stream drained completely; an
+        // interrupted or failed drain keeps it unresolved without usage.
+        let drained = drain_openai_compatible_stream(response, on_delta).await;
+        if drained.is_ok() {
+            permit.complete_send();
+        } else {
+            permit.fail_send();
+        }
+        drained
     }
 }

@@ -384,16 +384,58 @@ pub(super) struct AgentAnswerVerificationRequest<'a> {
     pub(super) assistant_grounding: &'a AssistantGroundingEvidence,
 }
 
-pub(super) async fn verify_agent_answer_against_tool_evidence(
-    request: AgentAnswerVerificationRequest<'_>,
-) -> anyhow::Result<RuntimeAnswerVerification> {
-    Ok(prepare_agent_verification_stage(request).await?.verification)
+pub(super) fn admitted_manifest_chunks(
+    manifest: &AgentEvidenceManifest,
+) -> Vec<crate::services::query::execution::RuntimeMatchedChunk> {
+    manifest
+        .sources
+        .iter()
+        .map(|source| crate::services::query::execution::RuntimeMatchedChunk {
+            chunk_id: source.chunk_id,
+            document_id: source.document_id,
+            revision_id: source.document_revision_id,
+            chunk_index: 0,
+            chunk_kind: None,
+            document_label: String::new(),
+            excerpt: String::new(),
+            score_kind: crate::services::query::execution::RuntimeChunkScoreKind::Relevance,
+            score: None,
+            source_text: source.text.clone(),
+        })
+        .collect()
 }
 
 /// Draft-only formal checks. Child outcome and semantic execution belong to
 /// the selected parent finalizer, never to this repeatable revision probe.
+#[cfg(any(test, feature = "test-support"))]
 pub(super) async fn prepare_agent_verification_stage(
     request: AgentAnswerVerificationRequest<'_>,
+) -> anyhow::Result<crate::services::query::execution::AnswerVerificationStage> {
+    prepare_agent_verification_stage_with_manifest(request, &AgentEvidenceManifest::default(), true)
+        .await
+}
+
+/// Composed synthesis verifies only the admitted primary chunks. Bundle chunk
+/// rows, segments, technical facts and their bundle object are not generator
+/// evidence and must not enter the literal/claim corpus.
+pub(super) fn composed_verification_evidence(
+    mut evidence: AuthoritativeAnswerEvidence,
+) -> AuthoritativeAnswerEvidence {
+    evidence.bundle = None;
+    evidence.chunk_rows.clear();
+    evidence.structured_blocks.clear();
+    evidence.technical_facts.clear();
+    evidence
+}
+
+/// Same stage, but the semantic loader and the non-semantic literal probe see
+/// exactly the typed sources admitted to the agent budget before generation.
+/// `include_bundle_blocks` stays true only for typed child passthrough reuse,
+/// where the child's selected segment manifest is the trusted evidence.
+pub(super) async fn prepare_agent_verification_stage_with_manifest(
+    request: AgentAnswerVerificationRequest<'_>,
+    manifest: &AgentEvidenceManifest,
+    include_bundle_blocks: bool,
 ) -> anyhow::Result<crate::services::query::execution::AnswerVerificationStage> {
     let AgentAnswerVerificationRequest {
         state,
@@ -420,27 +462,35 @@ pub(super) async fn prepare_agent_verification_stage(
         .as_ref()
         .and_then(|refs| query_ir_from_bundle_diagnostics(&refs.bundle.assembly_diagnostics));
     let intent_profile = query_intent_profile_from_query_ir(query_ir.as_ref());
-    let authoritative_evidence = AuthoritativeAnswerEvidence {
+    let mut authoritative_evidence = AuthoritativeAnswerEvidence {
         bundle: reference_context.bundle_refs.as_ref().map(|refs| refs.bundle.clone()),
         chunk_rows: reference_context.chunk_rows,
         structured_blocks: reference_context.structured_block_rows,
         technical_facts: reference_context.technical_fact_rows,
     };
-    let prompt_context = assistant_grounding.verification_corpus.join("\n\n");
+    // Composed synthesis may verify only the admitted primary chunks; every
+    // bundle-derived text source must be cleared, or an answer could validate
+    // a literal present only in an unadmitted bundle chunk/fact.
+    // Typed child passthrough is the exception and replaces this context
+    // wholesale from the trusted child report.
+    if !include_bundle_blocks {
+        authoritative_evidence = composed_verification_evidence(authoritative_evidence);
+    }
+    let prompt_context = manifest.source_context(assistant_grounding);
+    let primary_answer_chunks = admitted_manifest_chunks(manifest);
     let verification = verify_answer_against_authoritative_evidence(AnswerVerificationRequest {
         question: &execution.query_text,
         answer: answer_text,
         intent_profile: &intent_profile,
         evidence: &authoritative_evidence,
-        chunks: &[],
-        prompt_context: &prompt_context,
+        chunks: &primary_answer_chunks,
         assistant_grounding,
     });
     Ok(crate::services::query::execution::AnswerVerificationStage {
         verification,
         generation: crate::services::query::execution::AnswerGenerationStage {
             intent_profile,
-            primary_answer_chunks: Vec::new(),
+            primary_answer_chunks,
             authoritative_evidence,
             assistant_grounding: assistant_grounding.clone(),
             answer: answer_text.to_owned(),

@@ -16,6 +16,7 @@ use tracing::Instrument as _;
 use uuid::Uuid;
 
 use super::outbound_http::{PublicHttpUrlError, is_non_public_ip};
+use super::provider_send;
 
 pub const PROVIDER_SUCCESS_BODY_MAX_BYTES: u64 = 32 * 1024 * 1024;
 pub const PROVIDER_ERROR_BODY_MAX_BYTES: u64 = 64 * 1024;
@@ -466,6 +467,66 @@ pub enum ProviderSurface {
     Decision,
 }
 
+/// The natively authenticated caller of one paid provider attempt.
+///
+/// Every value is derived from an authentication the request already proved:
+/// the server-side MCP session digest, the browser session row, or the mutation
+/// origin the admitting request recorded. Nothing here is ever read from a
+/// policy, a configuration value, a CLI argument, a request body, a request
+/// label or an error message — those can only ever leave a dispatch
+/// [`Unattributed`](Self::Unattributed), which a fenced scope refuses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DispatchCaller {
+    McpSession([u8; 32]),
+    IamSession(Uuid),
+    MutationOrigin {
+        mutation_id: Uuid,
+        principal_id: Uuid,
+    },
+    /// No native caller bound this attempt: direct API tokens, maintenance
+    /// producers and connector-origin work with no recorded principal.
+    Unattributed,
+}
+
+tokio::task_local! {
+    static DISPATCH_CALLER: DispatchCaller;
+}
+
+impl DispatchCaller {
+    /// The caller a queued job is dispatched for, derived from the record that
+    /// admitted it: the mutation id plus the principal that mutation names.
+    /// A missing or nil principal is [`Self::Unattributed`], never a worker
+    /// identity, so a grant without a matching entry refuses the attempt.
+    #[must_use]
+    pub fn mutation_origin(mutation_id: Uuid, requested_by_principal_id: Option<Uuid>) -> Self {
+        match requested_by_principal_id {
+            Some(principal_id) if !principal_id.is_nil() && !mutation_id.is_nil() => {
+                Self::MutationOrigin { mutation_id, principal_id }
+            }
+            _ => Self::Unattributed,
+        }
+    }
+}
+
+/// Run `future` under the caller one authenticated request proved.
+///
+/// Installed only by the boundary that validated the caller: the HTTP auth
+/// middleware, the MCP session transport, and the ingest job that reads its own
+/// recorded mutation origin. The scope follows `tokio::join!` /
+/// `try_join!` parallelism inside the same task and ends when the future ends.
+pub(crate) async fn with_dispatch_caller<F>(caller: DispatchCaller, future: F) -> F::Output
+where
+    F: std::future::Future,
+{
+    DISPATCH_CALLER.scope(caller, future).await
+}
+
+/// The caller of the current request scope, or `Unattributed` outside one.
+#[must_use]
+pub(crate) fn current_dispatch_caller() -> DispatchCaller {
+    DISPATCH_CALLER.try_with(|caller| *caller).unwrap_or(DispatchCaller::Unattributed)
+}
+
 /// Sealed, non-serializable attestation of the resolved route and credential.
 ///
 /// Everything here is derived from the authoritative runtime binding (or the
@@ -482,6 +543,7 @@ pub struct ProviderDispatchContext {
     model_name: String,
     base_url: String,
     auth: Option<AttestedCredential>,
+    caller: DispatchCaller,
 }
 
 /// The exact credential header a resolved binding attaches, reduced to its
@@ -690,6 +752,10 @@ impl DispatchAuthority {
                 header,
                 value_digest: credential_digest(&value),
             }),
+            // Read per attestation, never copied from a binding, policy or
+            // request label: the authoritative value is the request scope's
+            // validated caller.
+            caller: current_dispatch_caller(),
         }
     }
 }
@@ -737,6 +803,12 @@ impl ProviderDispatchContext {
         &self.model_name
     }
 
+    /// The natively authenticated caller this attempt is dispatched for.
+    #[must_use]
+    pub fn caller(&self) -> DispatchCaller {
+        self.caller
+    }
+
     /// Whether `endpoint` stays under the resolved base URL this context was
     /// issued for. A caller cannot redirect an attested binding elsewhere.
     #[must_use]
@@ -778,6 +850,12 @@ pub enum ProviderDispatchRefusal {
     RouteMismatch,
     #[error("provider dispatch credential does not match the resolved binding")]
     CredentialMismatch,
+    #[error("provider dispatch is not authorized for this caller")]
+    Caller,
+    #[error("provider dispatch has no durable attribution for this send")]
+    Attribution,
+    #[error("provider dispatch already has a send in flight for this logical call")]
+    Busy,
     #[error("provider request body is not an inspectable bounded JSON object")]
     UninspectableBody,
     #[error("provider request is outside the admitted request envelope")]
@@ -790,20 +868,108 @@ pub enum ProviderDispatchRefusal {
 
 /// One acknowledged durable reservation of a full attempt unit.
 ///
-/// The permit is proof, not credit: dropping it never returns allowance.
+/// The permit is proof, not credit: dropping it never returns allowance. When
+/// the admission owner created a durable send row for this attempt, the permit
+/// also owns that row's transport lifetime: a permit dropped before the caller
+/// settles it terminalizes the row without usage, so a canceled or dropped send
+/// is visible as unresolved instead of disappearing.
 pub struct ProviderDispatchPermit {
     scope_id: Option<Uuid>,
+    send: Option<ProviderSendPermit>,
+}
+
+/// The durable row of one admitted physical send.
+///
+/// It is armed from the moment the row and the counter commit in one
+/// transaction and stays armed until the reply is accepted. `complete` hands
+/// the row to the caller's settlement; `fail` and a drop terminalize it without
+/// usage, which the cost coverage reports as unresolved rather than free.
+pub struct ProviderSendPermit {
+    provider_call_id: Uuid,
+    terminator: Option<ProviderSendTerminator>,
+    armed: bool,
+}
+
+/// Terminalizes a send row from a context that has no application state, such
+/// as a dropped transport future. It must never fabricate usage.
+pub type ProviderSendTerminator = Arc<dyn Fn(Uuid, &'static str) + Send + Sync>;
+
+impl ProviderSendPermit {
+    #[must_use]
+    pub fn new(provider_call_id: Uuid, terminator: Option<ProviderSendTerminator>) -> Self {
+        Self { provider_call_id, terminator, armed: true }
+    }
+
+    #[must_use]
+    pub fn provider_call_id(&self) -> Uuid {
+        self.provider_call_id
+    }
+
+    fn terminalize(&mut self, call_state: &'static str) {
+        if !self.armed {
+            return;
+        }
+        self.armed = false;
+        if let Some(terminator) = &self.terminator {
+            terminator(self.provider_call_id, call_state);
+        }
+        provider_send::finish_current_send_row(self.provider_call_id);
+    }
+
+    /// The reply was accepted. The row stays open for the caller's settlement,
+    /// and the scope may claim a new row if the caller asks for another send.
+    fn accept_reply(&mut self) {
+        if !self.armed {
+            return;
+        }
+        self.armed = false;
+        provider_send::finish_current_send_row(self.provider_call_id);
+    }
+}
+
+impl Drop for ProviderSendPermit {
+    fn drop(&mut self) {
+        // A dropped send had no accepted reply, so its row must not stay
+        // `started` and must not claim usage. The reaper remains the last
+        // resort, not the normal path.
+        self.terminalize("canceled");
+    }
+}
+
+impl std::fmt::Debug for ProviderDispatchPermit {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ProviderDispatchPermit")
+            .field("scope_id", &self.scope_id)
+            .field("send_id", &self.send_id())
+            .finish()
+    }
+}
+
+impl std::fmt::Debug for ProviderSendPermit {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ProviderSendPermit")
+            .field("provider_call_id", &self.provider_call_id)
+            .field("armed", &self.armed)
+            .finish()
+    }
 }
 
 impl ProviderDispatchPermit {
     #[must_use]
     pub fn unqualified() -> Self {
-        Self { scope_id: None }
+        Self { scope_id: None, send: None }
     }
 
     #[must_use]
     pub fn reserved(scope_id: Uuid) -> Self {
-        Self { scope_id: Some(scope_id) }
+        Self { scope_id: Some(scope_id), send: None }
+    }
+
+    #[must_use]
+    pub fn with_send(scope_id: Option<Uuid>, send: ProviderSendPermit) -> Self {
+        Self { scope_id, send: Some(send) }
     }
 
     /// The incident scope whose attempt unit this permit reserved, or `None`
@@ -812,6 +978,76 @@ impl ProviderDispatchPermit {
     pub fn scope_id(&self) -> Option<Uuid> {
         self.scope_id
     }
+
+    /// The durable row of this physical send, if the admission owner created
+    /// one for this authority.
+    #[must_use]
+    pub fn send_id(&self) -> Option<Uuid> {
+        self.send.as_ref().map(ProviderSendPermit::provider_call_id)
+    }
+
+    /// Accepts the reply: the row stays `started` for the caller's settlement,
+    /// which is the only place that may record usage.
+    pub fn complete_send(&mut self) {
+        if let Some(send) = self.send.as_mut() {
+            send.accept_reply();
+        }
+    }
+
+    /// Rejects the reply before any retry may start. The row becomes `failed`
+    /// without usage, so the next physical attempt owns a new row.
+    pub fn fail_send(&mut self) {
+        if let Some(send) = self.send.as_mut() {
+            send.terminalize("failed");
+        }
+    }
+}
+
+/// The transport result of one admitted physical send, carrying the permit that
+/// owns the matching durable row.
+pub struct ProviderSendResponse {
+    response: reqwest::Response,
+    permit: ProviderDispatchPermit,
+}
+
+impl ProviderSendResponse {
+    #[must_use]
+    pub fn into_parts(self) -> (reqwest::Response, ProviderDispatchPermit) {
+        (self.response, self.permit)
+    }
+
+    #[must_use]
+    pub fn status(&self) -> reqwest::StatusCode {
+        self.response.status()
+    }
+}
+
+/// Test-only caller scope, so an integration test can drive the real transport
+/// with the same authenticated caller a product request carries.
+#[cfg(feature = "test-support")]
+pub async fn with_test_dispatch_caller<F>(caller: DispatchCaller, future: F) -> F::Output
+where
+    F: std::future::Future,
+{
+    with_dispatch_caller(caller, future).await
+}
+
+/// Test-only runtime-binding authority builder for a synthetic provider fixture.
+#[cfg(feature = "test-support")]
+pub fn test_runtime_binding_authority(
+    provider_kind: impl Into<String>,
+    provider_catalog_id: Uuid,
+    model_name: impl Into<String>,
+    base_url: impl Into<String>,
+) -> DispatchAuthority {
+    DispatchAuthority::runtime_binding(
+        provider_kind,
+        provider_catalog_id,
+        None,
+        model_name,
+        base_url,
+        None,
+    )
 }
 
 /// The single owner that may admit a built provider request.
@@ -897,7 +1133,7 @@ pub async fn send_provider_http_request(
     context: &ProviderDispatchContext,
     admission: &dyn ProviderDispatchAdmission,
     operation: &str,
-) -> Result<reqwest::Response, ProviderDispatchError> {
+) -> Result<ProviderSendResponse, ProviderDispatchError> {
     let (client, request) = crate::observability::inject_trace_context(request).build_split();
     let request = request.map_err(|_| ProviderDispatchError::Build)?;
 
@@ -910,7 +1146,10 @@ pub async fn send_provider_http_request(
     let body = inspect_request_body(&request)?;
     let evidence =
         DispatchRequestEvidence { method: request.method(), url: request.url(), body: &body };
-    let _permit = admission.admit(context, &evidence).await?;
+    // The admission owner creates the durable send row and debits the counter in
+    // one transaction before the first byte leaves, and the permit owns that row
+    // for the rest of the transport.
+    let mut permit = admission.admit(context, &evidence).await?;
 
     let server_address = request.url().host_str().unwrap_or("unknown").to_owned();
     let method_label = request.method().as_str().to_owned();
@@ -935,10 +1174,18 @@ pub async fn send_provider_http_request(
         outcome,
         started.elapsed().as_secs_f64(),
     );
-    if let Ok(response) = &response {
-        span.record("http.response.status_code", response.status().as_u16());
+    match response {
+        Ok(response) => {
+            span.record("http.response.status_code", response.status().as_u16());
+            Ok(ProviderSendResponse { response, permit })
+        }
+        Err(error) => {
+            // No reply reached the caller, so this physical attempt carries no
+            // usage and must be terminal before any retry starts.
+            permit.fail_send();
+            Err(error.into())
+        }
     }
-    Ok(response?)
 }
 
 #[cfg(test)]
@@ -1177,6 +1424,28 @@ mod tests {
 #[cfg(test)]
 mod dispatch_attestation_tests {
     use super::*;
+    #[test]
+    fn job_origin_is_unattributed_without_a_recorded_principal() {
+        let mutation_id = Uuid::from_u128(7);
+        assert_eq!(
+            DispatchCaller::mutation_origin(mutation_id, Some(Uuid::from_u128(9))),
+            DispatchCaller::MutationOrigin { mutation_id, principal_id: Uuid::from_u128(9) },
+        );
+        assert_eq!(
+            DispatchCaller::mutation_origin(mutation_id, None),
+            DispatchCaller::Unattributed
+        );
+        assert_eq!(
+            DispatchCaller::mutation_origin(mutation_id, Some(Uuid::nil())),
+            DispatchCaller::Unattributed,
+            "a nil principal is not a caller",
+        );
+        assert_eq!(
+            DispatchCaller::mutation_origin(Uuid::nil(), Some(Uuid::from_u128(9))),
+            DispatchCaller::Unattributed,
+            "a job without a mutation id names no origin",
+        );
+    }
 
     fn context(key: &str) -> ProviderDispatchContext {
         DispatchAuthority::runtime_binding(

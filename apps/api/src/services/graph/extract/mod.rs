@@ -31,7 +31,8 @@ pub(crate) use types::{
     GraphExtractionOutcome, GraphExtractionRequest, GraphExtractionResumeState,
     GraphExtractionStructuredChunkContext, GraphExtractionSubTypeHintEntry,
     GraphExtractionSubTypeHintGroup, GraphExtractionSubTypeHints, GraphExtractionTaskFailure,
-    GraphExtractionTaskFailureCode, GraphExtractionTechnicalFact, GraphRelationCandidate,
+    GraphExtractionTaskFailureCode, GraphExtractionTechnicalFact, GraphProviderCallId,
+    GraphRelationCandidate,
 };
 pub(crate) use watchdog::{GraphExtractionActivity, GraphExtractionIdleWatchdog};
 
@@ -49,7 +50,9 @@ use crate::{
     },
     app::state::AppState,
     domains::{
-        agent_runtime::{RuntimeExecutionOwner, RuntimeStageKind, RuntimeStageState},
+        agent_runtime::{
+            RuntimeExecutionOwner, RuntimeStageKind, RuntimeStageState, RuntimeTaskKind,
+        },
         graph_quality::{ExtractionOutcomeStatus, ExtractionRecoverySummary},
     },
     infra::{
@@ -569,7 +572,6 @@ pub(crate) async fn extract_chunk_graph_candidates(
                 authority,
                 request,
                 extraction_record_id,
-                runtime_result.execution.id,
                 extraction_outcome,
             )
             .await
@@ -646,14 +648,13 @@ async fn fail_graph_extraction_encoding_damage(
     ))
 }
 
-/// Marks the owner record ready with the normalized candidate set and links the
-/// runtime execution. Honours a lost authority and a missing owner record.
+/// Marks the owner record ready with the normalized candidate set.
+/// Honours a lost authority and a missing owner record.
 async fn complete_graph_extraction_success(
     state: &AppState,
     authority: IngestRevisionWriteAuthority,
     request: &GraphExtractionRequest,
     extraction_record_id: uuid::Uuid,
-    runtime_execution_id: uuid::Uuid,
     extraction_outcome: GraphExtractionOutcome,
 ) -> std::result::Result<
     IngestAttemptMutationOutcome<GraphExtractionOutcome>,
@@ -706,11 +707,7 @@ async fn complete_graph_extraction_success(
             extraction_outcome.recovery_attempts.clone(),
         )
     })?;
-    Ok(IngestAttemptMutationOutcome::Applied(GraphExtractionOutcome {
-        graph_extraction_id: Some(extraction_record_id),
-        runtime_execution_id: Some(runtime_execution_id),
-        ..extraction_outcome
-    }))
+    Ok(IngestAttemptMutationOutcome::Applied(extraction_outcome))
 }
 
 struct FailedGraphExtractionAttempt {
@@ -748,7 +745,9 @@ async fn persist_graph_extraction_failure(
     )
     .await
     .map_err(|persist_error| GraphExtractionExecutionError {
-        message: format!("failed to persist graph extraction runtime trace: {persist_error:#}"),
+        provider_call_id: error.provider_call_id,
+        message: format!("failed to persist graph extraction runtime trace: {persist_error:#}")
+            .into(),
         request_shape_key: error.request_shape_key.clone(),
         request_size_bytes: error.request_size_bytes,
         provider_failure: error.provider_failure.clone(),
@@ -774,7 +773,7 @@ async fn persist_graph_extraction_failure(
         raw_output_json: serde_json::json!({}),
         normalized_output_json: serde_json::json!({ "entities": [], "relations": [] }),
         glean_pass_count: i32::try_from(error.resume_state.replay_count).unwrap_or(i32::MAX),
-        error_message: Some(error.message.clone()),
+        error_message: Some(error.message.to_string()),
     };
     let update = retry_graph_persistence(|| {
         repositories::runtime_graph_repository::update_runtime_graph_extraction_record_safe_fenced(
@@ -786,7 +785,9 @@ async fn persist_graph_extraction_failure(
     })
     .await
     .map_err(|persist_error| GraphExtractionExecutionError {
-        message: format!("failed to update graph extraction failure record: {persist_error:#}"),
+        provider_call_id: error.provider_call_id,
+        message: format!("failed to update graph extraction failure record: {persist_error:#}")
+            .into(),
         request_shape_key: error.request_shape_key.clone(),
         request_size_bytes: error.request_size_bytes,
         provider_failure: error.provider_failure.clone(),
@@ -803,9 +804,11 @@ async fn persist_graph_extraction_failure(
         }
     };
     updated.ok_or_else(|| GraphExtractionExecutionError {
+        provider_call_id: error.provider_call_id,
         message: format!(
             "graph extraction owner record {extraction_record_id} was not found during failure update"
-        ),
+        )
+        .into(),
         request_shape_key: error.request_shape_key.clone(),
         request_size_bytes: error.request_size_bytes,
         provider_failure: error.provider_failure.clone(),
@@ -916,7 +919,7 @@ async fn run_graph_extraction_runtime(
         );
         let failure = GraphExtractionTaskFailure {
             code: "ingest_stage_cancelled".to_string(),
-            summary: error.message.clone(),
+            summary: error.message.to_string(),
         };
         record_graph_runtime_stage(
             state.agent_runtime.executor(),
@@ -932,7 +935,21 @@ async fn run_graph_extraction_runtime(
         return Err((make_graph_terminal_failure_outcome(failure), Box::new(error)));
     }
 
-    match resolve_graph_extraction(state, runtime_binding, request, cancellation_token).await {
+    let billing_command = graph_provider_reservation_command(
+        runtime_binding,
+        request.activated_by_attempt_id,
+        graph_extraction_id,
+        runtime_session.execution.id,
+    );
+    match resolve_graph_extraction(
+        state,
+        runtime_binding,
+        request,
+        billing_command,
+        cancellation_token,
+    )
+    .await
+    {
         Ok(mut resolved) => {
             // Optional entity typing: rewrite each candidate's node type before
             // it is recorded, persisted or turned into an identity/edge key.
@@ -957,7 +974,6 @@ async fn run_graph_extraction_runtime(
                 },
             );
 
-            let runtime_execution_id = runtime_session.execution.id;
             let recovery_status = resolved.recovery_summary.status.clone();
             if matches!(
                 recovery_status,
@@ -1005,8 +1021,6 @@ async fn run_graph_extraction_runtime(
 
             let normalized = resolved.normalized.clone();
             let outcome = GraphExtractionOutcome {
-                graph_extraction_id: Some(graph_extraction_id),
-                runtime_execution_id: Some(runtime_execution_id),
                 provider_kind: resolved.provider_kind.clone(),
                 model_name: resolved.model_name.clone(),
                 prompt_hash: resolved.prompt_hash.clone(),
@@ -1098,7 +1112,8 @@ async fn run_graph_extraction_runtime(
             Err((
                 make_graph_terminal_failure_outcome(task_failure),
                 Box::new(GraphExtractionExecutionError {
-                    message: failure.error_message,
+                    provider_call_id: failure.provider_call_id,
+                    message: failure.error_message.into(),
                     request_shape_key: failure.request_shape_key,
                     request_size_bytes: failure.request_size_bytes,
                     provider_failure: failure.provider_failure,
@@ -1124,11 +1139,13 @@ async fn resolve_graph_extraction(
     state: &AppState,
     runtime_binding: &ResolvedRuntimeBinding,
     request: &GraphExtractionRequest,
+    billing_command: crate::services::ops::billing::ReserveExecutionProviderCallCommand,
     cancellation_token: &CancellationToken,
 ) -> std::result::Result<types::ResolvedGraphExtraction, GraphExtractionFailureOutcome> {
     session::resolve_graph_extraction_with_gateway(
         state.llm_gateway.as_ref(),
         session::GraphExtractionLoopRequest {
+            billing: Some((state, billing_command)),
             extraction_recovery: &state.retrieval_intelligence_services.extraction_recovery,
             provider_failure_classification: &state
                 .resolve_settle_blockers_services
@@ -1148,4 +1165,33 @@ async fn resolve_graph_extraction(
         cancellation_token,
     )
     .await
+}
+
+fn graph_provider_reservation_command(
+    binding: &ResolvedRuntimeBinding,
+    attempt_id: Option<uuid::Uuid>,
+    graph_extraction_id: uuid::Uuid,
+    runtime_execution_id: uuid::Uuid,
+) -> crate::services::ops::billing::ReserveExecutionProviderCallCommand {
+    let (owner, id, runtime_id, task) = match attempt_id {
+        Some(id) => ("ingest_attempt", id, None, None),
+        None => (
+            "graph_extraction_attempt",
+            graph_extraction_id,
+            Some(runtime_execution_id),
+            Some(RuntimeTaskKind::GraphExtract),
+        ),
+    };
+    crate::services::ops::billing::ReserveExecutionProviderCallCommand {
+        workspace_id: binding.workspace_id,
+        library_id: binding.library_id,
+        owning_execution_kind: owner.to_string(),
+        owning_execution_id: id,
+        runtime_execution_id: runtime_id,
+        runtime_task_kind: task,
+        binding_id: Some(binding.binding_id),
+        provider_catalog_id: binding.provider_catalog_id,
+        model_catalog_id: binding.model_catalog_id,
+        call_kind: "graph_extract".to_string(),
+    }
 }

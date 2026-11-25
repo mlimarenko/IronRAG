@@ -164,6 +164,7 @@ pub(crate) async fn run_graph_extraction(
     let outcome = resolve_graph_extraction_with_gateway(
         gateway,
         GraphExtractionLoopRequest {
+            billing: None,
             extraction_recovery: &ExtractionRecoveryService,
             provider_failure_classification: classification,
             runtime_binding: binding,

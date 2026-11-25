@@ -55,10 +55,21 @@ describe('document status filter vocabulary', () => {
       'canceled',
       'empty',
       'failed',
+      'paused',
+      'pending_materialization',
       'processing',
       'queued',
     ])
   })
+
+  it.each(['paused', 'pending_materialization'] as const)(
+    'resolves %s to its canonical status',
+    (status) => {
+      const state = urlStateAt(`?status=${status}`).result.current
+      expect(state.statusBucket).toBe(status)
+      expect(state.listFilter.status).toEqual([status])
+    },
+  )
 
   it.each([
     ['vectorgap', 'vector_gap'],

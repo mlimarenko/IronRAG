@@ -628,11 +628,11 @@ class ExecutionCostTests(unittest.TestCase):
         )
 
     def test_invalid_threshold_rejected(self):
+        baseline = matrix([case()])
+        candidate = matrix([case()])
         for value in ("NaN", "Infinity", "-1", "bad", "1e9999"):
             with self.subTest(value=value), self.assertRaises(ValueError):
-                comparison.build_cost_comparison(
-                    matrix([case()]), matrix([case()]), value
-                )
+                comparison.build_cost_comparison(baseline, candidate, value)
         args = comparison.parse_args(
             ["base", "candidate", "--max-cost-regression-percent", "0.5"]
         )

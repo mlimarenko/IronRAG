@@ -461,7 +461,7 @@ async fn extract_graph_chunk(
         .cloned()
         .collect::<Vec<_>>();
     ensure_not_cancelled(&task.cancellation_token)?;
-    let response = extract_chunk_graph_candidates(
+    let response = Box::pin(extract_chunk_graph_candidates(
         &task.state,
         &task.graph_runtime_context,
         task.command.authority,
@@ -476,7 +476,7 @@ async fn extract_graph_chunk(
             sub_type_hints: (*task.sub_type_hints).clone(),
         }),
         &task.cancellation_token,
-    )
+    ))
     .await
     .map_err(|error| graph_chunk_extraction_error(chunk.chunk_id, error))?;
     let response = match response {
@@ -486,11 +486,22 @@ async fn extract_graph_chunk(
         }
     };
     ensure_not_cancelled(&task.cancellation_token)?;
-    capture_graph_chunk_billing(&task, &chunk, &response).await?;
     Ok(IngestAttemptMutationOutcome::Applied(graph_chunk_aggregate(&response)))
 }
 
 fn graph_chunk_extraction_error(
+    chunk_id: Uuid,
+    error: GraphExtractionExecutionError,
+) -> anyhow::Error {
+    let provider_call_id = error.provider_call_id;
+    let result = graph_chunk_extraction_error_inner(chunk_id, error);
+    match provider_call_id {
+        Some(id) => result.context(crate::services::graph::extract::GraphProviderCallId(id)),
+        None => result,
+    }
+}
+
+fn graph_chunk_extraction_error_inner(
     chunk_id: Uuid,
     error: GraphExtractionExecutionError,
 ) -> anyhow::Error {
@@ -537,48 +548,6 @@ fn graph_provider_rate_limit(
         failure.retry_after_seconds.map(std::time::Duration::from_secs),
         "provider rate limited; response details were redacted".to_string(),
     ))
-}
-
-async fn capture_graph_chunk_billing(
-    task: &GraphChunkExtractionTask,
-    chunk: &KnowledgeChunkRow,
-    response: &GraphExtractionOutcome,
-) -> anyhow::Result<()> {
-    let graph_extraction_id = response.graph_extraction_id.ok_or_else(|| {
-        anyhow::anyhow!("graph extraction response is missing graph_extraction_id")
-    })?;
-    let runtime_execution_id = response.runtime_execution_id.ok_or_else(|| {
-        anyhow::anyhow!("graph extraction response is missing active runtime_execution_id")
-    })?;
-    if let Err(error) = task
-        .state
-        .application_services
-        .billing
-        .capture_graph_extraction(
-            &task.state,
-            CaptureGraphExtractionBillingCommand {
-                workspace_id: task.command.authority.workspace_id,
-                library_id: task.command.authority.library_id,
-                graph_extraction_id,
-                runtime_execution_id,
-                binding_id: None,
-                provider_kind: response.provider_kind.clone(),
-                model_name: response.model_name.clone(),
-                usage_json: response.usage_json.clone(),
-            },
-        )
-        .await
-    {
-        warn!(
-            revision_id = %task.command.authority.revision_id,
-            chunk_id = %chunk.chunk_id,
-            graph_extraction_id = %graph_extraction_id,
-            runtime_execution_id = %runtime_execution_id,
-            ?error,
-            "graph extraction billing capture failed; continuing graph admission",
-        );
-    }
-    Ok(())
 }
 
 fn graph_chunk_aggregate(response: &GraphExtractionOutcome) -> ChunkExtractAggregate {
@@ -889,8 +858,9 @@ mod tests {
         request_size_bytes: usize,
     ) -> GraphExtractionExecutionError {
         GraphExtractionExecutionError {
-            message: "graph extraction failed".to_string(),
-            request_shape_key: "shape".to_string(),
+            provider_call_id: None,
+            message: "graph extraction failed".into(),
+            request_shape_key: "shape".into(),
             request_size_bytes,
             provider_failure: provider_failure.map(Box::new),
             provider_admission_error: provider_admission_error.map(Box::new),
@@ -907,6 +877,20 @@ mod tests {
             }),
             cancelled: false,
         }
+    }
+
+    #[test]
+    fn graph_chunk_failure_preserves_reserved_provider_call_id() {
+        let id = Uuid::now_v7();
+        let mut error = graph_execution_error(None, None, 0);
+        error.provider_call_id = Some(id);
+        let error = graph_chunk_extraction_error(Uuid::now_v7(), error);
+        assert_eq!(
+            error
+                .downcast_ref::<crate::services::graph::extract::GraphProviderCallId>()
+                .map(|value| value.0),
+            Some(id)
+        );
     }
 
     #[test]

@@ -12,8 +12,7 @@ pub(super) struct AgentAnswerStageInput<'a> {
     pub(super) execution: &'a query_repository::QueryExecutionRow,
     pub(super) execution_context_bundle_id: Uuid,
     pub(super) provider_execution_context: QueryProviderExecutionContext,
-    pub(super) prior_grounded_answer_context_messages:
-        &'a [crate::integrations::llm::ChatMessage],
+    pub(super) prior_grounded_answer_context: &'a PriorGroundedAnswerContext,
     pub(super) agent_conversation_history: &'a [crate::integrations::llm::ChatMessage],
     pub(super) agent_grounded_answer_tool_history: &'a [ExternalConversationTurn],
     pub(super) agent_request_id: &'a str,
@@ -31,7 +30,7 @@ pub(super) async fn execute_agent_answer_stages(
     let answer_started = Utc::now();
     match run_mcp_tool_agent_turn(agent_turn_input(&input)).await {
         Ok(agent_result) => {
-            complete_agent_answer_stage(&mut input, agent_result, answer_started).await
+            Box::pin(complete_agent_answer_stage(&mut input, agent_result, answer_started)).await
         }
         Err(agent_failure) => {
             fail_agent_answer_stage(&mut input, agent_failure, answer_started).await
@@ -49,7 +48,8 @@ fn agent_turn_input<'a>(input: &'a AgentAnswerStageInput<'a>) -> McpToolAgentTur
         user_question: input.content_text,
         contextual_follow_up: input.conversation_context.has_prior_conversation,
         conversation_history: input.agent_conversation_history,
-        follow_up_context_messages: input.prior_grounded_answer_context_messages,
+        follow_up_context_messages: &input.prior_grounded_answer_context.messages,
+        prior_evidence_manifest: &input.prior_grounded_answer_context.manifest,
         grounded_answer_tool_history: input.agent_grounded_answer_tool_history,
         request_id: input.agent_request_id,
         grounded_answer_top_k: input.top_k,
@@ -106,7 +106,7 @@ async fn complete_agent_answer_stage(
     // Retain the already-paid agent transcript before verification can block or
     // be cancelled. It is not yet a finalized public answer.
     persist_agent_debug_snapshot(input, &agent_result, None).await;
-    let verification = verify_agent_result(input, &mut agent_result).await;
+    let verification = Box::pin(verify_agent_result(input, &mut agent_result)).await;
     if let Some(outcome) = verification.outcome {
         return outcome;
     }
@@ -128,7 +128,7 @@ async fn verify_agent_result(
     )
     .await
     else {
-        return run_agent_evidence_verification(input, agent_result).await;
+        return Box::pin(run_agent_evidence_verification(input, agent_result)).await;
     };
     let failure = begin_failure.with_provider_calls(agent_result.provider_calls.clone());
     persist_agent_debug_snapshot(input, agent_result, None).await;
@@ -148,12 +148,12 @@ async fn run_agent_evidence_verification(
     agent_result: &mut AgentTurnResult,
 ) -> AgentVerificationStageResult {
     let verify_started = Utc::now();
-    let result = match verify_agent_evidence(input, agent_result).await {
-        Ok(revised) => super::agent_semantic::finalize_selected_agent_answer(
+    let result = match Box::pin(verify_agent_evidence(input, agent_result)).await {
+        Ok(revised) => Box::pin(super::agent_semantic::finalize_selected_agent_answer(
             input.state,
             input.execution,
             agent_result,
-        )
+        ))
         .await
         .map(|()| revised)
         .map_err(|error| {
@@ -230,21 +230,29 @@ async fn verify_agent_evidence(
             return Ok(false);
         }
     }
-    let has_evidence =
-        agent_has_verifiable_tool_evidence(&child_execution_ids, &agent_result.assistant_grounding);
+    let has_evidence = agent_has_verifiable_tool_evidence(
+        &child_execution_ids,
+        &agent_result.evidence_manifest,
+        &agent_result.assistant_grounding,
+    );
     ensure_agent_grounding_available(input, agent_result, &child_execution_ids, has_evidence)
         .await?;
     if !agent_answer_needs_parent_verification(agent_result, has_evidence) {
         return Ok(false);
     }
-    let verification = verify_agent_answer_against_tool_evidence(AgentAnswerVerificationRequest {
-        state: input.state,
-        execution: input.execution,
-        context_bundle_id: input.execution_context_bundle_id,
-        answer_text: &agent_result.answer,
-        assistant_grounding: &agent_result.assistant_grounding,
-    })
+    let verification = super::agent_grounding::prepare_agent_verification_stage_with_manifest(
+        AgentAnswerVerificationRequest {
+            state: input.state,
+            execution: input.execution,
+            context_bundle_id: input.execution_context_bundle_id,
+            answer_text: &agent_result.answer,
+            assistant_grounding: &agent_result.assistant_grounding,
+        },
+        &agent_result.evidence_manifest,
+        false,
+    )
     .await
+    .map(|stage| stage.verification)
     .map_err(|error| {
         make_query_answer_failure(
             "query_agent_verify_failed",
@@ -347,7 +355,8 @@ async fn apply_agent_fidelity_revision(
     if revision_targets.is_empty() {
         return false;
     }
-    let prompt_context = agent_result.assistant_grounding.verification_corpus.join("\n\n");
+    let prompt_context =
+        agent_result.evidence_manifest.source_context(&agent_result.assistant_grounding);
     let revision = match run_literal_revision_turn(
         input.state,
         input.provider_execution_context,
@@ -482,12 +491,14 @@ async fn apply_agent_inventory_revision(
     let targets = literal_inventory_coverage_revision_targets(
         &agent_result.answer,
         input.agent_grounded_answer_tool_history,
+        &agent_result.evidence_manifest,
         &agent_result.assistant_grounding,
     );
     if targets.is_empty() {
         return false;
     }
-    let revision_context = literal_inventory_revision_context(&agent_result.assistant_grounding);
+    let revision_context =
+        agent_result.evidence_manifest.source_context(&agent_result.assistant_grounding);
     let revision_started = Instant::now();
     let revision = tokio::time::timeout(
         ASSISTANT_LITERAL_INVENTORY_REVISION_TIMEOUT,
@@ -544,14 +555,19 @@ async fn verify_and_accept_agent_revision(
         &revision.usage_json,
     );
     agent_result.debug_iterations.append(&mut revision.debug_iterations);
-    let verification = verify_agent_answer_against_tool_evidence(AgentAnswerVerificationRequest {
-        state: input.state,
-        execution: input.execution,
-        context_bundle_id: input.execution_context_bundle_id,
-        answer_text: &revision.answer,
-        assistant_grounding: &agent_result.assistant_grounding,
-    })
-    .await;
+    let verification = super::agent_grounding::prepare_agent_verification_stage_with_manifest(
+        AgentAnswerVerificationRequest {
+            state: input.state,
+            execution: input.execution,
+            context_bundle_id: input.execution_context_bundle_id,
+            answer_text: &revision.answer,
+            assistant_grounding: &agent_result.assistant_grounding,
+        },
+        &agent_result.evidence_manifest,
+        false,
+    )
+    .await
+    .map(|stage| stage.verification);
     match verification {
         Ok(verification) if verification.state == QueryVerificationState::Verified => {
             log_accepted_revision(
@@ -719,7 +735,7 @@ async fn fail_agent_answer_stage(
         query_service_failure_code(&agent_failure.error, "query_agent_loop_failed"),
         agent_failure.to_string(),
     )
-    .with_provider_calls(agent_failure.provider_calls);
+    .with_provider_calls(agent_failure.provider_calls.into_vec());
     record_query_runtime_stage(
         input.state.agent_runtime.executor(),
         input.runtime_session,

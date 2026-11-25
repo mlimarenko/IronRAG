@@ -45,7 +45,8 @@ macro_rules! current_graph_target {
                and stale_evidence.target_kind = '",
             $kind,
             "'
-               and current_revision.revision_id is null)"
+               and (current_revision.revision_id is null
+                    or current_revision.graph_state not in ('ready', 'graph_degraded')))"
         )
     };
 }
@@ -69,7 +70,8 @@ macro_rules! bulk_current_graph_targets {
                 select l.*, exists (
                     select 1 from content_current_revision r
                     where r.library_id = l.library_id and r.document_id = l.document_id
-                      and r.revision_id = l.revision_id offset 0
+                      and r.revision_id = l.revision_id
+                      and r.graph_state in ('ready', 'graph_degraded') offset 0
                 ) as current
                 from lineage l
             ), admitted as materialized (

@@ -6,14 +6,14 @@ use uuid::Uuid;
 use crate::{
     app::state::AppState,
     infra::{
-        knowledge_rows::{KnowledgeDocumentRow, KnowledgeRevisionRow},
+        knowledge_rows::{KnowledgeChunkRow, KnowledgeDocumentRow, KnowledgeRevisionRow},
         repositories::catalog_repository,
     },
     services::content::document_hint::resolve_document_hint,
-    shared::extraction::text_render::repair_technical_layout_noise,
 };
 
 use super::super::{
+    chunk_support::{chunk_answer_source_text, document_has_exact_readable_revision},
     retrieve::{excerpt_for, score_value},
     types::{RuntimeMatchedChunk, RuntimeQueryLibrarySummary, RuntimeRetrievedDocumentBrief},
 };
@@ -102,90 +102,47 @@ pub(crate) async fn load_retrieved_document_briefs(
 ) -> Vec<RuntimeRetrievedDocumentBrief> {
     let span_started = std::time::Instant::now();
     let brief_limit = top_k.clamp(16, 48);
-    let mut best_by_document = HashMap::<Uuid, RuntimeMatchedChunk>::new();
-    let mut ordered_document_ids = Vec::<Uuid>::new();
-    // Collect the focused-document chunks once — consolidation has
-    // already sorted them by chunk_index and biased their scores so
-    // they sit at the top of the bundle; the brief preview joins the
-    // first N of them in reading order. Non-focused documents fall
-    // back to a single "best-scored chunk excerpt".
-    let mut focused_chunks: Vec<&RuntimeMatchedChunk> = Vec::new();
-
-    for chunk in chunks {
-        // Attached-context documents (image attachments collapsed onto a parent
-        // page) are subordinate context, not standalone retrieved documents the
-        // user should be asked to clarify between. Exclude them from the brief
-        // set (which feeds the clarify-vs-answer disposition) unless the query
-        // explicitly focuses on that document. Role is the only signal — no
-        // MIME/extension/filename inspection here.
-        if Some(chunk.document_id) != focused_document_id
-            && document_index.get(&chunk.document_id).is_some_and(|document| {
-                crate::domains::content::role_is_attached_context(&document.document_role)
-            })
-        {
-            continue;
-        }
-        if Some(chunk.document_id) == focused_document_id {
-            focused_chunks.push(chunk);
-        }
-        let entry = best_by_document.entry(chunk.document_id).or_insert_with(|| {
-            ordered_document_ids.push(chunk.document_id);
-            chunk.clone()
-        });
-        if score_value(chunk.score) > score_value(entry.score) {
-            *entry = chunk.clone();
-        }
-    }
-
-    focused_chunks.sort_by_key(|chunk| chunk.chunk_index);
-    let focused_preview = focused_preview_from_bundle_chunks(&focused_chunks);
-
-    let ranked_documents = ordered_document_ids
-        .into_iter()
-        .take(brief_limit)
-        .filter_map(|document_id| {
-            let document = document_index.get(&document_id)?.clone();
-            let fallback_excerpt =
-                best_by_document.get(&document_id).map(|chunk| chunk.excerpt.clone());
-            let is_focused = Some(document_id) == focused_document_id;
-            Some((document, fallback_excerpt, is_focused))
-        })
+    let candidates =
+        select_brief_candidates(chunks, document_index, brief_limit, focused_document_id);
+    let ids = candidates
+        .iter()
+        .flat_map(|(_, chunks)| chunks.iter().map(|chunk| chunk.chunk_id))
         .collect::<Vec<_>>();
-
-    let focused_preview_ref = focused_preview.as_ref();
-    let previews = join_all(ranked_documents.into_iter().map(
-        |(document, fallback_excerpt, is_focused)| async move {
-            let (preview_excerpt, document_hint) = if is_focused {
-                // For the winner we already have the anchor-window
-                // chunks in the bundle; synthesize the preview from
-                // them and skip the `list_chunks_by_revision` fetch
-                // entirely. The separate revision lookup is kept so
-                // the resolved document_hint still reaches the prompt.
-                let document_hint = load_retrieved_document_hint(state, &document).await;
-                let preview = focused_preview_ref.cloned().or(fallback_excerpt).unwrap_or_default();
-                (preview, document_hint)
-            } else {
-                let (preview, document_hint) =
-                    load_retrieved_document_preview_and_hint(state, &document)
-                        .await
-                        .unwrap_or((None, None));
-                let preview = preview.or(fallback_excerpt).unwrap_or_default();
-                (preview, document_hint)
-            };
-            if preview_excerpt.trim().is_empty() {
+    let rows = if ids.is_empty() {
+        Vec::new()
+    } else {
+        match state.document_store.list_chunks_by_ids(&ids).await {
+            Ok(rows) => rows,
+            Err(error) => {
+                tracing::warn!(%error, "failed to load canonical document brief chunks");
+                return Vec::new();
+            }
+        }
+    };
+    let briefs = join_all(candidates.into_iter().map(|(document, selected)| {
+        let rows = &rows;
+        async move {
+            let current = state.document_store.get_document(document.document_id).await.ok()??;
+            if Some(current.document_id) != focused_document_id
+                && crate::domains::content::role_is_attached_context(&current.document_role)
+            {
                 return None;
             }
-            let title = document
+            let preview_excerpt = canonical_brief_preview(document, &current, &selected, rows)?;
+            let document_hint = load_retrieved_document_hint(state, &current).await;
+            let title = current
                 .title
                 .clone()
                 .filter(|value| !value.trim().is_empty())
-                .unwrap_or_else(|| document.external_key.clone());
+                .unwrap_or_else(|| current.external_key.clone());
             Some(RuntimeRetrievedDocumentBrief { title, preview_excerpt, document_hint })
-        },
-    ))
-    .await;
+        }
+    }))
+    .await
+    .into_iter()
+    .flatten()
+    .collect::<Vec<_>>();
 
-    let briefs: Vec<_> = previews.into_iter().flatten().collect();
     crate::services::query::turn_spans::record_span(
         "context.document_briefs",
         "db",
@@ -196,27 +153,86 @@ pub(crate) async fn load_retrieved_document_briefs(
     briefs
 }
 
-/// Build the "Retrieved document briefs" preview for the winning
-/// document out of the chunks consolidation has already packed into
-/// the bundle. Joining the anchor-window `source_text` segments in
-/// reading order produces a preview that actually reflects where the
-/// answer will quote from, rather than the intro-chunk of the
-/// revision (which is what `list_chunks_by_revision` surfaces).
-///
-/// `source_text` is already normalised in `apply_winner_chunks` via
-/// `repair_technical_layout_noise`, so we just trim and join here.
-pub(super) fn focused_preview_from_bundle_chunks(
-    chunks: &[&RuntimeMatchedChunk],
-) -> Option<String> {
-    let joined = chunks
-        .iter()
-        .filter_map(|chunk| {
-            let trimmed = chunk.source_text.trim();
-            (!trimmed.is_empty()).then(|| trimmed.to_string())
+pub(super) fn select_brief_candidates<'a>(
+    chunks: &'a [RuntimeMatchedChunk],
+    document_index: &'a HashMap<Uuid, KnowledgeDocumentRow>,
+    brief_limit: usize,
+    focused_document_id: Option<Uuid>,
+) -> Vec<(&'a KnowledgeDocumentRow, Vec<&'a RuntimeMatchedChunk>)> {
+    let mut by_document = HashMap::<Uuid, Vec<&RuntimeMatchedChunk>>::new();
+    let mut ordered_document_ids = Vec::new();
+    for chunk in chunks {
+        let Some(document) = document_index.get(&chunk.document_id) else { continue };
+        if !document_has_exact_readable_revision(document, chunk.revision_id)
+            || (Some(chunk.document_id) != focused_document_id
+                && crate::domains::content::role_is_attached_context(&document.document_role))
+        {
+            continue;
+        }
+        let entries = by_document.entry(chunk.document_id).or_insert_with(|| {
+            ordered_document_ids.push(chunk.document_id);
+            Vec::new()
+        });
+        entries.push(chunk);
+    }
+    ordered_document_ids
+        .into_iter()
+        .take(brief_limit)
+        .filter_map(|document_id| {
+            let document = document_index.get(&document_id)?;
+            let mut document_chunks = by_document.remove(&document_id)?;
+            if Some(document_id) == focused_document_id {
+                document_chunks.sort_by_key(|chunk| chunk.chunk_index);
+                document_chunks.truncate(RETRIEVED_DOCUMENT_BRIEF_SOURCE_CHUNKS);
+            } else {
+                let best = document_chunks.into_iter().reduce(|best, chunk| {
+                    if score_value(chunk.score) > score_value(best.score) { chunk } else { best }
+                })?;
+                document_chunks = vec![best];
+            }
+            Some((document, document_chunks))
         })
-        .take(RETRIEVED_DOCUMENT_BRIEF_SOURCE_CHUNKS)
-        .collect::<Vec<_>>()
-        .join(" ");
+        .collect()
+}
+
+pub(super) fn canonical_brief_preview(
+    indexed_document: &KnowledgeDocumentRow,
+    current_document: &KnowledgeDocumentRow,
+    selected: &[&RuntimeMatchedChunk],
+    rows: &[KnowledgeChunkRow],
+) -> Option<String> {
+    if current_document.document_id != indexed_document.document_id
+        || current_document.workspace_id != indexed_document.workspace_id
+        || current_document.library_id != indexed_document.library_id
+        || selected.is_empty()
+    {
+        return None;
+    }
+    let mut parts = Vec::new();
+    for chunk in selected {
+        if chunk.document_id != current_document.document_id
+            || !document_has_exact_readable_revision(current_document, chunk.revision_id)
+        {
+            return None;
+        }
+        let mut matches = rows.iter().filter(|row| row.chunk_id == chunk.chunk_id);
+        let row = matches.next()?;
+        if matches.next().is_some()
+            || row.document_id != chunk.document_id
+            || row.revision_id != chunk.revision_id
+            || row.chunk_index != chunk.chunk_index
+            || row.workspace_id != current_document.workspace_id
+            || row.library_id != current_document.library_id
+            || row.chunk_state != "ready"
+        {
+            return None;
+        }
+        let text = chunk_answer_source_text(row);
+        if !text.trim().is_empty() {
+            parts.push(text);
+        }
+    }
+    let joined = parts.join(" ");
     (!joined.is_empty()).then(|| excerpt_for(&joined, RETRIEVED_DOCUMENT_BRIEF_PREVIEW_CHARS))
 }
 
@@ -227,54 +243,6 @@ async fn load_retrieved_document_hint(
     let revision_id = document.readable_revision_id.or(document.active_revision_id)?;
     let revision = state.document_store.get_revision(revision_id).await.ok()??;
     resolve_retrieved_document_hint(state, document, Some(&revision)).await
-}
-
-async fn load_retrieved_document_preview_and_hint(
-    state: &AppState,
-    document: &KnowledgeDocumentRow,
-) -> Option<(Option<String>, Option<String>)> {
-    // Citation provenance is stored on the revision row, not on the
-    // document root — a document can have many revisions over its
-    // lifetime and each carries the provenance of *that* upload
-    // (URL for web-ingested pages, storage reference for files).
-    // We read the readable revision first (what the user would see
-    // today); the active revision is the fallback while a newer
-    // ingest run is still processing but has not landed yet.
-    let revision_id = document.readable_revision_id.or(document.active_revision_id)?;
-
-    let revision_future = state.document_store.get_revision(revision_id);
-    // The preview only consumes the first few reading-order chunks, so
-    // fetch a small head window instead of scanning the whole revision
-    // (a large document can hold thousands of chunks). Extra headroom
-    // covers empty/profile chunks dropped during normalization below.
-    let chunks_future = state
-        .document_store
-        .list_head_chunks_by_revision(revision_id, RETRIEVED_DOCUMENT_BRIEF_SOURCE_CHUNKS * 4);
-    let (revision_result, chunks_result) =
-        futures::future::join(revision_future, chunks_future).await;
-
-    let revision = revision_result.ok().flatten();
-    let document_hint = resolve_retrieved_document_hint(state, document, revision.as_ref()).await;
-
-    let chunks = chunks_result.ok().unwrap_or_default();
-    let combined = chunks
-        .into_iter()
-        .filter_map(|chunk| {
-            let normalized = repair_technical_layout_noise(&chunk.normalized_text);
-            let normalized = normalized.trim().to_string();
-            if normalized.is_empty() {
-                return None;
-            }
-            Some(normalized)
-        })
-        .take(RETRIEVED_DOCUMENT_BRIEF_SOURCE_CHUNKS)
-        .collect::<Vec<_>>()
-        .join(" ");
-
-    let preview = (!combined.is_empty())
-        .then(|| excerpt_for(&combined, RETRIEVED_DOCUMENT_BRIEF_PREVIEW_CHARS));
-
-    Some((preview, document_hint))
 }
 
 async fn resolve_retrieved_document_hint(

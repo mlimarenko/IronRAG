@@ -47,7 +47,7 @@ use crate::{
     },
     services::ai_catalog_service::ResolvedRuntimeBinding,
     services::query::{
-        assistant_grounding::AssistantGroundingEvidence,
+        assistant_grounding::{AgentEvidenceManifest, AssistantGroundingEvidence},
         completion_policy::{
             AnswerCompletionAssessment, AnswerCompletionGapReason, GroundedAnswerCompletionEnvelope,
         },

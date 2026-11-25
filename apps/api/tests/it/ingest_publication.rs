@@ -970,6 +970,7 @@ async fn admit_bound_publication_successor(
             }),
             parent_async_operation_id: None,
             priority: 10,
+            enrichment_scope: None,
         },
         None,
     )
@@ -2166,6 +2167,868 @@ async fn settling_a_failed_operation_ready_clears_its_failure_disposition() -> R
         .context("reopened operation missing")?;
         assert_eq!(reopened.status, "processing");
         assert_eq!(reopened.failure_disposition, None);
+        Ok(())
+    }
+    .await;
+    fixture.cleanup().await?;
+    result
+}
+
+/// The resident publication fixture plus the identity of one successor revision.
+struct SuccessorRevisionSeed {
+    revision_id: Uuid,
+    mutation_id: Uuid,
+    mutation_item_id: Uuid,
+    async_operation_id: Uuid,
+    job_id: Uuid,
+    attempt_id: Uuid,
+    embedding_profile_key: String,
+}
+
+impl SuccessorRevisionSeed {
+    fn base_publication_command(
+        &self,
+        fixture: &PublicationFixture,
+        completed_at: chrono::DateTime<Utc>,
+    ) -> ingest_repository::PublishContentIngestBase {
+        ingest_repository::PublishContentIngestBase {
+            workspace_id: fixture.workspace_id,
+            library_id: fixture.library_id,
+            document_id: fixture.document_id,
+            revision_id: self.revision_id,
+            mutation_id: self.mutation_id,
+            mutation_item_id: self.mutation_item_id,
+            attempt_id: self.attempt_id,
+            completed_at,
+        }
+    }
+}
+
+/// Seeds a second upload revision of the same document: prepared structure,
+/// chunks, chunk vector, running mutation with its leased job and attempt.
+async fn seed_successor_revision(fixture: &PublicationFixture) -> Result<SuccessorRevisionSeed> {
+    let checksum = format!("sha256:{}", "b".repeat(64));
+    let admission = crate::content_repository::unbound_mutation_admission(
+        ironrag_contracts::documents::ReplacementIdentity {
+            checksum: checksum.clone(),
+            byte_size: 21,
+            mime_type: "text/plain".to_owned(),
+            file_name: "publication.txt".to_owned(),
+            title: Some("Publication".to_owned()),
+            language_code: None,
+            source_uri: None,
+            document_hint: None,
+        },
+    )?;
+    let revision = match content_revision_repository::create_revision_with_projection(
+        &fixture.pool,
+        &content_revision_repository::NewContentRevisionProjection {
+            admission_identity: Some(&admission),
+            document_id: fixture.document_id,
+            workspace_id: fixture.workspace_id,
+            library_id: fixture.library_id,
+            content_source_kind: "upload",
+            checksum: &checksum,
+            mime_type: "text/plain",
+            byte_size: 21,
+            title: Some("Publication"),
+            language_code: None,
+            source_uri: None,
+            document_hint: None,
+            storage_key: Some("memory://publication-successor"),
+            created_by_principal_id: None,
+        },
+    )
+    .await?
+    {
+        content_revision_repository::CreateContentRevisionOutcome::Created(revision) => *revision,
+        other => return Err(anyhow!("successor revision fixture was not created: {other:?}")),
+    };
+    let mutation = seed_publication_mutation(
+        &fixture.pool,
+        fixture.workspace_id,
+        fixture.library_id,
+        "upload",
+        fixture.document_id,
+        Some(revision.id),
+    )
+    .await?;
+    let item = content_mutation_repository::create_mutation_item(
+        &fixture.pool,
+        &content_mutation_repository::NewContentMutationItem {
+            mutation_id: mutation.id,
+            document_id: fixture.document_id,
+            base_revision_id: None,
+            result_revision_id: Some(revision.id),
+            item_state: "pending",
+            message: None,
+        },
+    )
+    .await?;
+    let chunks = content_chunk_repository::replace_chunks_with_projection(
+        &fixture.pool,
+        revision.id,
+        &[crate::knowledge_seed::ready_paragraph_projection(
+            crate::knowledge_seed::ReadyChunkSeed {
+                workspace_id: fixture.workspace_id,
+                library_id: fixture.library_id,
+                document_id: fixture.document_id,
+                revision_id: revision.id,
+                chunk_index: 0,
+                text: "successor publication evidence",
+            },
+            21,
+            3,
+            "sha256:successor-publication-chunk",
+            i64::from(revision.revision_number),
+        )],
+    )
+    .await?;
+    let chunk = chunks.first().context("successor chunk was not created")?;
+    sqlx::query(
+        "insert into knowledge_structured_revision (
+            revision_id, workspace_id, library_id, document_id,
+            preparation_state, normalization_profile, source_format, language_code,
+            block_count, chunk_count, typed_fact_count, outline_json,
+            prepared_at, updated_at
+         ) values (
+            $1, $2, $3, $4, 'prepared', 'fixture-v1', 'text', null,
+            0, 1, 0, '[]'::jsonb, now(), now()
+         )",
+    )
+    .bind(revision.id)
+    .bind(fixture.workspace_id)
+    .bind(fixture.library_id)
+    .bind(fixture.document_id)
+    .execute(&fixture.pool)
+    .await?;
+    sqlx::query(
+        "update knowledge_revision
+         set text_state = 'accepted',
+             vector_state = 'processing',
+             graph_state = 'processing',
+             text_readable_at = null
+         where revision_id = $1",
+    )
+    .bind(revision.id)
+    .execute(&fixture.pool)
+    .await?;
+    let (async_operation_id, job_id, attempt_id) = seed_publication_queue(
+        &fixture.pool,
+        fixture.workspace_id,
+        fixture.library_id,
+        false,
+        PublicationQueueSeed {
+            document_id: fixture.document_id,
+            revision_id: revision.id,
+            mutation_id: mutation.id,
+            mutation_item_id: item.id,
+        },
+    )
+    .await?;
+    let embedding_profile_key = seed_publication_embedding(
+        &fixture.pool,
+        fixture.workspace_id,
+        fixture.library_id,
+        chunk.id,
+        revision.id,
+        revision.revision_number,
+    )
+    .await?;
+    Ok(SuccessorRevisionSeed {
+        revision_id: revision.id,
+        mutation_id: mutation.id,
+        mutation_item_id: item.id,
+        async_operation_id,
+        job_id,
+        attempt_id,
+        embedding_profile_key,
+    })
+}
+
+/// The revision's channel states plus whether each readiness timestamp is set.
+async fn revision_channel_states(
+    pool: &PgPool,
+    revision_id: Uuid,
+) -> Result<(String, String, String, bool, bool, bool)> {
+    Ok(sqlx::query_as::<_, (String, String, String, bool, bool, bool)>(
+        "select text_state, vector_state, graph_state,
+                text_readable_at is not null,
+                vector_ready_at is not null,
+                graph_ready_at is not null
+         from knowledge_revision
+         where revision_id = $1",
+    )
+    .bind(revision_id)
+    .fetch_one(pool)
+    .await?)
+}
+
+async fn revision_ready_outbox_count(pool: &PgPool, revision_id: Uuid) -> Result<i64> {
+    Ok(sqlx::query_scalar::<_, i64>(
+        "select count(*)::bigint
+         from webhook_lifecycle_outbox
+         where event_id = $1",
+    )
+    .bind(ironrag_backend::domains::webhook::revision_ready_event_id(revision_id))
+    .fetch_one(pool)
+    .await?)
+}
+
+/// The revision `content_current_revision` exposes for the document, if any.
+async fn current_view_revision(pool: &PgPool, document_id: Uuid) -> Result<Option<Uuid>> {
+    Ok(sqlx::query_scalar::<_, Uuid>(
+        "select revision_id from content_current_revision where document_id = $1",
+    )
+    .bind(document_id)
+    .fetch_optional(pool)
+    .await?)
+}
+
+/// The published item, aggregate and linked operation, as one comparable tuple.
+async fn published_outcome_states(
+    pool: &PgPool,
+    mutation_item_id: Uuid,
+    async_operation_id: Uuid,
+) -> Result<(String, String, String)> {
+    Ok(sqlx::query_as::<_, (String, String, String)>(
+        "select item.item_state::text, mutation.mutation_state::text, operation.status::text
+         from content_mutation_item as item
+         join content_mutation as mutation on mutation.id = item.mutation_id
+         join ops_async_operation as operation on operation.id = $2
+         where item.id = $1",
+    )
+    .bind(mutation_item_id)
+    .bind(async_operation_id)
+    .fetch_one(pool)
+    .await?)
+}
+
+impl PublicationFixture {
+    fn base_publication_command(
+        &self,
+        completed_at: chrono::DateTime<Utc>,
+    ) -> ingest_repository::PublishContentIngestBase {
+        ingest_repository::PublishContentIngestBase {
+            workspace_id: self.workspace_id,
+            library_id: self.library_id,
+            document_id: self.document_id,
+            revision_id: self.revision_id,
+            mutation_id: self.mutation_id,
+            mutation_item_id: self.mutation_item_id,
+            attempt_id: self.attempt_id,
+            completed_at,
+        }
+    }
+
+    fn enrichment_command(
+        &self,
+        expected_source_truth_version: i64,
+        graph_state: &str,
+        graph_ready_at: Option<chrono::DateTime<Utc>>,
+        completed_at: chrono::DateTime<Utc>,
+    ) -> ingest_repository::FinalizeContentIngestEnrichment {
+        ingest_repository::FinalizeContentIngestEnrichment {
+            workspace_id: self.workspace_id,
+            library_id: self.library_id,
+            document_id: self.document_id,
+            revision_id: self.revision_id,
+            mutation_id: self.mutation_id,
+            mutation_item_id: self.mutation_item_id,
+            attempt_id: self.attempt_id,
+            expected_source_truth_version,
+            embedding_profile_key: Some(self.embedding_profile_key.clone()),
+            graph_state: graph_state.to_string(),
+            graph_ready_at,
+            completed_at,
+        }
+    }
+}
+
+/// Runs the publish -> embed -> summary -> graph -> enrich order for the resident
+/// publication fixture.
+async fn publish_base_and_finalize_enrichment(
+    fixture: &PublicationFixture,
+) -> Result<ingest_repository::PublishContentIngestSuccessOutcome> {
+    let base = ingest_repository::publish_content_ingest_base(
+        &fixture.pool,
+        &fixture.base_publication_command(Utc::now()),
+    )
+    .await?;
+    let base_source_truth_version = match base {
+        ingest_repository::PublishContentIngestSuccessOutcome::Applied {
+            source_truth_version,
+            ..
+        } => source_truth_version,
+        other => return Err(anyhow!("base publication was not applied: {other:?}")),
+    };
+    let completed_at = Utc::now();
+    ingest_repository::finalize_content_ingest_enrichment(
+        &fixture.pool,
+        &fixture.enrichment_command(
+            base_source_truth_version,
+            "ready",
+            Some(completed_at),
+            completed_at,
+        ),
+        &ingest_repository::ContentIngestPublicationEffects::default(),
+        &FixedEmbeddingProfileSource(fixture.embedding_profile_key.clone()),
+    )
+    .await
+}
+
+#[tokio::test]
+#[ignore = "requires local postgres with the pgvector extensions"]
+async fn base_publication_publishes_text_before_enrichment_on_one_head() -> Result<()> {
+    let fixture = PublicationFixture::create("accepted", false).await?;
+    let result = async {
+        let source_before = fixture.source_truth_version().await?;
+        let base = ingest_repository::publish_content_ingest_base(
+            &fixture.pool,
+            &fixture.base_publication_command(Utc::now()),
+        )
+        .await?;
+        let base_source_truth_version = match base {
+            ingest_repository::PublishContentIngestSuccessOutcome::Applied {
+                source_truth_version,
+                mutation_completed,
+                publicly_visible,
+            } => {
+                assert!(mutation_completed);
+                assert!(publicly_visible);
+                source_truth_version
+            }
+            other => return Err(anyhow!("base publication was not applied: {other:?}")),
+        };
+        assert!(base_source_truth_version > source_before);
+
+        // The allowed text is readable and the head is published while the optional
+        // channels are truthfully still pending - never claimed as ready.
+        let head =
+            content_document_head_repository::get_document_head(&fixture.pool, fixture.document_id)
+                .await?
+                .context("base-published head missing")?;
+        assert_eq!(head.readable_revision_id, Some(fixture.revision_id));
+        assert_eq!(head.active_revision_id, Some(fixture.revision_id));
+        assert_eq!(head.latest_successful_attempt_id, Some(fixture.attempt_id));
+        assert_eq!(
+            revision_channel_states(&fixture.pool, fixture.revision_id).await?,
+            ("text_readable".into(), "processing".into(), "processing".into(), true, false, false)
+        );
+        assert_eq!(
+            current_view_revision(&fixture.pool, fixture.document_id).await?,
+            Some(fixture.revision_id),
+            "an ordinary upload is readable and current before enrichment finishes",
+        );
+        assert_eq!(
+            published_outcome_states(
+                &fixture.pool,
+                fixture.mutation_item_id,
+                fixture.async_operation_id
+            )
+            .await?,
+            ("applied".into(), "applied".into(), "ready".into())
+        );
+        // Completion belongs to the enrichment finalization; the deterministic
+        // revision-ready event is emitted exactly once.
+        let attempt =
+            ingest_repository::get_ingest_attempt_by_id(&fixture.pool, fixture.attempt_id)
+                .await?
+                .context("base-published attempt missing")?;
+        let job = ingest_repository::get_ingest_job_by_id(&fixture.pool, fixture.job_id)
+            .await?
+            .context("base-published job missing")?;
+        assert_eq!(attempt.attempt_state, "leased");
+        assert!(attempt.finished_at.is_none());
+        assert_eq!(job.queue_state, "leased");
+        assert!(job.completed_at.is_none());
+        assert_eq!(revision_ready_outbox_count(&fixture.pool, fixture.revision_id).await?, 1);
+
+        // Enrichment lands on the same revision and the same head.
+        let completed_at = Utc::now();
+        let enrich = ingest_repository::finalize_content_ingest_enrichment(
+            &fixture.pool,
+            &fixture.enrichment_command(
+                base_source_truth_version,
+                "ready",
+                Some(completed_at),
+                completed_at,
+            ),
+            &ingest_repository::ContentIngestPublicationEffects::default(),
+            &FixedEmbeddingProfileSource(fixture.embedding_profile_key.clone()),
+        )
+        .await?;
+        match enrich {
+            ingest_repository::PublishContentIngestSuccessOutcome::Applied {
+                source_truth_version,
+                publicly_visible,
+                ..
+            } => {
+                assert!(publicly_visible);
+                assert!(
+                    source_truth_version > base_source_truth_version,
+                    "vector readiness is its own answer-visible generation change",
+                );
+            }
+            other => return Err(anyhow!("enrichment finalization was not applied: {other:?}")),
+        }
+        let enriched_head =
+            content_document_head_repository::get_document_head(&fixture.pool, fixture.document_id)
+                .await?
+                .context("enriched head missing")?;
+        assert_eq!(enriched_head.readable_revision_id, Some(fixture.revision_id));
+        assert_eq!(
+            revision_channel_states(&fixture.pool, fixture.revision_id).await?,
+            ("text_readable".into(), "ready".into(), "ready".into(), true, true, true)
+        );
+        let attempt =
+            ingest_repository::get_ingest_attempt_by_id(&fixture.pool, fixture.attempt_id)
+                .await?
+                .context("enriched attempt missing")?;
+        let job = ingest_repository::get_ingest_job_by_id(&fixture.pool, fixture.job_id)
+            .await?
+            .context("enriched job missing")?;
+        assert_eq!(attempt.attempt_state, "succeeded");
+        assert_eq!(job.queue_state, "completed");
+        assert_eq!(
+            revision_ready_outbox_count(&fixture.pool, fixture.revision_id).await?,
+            1,
+            "the same revision emits exactly one revision-ready event across both steps",
+        );
+        Ok(())
+    }
+    .await;
+    fixture.cleanup().await?;
+    result
+}
+
+#[tokio::test]
+#[ignore = "requires local postgres with the pgvector extensions"]
+async fn restart_resume_reuses_the_published_head_and_readable_timestamp() -> Result<()> {
+    let fixture = PublicationFixture::create("accepted", false).await?;
+    let result = async {
+        let first = ingest_repository::publish_content_ingest_base(
+            &fixture.pool,
+            &fixture.base_publication_command(Utc::now()),
+        )
+        .await?;
+        assert!(matches!(
+            first,
+            ingest_repository::PublishContentIngestSuccessOutcome::Applied { .. }
+        ));
+        let first_readable_at = sqlx::query_scalar::<_, chrono::DateTime<Utc>>(
+            "select text_readable_at from knowledge_revision where revision_id = $1",
+        )
+        .bind(fixture.revision_id)
+        .fetch_one(&fixture.pool)
+        .await?;
+
+        // A resumed attempt re-runs the same step. It must stay idempotent: no
+        // second head, no rewritten readable timestamp, no duplicate event.
+        let resumed = ingest_repository::publish_content_ingest_base(
+            &fixture.pool,
+            &fixture.base_publication_command(Utc::now()),
+        )
+        .await?;
+        assert!(matches!(
+            resumed,
+            ingest_repository::PublishContentIngestSuccessOutcome::Applied { .. }
+        ));
+        let resumed_readable_at = sqlx::query_scalar::<_, chrono::DateTime<Utc>>(
+            "select text_readable_at from knowledge_revision where revision_id = $1",
+        )
+        .bind(fixture.revision_id)
+        .fetch_one(&fixture.pool)
+        .await?;
+        assert_eq!(resumed_readable_at, first_readable_at);
+        let head =
+            content_document_head_repository::get_document_head(&fixture.pool, fixture.document_id)
+                .await?
+                .context("resumed head missing")?;
+        assert_eq!(head.readable_revision_id, Some(fixture.revision_id));
+        assert_eq!(revision_ready_outbox_count(&fixture.pool, fixture.revision_id).await?, 1);
+
+        publish_base_and_finalize_enrichment(&fixture).await?;
+        // Once the lifecycle is complete, a further resume is a stale no-op rather
+        // than a second publication.
+        let stale = ingest_repository::publish_content_ingest_base(
+            &fixture.pool,
+            &fixture.base_publication_command(Utc::now()),
+        )
+        .await?;
+        assert!(matches!(
+            stale,
+            ingest_repository::PublishContentIngestSuccessOutcome::AuthorityLost { .. }
+        ));
+        assert_eq!(
+            current_view_revision(&fixture.pool, fixture.document_id).await?,
+            Some(fixture.revision_id)
+        );
+        Ok(())
+    }
+    .await;
+    fixture.cleanup().await?;
+    result
+}
+
+#[tokio::test]
+#[ignore = "requires local postgres with the pgvector extensions"]
+async fn enrichment_failure_after_base_keeps_text_readable_and_records_failed_channels()
+-> Result<()> {
+    for retryable in [true, false] {
+        let fixture = PublicationFixture::create("accepted", false).await?;
+        let result = async {
+            ingest_repository::publish_content_ingest_base(
+                &fixture.pool,
+                &fixture.base_publication_command(Utc::now()),
+            )
+            .await?;
+            let outcome = ingest_repository::fail_content_ingest_attempt(
+                &fixture.pool,
+                &ingest_repository::FailContentIngestAttempt {
+                    workspace_id: fixture.workspace_id,
+                    library_id: fixture.library_id,
+                    document_id: fixture.document_id,
+                    revision_id: fixture.revision_id,
+                    mutation_id: fixture.mutation_id,
+                    mutation_item_id: fixture.mutation_item_id,
+                    attempt_id: fixture.attempt_id,
+                    current_stage: None,
+                    failure_class: Some("provider".to_string()),
+                    failure_code: Some("provider_unavailable".to_string()),
+                    failure_disposition: Some(OpsFailureDisposition::RetryExhausted),
+                    failure_message: Some("embedding provider unavailable".to_string()),
+                    retryable,
+                    operational_defer: None,
+                    delete_vectors: false,
+                    failed_at: Utc::now(),
+                },
+            )
+            .await?;
+            let scheduled_retry = match outcome {
+                ingest_repository::FailContentIngestAttemptOutcome::Applied {
+                    retry_scheduled,
+                    mutation_failed,
+                    ..
+                } => {
+                    assert!(!mutation_failed, "a published item is never failed afterwards");
+                    retry_scheduled
+                }
+                other => return Err(anyhow!("failure publication was not applied: {other:?}")),
+            };
+            assert_eq!(scheduled_retry, retryable);
+
+            // The published document survives untouched: same head, same readable
+            // text, same applied item and same settled request. Only the failed
+            // channels and the attempt/job transition are recorded.
+            let head = content_document_head_repository::get_document_head(
+                &fixture.pool,
+                fixture.document_id,
+            )
+            .await?
+            .context("published head disappeared after enrichment failure")?;
+            assert_eq!(head.readable_revision_id, Some(fixture.revision_id));
+            assert_eq!(
+                current_view_revision(&fixture.pool, fixture.document_id).await?,
+                Some(fixture.revision_id),
+            );
+            assert_eq!(
+                revision_channel_states(&fixture.pool, fixture.revision_id).await?,
+                ("text_readable".into(), "failed".into(), "failed".into(), true, false, false)
+            );
+            assert_eq!(
+                published_outcome_states(
+                    &fixture.pool,
+                    fixture.mutation_item_id,
+                    fixture.async_operation_id
+                )
+                .await?,
+                ("applied".into(), "applied".into(), "ready".into()),
+                "an enrichment failure does not reopen or fail the published request",
+            );
+            let attempt =
+                ingest_repository::get_ingest_attempt_by_id(&fixture.pool, fixture.attempt_id)
+                    .await?
+                    .context("failed attempt missing")?;
+            let job = ingest_repository::get_ingest_job_by_id(&fixture.pool, fixture.job_id)
+                .await?
+                .context("failed job missing")?;
+            assert_eq!(attempt.attempt_state, "failed");
+            assert_eq!(attempt.failure_code.as_deref(), Some("provider_unavailable"));
+            assert_eq!(attempt.retryable, retryable);
+            assert_eq!(job.queue_state, if retryable { "queued" } else { "failed" });
+            assert_eq!(revision_ready_outbox_count(&fixture.pool, fixture.revision_id).await?, 1);
+            Ok(())
+        }
+        .await;
+        fixture.cleanup().await?;
+        result?;
+    }
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires local postgres with the pgvector extensions"]
+async fn cancellation_after_base_leaves_published_text_and_pending_channels() -> Result<()> {
+    let fixture = PublicationFixture::create("accepted", false).await?;
+    let result = async {
+        ingest_repository::publish_content_ingest_base(
+            &fixture.pool,
+            &fixture.base_publication_command(Utc::now()),
+        )
+        .await?;
+        // A cancel stops enrichment without running failure reconciliation, so the
+        // state a cancelled attempt leaves behind is exactly this: published text,
+        // pending channels and an open lease for the cooperative stop.
+        assert_eq!(
+            revision_channel_states(&fixture.pool, fixture.revision_id).await?,
+            ("text_readable".into(), "processing".into(), "processing".into(), true, false, false)
+        );
+        let head =
+            content_document_head_repository::get_document_head(&fixture.pool, fixture.document_id)
+                .await?
+                .context("cancelled head missing")?;
+        assert_eq!(head.readable_revision_id, Some(fixture.revision_id));
+        assert_eq!(
+            current_view_revision(&fixture.pool, fixture.document_id).await?,
+            Some(fixture.revision_id)
+        );
+        let attempt =
+            ingest_repository::get_ingest_attempt_by_id(&fixture.pool, fixture.attempt_id)
+                .await?
+                .context("cancelled attempt missing")?;
+        assert_eq!(attempt.attempt_state, "leased");
+        Ok(())
+    }
+    .await;
+    fixture.cleanup().await?;
+    result
+}
+
+#[tokio::test]
+#[ignore = "requires local postgres with the pgvector extensions"]
+async fn ordinary_update_publishes_the_new_revision_as_current() -> Result<()> {
+    let fixture = PublicationFixture::create("accepted", false).await?;
+    let result = async {
+        publish_base_and_finalize_enrichment(&fixture).await?;
+        let successor = seed_successor_revision(&fixture).await?;
+
+        let base = ingest_repository::publish_content_ingest_base(
+            &fixture.pool,
+            &successor.base_publication_command(&fixture, Utc::now()),
+        )
+        .await?;
+        let base_source_truth_version = match base {
+            ingest_repository::PublishContentIngestSuccessOutcome::Applied {
+                source_truth_version,
+                publicly_visible: true,
+                ..
+            } => source_truth_version,
+            other => return Err(anyhow!("successor base publication was not applied: {other:?}")),
+        };
+        let head =
+            content_document_head_repository::get_document_head(&fixture.pool, fixture.document_id)
+                .await?
+                .context("updated head missing")?;
+        assert_eq!(head.readable_revision_id, Some(successor.revision_id));
+        assert_eq!(
+            current_view_revision(&fixture.pool, fixture.document_id).await?,
+            Some(successor.revision_id),
+            "the updated revision is current while its enrichment is still pending",
+        );
+        assert_eq!(
+            revision_channel_states(&fixture.pool, successor.revision_id).await?,
+            ("text_readable".into(), "processing".into(), "processing".into(), true, false, false)
+        );
+        assert_eq!(
+            published_outcome_states(
+                &fixture.pool,
+                successor.mutation_item_id,
+                successor.async_operation_id
+            )
+            .await?,
+            ("applied".into(), "applied".into(), "ready".into())
+        );
+        assert_eq!(
+            ingest_repository::get_ingest_job_by_id(&fixture.pool, successor.job_id)
+                .await?
+                .context("successor job missing")?
+                .queue_state,
+            "leased",
+            "the update publishes its head before its own enrichment completes",
+        );
+        let completed_at = Utc::now();
+        ingest_repository::finalize_content_ingest_enrichment(
+            &fixture.pool,
+            &ingest_repository::FinalizeContentIngestEnrichment {
+                workspace_id: fixture.workspace_id,
+                library_id: fixture.library_id,
+                document_id: fixture.document_id,
+                revision_id: successor.revision_id,
+                mutation_id: successor.mutation_id,
+                mutation_item_id: successor.mutation_item_id,
+                attempt_id: successor.attempt_id,
+                expected_source_truth_version: base_source_truth_version,
+                embedding_profile_key: Some(successor.embedding_profile_key.clone()),
+                graph_state: "graph_degraded".to_string(),
+                graph_ready_at: None,
+                completed_at,
+            },
+            &ingest_repository::ContentIngestPublicationEffects::default(),
+            &FixedEmbeddingProfileSource(successor.embedding_profile_key.clone()),
+        )
+        .await?;
+        let finalized_head =
+            content_document_head_repository::get_document_head(&fixture.pool, fixture.document_id)
+                .await?
+                .context("finalized head missing")?;
+        assert_eq!(finalized_head.readable_revision_id, Some(successor.revision_id));
+        let attempt =
+            ingest_repository::get_ingest_attempt_by_id(&fixture.pool, successor.attempt_id)
+                .await?
+                .context("successor attempt missing")?;
+        assert_eq!(attempt.attempt_state, "succeeded");
+        assert_eq!(
+            attempt.failure_code.as_deref(),
+            Some("graph_degraded"),
+            "a degraded graph layer stays recorded on the attempt",
+        );
+        assert_eq!(
+            revision_channel_states(&fixture.pool, successor.revision_id).await?,
+            ("text_readable".into(), "ready".into(), "graph_degraded".into(), true, true, false)
+        );
+        Ok(())
+    }
+    .await;
+    fixture.cleanup().await?;
+    result
+}
+
+#[tokio::test]
+#[ignore = "requires local postgres with the pgvector extensions"]
+async fn enrichment_of_a_superseded_revision_never_rewrites_the_head() -> Result<()> {
+    let fixture = PublicationFixture::create("accepted", false).await?;
+    let result = async {
+        // The first revision is published but not enriched yet.
+        let first_base = ingest_repository::publish_content_ingest_base(
+            &fixture.pool,
+            &fixture.base_publication_command(Utc::now()),
+        )
+        .await?;
+        let first_source_truth_version = match first_base {
+            ingest_repository::PublishContentIngestSuccessOutcome::Applied {
+                source_truth_version,
+                publicly_visible: true,
+                ..
+            } => source_truth_version,
+            other => return Err(anyhow!("first base publication was not applied: {other:?}")),
+        };
+        // A successor supersedes it while its enrichment is still running.
+        let successor = seed_successor_revision(&fixture).await?;
+        ingest_repository::publish_content_ingest_base(
+            &fixture.pool,
+            &successor.base_publication_command(&fixture, Utc::now()),
+        )
+        .await?;
+        let completed_at = Utc::now();
+        let superseded = ingest_repository::finalize_content_ingest_enrichment(
+            &fixture.pool,
+            &fixture.enrichment_command(
+                first_source_truth_version,
+                "ready",
+                Some(completed_at),
+                completed_at,
+            ),
+            &ingest_repository::ContentIngestPublicationEffects::default(),
+            &FixedEmbeddingProfileSource(fixture.embedding_profile_key.clone()),
+        )
+        .await?;
+        match superseded {
+            ingest_repository::PublishContentIngestSuccessOutcome::Applied {
+                publicly_visible,
+                mutation_completed,
+                ..
+            } => {
+                assert!(!publicly_visible, "a superseded revision must not become current");
+                assert!(!mutation_completed);
+            }
+            other => {
+                return Err(anyhow!("superseded enrichment finalization failed: {other:?}"));
+            }
+        }
+        let head =
+            content_document_head_repository::get_document_head(&fixture.pool, fixture.document_id)
+                .await?
+                .context("superseded head missing")?;
+        assert_eq!(head.readable_revision_id, Some(successor.revision_id));
+        assert_eq!(
+            current_view_revision(&fixture.pool, fixture.document_id).await?,
+            Some(successor.revision_id),
+            "the older revision is never exposed again",
+        );
+        // The superseded revision still records what really happened to it; only
+        // the document head is untouched.
+        assert_eq!(
+            revision_channel_states(&fixture.pool, fixture.revision_id).await?,
+            ("text_readable".into(), "ready".into(), "ready".into(), true, true, true)
+        );
+        Ok(())
+    }
+    .await;
+    fixture.cleanup().await?;
+    result
+}
+
+#[tokio::test]
+#[ignore = "requires local postgres with the pgvector extensions"]
+async fn withheld_base_publication_completes_without_exposing_the_revision() -> Result<()> {
+    let fixture = PublicationFixture::create("accepted", false).await?;
+    let result = async {
+        let intent = accept_publication_intent(&fixture, "base-withheld").await?;
+        let before =
+            content_document_head_repository::get_document_head(&fixture.pool, fixture.document_id)
+                .await?
+                .context("pre-publication head missing")?;
+        let base = ingest_repository::publish_content_ingest_base(
+            &fixture.pool,
+            &fixture.base_publication_command(Utc::now()),
+        )
+        .await?;
+        match base {
+            ingest_repository::PublishContentIngestSuccessOutcome::Applied {
+                publicly_visible,
+                mutation_completed,
+                ..
+            } => {
+                assert!(!publicly_visible, "a foreign intent must withhold the readable head");
+                assert!(mutation_completed);
+            }
+            other => return Err(anyhow!("withheld base publication failed: {other:?}")),
+        }
+        let head =
+            content_document_head_repository::get_document_head(&fixture.pool, fixture.document_id)
+                .await?
+                .context("withheld head missing")?;
+        assert_eq!(head.visibility_intent_id, Some(intent));
+        assert_eq!(head.readable_revision_id, None);
+        assert_eq!(head.active_revision_id, None);
+        assert_eq!(head.document_summary, before.document_summary);
+        assert_eq!(current_view_revision(&fixture.pool, fixture.document_id).await?, None);
+        // Nothing else runs for a withheld revision, so its lifecycle closes here
+        // without claiming enrichment that never happened.
+        assert_eq!(
+            revision_channel_states(&fixture.pool, fixture.revision_id).await?,
+            ("text_readable".into(), "processing".into(), "processing".into(), true, false, false)
+        );
+        let job = ingest_repository::get_ingest_job_by_id(&fixture.pool, fixture.job_id)
+            .await?
+            .context("withheld job missing")?;
+        let attempt =
+            ingest_repository::get_ingest_attempt_by_id(&fixture.pool, fixture.attempt_id)
+                .await?
+                .context("withheld attempt missing")?;
+        assert_eq!(job.queue_state, "completed");
+        assert_eq!(attempt.attempt_state, "succeeded");
         Ok(())
     }
     .await;

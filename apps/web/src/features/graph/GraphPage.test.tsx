@@ -79,7 +79,7 @@ function renderGraph(initialEntry = '/graph') {
 }
 
 const readySummary = {
-  documentCountsByReadiness: {},
+  documentCountsByStatus: {},
   edgeCount: 1,
   graphReadyDocumentCount: 1,
   graphSparseDocumentCount: 0,

@@ -361,7 +361,7 @@ async fn lease_ingest_attempt(
     clippy::cognitive_complexity,
     reason = "the ingest job lifecycle is one flat sequence of named stages; the tracing spans add the remaining branches"
 )]
-pub(super) async fn execute_ingest_job(
+pub(crate) async fn execute_ingest_job(
     state: Arc<AppState>,
     worker_id: &str,
     job: ingest_repository::IngestJobRow,
@@ -438,8 +438,16 @@ pub(super) async fn execute_ingest_job(
         "library.id" = %job.library_id,
         "workspace.id" = %job.workspace_id,
     );
+    // The job's own recorded admission, never a worker identity: the mutation
+    // this job belongs to names the principal that admitted it. A job with no
+    // recorded origin stays unattributed, so a fenced grant refuses its paid
+    // stage before any counter moves.
+    let caller = crate::services::ingest::service::recorded_job_caller(&state, &job).await;
     let dispatch_result =
-        Box::pin(dispatch_ingest_job(&lifecycle)).instrument(job_span.clone()).await;
+        Box::pin(crate::shared::provider_http::with_dispatch_caller(caller, async {
+            Box::pin(dispatch_ingest_job(&lifecycle)).instrument(job_span.clone()).await
+        }))
+        .await;
     let already_finalized = dispatch_result.as_ref().is_ok_and(IngestDispatchOutcome::is_finalized);
     let result = dispatch_result.map(|_| ());
     drop(heartbeat_guard);

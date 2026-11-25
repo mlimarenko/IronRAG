@@ -5,12 +5,17 @@ use uuid::Uuid;
 
 use crate::{
     app::state::AppState,
-    domains::audit::{
-        AuditAssistantCallSummary, AuditAssistantModel, AuditEvent, AuditEventInternalView,
-        AuditEventRedactedView, AuditEventSubject,
+    domains::{
+        audit::{
+            AuditAssistantCallSummary, AuditAssistantModel, AuditEvent, AuditEventInternalView,
+            AuditEventRedactedView, AuditEventSubject, QUERY_EXECUTION_AUDIT_ACTION,
+            QUERY_EXECUTION_AUDIT_REDACTED_MESSAGE,
+        },
+        billing::CostCoverageStatus,
     },
     infra::repositories::{audit_repository, billing_repository, query_repository},
     interfaces::http::router_support::ApiError,
+    services::ops::billing::measured_scope_cost,
 };
 
 #[derive(Debug, Clone)]
@@ -208,18 +213,18 @@ impl AuditService {
 
         let internal_message =
             render_query_execution_audit_message(&command, assistant_summary.as_ref());
-        let redacted_message = render_query_execution_audit_redacted(assistant_summary.as_ref());
 
         self.append_event(
             state,
             AppendAuditEventCommand {
                 actor_principal_id: Some(command.actor_principal_id),
                 surface_kind: command.surface_kind,
-                action_kind: "query.execution.run".to_string(),
+                action_kind: QUERY_EXECUTION_AUDIT_ACTION.to_string(),
                 request_id: command.request_id,
                 trace_id: None,
                 result_kind: "succeeded".to_string(),
-                redacted_message: Some(redacted_message),
+                // The redacted feed is also visible to callers without usage_read.
+                redacted_message: Some(QUERY_EXECUTION_AUDIT_REDACTED_MESSAGE.to_string()),
                 internal_message: Some(internal_message),
                 subjects,
             },
@@ -388,6 +393,8 @@ impl AuditService {
                     total_cost: None,
                     currency_code: None,
                     provider_call_count: 0,
+                    unpriced_provider_call_count: 0,
+                    cost_coverage: None,
                 },
             );
         }
@@ -402,6 +409,8 @@ impl AuditService {
                     total_cost: None,
                     currency_code: None,
                     provider_call_count: 0,
+                    unpriced_provider_call_count: 0,
+                    cost_coverage: None,
                 }
             });
             if summary.runtime_execution_id.is_none() {
@@ -424,11 +433,17 @@ impl AuditService {
                     total_cost: None,
                     currency_code: None,
                     provider_call_count: 0,
+                    unpriced_provider_call_count: 0,
+                    cost_coverage: None,
                 }
             });
-            summary.total_cost = Some(row.total_cost);
-            summary.currency_code = Some(row.currency_code);
-            summary.provider_call_count = i64::from(row.provider_call_count);
+            apply_assistant_cost_observation(
+                summary,
+                row.total_cost,
+                &row.currency_code,
+                row.provider_call_count,
+                row.unpriced_provider_call_count,
+            );
         }
 
         for (execution_id, models) in models_by_execution {
@@ -440,13 +455,6 @@ impl AuditService {
                         model_name,
                     })
                     .collect();
-            }
-        }
-
-        for summary in summaries.values_mut() {
-            if summary.total_cost.is_none() && summary.provider_call_count == 0 {
-                summary.total_cost = Some(Decimal::ZERO);
-                summary.currency_code = Some("USD".to_string());
             }
         }
 
@@ -658,18 +666,27 @@ fn render_query_execution_audit_message(
     )
 }
 
-fn render_query_execution_audit_redacted(
-    assistant_summary: Option<&AuditAssistantCallSummary>,
-) -> String {
-    // The redacted view intentionally omits the question text (may
-    // contain PII the caller has not opted into exposing) but keeps
-    // the AI cost summary, which is already aggregate and safe.
-    match assistant_summary {
-        Some(summary) => format!(
-            "assistant call completed | {}",
-            format_assistant_call_summary_for_audit(summary)
-        ),
-        None => "assistant call completed".to_string(),
+fn apply_assistant_cost_observation(
+    summary: &mut AuditAssistantCallSummary,
+    total_cost: Decimal,
+    currency_code: &str,
+    provider_call_count: i32,
+    unpriced_provider_call_count: i32,
+) {
+    let (total_cost, currency_code, cost_coverage) = measured_scope_cost(
+        true,
+        total_cost,
+        currency_code,
+        i64::from(provider_call_count),
+        i64::from(unpriced_provider_call_count),
+    );
+    summary.total_cost = total_cost;
+    summary.currency_code = currency_code;
+    summary.cost_coverage = cost_coverage;
+    summary.unpriced_provider_call_count = i64::from(unpriced_provider_call_count);
+    // An empty rollup must not replace the descriptor count with zero.
+    if cost_coverage.is_some() {
+        summary.provider_call_count = i64::from(provider_call_count);
     }
 }
 
@@ -686,13 +703,30 @@ fn format_assistant_call_summary_for_audit(summary: &AuditAssistantCallSummary) 
         format!("models: {rendered}")
     };
 
-    let cost_fragment = match (summary.total_cost, summary.currency_code.as_deref()) {
-        (Some(cost), Some(currency)) => format!(", cost: {cost} {currency}"),
-        (Some(cost), None) => format!(", cost: {cost}"),
-        _ => String::new(),
-    };
+    let count_kind = if summary.cost_coverage.is_some() { "completed" } else { "recorded" };
+    format!(
+        "{count_kind} calls: {} | {}{}",
+        summary.provider_call_count,
+        models_fragment,
+        audit_cost_fragment(summary)
+    )
+}
 
-    format!("calls: {} | {}{}", summary.provider_call_count, models_fragment, cost_fragment)
+fn audit_cost_fragment(summary: &AuditAssistantCallSummary) -> String {
+    let unpriced = summary.unpriced_provider_call_count;
+    let amount = summary.total_cost.zip(summary.currency_code.as_deref());
+    match (amount, summary.cost_coverage) {
+        (Some((cost, currency)), Some(CostCoverageStatus::Complete)) => {
+            format!(", cost: {cost} {currency}")
+        }
+        (Some((cost, currency)), Some(CostCoverageStatus::Partial)) => {
+            format!(", cost: {cost} {currency} (partial, {unpriced} unpriced)")
+        }
+        (_, Some(CostCoverageStatus::Unknown)) => {
+            format!(", cost: unknown ({unpriced} unpriced)")
+        }
+        _ => String::new(),
+    }
 }
 
 fn truncate_on_char_boundary(text: &str, max_chars: usize) -> String {
@@ -728,5 +762,83 @@ fn map_event_subject(row: audit_repository::AuditEventSubjectRow) -> AuditEventS
         runtime_execution_id,
         context_bundle_id,
         async_operation_id,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{AuditAssistantCallSummary, apply_assistant_cost_observation};
+    use crate::domains::billing::CostCoverageStatus;
+    use rust_decimal::Decimal;
+    use uuid::Uuid;
+
+    fn summary_with_descriptor_count(provider_call_count: i64) -> AuditAssistantCallSummary {
+        AuditAssistantCallSummary {
+            query_execution_id: Uuid::nil(),
+            conversation_id: None,
+            runtime_execution_id: None,
+            models: Vec::new(),
+            total_cost: None,
+            currency_code: None,
+            provider_call_count,
+            unpriced_provider_call_count: 0,
+            cost_coverage: None,
+        }
+    }
+
+    #[test]
+    fn an_audit_summary_without_a_cost_observation_fabricates_no_zero() {
+        let mut summary = summary_with_descriptor_count(5);
+
+        apply_assistant_cost_observation(&mut summary, Decimal::ZERO, "USD", 0, 0);
+
+        assert_eq!(summary.total_cost, None);
+        assert_eq!(summary.currency_code, None);
+        assert_eq!(summary.cost_coverage, None);
+        assert_eq!(summary.unpriced_provider_call_count, 0);
+        assert_eq!(
+            summary.provider_call_count, 5,
+            "a stored row with no call does not overwrite the descriptor count with zero"
+        );
+    }
+
+    #[test]
+    fn a_fully_priced_audit_scope_keeps_its_genuine_zero() {
+        let mut summary = summary_with_descriptor_count(0);
+
+        apply_assistant_cost_observation(&mut summary, Decimal::ZERO, "USD", 2, 0);
+
+        assert_eq!(summary.total_cost, Some(Decimal::ZERO));
+        assert_eq!(summary.currency_code.as_deref(), Some("USD"));
+        assert_eq!(summary.cost_coverage, Some(CostCoverageStatus::Complete));
+        assert_eq!(summary.unpriced_provider_call_count, 0);
+        assert_eq!(summary.provider_call_count, 2);
+    }
+
+    #[test]
+    fn an_unresolved_only_audit_scope_is_unknown_without_an_amount() {
+        let mut summary = summary_with_descriptor_count(0);
+
+        apply_assistant_cost_observation(&mut summary, Decimal::ZERO, "USD", 0, 3);
+
+        assert_eq!(summary.total_cost, None);
+        assert_eq!(summary.currency_code, None);
+        assert_eq!(summary.cost_coverage, Some(CostCoverageStatus::Unknown));
+        assert_eq!(summary.unpriced_provider_call_count, 3);
+        assert_eq!(summary.provider_call_count, 0);
+    }
+
+    #[test]
+    fn a_partial_audit_scope_retains_its_known_subtotal() {
+        let subtotal = Decimal::from_str_exact("0.2500").expect("valid decimal");
+        let mut summary = summary_with_descriptor_count(0);
+
+        apply_assistant_cost_observation(&mut summary, subtotal, "USD", 1, 1);
+
+        assert_eq!(summary.total_cost, Some(subtotal));
+        assert_eq!(summary.currency_code.as_deref(), Some("USD"));
+        assert_eq!(summary.cost_coverage, Some(CostCoverageStatus::Partial));
+        assert_eq!(summary.unpriced_provider_call_count, 1);
+        assert_eq!(summary.provider_call_count, 1);
     }
 }

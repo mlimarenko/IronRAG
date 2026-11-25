@@ -28,6 +28,11 @@ MODEL_IDENTITIES = {
 }
 MAX_QUERY_TOKENS = 128
 MAX_SEQUENCE_TOKENS = 2048
+COMMON_MODEL_FILES = {"config.json", "tokenizer_config.json", "tokenizer.json"}
+MODEL_WEIGHT_FILES = {
+    "cross-encoder": {"model.safetensors"},
+    "late-interaction": {"pytorch_model.bin", "colbert_linear.pt", "sparse_linear.pt"},
+}
 
 
 class ModelForwardFailure(Exception):
@@ -109,7 +114,7 @@ def load_inputs(path: Path, expected_sha256: str) -> dict[str, Any]:
     return data
 
 
-def verify_environment(manifest_path: Path, expected: str, arm: str) -> dict[str, Any]:
+def load_manifest(manifest_path: Path, expected: str) -> dict[str, Any]:
     if digest(manifest_path) != expected:
         raise ValueError("execution manifest identity mismatch")
     manifest = json.loads(manifest_path.read_text())
@@ -117,27 +122,34 @@ def verify_environment(manifest_path: Path, expected: str, arm: str) -> dict[str
         raise ValueError("unsupported environment protocol")
     if digest(Path(manifest["uvLockPath"])) != manifest["uvLockSha256"]:
         raise ValueError("runtime lock changed")
-    for package, version in manifest["packages"].items():
+    return manifest
+
+
+def verify_packages(packages: dict[str, str]) -> None:
+    for package, version in packages.items():
         if importlib.metadata.version(package) != version:
             raise ValueError(f"installed runtime version mismatch: {package}")
-    for name, model in manifest["models"].items():
-        if (model["modelId"], model["revision"]) != MODEL_IDENTITIES[name]:
-            raise ValueError("unexpected model revision")
-        root = Path(model["path"]).resolve(strict=True)
-        required = {"config.json", "tokenizer_config.json", "tokenizer.json"}
-        required |= (
-            {"model.safetensors"}
-            if name == "cross-encoder"
-            else {"pytorch_model.bin", "colbert_linear.pt", "sparse_linear.pt"}
+
+
+def verify_model_snapshot(name: str, model: dict[str, Any]) -> None:
+    if (model["modelId"], model["revision"]) != MODEL_IDENTITIES[name]:
+        raise ValueError("unexpected model revision")
+    root = Path(model["path"]).resolve(strict=True)
+    if not (COMMON_MODEL_FILES | MODEL_WEIGHT_FILES[name]).issubset(model["files"]):
+        raise ValueError(
+            "incomplete local model snapshot, including projection heads"
         )
-        if not required.issubset(model["files"]):
-            raise ValueError(
-                "incomplete local model snapshot, including projection heads"
-            )
-        for relative, sha256 in model["files"].items():
-            file = (root / relative).resolve(strict=True)
-            if not file.is_relative_to(root) or digest(file) != sha256:
-                raise ValueError("local model file identity mismatch")
+    for relative, sha256 in model["files"].items():
+        file = (root / relative).resolve(strict=True)
+        if not file.is_relative_to(root) or digest(file) != sha256:
+            raise ValueError("local model file identity mismatch")
+
+
+def verify_environment(manifest_path: Path, expected: str, arm: str) -> dict[str, Any]:
+    manifest = load_manifest(manifest_path, expected)
+    verify_packages(manifest["packages"])
+    for name, model in manifest["models"].items():
+        verify_model_snapshot(name, model)
     if (
         set(manifest["models"]) != set(MODEL_IDENTITIES)
         or arm not in manifest["models"]
@@ -202,8 +214,7 @@ def finite_scores(
     ]
 
 
-def run(args: argparse.Namespace) -> None:
-    require_network_isolation()
+def configure_offline_environment() -> None:
     for name, value in {
         "HF_HUB_OFFLINE": "1",
         "TRANSFORMERS_OFFLINE": "1",
@@ -213,12 +224,10 @@ def run(args: argparse.Namespace) -> None:
         "OPENBLAS_NUM_THREADS": "1",
     }.items():
         os.environ[name] = value
-    data = load_inputs(args.input, args.input_sha256)
-    manifest = verify_environment(args.environment, args.environment_sha256, args.arm)
-    output = args.output.resolve()
-    output.mkdir(mode=0o700)
-    journal = output / "attempts.jsonl"
-    report = {
+
+
+def initial_report(args: argparse.Namespace, data: dict, manifest: dict) -> dict:
+    return {
         "protocol": "semantic-rerank-comparison-scores/1",
         "inputSha256": data["inputSha256"],
         "exportedInputFileSha256": args.input_sha256,
@@ -239,6 +248,160 @@ def run(args: argparse.Namespace) -> None:
             "scoreTies": "native replay preserves frozen candidate order",
         },
     }
+
+
+def load_runtime() -> dict[str, Any]:
+    """Import the pinned CPU stack lazily so a broken environment stays reportable."""
+    import numpy
+    import torch
+    from FlagEmbedding import BGEM3FlagModel, FlagReranker
+    from transformers import AutoTokenizer
+
+    torch.set_num_threads(1)
+    torch.set_num_interop_threads(1)
+    torch.manual_seed(0)
+    return {
+        "numpy": numpy,
+        "tokenizer": AutoTokenizer,
+        "reranker": FlagReranker,
+        "encoder": BGEM3FlagModel,
+    }
+
+
+def load_tokenizers(manifest: dict, runtime: dict) -> dict[str, Any]:
+    return {
+        name: runtime["tokenizer"].from_pretrained(
+            model["path"], local_files_only=True, trust_remote_code=False
+        )
+        for name, model in manifest["models"].items()
+    }
+
+
+def load_model(arm: str, path: str, report: dict, runtime: dict) -> Any:
+    if arm == "cross-encoder":
+        model = runtime["reranker"](
+            path,
+            devices="cpu",
+            use_fp16=False,
+            trust_remote_code=False,
+            query_max_length=MAX_QUERY_TOKENS,
+            max_length=MAX_SEQUENCE_TOKENS,
+            batch_size=1,
+            normalize=False,
+        )
+        report["latencyScope"] = (
+            "resident-model tokenization, all pair scores and sorting; no document cache"
+        )
+        return model
+    model = runtime["encoder"](
+        path,
+        devices="cpu",
+        use_fp16=False,
+        use_bf16=False,
+        trust_remote_code=False,
+        batch_size=1,
+        query_max_length=MAX_QUERY_TOKENS + 2,
+        passage_max_length=MAX_SEQUENCE_TOKENS,
+        return_dense=False,
+        return_sparse=False,
+        return_colbert_vecs=True,
+    )
+    report["latencyScope"] = (
+        "resident-model/resident-document-cache query encoding, MaxSim scores and sorting"
+    )
+    return model
+
+
+def text_key(text: str) -> str:
+    return hashlib.sha256(text.encode()).hexdigest()
+
+
+def precompute_documents(
+    output: Path, journal: Path, data: dict, model: Any, np: Any
+) -> tuple[dict[str, Any], dict]:
+    cache = {}
+    cache_root = output / "document-vectors"
+    cache_root.mkdir()
+    cache_start = time.perf_counter()
+    for query in data["queries"]:
+        for candidate in query["candidates"]:
+            text = candidate["text"]
+            key = text_key(text)
+            if key in cache:
+                continue
+            record(journal, {"event": "document_started", "textSha256": key})
+            start = time.perf_counter()
+            vector = model.encode_corpus(
+                [text],
+                batch_size=1,
+                max_length=MAX_SEQUENCE_TOKENS,
+                return_dense=False,
+                return_sparse=False,
+                return_colbert_vecs=True,
+            )["colbert_vecs"][0]
+            encode_ms = (time.perf_counter() - start) * 1000
+            if vector.dtype != np.float32 or not np.isfinite(vector).all():
+                raise ValueError("invalid FP32 document vectors")
+            file = cache_root / (key + ".npy")
+            with file.open("xb") as stream:
+                np.save(stream, vector, allow_pickle=False)
+            cache[key] = vector
+            record(
+                journal,
+                {
+                    "event": "document_observed",
+                    "textSha256": key,
+                    "encodingMs": encode_ms,
+                    "shape": list(vector.shape),
+                    "tensorBytes": vector.nbytes,
+                    "fileBytes": file.stat().st_size,
+                    "fileSha256": digest(file),
+                },
+            )
+    summary = {
+        "uniqueTexts": len(cache),
+        "encodeAndSerializeMs": (time.perf_counter() - cache_start) * 1000,
+        "tensorBytes": sum(vector.nbytes for vector in cache.values()),
+        "serializedBytes": sum(file.stat().st_size for file in cache_root.iterdir()),
+        "cacheLoadMs": None,
+        "cacheState": "retained in memory from fresh encoding",
+        "coldEndToEndLatencyMs": None,
+    }
+    return cache, summary
+
+
+def query_scores(arm: str, model: Any, cache: dict, query: dict) -> Any:
+    if arm == "cross-encoder":
+        return model.compute_score(
+            [[query["query"], row["text"]] for row in query["candidates"]],
+            batch_size=1,
+            query_max_length=MAX_QUERY_TOKENS,
+            max_length=MAX_SEQUENCE_TOKENS,
+            normalize=False,
+        )
+    query_vector = model.encode_queries(
+        [query["query"]],
+        batch_size=1,
+        max_length=MAX_QUERY_TOKENS + 2,
+        return_dense=False,
+        return_sparse=False,
+        return_colbert_vecs=True,
+    )["colbert_vecs"][0]
+    return [
+        model.colbert_score(query_vector, cache[text_key(row["text"])])
+        for row in query["candidates"]
+    ]
+
+
+def run(args: argparse.Namespace) -> None:
+    require_network_isolation()
+    configure_offline_environment()
+    data = load_inputs(args.input, args.input_sha256)
+    manifest = verify_environment(args.environment, args.environment_sha256, args.arm)
+    output = args.output.resolve()
+    output.mkdir(mode=0o700)
+    journal = output / "attempts.jsonl"
+    report = initial_report(args, data, manifest)
     write_new(
         output / "started.json",
         {
@@ -252,139 +415,29 @@ def run(args: argparse.Namespace) -> None:
     )
     active_query = None
     try:
-        import numpy as np
-        import torch
-        from FlagEmbedding import BGEM3FlagModel, FlagReranker
-        from transformers import AutoTokenizer
-
-        torch.set_num_threads(1)
-        torch.set_num_interop_threads(1)
-        torch.manual_seed(0)
-        tokenizers = {
-            name: AutoTokenizer.from_pretrained(
-                model["path"], local_files_only=True, trust_remote_code=False
-            )
-            for name, model in manifest["models"].items()
-        }
+        runtime = load_runtime()
+        tokenizers = load_tokenizers(manifest, runtime)
         report["tokenEnvelope"] = validate_token_envelope(data, tokenizers)
         write_new(output / "token-envelope.json", report["tokenEnvelope"])
         load_start = time.perf_counter()
-        path = manifest["models"][args.arm]["path"]
-        if args.arm == "cross-encoder":
-            model = FlagReranker(
-                path,
-                devices="cpu",
-                use_fp16=False,
-                trust_remote_code=False,
-                query_max_length=MAX_QUERY_TOKENS,
-                max_length=MAX_SEQUENCE_TOKENS,
-                batch_size=1,
-                normalize=False,
-            )
-            report["latencyScope"] = (
-                "resident-model tokenization, all pair scores and sorting; no document cache"
-            )
-        else:
-            model = BGEM3FlagModel(
-                path,
-                devices="cpu",
-                use_fp16=False,
-                use_bf16=False,
-                trust_remote_code=False,
-                batch_size=1,
-                query_max_length=MAX_QUERY_TOKENS + 2,
-                passage_max_length=MAX_SEQUENCE_TOKENS,
-                return_dense=False,
-                return_sparse=False,
-                return_colbert_vecs=True,
-            )
-            report["latencyScope"] = (
-                "resident-model/resident-document-cache query encoding, MaxSim scores and sorting"
-            )
+        model = load_model(
+            args.arm, manifest["models"][args.arm]["path"], report, runtime
+        )
         preserve_forward_failure(model.model)
         report["configuration"]["forwardFailurePolicy"] = (
             "fail fast, preserve first cause"
         )
         report["modelLoadMs"] = (time.perf_counter() - load_start) * 1000
-        cache = {}
+        cache: dict[str, Any] = {}
         if args.arm == "late-interaction":
-            cache_root = output / "document-vectors"
-            cache_root.mkdir()
-            cache_start = time.perf_counter()
-            for query in data["queries"]:
-                for candidate in query["candidates"]:
-                    text = candidate["text"]
-                    key = hashlib.sha256(text.encode()).hexdigest()
-                    if key in cache:
-                        continue
-                    record(journal, {"event": "document_started", "textSha256": key})
-                    start = time.perf_counter()
-                    vector = model.encode_corpus(
-                        [text],
-                        batch_size=1,
-                        max_length=MAX_SEQUENCE_TOKENS,
-                        return_dense=False,
-                        return_sparse=False,
-                        return_colbert_vecs=True,
-                    )["colbert_vecs"][0]
-                    encode_ms = (time.perf_counter() - start) * 1000
-                    if vector.dtype != np.float32 or not np.isfinite(vector).all():
-                        raise ValueError("invalid FP32 document vectors")
-                    file = cache_root / (key + ".npy")
-                    with file.open("xb") as stream:
-                        np.save(stream, vector, allow_pickle=False)
-                    cache[key] = vector
-                    record(
-                        journal,
-                        {
-                            "event": "document_observed",
-                            "textSha256": key,
-                            "encodingMs": encode_ms,
-                            "shape": list(vector.shape),
-                            "tensorBytes": vector.nbytes,
-                            "fileBytes": file.stat().st_size,
-                            "fileSha256": digest(file),
-                        },
-                    )
-            report["documentPrecomputation"] = {
-                "uniqueTexts": len(cache),
-                "encodeAndSerializeMs": (time.perf_counter() - cache_start) * 1000,
-                "tensorBytes": sum(vector.nbytes for vector in cache.values()),
-                "serializedBytes": sum(
-                    file.stat().st_size for file in cache_root.iterdir()
-                ),
-                "cacheLoadMs": None,
-                "cacheState": "retained in memory from fresh encoding",
-                "coldEndToEndLatencyMs": None,
-            }
+            cache, report["documentPrecomputation"] = precompute_documents(
+                output, journal, data, model, runtime["numpy"]
+            )
         for query in data["queries"]:
             active_query = query["id"]
             record(journal, {"event": "query_started", "id": query["id"]})
             start = time.perf_counter()
-            if args.arm == "cross-encoder":
-                scores = model.compute_score(
-                    [[query["query"], row["text"]] for row in query["candidates"]],
-                    batch_size=1,
-                    query_max_length=MAX_QUERY_TOKENS,
-                    max_length=MAX_SEQUENCE_TOKENS,
-                    normalize=False,
-                )
-            else:
-                query_vector = model.encode_queries(
-                    [query["query"]],
-                    batch_size=1,
-                    max_length=MAX_QUERY_TOKENS + 2,
-                    return_dense=False,
-                    return_sparse=False,
-                    return_colbert_vecs=True,
-                )["colbert_vecs"][0]
-                scores = [
-                    model.colbert_score(
-                        query_vector,
-                        cache[hashlib.sha256(row["text"].encode()).hexdigest()],
-                    )
-                    for row in query["candidates"]
-                ]
+            scores = query_scores(args.arm, model, cache, query)
             mapped = finite_scores(query["candidates"], scores)
             sorted(enumerate(mapped), key=lambda pair: (-pair[1]["score"], pair[0]))
             result = {

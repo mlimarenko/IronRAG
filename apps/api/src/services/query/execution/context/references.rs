@@ -142,6 +142,7 @@ pub(crate) fn build_structured_query_diagnostics(
         rerank: enrichment.rerank.clone(),
         context_assembly: enrichment.context_assembly.clone(),
         grouped_references: enrichment.grouped_references.clone(),
+        retrieval_degradations: Vec::new(),
         context_text: include_debug.then(|| context_text.to_string()),
         warning: None,
         warning_kind: None,

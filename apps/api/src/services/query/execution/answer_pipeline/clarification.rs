@@ -170,6 +170,7 @@ pub(super) async fn finalize_typed_clarification_verification(
             structured_blocks: Vec::new(),
             technical_facts: Vec::new(),
         },
+        primary_answer_chunks: &[],
         assistant_grounding: &AssistantGroundingEvidence::default(),
         answer_kind: None,
     })

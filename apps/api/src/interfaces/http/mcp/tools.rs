@@ -32,6 +32,7 @@ pub(crate) mod grounded;
 pub(crate) mod iam;
 pub(crate) mod ingest;
 pub(crate) mod runtime;
+pub(crate) mod source_evidence;
 pub(crate) mod web_ingest;
 
 #[derive(Clone, Copy)]
@@ -40,6 +41,24 @@ pub(crate) struct ToolCallContext<'a> {
     pub state: &'a AppState,
     pub request_id: &'a str,
     pub surface_kind: RuntimeSurfaceKind,
+    /// The validated MCP session identity of this request, when the request
+    /// arrived on a session that passed the owner and expiry checks. Tool
+    /// handlers may publish it only to the caller it belongs to; it is never
+    /// derived from a request header or from the caller's own arguments.
+    pub caller_context: Option<ToolCallerIdentity>,
+}
+
+/// The non-secret identity of the caller that owns this dispatch.
+///
+/// It exists only after the MCP session was validated for owner and expiry, and
+/// it stays `Copy` so the dispatch chain can hand it to each tool module in
+/// turn without cloning strings.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct ToolCallerIdentity {
+    /// Server-derived digest of the validated session identifier.
+    pub session_fingerprint: [u8; 32],
+    /// Principal that owns the validated session.
+    pub owner_principal_id: uuid::Uuid,
 }
 
 /// Capability inputs the listing predicate cannot derive purely from
@@ -237,6 +256,10 @@ fn can_read_library_memory(auth: &AuthContext, _capabilities: ToolVisibilityCapa
     auth.can_read_any_library_memory(POLICY_MCP_MEMORY_READ)
 }
 
+fn can_read_document_memory(auth: &AuthContext, _capabilities: ToolVisibilityCapabilities) -> bool {
+    auth.can_read_any_document_memory(POLICY_MCP_MEMORY_READ)
+}
+
 fn can_read_web_runs(auth: &AuthContext, _capabilities: ToolVisibilityCapabilities) -> bool {
     auth.can_read_any_library_memory(POLICY_LIBRARY_READ)
 }
@@ -246,6 +269,12 @@ fn can_read_runtime(auth: &AuthContext, _capabilities: ToolVisibilityCapabilitie
 }
 
 const TOOL_REGISTRY: &[ToolRegistryEntry] = &[
+    ToolRegistryEntry {
+        name: "get_caller_context",
+        surfaces: ToolSurfaces::BOTH,
+        mutating: false,
+        visible: always_visible,
+    },
     ToolRegistryEntry {
         name: "list_workspaces",
         surfaces: ToolSurfaces::BOTH,
@@ -274,7 +303,7 @@ const TOOL_REGISTRY: &[ToolRegistryEntry] = &[
         name: READ_DOCUMENT_TOOL_NAME,
         surfaces: ToolSurfaces::BOTH,
         mutating: false,
-        visible: |auth, _capabilities| auth.can_read_any_document_memory(POLICY_MCP_MEMORY_READ),
+        visible: can_read_document_memory,
     },
     ToolRegistryEntry {
         name: VIEW_DOCUMENT_IMAGE_TOOL_NAME,
@@ -289,7 +318,7 @@ const TOOL_REGISTRY: &[ToolRegistryEntry] = &[
         name: "list_documents",
         surfaces: ToolSurfaces::BOTH,
         mutating: false,
-        visible: can_read_library_memory,
+        visible: can_read_document_memory,
     },
     ToolRegistryEntry {
         name: "search_entities",
@@ -573,14 +602,23 @@ pub(super) async fn handle_tools_list(
     )
 }
 
+/// One JSON-RPC `tools/call` payload together with the surface and caller
+/// identity it is authorized for.
+pub(super) struct McpToolCallInput {
+    pub(super) request_id: String,
+    pub(super) id: Option<Value>,
+    pub(super) params: Option<Value>,
+    pub(super) surface: McpToolSurface,
+    pub(super) caller_context: Option<ToolCallerIdentity>,
+}
+
 pub(super) async fn handle_tools_call(
     auth: &AuthContext,
     state: &AppState,
-    request_id: &str,
-    id: Option<Value>,
-    params: Option<Value>,
-    surface: McpToolSurface,
+    call: McpToolCallInput,
 ) -> McpJsonRpcResponse {
+    let McpToolCallInput { request_id, id, params, surface, caller_context } = call;
+    let request_id = request_id.as_str();
     let params_value = params.unwrap_or_else(|| json!({}));
     let parsed: McpToolCallParams = match serde_json::from_value(params_value) {
         Ok(parsed) => parsed,
@@ -625,8 +663,13 @@ pub(super) async fn handle_tools_call(
         );
     }
 
-    let context =
-        ToolCallContext { auth, state, request_id, surface_kind: RuntimeSurfaceKind::Mcp };
+    let context = ToolCallContext {
+        auth,
+        state,
+        request_id,
+        surface_kind: RuntimeSurfaceKind::Mcp,
+        caller_context,
+    };
     let dispatch_started_at = std::time::Instant::now();
     // IRG-203 SITE-5: the dispatch stays inline here. Whether it must detach
     // from the bounded `tools/call` deadline is declared once in
@@ -751,6 +794,7 @@ pub(crate) async fn call_named_tool<'a>(
 mod tests {
     use std::collections::BTreeSet;
 
+    use serde_json::json;
     use uuid::Uuid;
 
     use crate::{
@@ -834,6 +878,30 @@ mod tests {
 
         assert!(grounded_index < search_index);
         assert!(grounded_index < read_index);
+    }
+
+    #[test]
+    fn document_grants_expose_scoped_inventory_but_not_library_search() {
+        let mut auth = auth_with_query_and_memory_access();
+        let document_id = Uuid::from_u128(1001);
+        auth.grants = vec![AuthGrant {
+            id: Uuid::from_u128(5),
+            resource_kind: "document".to_string(),
+            resource_id: document_id,
+            permission_kind: "document_read".to_string(),
+            workspace_id: Some(Uuid::from_u128(101)),
+            library_id: Some(Uuid::from_u128(11)),
+            document_id: Some(document_id),
+        }];
+
+        for surface in [McpToolSurface::Answer, McpToolSurface::Diagnostics] {
+            let tools = visible_tool_names(&auth, surface).into_iter().collect::<BTreeSet<_>>();
+            assert!(tools.contains("list_documents"));
+            assert!(tools.contains(READ_DOCUMENT_TOOL_NAME));
+            assert!(!tools.contains("search_documents"));
+            assert!(!tools.contains("get_graph_topology"));
+            assert!(!tools.contains("grounded_answer"));
+        }
     }
 
     #[test]
@@ -1010,6 +1078,48 @@ mod tests {
         .expect_err("unknown requested tools must fail loudly");
 
         assert!(error.to_string().contains("missing_tool"));
+    }
+
+    #[test]
+    fn caller_context_tool_appears_in_both_visible_contracts() {
+        let auth = auth_with_query_and_memory_access();
+        for surface in [McpToolSurface::Answer, McpToolSurface::Diagnostics] {
+            let names = visible_tool_names(&auth, surface);
+            assert!(
+                names.iter().any(|name| name == "get_caller_context"),
+                "caller-context tool missing from {surface:?} contract: {names:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn caller_context_tool_is_visible_on_both_surfaces_and_never_mutating() {
+        let entry = super::TOOL_REGISTRY
+            .iter()
+            .find(|entry| entry.name == "get_caller_context")
+            .expect("caller-context tool must stay registered");
+        assert!(!entry.mutating, "self-inspection must not be classified mutating");
+        assert!(entry.surfaces.answer && entry.surfaces.diagnostics);
+        assert!(super::runtime::descriptor("get_caller_context").is_some());
+    }
+
+    #[test]
+    fn caller_context_projection_publishes_only_the_two_fence_values() {
+        let principal = Uuid::now_v7();
+        let fingerprint = [7_u8; 32];
+        let payload = super::runtime::caller_context_projection(Some(super::ToolCallerIdentity {
+            session_fingerprint: fingerprint,
+            owner_principal_id: principal,
+        }))
+        .expect("a validated identity must project");
+        assert_eq!(payload["sessionFingerprint"], json!(hex::encode(fingerprint)));
+        assert_eq!(payload["owner"]["principalId"], json!(principal));
+        assert_eq!(payload.as_object().map(|map| map.len()), Some(2));
+
+        let refused = super::runtime::caller_context_projection(None)
+            .expect_err("an unvalidated request must not receive an identity");
+        assert_eq!(refused.kind(), "invalid_mcp_tool_call");
+        assert!(!refused.to_string().contains(&principal.to_string()));
     }
 
     #[test]

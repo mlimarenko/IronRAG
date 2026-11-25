@@ -2,8 +2,10 @@ use crate::infra::knowledge_plane::{ChunkLexicalQuery, VectorSimilaritySearchInp
 use crate::interfaces::http::router_support::current_embedding_search_guard;
 
 use super::grounding::saturating_rank;
+use super::resolution::SearchEmbeddingResolution;
 use super::*;
 use crate::infra::knowledge_plane::LexicalQueryOrigin;
+use crate::mcp_types::{McpSearchDegradation, McpSearchDegradationReason};
 
 use std::collections::{BTreeSet, HashSet};
 
@@ -77,6 +79,7 @@ struct SearchLibraryMaterial {
     >,
     lexical_chunk_hits: Vec<KnowledgeChunkSearchRow>,
     vector_chunk_hits: Vec<KnowledgeChunkVectorSearchRow>,
+    vector_degradation: Option<McpSearchDegradationReason>,
     chunk_map: HashMap<Uuid, KnowledgeChunkRow>,
     document_map: HashMap<Uuid, KnowledgeDocumentRow>,
     revision_map: HashMap<Uuid, KnowledgeRevisionRow>,
@@ -107,15 +110,17 @@ async fn load_search_library_material(
         .map_err(|error| ApiError::internal_with_log(error, "internal"))?;
     let lexical_chunk_hits =
         search_chunks_with_query_variants(state, library.library.id, query, lexical_limit).await?;
-    let embedding_context =
+    let embedding_resolution =
         resolve_search_embedding_context(state, library.library.id, query).await?;
-    let vector_chunk_hits = load_vector_search_hits(
-        state,
-        library.library.id,
-        embedding_context.as_ref(),
-        lexical_limit,
-    )
-    .await?;
+    let (vector_chunk_hits, vector_degradation) = match embedding_resolution {
+        SearchEmbeddingResolution::Ready(context) => {
+            load_vector_search_hits(state, library.library.id, &context, lexical_limit).await?
+        }
+        SearchEmbeddingResolution::EmptyInventory => (Vec::new(), None),
+        SearchEmbeddingResolution::ProviderUnavailable => {
+            (Vec::new(), Some(McpSearchDegradationReason::EmbeddingProviderUnavailable))
+        }
+    };
     let all_chunk_ids = lexical_chunk_hits
         .iter()
         .map(|hit| hit.chunk_id)
@@ -138,6 +143,7 @@ async fn load_search_library_material(
         structured_block_hits,
         lexical_chunk_hits,
         vector_chunk_hits,
+        vector_degradation,
         chunk_map,
         document_map: document_rows.into_iter().map(|row| (row.document_id, row)).collect(),
         revision_map: revision_rows.into_iter().map(|row| (row.revision_id, row)).collect(),
@@ -184,12 +190,9 @@ fn accumulate_structured_block_search_hits(
 async fn load_vector_search_hits(
     state: &AppState,
     library_id: Uuid,
-    embedding_context: Option<&McpSearchEmbeddingContext>,
+    context: &McpSearchEmbeddingContext,
     lexical_limit: usize,
-) -> Result<Vec<KnowledgeChunkVectorSearchRow>, ApiError> {
-    let Some(context) = embedding_context else {
-        return Ok(Vec::new());
-    };
+) -> Result<(Vec<KnowledgeChunkVectorSearchRow>, Option<McpSearchDegradationReason>), ApiError> {
     let _vector_guard = current_embedding_search_guard(
         state,
         library_id,
@@ -219,17 +222,43 @@ async fn load_vector_search_hits(
         )
         .await
     {
-        Ok(rows) => Ok(rows),
-        Err(error) => {
+        Ok(rows) => Ok((rows, None)),
+        Err(error) if is_operational_vector_store_failure(&error) => {
             warn!(
                 %library_id,
                 model_catalog_id = %context.model_catalog_id,
                 error = ?error,
                 "mcp search vector lookup failed; degrading to lexical-only MCP search",
             );
-            Ok(Vec::new())
+            Ok((Vec::new(), Some(McpSearchDegradationReason::VectorStoreUnavailable)))
         }
+        Err(error) => Err(ApiError::internal_with_log(error, "internal")),
     }
+}
+
+fn is_operational_vector_store_failure(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        cause.downcast_ref::<sqlx::Error>().is_some_and(|error| match error {
+            sqlx::Error::Io(_) | sqlx::Error::PoolTimedOut | sqlx::Error::PoolClosed => true,
+            sqlx::Error::Database(database) => {
+                database.code().is_some_and(|code| code.starts_with("08") || code == "57P03")
+            }
+            _ => false,
+        })
+    })
+}
+
+fn ensure_search_outcome_has_evidence(
+    has_hits: bool,
+    has_degradations: bool,
+) -> Result<(), ApiError> {
+    if !has_hits && has_degradations {
+        return Err(ApiError::ServiceUnavailable {
+            message: "document search degraded and returned no evidence".to_string(),
+            kind: "retrieval_degraded",
+        });
+    }
+    Ok(())
 }
 
 fn unique_chunk_document_ids(chunk_map: &HashMap<Uuid, KnowledgeChunkRow>) -> Vec<Uuid> {
@@ -751,6 +780,7 @@ pub(crate) async fn search_documents(
     let library_refs =
         libraries.iter().map(|item| item.descriptor.catalog_ref.clone()).collect::<Vec<_>>();
     let mut hits = Vec::new();
+    let mut degradations = Vec::new();
     let mut all_prepared_evidence_scopes = HashSet::new();
     for library in libraries {
         let lexical_limit = limit.saturating_mul(3).max(6);
@@ -759,10 +789,17 @@ pub(crate) async fn search_documents(
             structured_block_hits,
             lexical_chunk_hits,
             vector_chunk_hits,
+            vector_degradation,
             chunk_map,
             document_map,
             revision_map,
         } = load_search_library_material(state, &library, query, lexical_limit).await?;
+        if let Some(reason) = vector_degradation {
+            degradations.push(McpSearchDegradation {
+                library: library.descriptor.catalog_ref.clone(),
+                reason,
+            });
+        }
         let mut prepared_evidence_scopes = HashSet::new();
         let mut document_accumulators = HashMap::<Uuid, McpDocumentAccumulator>::new();
 
@@ -844,6 +881,7 @@ pub(crate) async fn search_documents(
     retain_current_search_hits(&mut hits, &current_scopes, &all_prepared_evidence_scopes);
     hits.sort_by(search_document_hit_order);
     hits.truncate(limit);
+    ensure_search_outcome_has_evidence(!hits.is_empty(), !degradations.is_empty())?;
 
     if !include_references {
         clear_search_reference_evidence(&mut hits);
@@ -854,7 +892,30 @@ pub(crate) async fn search_documents(
         limit,
         libraries: library_refs,
         hits,
+        degradations,
     })
+}
+
+#[cfg(test)]
+mod degradation_tests {
+    use super::*;
+
+    #[test]
+    fn degraded_search_requires_revalidated_evidence() {
+        assert!(ensure_search_outcome_has_evidence(true, true).is_ok());
+        assert!(ensure_search_outcome_has_evidence(false, true).is_err());
+        assert!(ensure_search_outcome_has_evidence(false, false).is_ok());
+    }
+
+    #[test]
+    fn vector_store_degradation_does_not_hide_unknown_integrity_failures() {
+        assert!(is_operational_vector_store_failure(&anyhow::Error::new(
+            sqlx::Error::PoolTimedOut
+        )));
+        assert!(!is_operational_vector_store_failure(&anyhow::anyhow!(
+            "projection identity mismatch"
+        )));
+    }
 }
 
 const fn search_readability_rank(state: &McpReadabilityState) -> u8 {

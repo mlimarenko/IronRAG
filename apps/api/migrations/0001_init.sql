@@ -2698,7 +2698,8 @@ CREATE CONSTRAINT TRIGGER content_document_head_revision_admission AFTER INSERT 
 CREATE VIEW public.content_current_revision AS
 SELECT d.id AS document_id, d.workspace_id, d.library_id, r.id AS revision_id,
        h.visibility_intent_id,
-       r.admission_identity->'replacement'->>'fileName' AS source_file_name
+       r.admission_identity->'replacement'->>'fileName' AS source_file_name,
+       k.vector_state, k.vector_ready_at, k.graph_state, k.graph_ready_at
 FROM public.content_document d
 JOIN public.content_document_head h ON h.document_id = d.id
 JOIN public.content_revision r ON r.id = h.readable_revision_id AND r.document_id = d.id
@@ -2718,8 +2719,6 @@ WHERE d.document_state = 'active' AND d.deleted_at IS NULL
       AND r.admission_identity->>'visibilityIntentId' = intent.mutation_item_id::text
       AND r.revision_number > intent.revision_floor
       AND intent_mutation.workspace_id = d.workspace_id AND intent_mutation.library_id = d.library_id
-      AND k.vector_state = 'ready' AND k.vector_ready_at IS NOT NULL
-      AND k.graph_state IN ('ready', 'graph_degraded')
       AND r.admission_identity->'replacement'->>'checksum' = r.checksum
       AND r.admission_identity->'replacement'->'byteSize' = to_jsonb(r.byte_size)
       AND r.admission_identity->'replacement'->>'mimeType' = r.mime_type

@@ -12,13 +12,15 @@ import urllib.error
 import urllib.request
 from urllib.parse import urlsplit
 
+PLATFORM_AMD64 = "linux/amd64"
+PLATFORM_ARM64 = "linux/arm64"
 IMAGES = {
-    "ironrag-backend": {"linux/amd64"},
-    "ironrag-frontend": {"linux/amd64"},
-    "ironrag.bookstack": {"linux/amd64", "linux/arm64"},
-    "ironrag.confluence": {"linux/amd64", "linux/arm64"},
-    "ironrag.gitrepos": {"linux/amd64", "linux/arm64"},
-    "ironrag.youtrack": {"linux/amd64", "linux/arm64"},
+    "ironrag-backend": {PLATFORM_AMD64},
+    "ironrag-frontend": {PLATFORM_AMD64},
+    "ironrag.bookstack": {PLATFORM_AMD64, PLATFORM_ARM64},
+    "ironrag.confluence": {PLATFORM_AMD64, PLATFORM_ARM64},
+    "ironrag.gitrepos": {PLATFORM_AMD64, PLATFORM_ARM64},
+    "ironrag.youtrack": {PLATFORM_AMD64, PLATFORM_ARM64},
 }
 ANCHOR = "31f3f205e20fdf18ffb78b6b046fded327f9133c"
 FROZEN_LATEST = {
@@ -29,7 +31,17 @@ FROZEN_LATEST = {
     "ironrag.gitrepos": "sha256:3bf161604359633a493cad5f0b05fad04afe96526946f90a5d86b2e33927b706",
     "ironrag.youtrack": "sha256:ddf52f174e8f71a3ffc6866a5e3ca463a63508c170211e530c80a9a809baafaf",
 }
-SEMVER = re.compile(r"v?(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)")
+VERSION_LABEL = "org.opencontainers.image.version"
+REVISION_LABEL = "org.opencontainers.image.revision"
+SOURCE_LABEL = "org.opencontainers.image.source"
+SOURCE_COMMIT_LABEL = "io.ironrag.source-commit"
+PIPELINE_ID_LABEL = "io.ironrag.pipeline-id"
+SOURCE_REPOSITORY = "https://github.com/mlimarenko/IronRAG"
+RAW_RELEASE_BASE = "https://raw.githubusercontent.com/mlimarenko/IronRAG/"
+DESCRIPTOR_FILE = ".public-release.json"
+SEMVER = re.compile(r"v?(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)", re.ASCII)
+COMMIT_SHA = re.compile(r"[0-9a-f]{40}", re.ASCII)
+PIPELINE_NUMBER = re.compile(r"[1-9]\d*", re.ASCII)
 
 
 class Refused(ValueError):
@@ -126,64 +138,101 @@ def version_tuple(value):
 
 
 def verify(labels, descriptor, public_commit):
+    expected = {
+        VERSION_LABEL: "v" + descriptor["version"],
+        REVISION_LABEL: public_commit,
+        SOURCE_LABEL: SOURCE_REPOSITORY,
+        SOURCE_COMMIT_LABEL: descriptor["source_commit"],
+        PIPELINE_ID_LABEL: descriptor["pipeline_id"],
+    }
     for actual in labels.values():
-        expected = {
-            "org.opencontainers.image.version": "v" + descriptor["version"],
-            "org.opencontainers.image.revision": public_commit,
-            "org.opencontainers.image.source": "https://github.com/mlimarenko/IronRAG",
-            "io.ironrag.source-commit": descriptor["source_commit"],
-            "io.ironrag.pipeline-id": descriptor["pipeline_id"],
-        }
         if any(actual.get(k) != v for k, v in expected.items()):
             raise Refused("existing image has foreign provenance")
 
 
-def prepare(registry, descriptor, commit):
-    version = registry.image_labels("v" + descriptor["version"])
-    needs_build = True
-    if version is not None:
-        try:
-            verify(version, descriptor, commit)
-            needs_build = False
-        except Refused:
-            needs_build = True
-    latest = registry.image_labels("latest")
-    update_latest = True
+def needs_build(registry, descriptor, commit):
+    """Refuse to reuse an immutable version tag unless its provenance matches."""
+    labels = registry.image_labels("v" + descriptor["version"])
+    if labels is None:
+        return True
+    try:
+        verify(labels, descriptor, commit)
+    except Refused:
+        return True
+    return False
+
+
+def is_frozen_snapshot(registry, labels, actual):
+    """Recognize the frozen pre-descriptor latest digest instead of publishing it."""
+    if labels.get(REVISION_LABEL) != ANCHOR or actual != "v0.6.0":
+        return False
+    if registry.latest_digest != FROZEN_LATEST[registry.image]:
+        raise Refused("frozen latest digest changed")
+    return True
+
+
+def require_active_provenance(labels):
+    if (
+        not COMMIT_SHA.fullmatch(labels.get(SOURCE_COMMIT_LABEL, ""))
+        or not PIPELINE_NUMBER.fullmatch(labels.get(PIPELINE_ID_LABEL, ""))
+        or labels.get(SOURCE_LABEL) != SOURCE_REPOSITORY
+    ):
+        raise Refused("latest has foreign provenance")
+
+
+def tolerate_foreign_latest(latest, descriptor, commit):
+    """A same-version latest tag is replaced, never repaired in place."""
+    try:
+        verify(latest, descriptor, commit)
+    except Refused:
+        pass
+
+
+def public_release_descriptor(revision):
+    return json.loads(get(RAW_RELEASE_BASE + revision + "/" + DESCRIPTOR_FILE))
+
+
+def prove_previous_release(latest, labels, actual, proven):
+    """Bind an older latest tag to the public descriptor of its own revision."""
+    revision = labels.get(REVISION_LABEL, "")
+    if not COMMIT_SHA.fullmatch(revision):
+        raise Refused("latest public revision is invalid")
+    proof = (revision, actual)
+    if proof in proven:
+        return
+    frozen = public_release_descriptor(revision)
+    if frozen != public_release_descriptor(actual):
+        raise Refused("latest public tag source differs")
+    verify(latest, frozen, revision)
+    proven.add(proof)
+
+
+def latest_allows_update(registry, descriptor, commit, latest):
+    """Decide whether this release may advance latest over every published tag."""
     proven = set()
-    if latest is not None:
-        for labels in latest.values():
-            actual = labels.get("org.opencontainers.image.version", "")
-            current = version_tuple(actual)
-            selected = version_tuple(descriptor["version"])
-            if labels.get("org.opencontainers.image.revision") == ANCHOR and actual == "v0.6.0":
-                if registry.latest_digest != FROZEN_LATEST[registry.image]:
-                    raise Refused("frozen latest digest changed")
-                continue  # Frozen pre-descriptor snapshot, not an active publisher.
-            if (not re.fullmatch(r"[0-9a-f]{40}", labels.get("io.ironrag.source-commit", ""))
-                    or not re.fullmatch(r"[1-9][0-9]*", labels.get("io.ironrag.pipeline-id", ""))
-                    or labels.get("org.opencontainers.image.source") != "https://github.com/mlimarenko/IronRAG"):
-                raise Refused("latest has foreign provenance")
-            if current == selected:
-                try:
-                    verify(latest, descriptor, commit)
-                except Refused:
-                    pass
-            else:
-                revision = labels.get("org.opencontainers.image.revision", "")
-                if not re.fullmatch(r"[0-9a-f]{40}", revision):
-                    raise Refused("latest public revision is invalid")
-                proof = (revision, actual)
-                if proof not in proven:
-                    base = "https://raw.githubusercontent.com/mlimarenko/IronRAG/"
-                    frozen = json.loads(get(base + revision + "/.public-release.json"))
-                    tagged = json.loads(get(base + actual + "/.public-release.json"))
-                    if frozen != tagged:
-                        raise Refused("latest public tag source differs")
-                    verify(latest, frozen, revision)
-                    proven.add(proof)
-            if current > selected:
-                update_latest = False
-    return needs_build, update_latest
+    update_latest = True
+    for labels in latest.values():
+        actual = labels.get(VERSION_LABEL, "")
+        current = version_tuple(actual)
+        selected = version_tuple(descriptor["version"])
+        if is_frozen_snapshot(registry, labels, actual):
+            continue  # Frozen pre-descriptor snapshot, not an active publisher.
+        require_active_provenance(labels)
+        if current == selected:
+            tolerate_foreign_latest(latest, descriptor, commit)
+        else:
+            prove_previous_release(latest, labels, actual, proven)
+        if current > selected:
+            update_latest = False
+    return update_latest
+
+
+def prepare(registry, descriptor, commit):
+    build = needs_build(registry, descriptor, commit)
+    latest = registry.image_labels("latest")
+    if latest is None:
+        return build, True
+    return build, latest_allows_update(registry, descriptor, commit, latest)
 
 
 def main():
@@ -192,13 +241,13 @@ def main():
     parser.add_argument("--image", choices=IMAGES)
     args = parser.parse_args()
     try:
-        descriptor = json.loads(Path(".public-release.json").read_text())
+        descriptor = json.loads(Path(DESCRIPTOR_FILE).read_text())
         commit = os.environ["GITHUB_SHA"]
         if (descriptor.get("schema") != "ironrag.public-release/v1"
                 or os.environ["GITHUB_REF_NAME"] != "v" + descriptor["version"]
-                or not re.fullmatch(r"[0-9a-f]{40}", descriptor["source_commit"])
-                or not re.fullmatch(r"[1-9][0-9]*", descriptor["pipeline_id"])
-                or not re.fullmatch(r"[1-9][0-9]*", descriptor["pipeline_iid"])):
+                or not COMMIT_SHA.fullmatch(descriptor["source_commit"])
+                or not PIPELINE_NUMBER.fullmatch(descriptor["pipeline_id"])
+                or not PIPELINE_NUMBER.fullmatch(descriptor["pipeline_iid"])):
             raise Refused("release descriptor mismatch")
         version_tuple(descriptor["version"])
         for image in IMAGES if args.mode == "all" else [args.image]:

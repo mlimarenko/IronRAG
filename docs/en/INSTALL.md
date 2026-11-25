@@ -10,6 +10,10 @@
 
 ## Interactive install
 
+For an existing v0.6.3 installation, follow the
+[v0.6.4 upgrade procedure](#upgrade-from-v063-to-v064) before starting the new
+images or re-running the installer.
+
 ```bash
 curl -fsSL https://raw.githubusercontent.com/mlimarenko/IronRAG/master/install.sh | bash
 ```
@@ -44,6 +48,209 @@ text recognition runs through the remote Vision provider, not bundled models.
 Run `./install.sh --help` for the full flag and environment-variable list, or
 `--plan-only` to print the detected profile without writing or deploying
 anything.
+
+## Upgrade bundled PostgreSQL to 19
+
+New bundled installations use PostgreSQL 19 with pgvector 0.8.7. An existing
+PostgreSQL 18 volume needs a database migration, not an image swap. Keep the old
+volume and image. Do not change `PGDATA` to point PostgreSQL 19 at the old files,
+and do not delete the old volume to get past the startup refusal.
+
+1. Rehearse a logical dump and restore to a separate PostgreSQL 19 cluster.
+   Check the database encoding and locale, extensions, roles and grants, schema
+   migration ledger, vector indexes, and representative records. Measure the
+   maintenance window on a copy of the database. Keep the existing content store,
+   encryption key, and database credentials.
+2. Stop and drain API, workers, connectors, and any scheduled writer. Take and
+   verify a fresh recoverable backup. Use `pg_dump` in custom format for the
+   database and preserve role definitions separately if the deployment needs
+   them. PostgreSQL role dumps can contain password hashes; keep them with the
+   protected backup. Preserve the contents and configuration of the old volume.
+3. Initialize PostgreSQL 19 on a **new** physical volume and restore with
+   `pg_restore --exit-on-error`. In Compose, keep the same project and select
+   the new volume with `IRONRAG_POSTGRES_VOLUME_NAME`; start only `postgres`
+   with `docker compose up -d --no-deps postgres`. In Helm, prepare the new
+   cluster on a separate PVC that is not behind the application database
+   Service; set `dependencies.postgres.persistence.existingClaim` to that
+   claim at cutover. Do not let the normal application rollout run before the
+   restore is complete.
+4. Confirm the server and extension versions, schema ledger, counts, grants,
+   and vector search on the restored database. Bring up the application against
+   the new volume and check readiness before reopening traffic. The old volume
+   is a rollback point only until the new cluster accepts writes; after that,
+   do not switch back to it and discard the new data.
+
+For externally managed PostgreSQL, use the database provider's major-upgrade
+procedure and verify pgvector before changing the IronRAG connection.
+
+## Upgrade from v0.6.3 to v0.6.4
+
+This upgrade requires a maintenance window and the guarded
+[`text-publication-schema` transition](./CLI.md#migrate-text-publication-schema).
+That reference owns the exact predecessor, refusal conditions and schema behavior.
+Do not run the new startup service against the old schema or edit the SQLx ledger
+to bypass a refusal.
+
+Prepare the published v0.6.4 Compose definition or Helm chart and the verified
+release digests for backend, frontend and every enabled bundled connector.
+The migration and the replacement startup, API and worker must use the **same
+backend digest**. The released executable is
+`/usr/local/bin/ironrag-maintenance`, not `ironrag-cli`; it reads the backend
+environment, including `IRONRAG_DATABASE_URL`.
+
+Preserve the existing deployment identity and configuration: Compose project or
+Helm release/namespace, PostgreSQL database and volume/PVC, vector extension and
+data, content volume or bucket, Secrets and `IRONRAG_CREDENTIAL_MASTER_KEY`.
+Do not regenerate keys, recreate storage or upgrade PostgreSQL, Redis or the
+vector extension as part of this procedure. Pin stateful dependencies to the
+installation's existing images when adopting the release configuration.
+
+Before either dry-run or apply, block new requests and connector intake, let
+in-flight work finish, and stop **all** old API, worker and maintenance writers.
+Include separately deployed connectors, scheduled jobs and other replicas.
+Prevent supervisors, autoscalers or GitOps reconciliation from restarting them.
+A stop command alone is not evidence that work drained. Confirm quiescence, then
+take and verify a rollback backup of PostgreSQL and content storage, retaining
+the matching keys, configuration and v0.6.3 images. Keep dependencies available
+for maintenance without restarting the old application.
+
+### Compose
+
+Use the existing installation directory, project name and `.env`. Change only
+the application pins; replace the placeholders with the verified v0.6.4 digests:
+
+```dotenv
+IRONRAG_BACKEND_IMAGE=pipingspace/ironrag-backend:v0.6.4@sha256:<backend-digest>
+IRONRAG_FRONTEND_IMAGE=pipingspace/ironrag-frontend:v0.6.4@sha256:<frontend-digest>
+```
+
+The [Compose definition](../../docker-compose.yml) shares the backend pin and
+runtime environment across `startup`, `backend` and `worker`. Validate and pull
+without starting services:
+
+```bash
+docker compose config --quiet
+docker compose pull startup backend worker frontend
+```
+
+After blocking intake and draining work, stop the application roles. Stop external
+writers separately and complete the backup checks above before proceeding:
+
+```bash
+docker compose stop frontend backend worker startup
+```
+
+Run the preview from the replacement backend, reusing its environment and mounts.
+`--no-deps` prevents Compose from starting the normal startup service or other
+dependencies; `--entrypoint` selects the packaged maintenance executable:
+
+```bash
+docker compose run --rm --no-deps \
+  --entrypoint /usr/local/bin/ironrag-maintenance backend \
+  migrate text-publication-schema --json
+```
+
+Review the successful preview and backup before running the separate apply step.
+Keep writers stopped and use the unchanged image pin and configuration:
+
+```bash
+docker compose run --rm --no-deps \
+  --entrypoint /usr/local/bin/ironrag-maintenance backend \
+  migrate text-publication-schema --apply --json
+```
+
+Only after successful apply, recreate the normal startup container:
+
+```bash
+docker compose up -d --no-deps --no-build --force-recreate startup
+docker compose logs --tail=80 startup
+docker compose ps -a startup
+```
+
+Wait for `startup` to exit with code 0. Logs or a running container are not enough.
+Then replace the API, worker and frontend:
+
+```bash
+docker compose up -d --no-deps --no-build backend worker frontend
+docker compose ps -a
+```
+
+Confirm API and worker readiness and frontend health. Replace all enabled
+connector images with their verified v0.6.4 artifacts, preserving configuration,
+before reopening intake. These commands do not replace stateful services or
+remove volumes.
+
+### Helm
+
+Use the existing release name and namespace and a reviewed values file for the
+published v0.6.4 chart. Preserve dependency image pins, Secrets, PVCs and storage
+settings. Set `api.image.digest` and `worker.image.digest` to the same verified
+backend `sha256:…`, and `web.image.digest` to the verified frontend digest.
+Keep the matching repositories. A digest takes precedence over `image.tag`;
+updating a tag while leaving an old digest does not replace an image.
+
+The chart's [startup Job](../../charts/ironrag/templates/startup-job.yaml) uses
+`api.image`; API and worker init containers wait for that release revision's Job.
+The chart does **not** provide a migration-command value. Its startup gate does
+not stop old pods: API uses a rolling update. Do not use a normal `helm upgrade`
+as the writer-drain or manual-migration step.
+
+1. Block intake and pause GitOps reconciliation. Prevent HPA or other owners from
+   restoring old replica counts, then scale the old API and worker deployments
+   to zero using the installation's actual resource names. Stop other writers
+   and confirm all old writer pods and jobs have terminated. Complete the backup
+   checks above.
+2. Prepare a separate one-off maintenance Job. To obtain the pod configuration,
+   render only the startup Job locally, not Secrets. Here `RELEASE`, `NAMESPACE`
+   and `VALUES` identify the existing installation and reviewed replacement
+   values; run from the published v0.6.4 checkout:
+
+   ```bash
+   helm template "$RELEASE" ./charts/ironrag \
+     --namespace "$NAMESPACE" -f "$VALUES" \
+     --show-only templates/startup-job.yaml > maintenance-preview.yaml
+   ```
+
+   This requires `startup.mode=startup_job`. Give the Job a distinct name outside
+   the chart's `*-startup-r<revision>` names and remove any Helm/Argo hook
+   annotations. Set `spec.backoffLimit: 0` and the pod's `restartPolicy: Never`.
+   Keep the pod's environment references, security context, mounts, pull secrets,
+   dependency waits and network-policy labels. Check that its ConfigMap/Secret
+   references already exist and select the intended database, that the backend
+   image is the verified digest, and that its service account and network policy
+   permit the required access. Do not apply the full rendered release here.
+3. Override the `startup` container's command and arguments:
+
+   ```yaml
+   command: ["/usr/local/bin/ironrag-maintenance"]
+   args: ["migrate", "text-publication-schema", "--json"]
+   ```
+
+   Create that reviewed Job in the existing namespace. Require successful
+   completion and review its report. For apply, create a second distinctly named
+   Job with the same image and pod configuration, adding `"--apply"` to `args`.
+   Require successful completion; a failed or timed-out Job does not authorize
+   starting application pods.
+4. After apply, upgrade the existing release with the reviewed values and normal
+   replica counts. Keep intake blocked until the new startup Job completes and
+   API, worker and web are ready. Do not use automatic rollback to the old
+   application after the schema transition:
+
+   ```bash
+   helm upgrade "$RELEASE" ./charts/ironrag \
+     --namespace "$NAMESPACE" -f "$VALUES" \
+     --wait --wait-for-jobs --timeout 20m
+   ```
+
+   Replace separately deployed connectors with the same release's verified
+   images before resuming intake and reconciliation.
+
+On a migration or startup refusal, keep writers stopped and inspect the reported
+condition. After apply, reverting only application images is not a schema
+rollback: the old binary rejects the new checksum. Returning to v0.6.3 requires
+restoring the coordinated backup with its matching runtime. The transition does
+not re-ingest sources, restore historical heads or enable financial scopes or
+semantic rerank.
 
 ## Upgrade from v0.6.2 to v0.6.3
 

@@ -4,6 +4,8 @@ use sqlx::PgPool;
 use sqlx::{Postgres, QueryBuilder};
 use uuid::Uuid;
 
+use crate::domains::audit::{QUERY_EXECUTION_AUDIT_ACTION, QUERY_EXECUTION_AUDIT_REDACTED_MESSAGE};
+
 #[derive(Debug, Clone, FromRow)]
 pub struct AuditEventRow {
     pub id: Uuid,
@@ -440,10 +442,10 @@ pub async fn list_audit_events(
             ae.request_id,
             ae.trace_id,
             ae.result_kind::text as result_kind,
-            ae.created_at,
-            ae.redacted_message,
-            ae.internal_message, ",
+            ae.created_at, ",
     );
+    push_redacted_audit_message(&mut builder);
+    builder.push(" as redacted_message, ae.internal_message, ");
     builder.push(AUDIT_ACTOR_LABEL_SQL);
     builder.push(" as actor_label from audit_event ae where 1 = 1");
     push_list_audit_event_filters(
@@ -746,6 +748,17 @@ fn push_subject_visibility(
     builder.push(")");
 }
 
+// Historical query events can contain model and cost data in their stored
+// redacted message. Apply the same redaction to output and search.
+fn push_redacted_audit_message(builder: &mut QueryBuilder<Postgres>) {
+    builder
+        .push("case when ae.action_kind = ")
+        .push_bind(QUERY_EXECUTION_AUDIT_ACTION)
+        .push(" then ")
+        .push_bind(QUERY_EXECUTION_AUDIT_REDACTED_MESSAGE)
+        .push(" else ae.redacted_message end");
+}
+
 /// The column filters and the whole-table search, shared by the count, list and
 /// facet queries. The multi-value lists are OR within a column and AND across
 /// columns; the search matches every visible metadata field, including the
@@ -780,8 +793,9 @@ fn push_list_audit_event_filters(
         let pattern = format!("%{search}%");
         builder.push(" or ");
         push_audit_action_search(builder, &pattern);
-        builder.push(" or coalesce(ae.redacted_message, '') ilike ");
-        builder.push_bind(pattern.clone());
+        builder.push(" or coalesce(");
+        push_redacted_audit_message(builder);
+        builder.push(", '') ilike ").push_bind(pattern.clone());
         if scope.internal {
             builder.push(" or coalesce(ae.internal_message, '') ilike ");
             builder.push_bind(pattern.clone());

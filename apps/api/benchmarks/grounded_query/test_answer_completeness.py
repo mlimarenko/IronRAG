@@ -365,7 +365,7 @@ class AnswerCompletenessTests(unittest.TestCase):
         self.assertEqual(completeness["unavailableCases"], 1)
         self.assertEqual(completeness["annotationCoverage"], 1 / 3)
         self.assertEqual(completeness["facts"]["fraction"], 0.5)
-        self.assertFalse(matrix["strictCasePassCount"] == matrix["totalCases"])
+        self.assertNotEqual(matrix["strictCasePassCount"], matrix["totalCases"])
 
     def test_comparator_rejects_tampered_provenance(self):
         annotated = hardening_case("aurora_quorum_fixed_size")

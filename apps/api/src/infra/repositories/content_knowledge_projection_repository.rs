@@ -754,9 +754,10 @@ pub async fn reconcile_failed_document_head_with_projection(
     }
 }
 
-/// Repairs a NULL head only if it is still eligible under the lifecycle locks.
-/// Re-select the latest chunk-bearing revision here rather than trusting the
-/// sweeper snapshot, and preserve operational identities on the locked head.
+/// Checks whether a NULL head is still eligible under the lifecycle locks.
+/// The operation deliberately does not promote a historical revision: a null
+/// readable head has no current publication owner, and publication belongs to
+/// the normal ingest/materialization lifecycle. Always returns `Ok(false)`.
 pub async fn repair_null_document_head_with_projection(
     postgres: &PgPool,
     document_id: Uuid,

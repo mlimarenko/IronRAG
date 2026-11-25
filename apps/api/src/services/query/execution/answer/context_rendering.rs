@@ -287,7 +287,7 @@ fn select_primary_answer_chunks(
     } else {
         (super::MAX_CHUNKS_PER_DOCUMENT, super::MIN_CHUNKS_PER_DOCUMENT)
     };
-    let balanced = select_document_balanced_chunks(DocumentBalancedChunkSelection {
+    let mut balanced = select_document_balanced_chunks(DocumentBalancedChunkSelection {
         question,
         ir: Some(query_ir),
         chunks: filtered_chunks,
@@ -295,10 +295,10 @@ fn select_primary_answer_chunks(
         pagination_requested: false,
         max_total_chunks,
         max_chunks_per_document,
-    })
-    .into_iter()
-    .cloned()
-    .collect::<Vec<_>>();
+    });
+    if query_ir.requests_document_overview_evidence() {
+        retain_openings_in_document_samples(filtered_chunks, &mut balanced);
+    }
     let mut selected = comparison_declaration_chunks(
         query_ir,
         filtered_chunks,
@@ -310,12 +310,120 @@ fn select_primary_answer_chunks(
         balanced
             .into_iter()
             .filter(|chunk| seen_chunk_ids.insert(chunk.chunk_id))
-            .take(max_total_chunks.saturating_sub(selected.len())),
+            .take(max_total_chunks.saturating_sub(selected.len()))
+            .cloned(),
     );
     if selected.is_empty() {
         selected = filtered_chunks.iter().take(8).cloned().collect();
     }
+    append_missing_overview_openings(query_ir, filtered_chunks, &mut selected, max_total_chunks);
     selected
+}
+
+/// A version-qualified `Describe` overview takes the narrow per-document cap,
+/// so a ranked update can occupy the second slot and leave the adjacent opening
+/// unrendered even though it is already admitted. Spend an unused total-budget
+/// slot on that admitted opening instead of raising the per-document cap.
+fn append_missing_overview_openings(
+    query_ir: &QueryIR,
+    chunks: &[RuntimeMatchedChunk],
+    selected: &mut Vec<RuntimeMatchedChunk>,
+    max_total_chunks: usize,
+) {
+    if query_ir.act != QueryAct::Describe
+        || query_ir.requests_source_coverage_context()
+        || !query_ir.requests_document_overview_evidence()
+        || selected.len() >= max_total_chunks
+    {
+        return;
+    }
+    let mut seen_ids = selected.iter().map(|chunk| chunk.chunk_id).collect::<HashSet<_>>();
+    let mut documents = Vec::<(super::Uuid, super::Uuid)>::new();
+    for chunk in selected.iter() {
+        let key = (chunk.document_id, chunk.revision_id);
+        if !documents.contains(&key) {
+            documents.push(key);
+        }
+    }
+    for (document_id, revision_id) in documents {
+        let Some(representative) = selected
+            .iter()
+            .find(|chunk| chunk.document_id == document_id && chunk.revision_id == revision_id)
+        else {
+            continue;
+        };
+        let Some(openings) =
+            super::source_context::document_overview_openings(representative, chunks)
+        else {
+            continue;
+        };
+        for rank in openings.reading_order {
+            if selected.len() >= max_total_chunks {
+                return;
+            }
+            let opening = &chunks[rank];
+            if seen_ids.insert(opening.chunk_id) {
+                selected.push(opening.clone());
+            }
+        }
+    }
+}
+
+/// Keep the best match and the multi-section opening where a document already
+/// has spare slots. Sampling cannot introduce a document, a revision, or an
+/// extra prompt slot. A sole best match, an already selected opening, and a
+/// protected retrieval lane keep their slots; missing openings fill only the
+/// remaining replaceable slots.
+fn retain_openings_in_document_samples<'a>(
+    chunks: &'a [RuntimeMatchedChunk],
+    sample: &mut [&'a RuntimeMatchedChunk],
+) {
+    let mut slots_by_document = HashMap::<(super::Uuid, super::Uuid), Vec<usize>>::new();
+    for (slot, chunk) in sample.iter().enumerate() {
+        slots_by_document.entry((chunk.document_id, chunk.revision_id)).or_default().push(slot);
+    }
+    let mut chosen_ids = sample.iter().map(|chunk| chunk.chunk_id).collect::<HashSet<_>>();
+    for slots in slots_by_document.values() {
+        if slots.len() < 2 {
+            continue;
+        }
+        let Some(openings) =
+            super::source_context::document_overview_openings(sample[slots[0]], chunks)
+        else {
+            continue;
+        };
+        let opening_ids = openings
+            .reading_order
+            .iter()
+            .map(|rank| chunks[*rank].chunk_id)
+            .collect::<HashSet<_>>();
+        let spare_slots = slots[1..]
+            .iter()
+            .copied()
+            .filter(|slot| !opening_ids.contains(&sample[*slot].chunk_id))
+            .filter(|slot| sample[*slot].score_kind.can_yield_overview_slot())
+            .collect::<Vec<_>>();
+        let preference = if spare_slots.len() >= 2 {
+            openings.reading_order.clone()
+        } else {
+            let mut preference = Vec::with_capacity(openings.reading_order.len());
+            preference.push(openings.primary);
+            preference.extend(
+                openings.reading_order.iter().copied().filter(|rank| *rank != openings.primary),
+            );
+            preference
+        };
+        let mut spare_slots = spare_slots.into_iter();
+        for rank in preference {
+            let opening = &chunks[rank];
+            if chosen_ids.contains(&opening.chunk_id) {
+                continue;
+            }
+            let Some(slot) = spare_slots.next() else { break };
+            sample[slot] = opening;
+            chosen_ids.insert(opening.chunk_id);
+        }
+    }
 }
 
 fn prepend_source_profile_chunks_for_coverage(
@@ -378,8 +486,12 @@ fn render_primary_chunk_sections(
     }
     let lines = render_evidence_chunk_lines(&content_chunks, &question_keywords, "sampled");
     if !lines.is_empty() {
+        // A sampled section cannot certify that a source list is complete or
+        // that a dated record is the latest one. The typed header markers keep
+        // that limit visible to answer synthesis without adding free-text
+        // evidence lines.
         sections.push(format!(
-            "EVIDENCE_CHUNK blocks (scope=excerpt; coverage=sampled)\n{}",
+            "EVIDENCE_CHUNK blocks (scope=excerpt; coverage=sampled; recency=uncertified; completeness=uncertified)\n{}",
             lines.join("\n")
         ));
     }

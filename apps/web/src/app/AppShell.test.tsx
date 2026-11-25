@@ -8,6 +8,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { AppShell } from './AppShell'
 import { BUILD_VERSION_TAG } from '@/shared/lib/build-version'
+import { clearAccountTelemetryConsent } from '@/shared/lib/telemetry/consent'
 
 const layoutStyles = readFileSync(resolve(process.cwd(), 'src/styles/layout.css'), 'utf8')
 
@@ -288,5 +289,25 @@ describe('AppShell compact hierarchy', () => {
       'href',
       'https://github.com/mlimarenko/IronRAG/releases',
     )
+  })
+})
+
+describe('AppShell analytics action', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+    mocks.getLatestVersion.mockResolvedValue({ version: '0.0.0', releasedAt: null })
+    clearAccountTelemetryConsent()
+  })
+
+  it('offers no grant for the signed-in account before its preference is ready', async () => {
+    const user = userEvent.setup()
+    renderShell()
+
+    await user.click(screen.getByRole('button', { name: 'User menu' }))
+
+    expect(screen.queryByRole('menuitem', { name: 'Turn on product analytics' })).toBeNull()
+    expect(
+      screen.getByRole('menuitem', { name: 'Telemetry setting is unavailable' }),
+    ).toHaveAttribute('aria-disabled', 'true')
   })
 })

@@ -8,6 +8,7 @@ pub(super) struct AgentToolDispatch<'a> {
     pub(super) max_parallel_actions: usize,
     pub(super) deadline_started: Instant,
     pub(super) focused_grounded_follow_up: bool,
+    pub(super) runtime_grounded_call: bool,
     pub(super) allowed_tool_names: &'a BTreeSet<String>,
 }
 
@@ -22,6 +23,7 @@ pub(super) async fn execute_tool_calls(
         max_parallel_actions,
         deadline_started,
         focused_grounded_follow_up,
+        runtime_grounded_call,
         allowed_tool_names,
     } = dispatch;
     let mut outcomes: Vec<Option<ToolExecutionOutcome>> = vec![None; tool_calls.len()];
@@ -50,32 +52,41 @@ pub(super) async fn execute_tool_calls(
                         tool_name: pending.call.name.clone(),
                     },
                 );
-                let mut outcome = match deadline_remaining(deadline_started, input.deadline) {
-                    Some(remaining) => {
-                        // Bound the per-tool-call wait by the smaller of the
-                        // remaining turn deadline and the configured per-tool-call
-                        // max, so one hung tool future can never run past every
-                        // budget. On timeout produce a structured error outcome;
-                        // the error path clears the dedup fingerprint so a retry
-                        // of the same call is not suppressed.
-                        let per_call_wait = per_tool_call_wait_for_tool(
-                            &pending.call.name,
-                            remaining,
-                            input.soft_final_answer_deadline,
-                            focused_grounded_follow_up,
-                        );
-                        Box::pin(run_tool_call_within_budget(
-                            execute_one_tool_call(&input, &pending.call, allowed_tool_names),
-                            per_call_wait,
-                            &pending.call.name,
-                            iteration,
-                        ))
-                        .await
+                let mut outcome = if grounded_call_blocked(
+                    &pending.call.name,
+                    runtime_grounded_call,
+                ) {
+                    tool_execution_error(
+                        "grounded_answer calls are owned by the bounded runtime sequence",
+                    )
+                } else {
+                    match deadline_remaining(deadline_started, input.deadline) {
+                        Some(remaining) => {
+                            // Bound the per-tool-call wait by the smaller of the
+                            // remaining turn deadline and the configured per-tool-call
+                            // max, so one hung tool future can never run past every
+                            // budget. On timeout produce a structured error outcome;
+                            // the error path clears the dedup fingerprint so a retry
+                            // of the same call is not suppressed.
+                            let per_call_wait = per_tool_call_wait_for_tool(
+                                &pending.call.name,
+                                remaining,
+                                input.soft_final_answer_deadline,
+                                focused_grounded_follow_up,
+                            );
+                            Box::pin(run_tool_call_within_budget(
+                                execute_one_tool_call(&input, &pending.call, allowed_tool_names),
+                                per_call_wait,
+                                &pending.call.name,
+                                iteration,
+                            ))
+                            .await
+                        }
+                        None => tool_execution_error(format!(
+                            "tool '{}' was not started because the assistant turn deadline expired",
+                            pending.call.name
+                        )),
                     }
-                    None => tool_execution_error(format!(
-                        "tool '{}' was not started because the assistant turn deadline expired",
-                        pending.call.name
-                    )),
                 };
                 let elapsed_ms = started_at.elapsed().as_millis().try_into().unwrap_or(u64::MAX);
                 outcome.duration_ms = elapsed_ms;
@@ -120,6 +131,10 @@ pub(super) async fn execute_tool_calls(
         .collect()
 }
 
+pub(super) fn grounded_call_blocked(tool_name: &str, runtime_grounded_call: bool) -> bool {
+    tool_name == GROUNDED_ANSWER_TOOL_NAME && !runtime_grounded_call
+}
+
 /// Replay payload cached for a successfully completed tool call so a later
 /// effective-duplicate of the same call replays the real data instead of
 /// dead-ending the agent with a refusal message.
@@ -128,7 +143,7 @@ pub(super) struct CompletedToolPayload {
     pub(super) message_content: String,
     pub(super) result_text: Option<String>,
     pub(super) result_json: Option<Value>,
-    pub(super) grounding_text: Option<String>,
+    pub(super) source_texts: Vec<String>,
     pub(super) document_reference:
         Option<Box<super::super::assistant_grounding::AssistantGroundingDocumentReference>>,
     pub(super) grounded_answer_body: Option<String>,
@@ -275,7 +290,7 @@ pub(super) fn record_effective_tool_payload_outcome(
                 message_content: outcome.message_content.clone(),
                 result_text: outcome.result_text.clone(),
                 result_json: outcome.result_json.clone(),
-                grounding_text: outcome.grounding_text.clone(),
+                source_texts: outcome.source_texts.clone(),
                 document_reference: outcome.document_reference.clone(),
                 grounded_answer_body: outcome.grounded_answer_body.clone(),
                 grounded_answer_outcome: outcome.grounded_answer_outcome.clone(),
@@ -316,7 +331,7 @@ pub(super) fn replayed_tool_execution_outcome(
         message_content: payload.message_content,
         result_text: payload.result_text,
         result_json: payload.result_json,
-        grounding_text: payload.grounding_text,
+        source_texts: payload.source_texts,
         document_reference: payload.document_reference,
         grounded_answer_body: payload.grounded_answer_body,
         grounded_answer_outcome: payload.grounded_answer_outcome,
@@ -389,6 +404,9 @@ pub(super) async fn execute_one_tool_call(
         state: input.state,
         request_id: input.request_id,
         surface_kind: RuntimeSurfaceKind::Ui,
+        // The agent loop runs inside a UI turn, not on an MCP session, so no
+        // session-derived caller identity exists to publish.
+        caller_context: None,
     };
     let Some(result) = Box::pin(tools::call_named_tool(&call.name, context, &arguments)).await
     else {
@@ -402,7 +420,9 @@ pub(super) async fn execute_one_tool_call(
         extract_child_runtime_execution_ids(&call.name, &result.structured_content);
     let is_error = result.is_error;
     let message_content = tool_result_model_message(&call.name, &result);
-    let grounding_text = tool_result_verification_text(&call.name, &result);
+    let source_texts = crate::interfaces::http::mcp::tools::source_evidence::admitted_source_texts(
+        &call.name, &result,
+    );
     let document_reference = native_document_read_reference(&call.name, &result).map(Box::new);
     let grounded_answer_body = grounded_answer_verbatim_body(&call.name, &result);
     let grounded_answer_outcome = grounded_answer_typed_outcome(&call.name, &result);
@@ -429,7 +449,7 @@ pub(super) async fn execute_one_tool_call(
         message_content,
         result_text,
         result_json,
-        grounding_text,
+        source_texts,
         document_reference,
         grounded_answer_body,
         grounded_answer_outcome,

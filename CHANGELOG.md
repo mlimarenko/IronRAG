@@ -1,5 +1,128 @@
 # Changelog
 
+## 0.6.4
+
+### Added
+
+- The connector CLI and Python client expose the existing
+  `POST /v1/ops/ingest-queue/jobs/{jobId}/execute` operation as
+  `--execute-ingest-job <uuid>` and
+  `IronRagClient.execute_ingest_queue_job`, the single execution phase for a
+  job the same connector already admitted. The endpoint answers with that job's
+  own record (state, latest attempt, readiness) instead of the privileged
+  global queue, so the connector's `library_write` credential is sufficient;
+  a 200 is the server's report for this job, not a publication claim.
+- YouTrack connectors can resume one freshly observed issue or article with
+  `--once --kind issue|article --item-id`, using the existing routing, rights
+  checks and materialization journal without starting a sweep.
+- Chat financial envelopes can explicitly admit bounded inline PNG/JPEG inputs.
+  Text-only envelopes reject nested media; an image allowance does not reduce
+  the full per-attempt financial reservation.
+
+### Breaking
+
+- Bundled PostgreSQL moves to 19 with pgvector 0.8.7. Copy an existing
+  PostgreSQL 18 database to a new volume before changing the image.
+  See [the major-version upgrade instructions](./docs/en/INSTALL.md#upgrade-bundled-postgresql-to-19).
+- Document inventory uses one operational status vocabulary, including `paused`
+  and `pending_materialization`. Current readability and graph/vector capability
+  are separate from operational status. Knowledge summaries expose
+  `documentCountsByStatus` instead of `documentCountsByReadiness`. MCP document
+  listing uses `readableOnly` for current readability; `statusFilter` accepts
+  operational statuses only.
+- Unmeasured or incomplete cost totals and currencies are nullable. An execution
+  with no recorded measurement no longer returns a fabricated zero-cost record.
+- Downloading an unavailable original returns a typed source-unavailable error.
+  Normalized text is not served as an original PDF or other binary file.
+
+### Fixed
+
+- Grounded answer verification now checks applicable verbatim source statements
+  against the same authorized primary source excerpts before marking a visible
+  answer `finalAnswerReady`, binds each chunk source to its own text without
+  attributing neighboring `window_text` sentences to that chunk, surfaces
+  supporting verification quotes in compact reference excerpts, and keeps
+  `sequenceBudget` and `queryLanguage` identical across `content[0].text` and
+  `structuredContent` in MCP `grounded_answer` responses.
+- The bundled web proxy no longer cuts the exact-job ingest request
+  `POST /v1/ops/ingest-queue/jobs/{jobId}/execute` at the general `/v1/` read
+  timeout. Both its HTTP and its TLS server now give that one route an 1800 s
+  read budget, matching the connector default, while the rest of `/v1/` keeps
+  the short one. The proxy still sends the mutation once, and an external
+  proxy in front keeps its own limit.
+- A grounded or composed assistant answer that copies a long run of retrieved
+  evidence without earning `Verified` returns a bounded refusal instead of the
+  copied text. The copy check compares against source material, not the
+  generated answer returned by a child `grounded_answer` call. References
+  remain available.
+- If an accepted assistant stream ends without a terminal event, the web client
+  reads `GET /v1/query/executions/{executionId}` using the ID from the
+  `x-ironrag-query-execution-id` response header. It does not resubmit the
+  question. Repeating a question in the same conversation no longer makes an
+  earlier reply stand in for the new one.
+- Questions spanning several documents no longer receive a one-source changelog
+  summary just because they mention a version.
+- When a financial scope forbids sending tool definitions to the provider, the
+  UI assistant still runs its local grounded-answer and repair steps. If it
+  needs to compose a final answer, it sends text without provider tool calls.
+- The semantic verifier selects passages by ID. Each reported missing caveat
+  must cite at least one passage. The server resolves each citation to exact
+  source bytes, including when the same phrase occurs twice.
+- Admitted current text becomes readable before optional embedding, summary and
+  graph work finishes. Operational enrichment failure retains the applied base
+  mutation and reports failed channels; revocation and supersession remain strict.
+- Library descriptions, document counts, filters and pagination use the same
+  authorized document set, including document-only grants.
+- Answer generation budgets distinct evidence in UTF-8 bytes before verification.
+  Preparation failures retain the exceeded bound, measured value and limit.
+- Grounded completion has a finite repair sequence. Consumers retain historical
+  caveats, limitations and substantive source attribution through compact output.
+- Optional retrieval outages retain usable authorized evidence and report typed
+  degradation. Financial, authorization and source-integrity refusals stay
+  terminal rather than becoming lexical fallback.
+- Semantic reranking remains off by default. When enabled, it falls back to
+  deterministic lexical order when its budget
+  expires before dispatch or when an after-send timeout durably settles every
+  admitted physical attempt without fabricating usage. Uncertain admission or
+  unfinished accounting still fails closed.
+- Visible citations use authoritative document/revision identity and one shared
+  selection policy before bounded source-text hydration.
+- Low-quality nonempty PDF page text can receive a bounded Vision reread.
+  Transcription, unreadable regions and inferred diagram relations carry distinct
+  provenance; inferred relations are not inserted into source text.
+- Embedding batches, Vision attempts and graph provider calls reserve accounting
+  before dispatch and retain real call identities on failures. Unknown usage
+  remains unknown rather than appearing free.
+- Expected financial-policy administration refusals return a safe client error
+  without changing policy; persistence failures remain server errors.
+- Operators can close a prepared financial admission without activating it,
+  including after its cutoff. Closing preserves the policy, counters, caller
+  binding and history.
+- The exact-job ingest execute request has its own
+  `EXECUTE_INGEST_JOB_TIMEOUT_SECONDS` budget (default 1800) instead of the
+  60-second general request timeout, so a real Full ingest is not aborted
+  client-side; every other connector request keeps `REQUEST_TIMEOUT_SECONDS`.
+- A retried `revision.ready` transition reuses its persisted outbox event and
+  its original `occurred_at` instead of failing on the newer timestamp of the
+  retry. Different event data under one identity is still refused, and no
+  second event or recipient snapshot is created.
+
+### Upgrade
+
+- Existing installations require the guarded
+  `ironrag-maintenance migrate text-publication-schema` transition before starting
+  the new runtime. Stop and drain writers, review the dry run and backup safeguards,
+  and use the exact replacement backend artifact. Keep the PostgreSQL major
+  version, content storage, credential keys and financial history unchanged
+  during this schema change.
+  See [the Compose and Helm upgrade instructions](./docs/en/INSTALL.md#upgrade-from-v063-to-v064).
+- To upgrade an existing bundled PostgreSQL 18 database to 19 as well, run the
+  separate logical migration linked above. The application schema transition
+  does not make an 18 data volume usable with a 19 image.
+- Replace startup, API, worker, frontend and enabled connector images together.
+  The transition does not restore historical document heads, re-ingest sources or
+  activate a financial scope.
+
 ## 0.6.3
 
 ### Added

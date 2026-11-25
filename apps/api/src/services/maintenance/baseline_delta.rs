@@ -124,6 +124,9 @@ pub const BASELINE_REVISION_PROVIDER_SOURCE_GENERATION_FENCE_SHA384: &str = "b54
 /// Frozen IRG-350 baseline: durable account-scoped telemetry consent preference.
 pub const BASELINE_REVISION_USER_PREFERENCE_SHA384: &str = "e6749be6a755648961fd13e26a9090c9df0f087d1860ab10a7d40cec71ffc439eb77122dca45c1c25f94998a7a4e65af";
 
+/// IRG-367 text-readable publication baseline.
+pub const BASELINE_REVISION_TEXT_PUBLICATION_SHA384: &str = "cf73642962589b34d1658935922a82e8a7a7bf2b970dfd6e57639ae9561254e71bb32cf35ac180817968b5befdea2a51";
+
 /// Serialises every baseline transition in the instance. One key, not one per
 /// delta: two different transitions racing on the same checksum row would each
 /// read a predecessor the other is about to replace.
@@ -194,6 +197,7 @@ pub(crate) const BASELINE_DELTA_SPECS: &[AdditiveBaselineDeltaSpec] = &[
     crate::services::maintenance::billing_knowledge_search_schema::BILLING_KNOWLEDGE_SEARCH_DELTA,
     crate::services::maintenance::provider_source_generation_fence_schema::PROVIDER_SOURCE_GENERATION_FENCE_DELTA,
     crate::services::maintenance::user_preference_schema::USER_PREFERENCE_DELTA,
+    crate::services::maintenance::text_publication_schema::TEXT_PUBLICATION_DELTA,
 ];
 
 /// Derives the ordered revision chain from the specs alone. A predecessor that
@@ -475,9 +479,10 @@ mod tests {
         BASELINE_REVISION_IRG112_SHA384, BASELINE_REVISION_IRG173_SHA384,
         BASELINE_REVISION_PROVIDER_SOURCE_GENERATION_FENCE_SHA384,
         BASELINE_REVISION_PROVISIONING_SHA384, BASELINE_REVISION_QUERY_RERANK_SHA384,
-        BASELINE_REVISION_USER_PREFERENCE_SHA384, BASELINE_REVISION_VISION_RECOGNITION_SHA384,
-        BASELINE_REVISION_XBERG_RECOGNITION_SHA384, baseline_revision_chain,
-        recorded_revision_object_groups, revision_chain_for, shipped_baseline_sha384_hex,
+        BASELINE_REVISION_TEXT_PUBLICATION_SHA384, BASELINE_REVISION_USER_PREFERENCE_SHA384,
+        BASELINE_REVISION_VISION_RECOGNITION_SHA384, BASELINE_REVISION_XBERG_RECOGNITION_SHA384,
+        baseline_revision_chain, recorded_revision_object_groups, revision_chain_for,
+        shipped_baseline_sha384_hex,
     };
     use crate::infra::persistence::REQUIRED_BASELINE_OBJECT_GROUPS_QUERY_RERANK;
 
@@ -501,6 +506,7 @@ mod tests {
                 BASELINE_REVISION_BILLING_KNOWLEDGE_SEARCH_SHA384,
                 BASELINE_REVISION_PROVIDER_SOURCE_GENERATION_FENCE_SHA384,
                 BASELINE_REVISION_USER_PREFERENCE_SHA384,
+                BASELINE_REVISION_TEXT_PUBLICATION_SHA384,
             ]
         );
         let shipped = shipped_baseline_sha384_hex();
@@ -536,48 +542,71 @@ mod tests {
                 "{}: a delta must declare the predecessor groups it builds on",
                 spec.operator_command,
             );
-            if spec.target_sha384_hex == BASELINE_REVISION_CONTENT_VISIBILITY_INTENT_SHA384 {
-                use crate::infra::persistence::{
-                    REQUIRED_BASELINE_OBJECT_GROUPS_ADMISSION_VISIBILITY_POLICY,
-                    REQUIRED_BASELINE_OBJECT_GROUPS_DECISION_CATALOG,
-                };
-                assert_eq!(
-                    spec.prerequisite_object_groups,
-                    REQUIRED_BASELINE_OBJECT_GROUPS_ADMISSION_VISIBILITY_POLICY
-                );
-                assert!(
-                    spec.required_object_groups
-                        .starts_with(REQUIRED_BASELINE_OBJECT_GROUPS_DECISION_CATALOG)
-                );
-                let retired_policy =
-                    spec.prerequisite_object_groups.last().expect("certified policy group");
-                assert!(!spec.required_object_groups.contains(retired_policy));
-                assert!(spec.additive_sql.contains(
-                    "ALTER TABLE public.content_mutation DROP COLUMN visibility_policy;"
-                ));
-                assert!(
-                    spec.additive_sql.contains("DROP TYPE public.admission_visibility_policy;")
-                );
-            } else if spec.target_sha384_hex == BASELINE_REVISION_VISION_RECOGNITION_SHA384 {
-                assert_eq!(
-                    &spec.required_object_groups[..7],
-                    &spec.prerequisite_object_groups[..7]
-                );
-                assert!(
-                    !spec.required_object_groups.contains(
-                        spec.prerequisite_object_groups.last().expect("predecessor policy")
-                    )
-                );
-            } else if spec.target_sha384_hex == BASELINE_REVISION_BILLING_KNOWLEDGE_SEARCH_SHA384 {
-                assert_knowledge_search_replaces_only_owner_enum(spec);
-            } else {
-                assert!(
-                    spec.required_object_groups.starts_with(spec.prerequisite_object_groups),
-                    "{}: the predecessor's object groups must lead its target's groups",
-                    spec.operator_command,
-                );
-            }
+            assert_target_prerequisites(spec);
         }
+    }
+
+    /// The per-target prerequisite contract, including the certificates a target
+    /// deliberately replaces.
+    fn assert_target_prerequisites(spec: &AdditiveBaselineDeltaSpec) {
+        if spec.target_sha384_hex == BASELINE_REVISION_CONTENT_VISIBILITY_INTENT_SHA384 {
+            assert_visibility_intent_prerequisites(spec);
+        } else if spec.target_sha384_hex == BASELINE_REVISION_VISION_RECOGNITION_SHA384 {
+            assert_eq!(&spec.required_object_groups[..7], &spec.prerequisite_object_groups[..7]);
+            assert!(
+                !spec
+                    .required_object_groups
+                    .contains(spec.prerequisite_object_groups.last().expect("predecessor policy"))
+            );
+        } else if spec.target_sha384_hex == BASELINE_REVISION_BILLING_KNOWLEDGE_SEARCH_SHA384 {
+            assert_knowledge_search_replaces_only_owner_enum(spec);
+        } else if spec.target_sha384_hex == BASELINE_REVISION_TEXT_PUBLICATION_SHA384 {
+            assert_text_publication_replaces_only_head_view(spec);
+        } else {
+            assert!(
+                spec.required_object_groups.starts_with(spec.prerequisite_object_groups),
+                "{}: the predecessor's object groups must lead its target's groups",
+                spec.operator_command,
+            );
+        }
+    }
+
+    /// The visibility-intent target drops the retired admission policy and keeps
+    /// the decision catalog as its leading groups.
+    fn assert_visibility_intent_prerequisites(spec: &AdditiveBaselineDeltaSpec) {
+        use crate::infra::persistence::{
+            REQUIRED_BASELINE_OBJECT_GROUPS_ADMISSION_VISIBILITY_POLICY,
+            REQUIRED_BASELINE_OBJECT_GROUPS_DECISION_CATALOG,
+        };
+        assert_eq!(
+            spec.prerequisite_object_groups,
+            REQUIRED_BASELINE_OBJECT_GROUPS_ADMISSION_VISIBILITY_POLICY
+        );
+        assert!(
+            spec.required_object_groups
+                .starts_with(REQUIRED_BASELINE_OBJECT_GROUPS_DECISION_CATALOG)
+        );
+        let retired_policy =
+            spec.prerequisite_object_groups.last().expect("certified policy group");
+        assert!(!spec.required_object_groups.contains(retired_policy));
+        assert!(
+            spec.additive_sql
+                .contains("ALTER TABLE public.content_mutation DROP COLUMN visibility_policy;")
+        );
+        assert!(spec.additive_sql.contains("DROP TYPE public.admission_visibility_policy;"));
+    }
+
+    /// The text-publication target replaces exactly one element of one group.
+    fn assert_text_publication_replaces_only_head_view(spec: &AdditiveBaselineDeltaSpec) {
+        let previous = spec.prerequisite_object_groups;
+        let current = spec.required_object_groups;
+        assert_eq!(previous.len(), current.len());
+        assert_eq!(&previous[..6], &current[..6]);
+        assert_eq!(&previous[7..], &current[7..]);
+        assert_eq!(previous[6].len(), 10);
+        assert_eq!(current[6].len(), 10);
+        assert_eq!(&previous[6][..9], &current[6][..9]);
+        assert_ne!(previous[6][9], current[6][9]);
     }
 
     fn assert_knowledge_search_replaces_only_owner_enum(spec: &AdditiveBaselineDeltaSpec) {

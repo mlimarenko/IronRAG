@@ -1,4 +1,3 @@
-use super::provider_call::{ProviderCallReservationTask, wait_for_provider_call_reservation};
 use super::scoring::{ProviderSemanticScore, parse_semantic_scores, validate_semantic_scores};
 use super::*;
 
@@ -63,13 +62,61 @@ async fn slow_semantic_rerank_does_not_hold_the_turn_past_the_wait_budget() {
     };
 
     let started = Instant::now();
-    let attempt = await_semantic_rerank_within_turn_wait(turn_wait, stage).await;
+    let attempt =
+        await_semantic_rerank_within_turn_wait(turn_wait, stage, &AtomicBool::new(false)).await;
 
-    assert!(attempt.is_none(), "a provider slower than the turn wait must not win the race");
+    assert!(
+        matches!(attempt, Ok(None)),
+        "a provider slower than the turn wait must not win the race"
+    );
     assert!(
         started.elapsed() < Duration::from_millis(300),
         "the turn must not wait for the slow provider tail"
     );
+}
+
+#[tokio::test(start_paused = true)]
+async fn turn_deadline_fails_closed_during_pending_reservation_and_accounting() {
+    for phase in ["reservation", "accounting"] {
+        let unknown = Arc::new(AtomicBool::new(false));
+        let stage_unknown = Arc::clone(&unknown);
+        let (entered, entered_rx) = tokio::sync::oneshot::channel();
+        let (_release, pending) = tokio::sync::oneshot::channel::<()>();
+        let waiter_unknown = Arc::clone(&unknown);
+        let waiter = tokio::spawn(async move {
+            await_semantic_rerank_within_turn_wait(
+                Duration::from_secs(1),
+                pending_financial_phase(&stage_unknown, async move {
+                    entered.send(()).expect("test observes pending phase");
+                    let _ = pending.await;
+                    SemanticRerankAttempt::Failed {
+                        failure: SemanticRerankFailure::TimedOut,
+                        prepared_candidate_count: 1,
+                    }
+                }),
+                &waiter_unknown,
+            )
+            .await
+        });
+        entered_rx.await.expect("phase started");
+        tokio::time::advance(Duration::from_secs(2)).await;
+        assert!(
+            matches!(waiter.await.expect("waiter"), Err(FinancialStateUnknown)),
+            "{phase} must not fall back"
+        );
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn turn_deadline_before_reservation_can_degrade() {
+    let unknown = AtomicBool::new(false);
+    let result = await_semantic_rerank_within_turn_wait(
+        Duration::from_secs(1),
+        std::future::pending::<SemanticRerankAttempt>(),
+        &unknown,
+    )
+    .await;
+    assert!(matches!(result, Ok(None)));
 }
 
 #[test]
@@ -105,6 +152,38 @@ fn degradation_reason_names_every_stage_failure() {
 }
 
 #[test]
+fn expired_dispatch_budget_degrades_without_a_provider_attempt() {
+    let started = Instant::now();
+    let live = SemanticRerankDecisionDeadline::starting_at(started, Duration::from_millis(1_000));
+    let provider_slice = dispatch_budget_after_binding(live, 16)
+        .expect("a live decision budget must still start the provider dispatch");
+    assert!(
+        provider_slice < Duration::from_millis(1_000),
+        "dispatch budget must reserve headroom inside the decision deadline for settlement"
+    );
+    assert!(
+        provider_slice >= Duration::from_millis(800),
+        "settlement reserve must stay bounded and leave most of the budget for dispatch"
+    );
+
+    // The budget was consumed by the work that precedes the dispatch, so the
+    // gate sees the same deadline binding resolution left behind.
+    let consumed = SemanticRerankDecisionDeadline { expires_at: started };
+    let attempt = dispatch_budget_after_binding(consumed, 16)
+        .expect_err("a consumed decision budget must refuse the dispatch");
+
+    assert_eq!(
+        attempt,
+        SemanticRerankAttempt::Failed {
+            failure: SemanticRerankFailure::TimedOut,
+            prepared_candidate_count: 16,
+        },
+        "the gate never polled the dispatch, so the turn degrades to the deterministic \
+         order instead of reporting a financial-state error"
+    );
+}
+
+#[test]
 fn slow_binding_consumes_the_provider_decision_budget() {
     let started = Instant::now();
     let deadline =
@@ -114,24 +193,6 @@ fn slow_binding_consumes_the_provider_decision_budget() {
         deadline.remaining_at(started + Duration::from_millis(650)),
         Some(Duration::from_millis(350))
     );
-}
-
-#[tokio::test]
-async fn reservation_deadline_does_not_cancel_the_reconcilable_insert_task() {
-    let provider_call_id = Uuid::now_v7();
-    let (release, blocked) = tokio::sync::oneshot::channel::<()>();
-    let mut task: ProviderCallReservationTask = tokio::spawn(async move {
-        let _ = blocked.await;
-        Ok(provider_call_id)
-    });
-
-    let before_deadline =
-        wait_for_provider_call_reservation(&mut task, Duration::from_millis(1)).await;
-    assert!(before_deadline.is_none());
-
-    assert!(release.send(()).is_ok());
-    let completed = task.await.expect("reservation task should remain joinable");
-    assert_eq!(completed.expect("synthetic reservation should succeed"), provider_call_id);
 }
 
 #[test]

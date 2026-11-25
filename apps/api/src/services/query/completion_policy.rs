@@ -213,6 +213,40 @@ pub(crate) struct GroundedAnswerRepairPolicy {
     pub max_additional_grounded_answer_calls: u8,
 }
 
+#[derive(Debug, Clone, Copy, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum GroundedSequenceOutcome {
+    ConfirmedAnswer,
+    Clarification,
+    Repair,
+    InsufficientEvidence,
+    TransientRetry,
+    TerminalFailure,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct GroundedSequenceBudget {
+    pub attempt: u8,
+    pub remaining_calls: u8,
+    pub outcome: GroundedSequenceOutcome,
+}
+
+impl GroundedSequenceBudget {
+    pub(crate) fn failure(attempt: u8, retryable: bool) -> Self {
+        let retry = attempt == 0 && retryable;
+        Self {
+            attempt,
+            remaining_calls: u8::from(retry),
+            outcome: if retry {
+                GroundedSequenceOutcome::TransientRetry
+            } else {
+                GroundedSequenceOutcome::TerminalFailure
+            },
+        }
+    }
+}
+
 /// Serialized completion/readiness contract shared by MCP and the in-process
 /// UI agent. Unknown top-level response fields are ignored while every field
 /// owned by this envelope remains required and cross-validated.
@@ -224,6 +258,7 @@ pub(crate) struct GroundedAnswerCompletionEnvelope {
     pub completion: AnswerCompletionAssessment,
     pub repair_policy: GroundedAnswerRepairPolicy,
     pub readiness: GroundedAnswerReadiness,
+    pub sequence_budget: GroundedSequenceBudget,
 }
 
 impl GroundedAnswerCompletionEnvelope {
@@ -284,7 +319,32 @@ impl GroundedAnswerCompletionEnvelope {
                 max_additional_grounded_answer_calls: u8::from(repair_required),
             },
             readiness,
+            sequence_budget: GroundedSequenceBudget {
+                attempt: 0,
+                remaining_calls: u8::from(repair_required),
+                outcome: if final_answer_ready {
+                    GroundedSequenceOutcome::ConfirmedAnswer
+                } else if matches!(answer_disposition, AssistantAnswerDisposition::Clarification) {
+                    GroundedSequenceOutcome::Clarification
+                } else if repair_required {
+                    GroundedSequenceOutcome::Repair
+                } else {
+                    GroundedSequenceOutcome::InsufficientEvidence
+                },
+            },
         }
+    }
+
+    pub(crate) fn with_attempt(mut self, attempt: u8) -> Self {
+        self.sequence_budget.attempt = attempt;
+        if attempt == 1 && self.repair_policy.required {
+            self.repair_policy.required = false;
+            self.repair_policy.max_additional_grounded_answer_calls = 0;
+            self.readiness.completion_required = false;
+            self.sequence_budget.remaining_calls = 0;
+            self.sequence_budget.outcome = GroundedSequenceOutcome::InsufficientEvidence;
+        }
+        self
     }
 
     pub(crate) fn from_structured_content(value: &Value) -> anyhow::Result<Self> {
@@ -309,9 +369,28 @@ impl GroundedAnswerCompletionEnvelope {
                     | AssistantAnswerDisposition::Clarification
             );
         let final_answer_ready = factual_ready && lifecycle_completed && self.completion.complete;
-        let repair_required = !final_answer_ready && !terminal_nonfactual;
+        let repair_possible = !final_answer_ready && !terminal_nonfactual;
+        let exhausted = repair_possible
+            && self.sequence_budget.attempt == 1
+            && !self.repair_policy.required
+            && self.repair_policy.reason.is_some()
+            && self.repair_policy.max_additional_grounded_answer_calls == 0;
+        let repair_required = repair_possible && !exhausted;
         let completion_required = repair_required && !self.completion.complete;
+        let expected_outcome = if final_answer_ready {
+            GroundedSequenceOutcome::ConfirmedAnswer
+        } else if self.readiness.clarification_required {
+            GroundedSequenceOutcome::Clarification
+        } else if repair_required {
+            GroundedSequenceOutcome::Repair
+        } else {
+            GroundedSequenceOutcome::InsufficientEvidence
+        };
         if !self.completion.is_consistent()
+            || self.sequence_budget.attempt > 1
+            || (self.sequence_budget.attempt == 1 && repair_required)
+            || self.sequence_budget.outcome != expected_outcome
+            || self.sequence_budget.remaining_calls != u8::from(repair_required)
             || self.final_answer_ready != self.finalizable
             || self.final_answer_ready != final_answer_ready
             || self.readiness.final_answer_ready != self.final_answer_ready
@@ -880,6 +959,28 @@ mod tests {
         let serialized = serde_json::to_value(&envelope).expect("envelope should serialize");
         assert_eq!(envelope.repair_policy.max_additional_grounded_answer_calls, 1);
         assert!(GroundedAnswerCompletionEnvelope::from_structured_content(&serialized).is_ok());
+    }
+
+    #[test]
+    fn completion_envelope_rejects_inconsistent_sequence_budget() {
+        let initial = GroundedAnswerCompletionEnvelope::new(
+            AssistantAnswerDisposition::NonTerminal,
+            "Unverified answer.",
+            AnswerCompletionAssessment::complete(),
+            "completed",
+            None,
+        );
+        let exhausted = initial.clone().with_attempt(1);
+        assert!(exhausted.is_consistent());
+        let mut invalid = exhausted.clone();
+        invalid.sequence_budget.attempt = 0;
+        assert!(!invalid.is_consistent());
+        invalid = initial;
+        invalid.sequence_budget.attempt = 1;
+        assert!(!invalid.is_consistent());
+        invalid = exhausted;
+        invalid.sequence_budget.remaining_calls = 1;
+        assert!(!invalid.is_consistent());
     }
 
     #[test]

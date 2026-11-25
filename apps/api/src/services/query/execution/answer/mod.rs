@@ -54,7 +54,10 @@ use super::technical_literals::{
     extract_parameter_literals, extract_prefix_literals, extract_url_literals,
     select_document_balanced_chunks, technical_literal_focus_keywords,
 };
-use super::types::{AuthoritativeAnswerEvidence, RuntimeChunkScoreKind, RuntimeMatchedChunk};
+use super::types::{
+    AuthoritativeAnswerEvidence, RuntimeChunkScoreKind, RuntimeMatchedChunk,
+    SelectedGraphContextLine,
+};
 use super::{
     MAX_ANSWER_BLOCKS, MAX_CHUNKS_PER_DOCUMENT, MIN_CHUNKS_PER_DOCUMENT, SOURCE_UNIT_CHUNK_KIND,
     build_table_row_grounded_answer, build_table_summary_grounded_answer,

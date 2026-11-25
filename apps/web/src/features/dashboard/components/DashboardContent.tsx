@@ -47,7 +47,8 @@ function attentionCountFor(
   metrics: DashboardData['metrics'],
 ): Record<string, number> {
   if (code === 'failed_documents') return { count: metrics.failed }
-  if (code === 'graph_coverage_gap') return { count: metrics.graphSparse }
+  if (code === 'graph_coverage_gap')
+    return { count: Math.max(0, metrics.ready - metrics.graphReady) }
   return {}
 }
 
@@ -62,6 +63,8 @@ function notReadyBreakdown(
   const buckets = [
     ['dashboard.notReadyProcessing', metrics.processing],
     ['dashboard.notReadyQueued', metrics.queued],
+    ['dashboard.notReadyPaused', metrics.paused],
+    ['dashboard.notReadyPendingMaterialization', metrics.pendingMaterialization],
     ['dashboard.notReadyFailed', metrics.failed],
     ['dashboard.notReadyCanceled', metrics.canceled],
     ['dashboard.notReadyEmpty', metrics.empty],
@@ -216,6 +219,8 @@ export function DashboardContent({
   const notReady =
     data.metrics.processing +
     data.metrics.queued +
+    data.metrics.paused +
+    data.metrics.pendingMaterialization +
     data.metrics.failed +
     data.metrics.canceled +
     data.metrics.empty
@@ -237,7 +242,7 @@ export function DashboardContent({
     // documents or a graph canvas that cannot enumerate the counted set.
     [
       t('dashboard.factMapLimitedDocuments'),
-      data.metrics.graphSparse,
+      Math.max(0, data.metrics.ready - data.metrics.graphReady),
       '/documents?status=graphgap',
       'sparse',
     ],
@@ -255,7 +260,7 @@ export function DashboardContent({
           <span>{t('dashboard.materials')}</span>
           <strong>{formatNumber(data.metrics.total, locale)}</strong>
           <small>
-            {formatNumber(data.metrics.ready, locale)} {t('dashboard.availableNow')}
+            {formatNumber(data.metrics.readable, locale)} {t('dashboard.availableNow')}
           </small>
           <FileText size={18} />
         </Link>

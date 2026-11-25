@@ -46,6 +46,18 @@ describe('deriveDocumentSearch', () => {
     expect(derived.searchStatus).toContain('ready')
   })
 
+  it('matches paused and pending-content labels in both languages', async () => {
+    expect(deriveDocumentSearch('Paused', 'en', i18n.t).searchStatus).toContain('paused')
+    expect(deriveDocumentSearch('Awaiting content', 'en', i18n.t).searchStatus).toContain(
+      'pending_materialization',
+    )
+    await i18n.changeLanguage('ru')
+    expect(deriveDocumentSearch('На паузе', 'ru', i18n.t).searchStatus).toContain('paused')
+    expect(deriveDocumentSearch('Ожидает содержимое', 'ru', i18n.t).searchStatus).toContain(
+      'pending_materialization',
+    )
+  })
+
   it('carries the normalized decimal alongside the raw term', () => {
     const derived = deriveDocumentSearch('0,50', 'ru', i18n.t)
     expect(derived.search).toBe('0,50')

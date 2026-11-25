@@ -120,6 +120,8 @@ pub struct AdmitDocumentCommand {
     /// Connector-declared structural parent identity, threaded into
     /// [`CreateDocumentCommand::parent_external_key`] at admission.
     pub parent_external_key: Option<String>,
+    /// Absent means [`crate::domains::content::EnrichmentScope::Full`].
+    pub enrichment_scope: Option<crate::domains::content::EnrichmentScope>,
 }
 
 #[derive(Debug, Clone)]
@@ -128,6 +130,8 @@ pub struct AdmitMutationCommand {
     pub library_id: Uuid,
     pub document_id: Uuid,
     pub operation_kind: String,
+    /// Absent means [`crate::domains::content::EnrichmentScope::Full`].
+    pub enrichment_scope: Option<crate::domains::content::EnrichmentScope>,
     pub idempotency_key: Option<String>,
     pub requested_by_principal_id: Option<Uuid>,
     pub request_surface: String,
@@ -158,6 +162,9 @@ pub struct UploadInlineDocumentCommand {
     /// Optional connector-declared structural parent identity from the
     /// multipart `parent_external_key` field; threaded through admission.
     pub parent_external_key: Option<String>,
+    /// Optional bounded plan from the multipart `enrichment_scope` field.
+    /// Absent means [`crate::domains::content::EnrichmentScope::Full`].
+    pub enrichment_scope: Option<crate::domains::content::EnrichmentScope>,
 }
 
 #[derive(Debug, Clone)]
@@ -190,6 +197,8 @@ pub struct ReplaceInlineMutationCommand {
     pub mime_type: Option<String>,
     pub file_bytes: Vec<u8>,
     pub visibility_intent_id: Option<Uuid>,
+    /// Absent means [`crate::domains::content::EnrichmentScope::Full`].
+    pub enrichment_scope: Option<crate::domains::content::EnrichmentScope>,
 }
 
 impl ReplaceInlineMutationCommand {

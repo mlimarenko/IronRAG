@@ -10,10 +10,31 @@ use crate::{
 };
 
 use super::{
-    graph_retrieval_error::is_vector_relation_not_found,
     retrieve::validate_runtime_vector_search_context,
     types::{QueryGraphIndex, RuntimeMatchedEntity, RuntimeVectorSearchContext},
 };
+
+#[derive(Debug, thiserror::Error)]
+#[error("graph entity vector store unavailable")]
+pub(super) struct EntityVectorStoreUnavailable;
+
+fn entity_vector_fetch_error(error: anyhow::Error) -> anyhow::Error {
+    let operational = error.downcast_ref::<QueryServiceError>().is_none()
+        && error.chain().any(|cause| {
+            cause.downcast_ref::<sqlx::Error>().is_some_and(|error| match error {
+                sqlx::Error::Io(_) | sqlx::Error::PoolTimedOut | sqlx::Error::PoolClosed => true,
+                sqlx::Error::Database(database) => {
+                    database.code().is_some_and(|code| code.starts_with("08") || code == "57P03")
+                }
+                _ => false,
+            })
+        });
+    if operational {
+        EntityVectorStoreUnavailable.into()
+    } else {
+        error.context("failed to search normalized entity vectors for runtime query")
+    }
+}
 
 pub(super) async fn retrieve_entity_vector_hits(
     state: &AppState,
@@ -40,7 +61,7 @@ pub(super) async fn retrieve_entity_vector_hits(
         question_embedding,
         "runtime entity search",
     )?;
-    let raw_hits = match state
+    let raw_hits = state
         .search_store
         .search_entity_vectors_by_similarity(
             VectorSimilaritySearchInput {
@@ -53,21 +74,7 @@ pub(super) async fn retrieve_entity_vector_hits(
             limit.max(1),
         )
         .await
-    {
-        Ok(hits) => hits,
-        Err(ref error) if is_vector_relation_not_found(error) => {
-            tracing::info!(
-                library_id = %library_id,
-                "entity vector search: empty layer, returning no graph evidence"
-            );
-            Vec::new()
-        }
-        Err(error) => {
-            return Err(
-                error.context("failed to search normalized entity vectors for runtime query")
-            );
-        }
-    };
+        .map_err(entity_vector_fetch_error)?;
 
     Ok(raw_hits
         .into_iter()
@@ -82,4 +89,25 @@ pub(super) async fn retrieve_entity_vector_hits(
             })
         })
         .collect())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn entity_vector_fetch_classifies_only_operational_failures() {
+        assert!(
+            entity_vector_fetch_error(anyhow::Error::new(sqlx::Error::PoolTimedOut))
+                .downcast_ref::<EntityVectorStoreUnavailable>()
+                .is_some()
+        );
+        assert!(
+            entity_vector_fetch_error(anyhow::Error::new(QueryServiceError::StateConflict {
+                message: "identity changed".into(),
+            }))
+            .downcast_ref::<EntityVectorStoreUnavailable>()
+            .is_none()
+        );
+    }
 }

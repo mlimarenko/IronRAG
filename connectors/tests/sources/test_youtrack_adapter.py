@@ -5,6 +5,7 @@ from collections.abc import AsyncIterator
 from copy import deepcopy
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 from uuid import UUID
 
 import httpx
@@ -22,10 +23,19 @@ from ironrag_connector import (
     SourceFetchDeferred,
     SourceFetchDelete,
     SourceFetchMaterialized,
+    SourceItemRef,
     SourceMaterializationEnforcement,
     load_routing_config,
 )
-from ironrag_connector.sources.youtrack.adapter import YouTrackAdapter, YouTrackApi
+from ironrag_connector.cli import _run_one
+from ironrag_connector.ironrag import ReplacementIdentity
+from ironrag_connector.orchestrator import Orchestrator
+from ironrag_connector.routing import RoutingConfig
+from ironrag_connector.sources.youtrack.adapter import (
+    ItemObservationSkipped,
+    YouTrackAdapter,
+    YouTrackApi,
+)
 from ironrag_connector.sources.youtrack.config import YouTrackSettings
 from ironrag_connector.sources.youtrack.mapping import KIND_ARTICLE, KIND_ISSUE
 from ironrag_connector.sources.youtrack.youtrack import (
@@ -33,6 +43,7 @@ from ironrag_connector.sources.youtrack.youtrack import (
     YouTrackError,
     YouTrackNotFoundError,
 )
+from ironrag_connector.state import StateStore
 
 
 def _settings(**overrides: object) -> YouTrackSettings:
@@ -278,6 +289,238 @@ class FakeYouTrackClient:
 
     async def aclose(self) -> None:
         self.closed = True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", [KIND_ISSUE, KIND_ARTICLE])
+async def test_observe_one_item_fetches_fresh_ref_and_materializes(kind: str) -> None:
+    article = _article(attachments=[])
+    issue = _issue()
+    client = FakeYouTrackClient([article], {"226-0": article}, [issue], {"3-0": issue})
+    adapter = _adapter(_settings(), client=client)
+    item_id = "3-0" if kind == KIND_ISSUE else "226-0"
+    observed = await adapter.observe_item(kind, item_id)
+    assert not isinstance(observed, ItemObservationSkipped)
+    assert observed.item_id == item_id
+    assert observed.materialization_enforcement is SourceMaterializationEnforcement.REQUIRED
+    assert isinstance(await adapter.fetch(observed), SourceFetchMaterialized)
+    assert client.validation_count == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", [KIND_ISSUE, KIND_ARTICLE])
+@pytest.mark.parametrize("exclusion", ["restricted", "project"])
+async def test_observe_one_item_refuses_hidden_or_excluded(kind: str, exclusion: str) -> None:
+    changes = (
+        {"visibility": {"$type": "LimitedVisibility"}}
+        if exclusion == "restricted"
+        else {"project": {"id": "0-7", "shortName": "IRG", "archived": True}}
+    )
+    article = _article(attachments=[], **changes)
+    issue = _issue(**changes)
+    client = FakeYouTrackClient([article], {"226-0": article}, [issue], {"3-0": issue})
+    adapter = _adapter(_settings(), client=client)
+    result = await adapter.observe_item(kind, "3-0" if kind == KIND_ISSUE else "226-0")
+    assert isinstance(result, ItemObservationSkipped)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", [KIND_ISSUE, KIND_ARTICLE])
+async def test_observe_one_item_refuses_identity_mismatch(kind: str) -> None:
+    article = _article(id="226-other", attachments=[])
+    issue = _issue(id="3-other")
+    client = FakeYouTrackClient([], {"226-0": article}, [], {"3-0": issue})
+    adapter = _adapter(_settings(), client=client)
+    with pytest.raises(YouTrackError, match="different item identity"):
+        await adapter.observe_item(kind, "3-0" if kind == KIND_ISSUE else "226-0")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", [KIND_ISSUE, KIND_ARTICLE])
+async def test_observe_one_item_not_found_is_skipped(kind: str) -> None:
+    adapter = _adapter(_settings(), client=FakeYouTrackClient([], {}))
+    result = await adapter.observe_item(kind, "3-0" if kind == KIND_ISSUE else "226-0")
+    assert isinstance(result, ItemObservationSkipped)
+    assert result.reason == "source item is absent or inaccessible"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", [KIND_ISSUE, KIND_ARTICLE])
+async def test_observe_one_item_rejects_changed_authenticated_identity(kind: str) -> None:
+    class ChangingIdentityClient(FakeYouTrackClient):
+        async def validate_credentials(self) -> dict[str, object]:
+            self.validation_count += 1
+            return {"id": "first" if self.validation_count == 1 else "second"}
+
+    article = _article(attachments=[])
+    issue = _issue()
+    client = ChangingIdentityClient([article], {"226-0": article}, [issue], {"3-0": issue})
+    adapter = _adapter(_settings(), client=client)
+    with pytest.raises(YouTrackError, match="authenticated identity changed"):
+        await adapter.observe_item(kind, "3-0" if kind == KIND_ISSUE else "226-0")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("state", ["allowed", "excluded", "mismatch", "unsafe_projection"])
+async def test_one_item_operation_pushes_only_fresh_authorized_observation(
+    monkeypatch: pytest.MonkeyPatch, state: str
+) -> None:
+    issue = _issue()
+    if state == "excluded":
+        issue["visibility"] = {"$type": "LimitedVisibility"}
+    if state == "mismatch":
+        issue["id"] = "3-other"
+    if state == "unsafe_projection":
+        issue["commentsCount"] = 1
+    client = FakeYouTrackClient([], {}, [], {"3-0": issue})
+    adapter = _adapter(_settings(), client=client)
+    pushed = []
+
+    class IronRag:
+        async def aclose(self) -> None:
+            pass
+
+        async def resolve_library_refs(self, *args: object) -> dict:
+            return {}
+
+    class Router:
+        async def initialize(self, resolver: object) -> None:
+            pass
+
+        def resolve(self, ref: object) -> object:
+            return object()
+
+    class Pidfile:
+        def acquire(self) -> None:
+            pass
+
+        def release(self) -> None:
+            pass
+
+    class Orchestrator:
+        async def push_ref(self, ref: object, *, enrichment_scope: str | None = None) -> object:
+            assert enrichment_scope is None
+            pushed.append(ref)
+            return SimpleNamespace(
+                ref=ref,
+                action="replaced",
+                workspace_id=None,
+                library_id=None,
+                rule_description=None,
+                ironrag_document_id="document",
+                detail="accepted",
+                deferred=False,
+                exclusion=SourceExclusion.NONE,
+                admission=None,
+                dependent_outcomes=(),
+            )
+
+    components = SimpleNamespace(
+        adapter=adapter,
+        ironrag=IronRag(),
+        router=Router(),
+        pidfile=Pidfile(),
+        state=SimpleNamespace(close=lambda: None),
+        orchestrator=Orchestrator(),
+    )
+    monkeypatch.setattr("ironrag_connector.cli.build_components", lambda *_: components)
+    if state == "mismatch":
+        settings = _settings()
+        with pytest.raises(YouTrackError):
+            await _run_one(settings, lambda *_: adapter, KIND_ISSUE, "3-0")
+        assert not pushed
+    else:
+        outcome = await _run_one(_settings(), lambda *_: adapter, KIND_ISSUE, "3-0")
+        assert len(pushed) == (1 if state == "allowed" else 0)
+        assert outcome["action"] == ("replaced" if state == "allowed" else "skipped")
+
+
+@pytest.mark.asyncio
+async def test_one_item_unrouted_preserves_document_and_journal(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from test_sdk_orchestrator import DOC_PRE, LIB, FakeIronRag, _document
+
+    issue = _issue()
+    adapter = _adapter(_settings(), client=FakeYouTrackClient([], {}, [], {"3-0": issue}))
+    ironrag = FakeIronRag()
+    ironrag.resolve_library_refs = lambda refs: _empty_targets()
+    ironrag.aclose = _noop_async
+    router = Router(RoutingConfig())
+    state = StateStore(tmp_path / "state.sqlite")
+    key = adapter.external_key(KIND_ISSUE, "3-0")
+    state.upsert(
+        kind=KIND_ISSUE,
+        item_id="3-0",
+        change_token="old",
+        external_key=key,
+        ironrag_document_id=str(DOC_PRE),
+        ironrag_library_id=str(LIB),
+    )
+    ironrag.documents[(LIB, key)] = _document(DOC_PRE, LIB, key)
+    observation = state.observe_materialization(
+        adapter="youtrack",
+        kind=KIND_ISSUE,
+        item_id="3-0",
+        external_key=key,
+        library_id=str(LIB),
+        target_document_id=str(DOC_PRE),
+        materialization_token="old",
+        replacement=ReplacementIdentity(
+            checksum="sha256:" + "a" * 64,
+            byte_size=1,
+            mime_type="text/markdown",
+            file_name="issue.md",
+        ),
+    )
+    attempt = state.prepare_materialization_attempt(
+        observation, document_id=str(DOC_PRE), library_id=str(LIB)
+    )
+    cursor = state.get(KIND_ISSUE, "3-0")
+    orchestrator = Orchestrator(
+        adapter=adapter, ironrag=ironrag, router=router, state=state, policies=_policies()
+    )
+    components = SimpleNamespace(
+        adapter=adapter,
+        ironrag=ironrag,
+        router=router,
+        pidfile=SimpleNamespace(acquire=lambda: None, release=lambda: None),
+        state=SimpleNamespace(close=lambda: None),
+        orchestrator=orchestrator,
+    )
+    monkeypatch.setattr("ironrag_connector.cli.build_components", lambda *_: components)
+    outcome = await _run_one(_settings(), lambda *_: adapter, KIND_ISSUE, "3-0")
+    assert outcome["action"] == "skipped"
+    assert "route" in outcome["detail"]
+    assert not ironrag.deletes
+    assert not ironrag.visibility_requests
+    assert not ironrag.creates
+    assert not ironrag.revisions
+    assert (LIB, key) in ironrag.documents
+    assert state.get(KIND_ISSUE, "3-0") == cursor
+    assert state.materialization_attempts_for_document(str(DOC_PRE)) == [attempt]
+    assert (
+        state.observe_materialization(
+            adapter="youtrack",
+            kind=KIND_ISSUE,
+            item_id="3-0",
+            external_key=key,
+            library_id=str(LIB),
+            target_document_id=str(DOC_PRE),
+            materialization_token="old",
+            replacement=observation.replacement,
+        )
+        == observation
+    )
+    state.close()
+
+
+async def _empty_targets() -> dict:
+    return {}
+
+
+async def _noop_async() -> None:
+    pass
 
 
 @pytest.mark.asyncio
@@ -2693,3 +2936,507 @@ async def _first(iterator: AsyncIterator[object]):
     async for item in iterator:
         return item
     raise AssertionError("expected one item")
+
+
+# ---------------------------------------------------------------------------
+# Rejection paths: a malformed vendor answer stays a typed adapter error.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("kind", "item_id"),
+    [("page", "3-0"), (KIND_ISSUE, ""), (KIND_ISSUE, " 3-0"), (KIND_ISSUE, "3-0 ")],
+)
+async def test_observe_item_requires_a_primary_kind_and_canonical_id(
+    kind: str, item_id: str
+) -> None:
+    client = FakeYouTrackClient([], {})
+    adapter = _adapter(_settings(), client=client)
+
+    with pytest.raises(ValueError, match="supported kind and nonempty canonical item ID"):
+        await adapter.observe_item(kind, item_id)
+    assert client.validation_count == 0
+
+
+@pytest.mark.asyncio
+async def test_observe_item_skips_an_article_whose_ancestry_is_gone() -> None:
+    """A 404 on the parent descriptor makes the article's scope unprovable."""
+
+    article = _article(attachments=[], parentArticle={"id": "999-9"})
+    client = FakeYouTrackClient([article], {"226-0": article})
+    adapter = _adapter(_settings(), client=client)
+
+    observed = await adapter.observe_item(KIND_ARTICLE, "226-0")
+
+    assert isinstance(observed, ItemObservationSkipped)
+    assert observed.reason == "article ancestry is inaccessible"
+
+
+@pytest.mark.asyncio
+async def test_iter_items_census_counts_a_restricted_issue_parent() -> None:
+    """A restricted issue keeps its identity but reads none of its children."""
+
+    issue = _issue(visibility=dict(_LIMITED_VISIBILITY), commentsCount=1)
+    client = FakeYouTrackClient(
+        [],
+        {},
+        issue_summaries=[issue],
+        issue_details={"3-0": issue},
+        issue_comments={"3-0": [_comment("7-1", "hidden", created=1)]},
+    )
+    adapter = _adapter(_settings(), client=client)
+
+    refs = [ref async for ref in adapter.iter_items()]
+
+    assert len(refs) == 1
+    census = adapter._visibility_census[KIND_ISSUE]
+    assert census["in_scope"] == 1
+    assert census["restricted_parents"] == 1
+    assert census["comments"] == 0
+    assert client.comment_reads == []
+
+
+@pytest.mark.asyncio
+async def test_fetch_refuses_an_unsupported_item_kind() -> None:
+    adapter = _adapter(_settings(), client=FakeYouTrackClient([], {}))
+    ref = SourceItemRef(
+        item_id="1-1",
+        kind="page",
+        external_key="youtrack:page:1-1",
+        materialization_enforcement=SourceMaterializationEnforcement.REQUIRED,
+    )
+
+    with pytest.raises(YouTrackError, match="unsupported YouTrack item kind"):
+        await adapter.fetch(ref)
+
+
+@pytest.mark.asyncio
+async def test_fetch_deletes_an_article_whose_identity_changed_after_enumeration() -> None:
+    article = _article(attachments=[])
+    client = FakeYouTrackClient([article], {"226-0": article})
+    adapter = _adapter(_settings(), client=client)
+    ref = await _first(adapter.iter_items())
+    client.details["226-0"] = _article(id="226-other", attachments=[])
+
+    result = await adapter.fetch(ref)
+
+    assert isinstance(result, SourceFetchDelete)
+    assert result.enforcement is SourceDeleteEnforcement.REQUIRED
+    assert result.reason == "article identity can no longer be proven after enumeration"
+    assert result.cacheable is False
+
+
+@pytest.mark.asyncio
+async def test_fetch_deletes_an_issue_that_vanished_after_enumeration() -> None:
+    issue = _issue()
+    client = FakeYouTrackClient([], {}, issue_summaries=[issue], issue_details={"3-0": issue})
+    adapter = _adapter(_settings(), client=client)
+    ref = await _first(adapter.iter_items())
+    client.issue_details.pop("3-0")
+
+    result = await adapter.fetch(ref)
+
+    assert isinstance(result, SourceFetchDelete)
+    assert result.reason == "issue can no longer be read after enumeration"
+    assert result.enforcement is SourceDeleteEnforcement.REQUIRED
+    assert result.cacheable is False
+
+
+@pytest.mark.asyncio
+async def test_fetch_defers_an_issue_edited_during_materialization() -> None:
+    issue = _issue()
+    client = FakeYouTrackClient([], {}, issue_summaries=[issue], issue_details={"3-0": issue})
+    adapter = _adapter(_settings(), client=client)
+    ref = await _first(adapter.iter_items())
+    client.issue_details["3-0"] = _issue(summary="Edited while materializing")
+
+    result = await adapter.fetch(ref)
+
+    assert isinstance(result, SourceFetchDeferred)
+    assert result.reason == "issue changed during materialization"
+
+
+@pytest.mark.asyncio
+async def test_link_without_embedded_targets_keeps_the_collection_proven_empty() -> None:
+    """``issues: []`` is the vendor's proof that the link has no targets."""
+
+    issue = _issue(links=[{"id": "9-1", "direction": "OUTWARD", "issues": []}])
+    client = FakeYouTrackClient(
+        [],
+        {},
+        issue_summaries=[issue],
+        issue_details={"3-0": issue},
+        issue_links={"3-0": [{"id": "9-1", "direction": "OUTWARD", "issues": []}]},
+    )
+    adapter = _adapter(_settings(), client=client)
+    ref = await _first(adapter.iter_items())
+
+    result = await adapter.fetch(ref)
+
+    assert isinstance(result, SourceFetchMaterialized)
+    assert result.item.ref.raw["_ironrag_projection"]["related"]["links"][0]["targets"] == []
+    assert (
+        result.item.ref.raw["_ironrag_projection"]["related"]["links"][0]["targets_complete"]
+        is True
+    )
+
+
+@pytest.mark.asyncio
+async def test_link_target_outside_scope_is_kept_as_ineligible_evidence() -> None:
+    """An unreadable target project marks the target ineligible, not unknown-visible."""
+
+    target = _link_target("3-9", "IRG-9")
+    target["project"] = {"id": "0-8", "archived": False}
+    link = {"id": "9-1", "direction": "OUTWARD", "issues": [{"id": "3-9"}]}
+    issue = _issue(links=[link])
+    client = FakeYouTrackClient(
+        [],
+        {},
+        issue_summaries=[issue],
+        issue_details={"3-0": issue},
+        issue_links={"3-0": [link]},
+        issue_link_targets={("3-0", "9-1"): [target]},
+    )
+    adapter = _adapter(_settings(youtrack_projects="IRG"), client=client)
+    ref = await _first(adapter.iter_items())
+
+    result = await adapter.fetch(ref)
+
+    assert isinstance(result, SourceFetchMaterialized)
+    links = result.item.ref.raw["_ironrag_projection"]["related"]["links"]
+    assert links[0]["targets"][0]["eligible"] is False
+    assert links[0]["targets"][0]["id_readable"] is None
+
+
+@pytest.mark.asyncio
+async def test_target_without_proven_scope_is_recorded_as_ineligible() -> None:
+    """A malformed target project proves neither eligibility nor ineligibility.
+
+    The projection therefore cannot represent the link safely and the item is
+    deleted rather than materialized with an unproven target.
+    """
+
+    target = _link_target("3-9", "IRG-9")
+    del target["project"]
+    link = {"id": "9-1", "direction": "OUTWARD", "issues": [{"id": "3-9"}]}
+    issue = _issue(links=[link])
+    client = FakeYouTrackClient(
+        [],
+        {},
+        issue_summaries=[issue],
+        issue_details={"3-0": issue},
+        issue_links={"3-0": [link]},
+        issue_link_targets={("3-0", "9-1"): [target]},
+    )
+    adapter = _adapter(_settings(), client=client)
+    ref = await _first(adapter.iter_items())
+
+    result = await adapter.fetch(ref)
+
+    assert isinstance(result, SourceFetchDelete)
+    assert result.enforcement is SourceDeleteEnforcement.REQUIRED
+    assert result.cacheable is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("custom_fields", "match"),
+    [
+        ("not-a-collection", "customFields was not a collection of objects"),
+        ([1], "customFields was not a collection of objects"),
+        ([{"value": None}], "did not contain a name"),
+        ([{"name": "Type", "$type": 5, "value": None}], "custom field type was not a string"),
+    ],
+)
+async def test_issue_with_a_malformed_custom_field_collection_aborts_census(
+    custom_fields: object, match: str
+) -> None:
+    issue = _issue(customFields=custom_fields)
+    client = FakeYouTrackClient([], {}, issue_summaries=[issue], issue_details={"3-0": issue})
+    adapter = _adapter(_settings(), client=client)
+
+    with pytest.raises(YouTrackError, match=match):
+        _ = [ref async for ref in adapter.iter_items()]
+
+
+@pytest.mark.asyncio
+async def test_duplicate_custom_field_names_abort_before_a_token_is_emitted() -> None:
+    """Two fields with one name make the normalized snapshot ambiguous."""
+
+    issue = _issue(
+        customFields=[
+            {"name": "Type", "value": {"id": "t-1", "name": "Change"}},
+            {"name": "Type", "value": {"id": "t-2", "name": "Bug"}},
+        ]
+    )
+    client = FakeYouTrackClient([], {}, issue_summaries=[issue], issue_details={"3-0": issue})
+    adapter = _adapter(_settings(), client=client)
+
+    with pytest.raises(YouTrackError, match="duplicate field Type"):
+        _ = [ref async for ref in adapter.iter_items()]
+
+
+@pytest.mark.asyncio
+async def test_fetch_refuses_a_ref_without_a_normalized_projection() -> None:
+    """A ref that did not come from enumeration cannot be materialized."""
+
+    issue = _issue()
+    client = FakeYouTrackClient([], {}, issue_summaries=[issue], issue_details={"3-0": issue})
+    adapter = _adapter(_settings(), client=client)
+    ref = await _first(adapter.iter_items())
+    ref = replace(ref, raw={})
+
+    with pytest.raises(YouTrackError, match="did not contain normalized projection"):
+        await adapter.fetch(ref)
+
+
+@pytest.mark.asyncio
+async def test_fetch_refuses_a_ref_with_a_malformed_projection() -> None:
+    issue = _issue()
+    client = FakeYouTrackClient([], {}, issue_summaries=[issue], issue_details={"3-0": issue})
+    adapter = _adapter(_settings(), client=client)
+    ref = await _first(adapter.iter_items())
+    ref = replace(
+        ref,
+        raw={"_ironrag_projection": {"access_chain": "not-a-list", "related": {}}},
+    )
+
+    with pytest.raises(YouTrackError, match="malformed normalized projection"):
+        await adapter.fetch(ref)
+
+
+@pytest.mark.asyncio
+async def test_related_snapshot_with_duplicate_comment_ids_aborts_the_census() -> None:
+    issue = _issue(commentsCount=2)
+    duplicate = _comment("7-1", "same id", created=1)
+    client = FakeYouTrackClient(
+        [],
+        {},
+        issue_summaries=[issue],
+        issue_details={"3-0": issue},
+        issue_comments={"3-0": [duplicate, dict(duplicate)]},
+    )
+    adapter = _adapter(_settings(), client=client)
+
+    with pytest.raises(YouTrackError, match="duplicate comment id"):
+        _ = [ref async for ref in adapter.iter_items()]
+
+
+@pytest.mark.asyncio
+async def test_related_snapshot_with_duplicate_link_ids_aborts_the_census() -> None:
+    link = {"id": "9-1", "direction": "OUTWARD", "issues": []}
+    issue = _issue(links=[link])
+    client = FakeYouTrackClient(
+        [],
+        {},
+        issue_summaries=[issue],
+        issue_details={"3-0": issue},
+        issue_links={"3-0": [link, dict(link)]},
+    )
+    adapter = _adapter(_settings(), client=client)
+
+    with pytest.raises(YouTrackError, match="duplicate link id"):
+        _ = [ref async for ref in adapter.iter_items()]
+
+
+@pytest.mark.asyncio
+async def test_related_snapshot_with_duplicate_link_target_ids_aborts_the_census() -> None:
+    link = {"id": "9-1", "direction": "OUTWARD", "issues": [{"id": "3-9"}]}
+    target = _link_target("3-9", "IRG-9")
+    issue = _issue(links=[link])
+    client = FakeYouTrackClient(
+        [],
+        {},
+        issue_summaries=[issue],
+        issue_details={"3-0": issue},
+        issue_links={"3-0": [link]},
+        issue_link_targets={("3-0", "9-1"): [target, dict(target)]},
+    )
+    adapter = _adapter(_settings(), client=client)
+
+    with pytest.raises(YouTrackError, match="duplicate link target id"):
+        _ = [ref async for ref in adapter.iter_items()]
+
+
+@pytest.mark.asyncio
+async def test_comment_with_non_string_text_fails_closed() -> None:
+    comment = _comment("7-1", "ignored", created=1)
+    comment["text"] = 42
+    issue = _issue(commentsCount=1)
+    client = FakeYouTrackClient(
+        [],
+        {},
+        issue_summaries=[issue],
+        issue_details={"3-0": issue},
+        issue_comments={"3-0": [comment]},
+    )
+    adapter = _adapter(_settings(), client=client)
+
+    with pytest.raises(YouTrackError, match="comment text was not a string or null"):
+        _ = [ref async for ref in adapter.iter_items()]
+
+
+@pytest.mark.asyncio
+async def test_comment_without_a_created_timestamp_fails_closed() -> None:
+    comment = _comment("7-1", "missing creation", created=1)
+    comment.pop("created")
+    issue = _issue(commentsCount=1)
+    client = FakeYouTrackClient(
+        [],
+        {},
+        issue_summaries=[issue],
+        issue_details={"3-0": issue},
+        issue_comments={"3-0": [comment]},
+    )
+    adapter = _adapter(_settings(), client=client)
+
+    with pytest.raises(YouTrackError, match="did not contain a timestamp"):
+        _ = [ref async for ref in adapter.iter_items()]
+
+
+@pytest.mark.asyncio
+async def test_attachment_with_a_boolean_timestamp_fails_closed() -> None:
+    attachment = {
+        "id": "237-3",
+        "name": "diagram.png",
+        "size": 10,
+        "draft": False,
+        "removed": False,
+        "created": True,
+        "visibility": {"$type": "UnlimitedVisibility"},
+    }
+    issue = _issue(attachments=[attachment])
+    client = FakeYouTrackClient(
+        [],
+        {},
+        issue_summaries=[issue],
+        issue_details={"3-0": issue},
+        issue_attachments={"3-0": [attachment]},
+    )
+    adapter = _adapter(_settings(), client=client)
+
+    with pytest.raises(YouTrackError, match="non-negative integer timestamp"):
+        _ = [ref async for ref in adapter.iter_items()]
+
+
+@pytest.mark.asyncio
+async def test_pinned_comment_records_the_pin_in_the_rendered_payload() -> None:
+    comment = _comment("7-1", "pinned note", created=1)
+    comment["pinned"] = True
+    issue = _issue(commentsCount=1)
+    client = FakeYouTrackClient(
+        [],
+        {},
+        issue_summaries=[issue],
+        issue_details={"3-0": issue},
+        issue_comments={"3-0": [comment]},
+    )
+    adapter = _adapter(_settings(), client=client)
+    ref = await _first(adapter.iter_items())
+
+    result = await adapter.fetch(ref)
+
+    assert isinstance(result, SourceFetchMaterialized)
+    assert "- **Pinned:** true" in result.item.payload.decode("utf-8")
+
+
+@pytest.mark.asyncio
+async def test_parent_metadata_falls_back_to_the_project_name() -> None:
+    issue = _issue(project={"id": "0-7", "name": "IronRAG", "archived": False})
+    client = FakeYouTrackClient([], {}, issue_summaries=[issue], issue_details={"3-0": issue})
+    adapter = _adapter(_settings(), client=client)
+    ref = await _first(adapter.iter_items())
+
+    result = await adapter.fetch(ref)
+
+    assert isinstance(result, SourceFetchMaterialized)
+    assert "- **Project:** IronRAG" in result.item.payload.decode("utf-8")
+
+
+@pytest.mark.asyncio
+async def test_parent_metadata_omits_missing_created_and_reporter_login() -> None:
+    """Absent metadata is omitted from the bytes, not rendered as a placeholder."""
+
+    issue = _issue(reporter={"id": "1-2"})
+    issue.pop("created")
+    client = FakeYouTrackClient([], {}, issue_summaries=[issue], issue_details={"3-0": issue})
+    adapter = _adapter(_settings(), client=client)
+    ref = await _first(adapter.iter_items())
+
+    result = await adapter.fetch(ref)
+
+    assert isinstance(result, SourceFetchMaterialized)
+    payload = result.item.payload.decode("utf-8")
+    assert "- **Created:**" not in payload
+    assert "- **Reporter:**" not in payload
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("value", "rendered"),
+    [(True, "true"), (5, "5"), (2.5, "2.5")],
+)
+async def test_scalar_custom_field_values_keep_their_wire_spelling(
+    value: object, rendered: str
+) -> None:
+    issue = _issue(customFields=[{"name": "Priority", "value": value}])
+    client = FakeYouTrackClient([], {}, issue_summaries=[issue], issue_details={"3-0": issue})
+    adapter = _adapter(_settings(), client=client)
+    ref = await _first(adapter.iter_items())
+
+    result = await adapter.fetch(ref)
+
+    assert isinstance(result, SourceFetchMaterialized)
+    assert ref.routing_facts["custom_field:Priority"] == rendered
+    assert f"- **Priority:** {rendered}" in result.item.payload.decode("utf-8")
+
+
+@pytest.mark.asyncio
+async def test_custom_field_object_with_a_non_string_identity_fails_closed() -> None:
+    issue = _issue(customFields=[{"name": "Priority", "value": {"id": 5}}])
+    client = FakeYouTrackClient([], {}, issue_summaries=[issue], issue_details={"3-0": issue})
+    adapter = _adapter(_settings(), client=client)
+
+    with pytest.raises(YouTrackError, match="custom field id was not a string"):
+        _ = [ref async for ref in adapter.iter_items()]
+
+
+@pytest.mark.asyncio
+async def test_article_with_an_ancestor_missing_from_the_census_keeps_unknown_link() -> None:
+    """A parent id the census cannot resolve is an unprovable access chain."""
+
+    article = _article(attachments=[], parentArticle={"id": "999-9"})
+    client = FakeYouTrackClient([article], {"226-0": article})
+    adapter = _adapter(_settings(), client=client)
+
+    ref = await _first(adapter.iter_items())
+
+    chain = ref.raw["_ironrag_projection"]["access_chain"]
+    assert chain == [
+        {"item_id": "226-0", "kind": "unlimited"},
+        {"item_id": "999-9", "kind": "unknown"},
+    ]
+    assert isinstance(await adapter.fetch(ref), SourceFetchDelete)
+
+
+@pytest.mark.asyncio
+async def test_project_without_any_selector_aborts_the_census() -> None:
+    issue = _issue(project={"archived": False})
+    client = FakeYouTrackClient([], {}, issue_summaries=[issue], issue_details={"3-0": issue})
+    adapter = _adapter(_settings(), client=client)
+
+    with pytest.raises(YouTrackError, match="project did not contain an id"):
+        _ = [ref async for ref in adapter.iter_items()]
+
+
+@pytest.mark.asyncio
+async def test_excluded_project_is_dropped_before_related_reads() -> None:
+    issue = _issue()
+    client = FakeYouTrackClient([], {}, issue_summaries=[issue], issue_details={"3-0": issue})
+    adapter = _adapter(_settings(youtrack_exclude_projects="IRG"), client=client)
+
+    refs = [ref async for ref in adapter.iter_items()]
+
+    assert refs == []
+    assert client.comment_reads == []

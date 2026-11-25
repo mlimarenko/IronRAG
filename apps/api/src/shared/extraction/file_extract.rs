@@ -26,6 +26,7 @@ use self::normalization::{normalize_extracted_content, with_extraction_quality_m
 pub(crate) use self::visual_recognition::aggregate_vision_usage_json;
 pub use self::visual_recognition::{
     VisualRecognitionInput, VisualRecognitionReceipt, recognize_native_visuals,
+    recognize_native_visuals_with_ledger,
 };
 pub use self::{
     errors::{
@@ -70,6 +71,10 @@ pub struct ExtractedContentQuality {
     pub normalization_status: ExtractionNormalizationStatus,
     pub ocr_source: Option<String>,
     pub warning_count: usize,
+    /// Explicit marker when the stored text is not verified evidence of names
+    /// or relations, for example low-confidence native text without any visual
+    /// reading. `None` means no limitation was recorded, not proven quality.
+    pub evidence_limitation: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -102,6 +107,7 @@ pub struct FileExtractionPlan {
 }
 
 pub struct FileExtractionRequest<'a> {
+    pub vision_ledger: Option<&'a dyn extraction::image::VisionCallLedger>,
     pub vision_dispatch: Option<&'a crate::shared::provider_http::DispatchAuthority>,
     pub max_output_tokens_override: Option<i32>,
     pub cancellation_token: Option<&'a tokio_util::sync::CancellationToken>,
@@ -190,8 +196,12 @@ pub fn extraction_quality_from_source_map(
         .and_then(serde_json::Value::as_u64)
         .and_then(|value| usize::try_from(value).ok())
         .unwrap_or(warning_count);
+    let evidence_limitation = quality
+        .and_then(|item| item.get("evidence_limitation"))
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string);
 
-    ExtractedContentQuality { normalization_status, ocr_source, warning_count }
+    ExtractedContentQuality { normalization_status, ocr_source, warning_count, evidence_limitation }
 }
 
 /// Builds a local extraction plan for a file payload using only deterministic parsers.
@@ -422,6 +432,7 @@ pub async fn build_runtime_file_extraction_plan(
     request: FileExtractionRequest<'_>,
 ) -> Result<FileExtractionPlan, FileExtractError> {
     let FileExtractionRequest {
+        vision_ledger,
         vision_dispatch,
         max_output_tokens_override,
         cancellation_token,
@@ -457,7 +468,9 @@ pub async fn build_runtime_file_extraction_plan(
                 message: error.to_string(),
             }
         })?;
-        let receipt = recognize_native_visuals(&mut native, file_kind, input).await?;
+        let receipt =
+            recognize_native_visuals_with_ledger(&mut native, file_kind, input, vision_ledger)
+                .await?;
         let calls = receipt.calls.clone();
         let mut output =
             xberg::project_native(native, source).map_err(|_| FileExtractError::VisionFailed {
@@ -465,6 +478,7 @@ pub async fn build_runtime_file_extraction_plan(
                 class: ExtractionFailureClass::OperationalTerminal,
                 message: "native extraction projection failed after visual recognition".into(),
                 calls: calls.clone(),
+                provider_call_id: None,
             })?;
         receipt.apply(&mut output);
         if output.content_text.trim().is_empty() {
@@ -473,6 +487,7 @@ pub async fn build_runtime_file_extraction_plan(
                 class: ExtractionFailureClass::ContentInvalid,
                 message: "document contains no usable native or recognized text".into(),
                 calls,
+                provider_call_id: None,
             });
         }
         return Ok(build_plan_from_extraction(
@@ -484,7 +499,7 @@ pub async fn build_runtime_file_extraction_plan(
     if file_kind == UploadFileKind::Image {
         let provider = vision_provider.ok_or_else(|| missing_vision_binding_error(file_kind))?;
         let empty = serde_json::json!({});
-        let output = extraction::image::extract_image_with_provider(
+        let output = extraction::image::extract_image_with_provider_with_ledger(
             gateway,
             extraction::image::VisionProviderInput {
                 dispatch: vision_dispatch,
@@ -498,6 +513,7 @@ pub async fn build_runtime_file_extraction_plan(
             mime_type.unwrap_or("image/png"),
             &file_bytes,
             cancellation_token,
+            vision_ledger,
         )
         .await
         .map_err(|error| FileExtractError::VisionFailed {
@@ -509,6 +525,7 @@ pub async fn build_runtime_file_extraction_plan(
             },
             message: error.message.into(),
             calls: error.calls,
+            provider_call_id: error.provider_call_id,
         })?;
         if output.content_text.trim().is_empty() {
             let calls = serde_json::from_value(output.usage_json["vision_calls"].clone())
@@ -518,6 +535,7 @@ pub async fn build_runtime_file_extraction_plan(
                 class: ExtractionFailureClass::ContentInvalid,
                 message: "image contains no readable text".into(),
                 calls,
+                provider_call_id: None,
             });
         }
         return Ok(build_plan_from_extraction(

@@ -178,26 +178,31 @@ pub(crate) async fn resolve_document_state(
     document_id: Uuid,
     accepted_permissions: &[&str],
 ) -> Result<ResolvedDocumentState, ApiError> {
+    let document_not_found = || ApiError::NotFound("document not found".to_string());
     let knowledge_document = state
         .document_store
         .get_document(document_id)
         .await
         .map_err(|error| ApiError::internal_with_log(error, "internal"))?
-        .ok_or_else(|| ApiError::NotFound("document not found".to_string()))?;
+        .ok_or_else(document_not_found)?;
     let library = catalog_repository::get_library_by_id(
         &state.persistence.postgres,
         knowledge_document.library_id,
     )
     .await
     .map_err(|error| ApiError::internal_with_log(error, "internal"))?
-    .ok_or_else(|| ApiError::resource_not_found("library", knowledge_document.library_id))?;
+    .ok_or_else(document_not_found)?;
     authorize_document_permission(
         auth,
         library.workspace_id,
         library.id,
         document_id,
         accepted_permissions,
-    )?;
+    )
+    .map_err(|error| match error {
+        ApiError::Unauthorized => document_not_found(),
+        error => error,
+    })?;
     let snapshot =
         crate::infra::repositories::content_document_head_repository::list_document_read_snapshots(
             &state.persistence.postgres,
@@ -460,6 +465,21 @@ async fn load_source_visual_description(
         .await
 }
 
+/// The typed admission refusal carried by a provider call error, if any.
+fn admission_refusal(
+    error: &anyhow::Error,
+) -> Option<crate::shared::provider_http::ProviderDispatchRefusal> {
+    match error
+        .downcast_ref::<crate::integrations::retry::ProviderCallError>()?
+        .admission_error()?
+    {
+        crate::integrations::provider_budget::ProviderBudgetError::Dispatch(refusal) => {
+            Some(refusal.clone())
+        }
+        _ => None,
+    }
+}
+
 async fn describe_source_image(
     state: &AppState,
     state_view: &ResolvedDocumentState,
@@ -479,9 +499,8 @@ async fn describe_source_image(
         },
         binding,
     ).await?;
-    match crate::integrations::retry::with_single_provider_attempt(
-        crate::observability::with_provider_call_id(
-            provider_call.provider_call_id(),
+    let description = provider_call
+        .scoped(crate::integrations::retry::with_single_provider_attempt(
             crate::shared::extraction::image::describe_image_with_provider(
                 state.llm_gateway.as_ref(),
                 crate::shared::extraction::image::VisionProviderInput {
@@ -503,27 +522,91 @@ async fn describe_source_image(
                 mime_type,
                 file_bytes,
             ),
-        ),
-    )
-    .await
-    {
-        Ok(result) => {
-            provider_call.complete(&result.usage_json).await?;
-            let text = result.text.trim().to_string();
-            Ok((!text.is_empty()).then_some(text))
-        }
+        ))
+        .await;
+    match description {
+        Ok(result) => settle_source_image_description(&mut provider_call, result).await,
         Err(error) => {
-            // Description is optional, but its attempted spend is not. Only a
-            // durably failed call may fall back to the canonical text alone.
-            provider_call.fail().await?;
-            warn!(
-                document_id = %state_view.document_id,
-                revision_id = %latest_revision_id,
-                mime_type = %mime_type,
-                error = %error,
-                "failed to derive source image description for MCP read_document"
-            );
-            Ok(None)
+            handle_source_image_description_error(
+                state_view,
+                latest_revision_id,
+                mime_type,
+                &mut provider_call,
+                error,
+            )
+            .await
         }
     }
+}
+
+async fn settle_source_image_description(
+    provider_call: &mut crate::services::ops::billing::provider_reservation::ProviderCallReservation,
+    result: crate::shared::extraction::image::ImageVisionOutput,
+) -> Result<Option<String>, ApiError> {
+    provider_call.complete(&result.usage_json).await?;
+    let text = result.text.trim().to_string();
+    Ok((!text.is_empty()).then_some(text))
+}
+
+async fn handle_source_image_description_error(
+    state_view: &ResolvedDocumentState,
+    latest_revision_id: Uuid,
+    mime_type: &str,
+    provider_call: &mut crate::services::ops::billing::provider_reservation::ProviderCallReservation,
+    error: anyhow::Error,
+) -> Result<Option<String>, ApiError> {
+    // Description is optional, but a financial or authority refusal is
+    // not: it fails the whole read exactly as the pre-send reservation
+    // did, so a denied dispatch can never look like a successful read
+    // with the image silently omitted.
+    if let Some(refusal) = admission_refusal(&error) {
+        return refuse_source_image_description(
+            state_view,
+            latest_revision_id,
+            provider_call,
+            refusal,
+        )
+        .await;
+    }
+    // Description is optional, but its attempted spend is not. Only a
+    // durably failed call may fall back to the canonical text alone.
+    skip_source_image_description(state_view, latest_revision_id, mime_type, provider_call, error)
+        .await
+}
+
+async fn refuse_source_image_description(
+    state_view: &ResolvedDocumentState,
+    latest_revision_id: Uuid,
+    provider_call: &mut crate::services::ops::billing::provider_reservation::ProviderCallReservation,
+    refusal: crate::shared::provider_http::ProviderDispatchRefusal,
+) -> Result<Option<String>, ApiError> {
+    provider_call.fail().await?;
+    warn!(
+        document_id = %state_view.document_id,
+        revision_id = %latest_revision_id,
+        ?refusal,
+        "MCP image description admission was refused; the read fails closed"
+    );
+    Err(ApiError::service_unavailable(
+        format!("image description admission refused: {refusal}"),
+        "provider_admission_refused",
+    ))
+}
+
+async fn skip_source_image_description(
+    state_view: &ResolvedDocumentState,
+    latest_revision_id: Uuid,
+    mime_type: &str,
+    provider_call: &mut crate::services::ops::billing::provider_reservation::ProviderCallReservation,
+    error: anyhow::Error,
+) -> Result<Option<String>, ApiError> {
+    provider_call.fail().await?;
+    warn!(
+        document_id = %state_view.document_id,
+        revision_id = %latest_revision_id,
+        mime_type = %mime_type,
+        error = %error,
+        "failed to derive source image description for MCP read_document"
+    );
+    Ok(None)
 }

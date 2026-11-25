@@ -5,13 +5,12 @@ use super::literal_coverage::{
 };
 use super::output_boundary::{
     enforce_hard_output_boundary, literal_revision_context, merge_generation_usage,
-    selected_runtime_grounding_evidence,
 };
 use super::preflight::structural_question_tokens;
 use super::verification::verify_generated_answer;
 use super::{
-    AnswerVerificationStage, AppState, AssistantGroundingEvidence, ChatMessage, HashMap, HashSet,
-    KnowledgeDocumentRow, PreparedAnswerQueryResult, QueryIR, RuntimeMatchedChunk, Uuid,
+    AnswerVerificationStage, AppState, ChatMessage, HashMap, HashSet, KnowledgeDocumentRow,
+    QueryIR, RuntimeMatchedChunk, Uuid,
 };
 use anyhow::Context as _;
 
@@ -132,17 +131,6 @@ impl LiteralRevisionPath {
             },
         }
     }
-
-    pub(super) fn revised_grounding(
-        self,
-        prepared: &PreparedAnswerQueryResult,
-        revision_grounding: AssistantGroundingEvidence,
-    ) -> AssistantGroundingEvidence {
-        match self {
-            Self::FastPath => selected_runtime_grounding_evidence(prepared, revision_grounding),
-            Self::AnswerPreflight => AssistantGroundingEvidence::default(),
-        }
-    }
 }
 
 pub(super) struct LiteralRevisionAttempt<'a> {
@@ -152,7 +140,6 @@ pub(super) struct LiteralRevisionAttempt<'a> {
     pub(super) revision_question: &'a str,
     pub(super) verification_question: &'a str,
     pub(super) conversation_history: &'a [ChatMessage],
-    pub(super) prepared: &'a PreparedAnswerQueryResult,
     pub(super) path: LiteralRevisionPath,
 }
 
@@ -163,10 +150,7 @@ pub(super) async fn revise_answer_literals_if_needed(
     debug_iterations: &mut Vec<crate::services::query::llm_context_debug::LlmIterationDebug>,
 ) -> anyhow::Result<()> {
     let telemetry = context.path.telemetry();
-    let revision_context = literal_revision_context(
-        &verification_stage.generation.prompt_context,
-        &verification_stage.generation.assistant_grounding,
-    );
+    let revision_context = literal_revision_context(&verification_stage.generation);
     let mut outputs =
         LiteralRevisionOutputs { verification_stage, provider_calls, debug_iterations };
     apply_literal_fidelity_revision(&context, &mut outputs, telemetry, &revision_context).await?;
@@ -317,7 +301,6 @@ async fn apply_literal_revision_result(
         answer,
         usage_json: revision_usage,
         provider_calls: revision_provider_calls,
-        assistant_grounding: revision_grounding,
         debug_iterations: revision_debug_iterations,
         ..
     } = revision;
@@ -343,8 +326,6 @@ async fn apply_literal_revision_result(
     }
 
     let mut generation = outputs.verification_stage.generation.clone();
-    generation.assistant_grounding =
-        context.path.revised_grounding(context.prepared, revision_grounding);
     generation.answer = revision_answer;
     generation.usage_json = usage_json;
     *outputs.verification_stage = verify_generated_answer(

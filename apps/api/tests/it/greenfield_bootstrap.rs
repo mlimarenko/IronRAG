@@ -1,13 +1,10 @@
 //! Greenfield bootstrap integration tests. Ignored by default: they need a
-//! live PostgreSQL with the pgvector extension (same image as
-//! docker-compose.yml, `pgvector/pgvector:pg18`) reachable via
-//! `IRONRAG_DATABASE_URL`; each test creates and drops its own temporary
-//! database on that server. Run with:
+//! disposable PostgreSQL with pgvector, using the image in `docker-compose.yml`.
+//! Set `IRONRAG_DATABASE_URL` to that test server; each test creates and drops
+//! its own database there. Never point it at an existing deployment.
 //!
 //! ```sh
-//! docker run -d --name ironrag-test-pg -e POSTGRES_PASSWORD=postgres \
-//!     -p 127.0.0.1:55433:5432 pgvector/pgvector:pg18
-//! IRONRAG_DATABASE_URL='postgres://postgres:postgres@127.0.0.1:55433/ironrag' cargo test -p ironrag-backend --test it -- --ignored greenfield_bootstrap:: # pragma: allowlist secret
+//! cargo test -p ironrag-backend --test it -- --ignored greenfield_bootstrap::
 //! ```
 
 use crate::{database_url, http_response_support};
@@ -1864,7 +1861,8 @@ mod vision_recognition {
             persistence::validate_baseline_objects_present(&pool).await?;
             assert_eq!(
                 hex::encode(baseline_checksum(&pool).await?),
-                baseline_delta::BASELINE_REVISION_USER_PREFERENCE_SHA384
+                baseline_delta::BASELINE_REVISION_TEXT_PUBLICATION_SHA384,
+                "the fresh baseline is the text-publication revision, so the singleton policy is already shipped",
             );
             let workspace =
                 catalog_repository::create_workspace(&pool, "fresh-vision", "Fresh Vision", None)
@@ -2137,6 +2135,9 @@ mod xberg_recognition {
             let preference = ironrag_backend::services::maintenance::user_preference_schema::migrate_user_preference_schema(&pool,true).await?;
             assert!(preference.schema_applied && !preference.already_current);
             assert_eq!(hex::encode(baseline_checksum(&pool).await?), baseline_delta::BASELINE_REVISION_USER_PREFERENCE_SHA384);
+            let publication = ironrag_backend::services::maintenance::text_publication_schema::migrate_text_publication_schema(&pool,true).await?;
+            assert!(publication.schema_applied && !publication.already_current);
+            assert_eq!(hex::encode(baseline_checksum(&pool).await?), baseline_delta::BASELINE_REVISION_TEXT_PUBLICATION_SHA384);
             assert_eq!(preserved_publication(&pool).await?,before);
             assert_eq!(source_digest(&storage,&key).await?,original_bytes);
             persistence::validate_baseline_objects_present(&pool).await?;
@@ -2309,6 +2310,10 @@ async fn visibility_contract_exact_predecessor_upgrade_and_refusals() -> Result<
         let retained_history: bool = sqlx::query_scalar("select exists(select 1 from content_mutation_item i join content_mutation_predecessor_audit a on a.id=i.mutation_id join content_mutation_reference r on r.id=a.id join ingest_job j on j.mutation_id=r.id and j.mutation_item_id=i.id join ingest_attempt attempt on attempt.job_id=j.id where i.id=$1 and attempt.id=$2 and a.request_fingerprint is null and a.predecessor_baseline_sha384=decode($3,'hex'))")
             .bind(item_id).bind(attempt_id).bind(baseline_delta::BASELINE_REVISION_ADMISSION_VISIBILITY_POLICY_SHA384).fetch_one(&pool).await?;
         assert!(retained_history, "historical audit, common item and job/attempt must be retained exactly");
+        // The current-view certificate belongs to the final text-publication
+        // hop, so the registered path advances to the shipped revision before
+        // it is compared with a fresh install at the same tip.
+        advance_visibility_intent_to_shipped(&pool).await?;
         let fresh = TempDatabase::create(&settings.database_url).await?;
         let fresh_pool = PgPoolOptions::new().max_connections(2).connect(&fresh.database_url).await?;
         let comparison = async {
@@ -2316,7 +2321,7 @@ async fn visibility_contract_exact_predecessor_upgrade_and_refusals() -> Result<
             assert_retired_visibility_policy_absent(&fresh_pool).await?;
             assert_eq!(visibility_schema_catalog(&pool).await?,visibility_schema_catalog(&fresh_pool).await?,
                 "registered hop and fresh authority must create identical database objects");
-            // Run the same filename/READY boundary matrix against both catalogs.
+            // Run the same filename and text/vector channel matrix against both catalogs.
             for catalog in [&pool, &fresh_pool] {
                 sqlx::raw_sql(include_str!("../fixtures/schema/content_visibility_filename.sql"))
                     .execute(catalog).await?;
@@ -2398,6 +2403,7 @@ async fn visibility_contract_mutation_reference_is_exclusive_and_reserves_histor
             source_identity:None,target:admission::ContentAdmissionTarget::New {
                 external_key:Some("must-not-create".to_owned()),file_name:None,parent_external_key:None,
             },revision:None,parent_async_operation_id:None,priority:0,
+            enrichment_scope: None,
         };
         let denied = admission::admit_content_with_failpoint(&pool,&request,None).await.expect_err("historical namespace must reject before creating rows");
         assert!(matches!(denied,admission::AdmissionError::IdempotencyConflict{mutation_id} if mutation_id==historical));
@@ -2875,13 +2881,94 @@ async fn advance_to_irg112_revision(pool: &PgPool) -> Result<()> {
     Ok(())
 }
 
+/// Advances a database that recorded the canonical content-visibility-intent
+/// revision to the tree's shipped baseline through the remaining registered
+/// additive hops. The current-view certificate belongs to the final
+/// text-publication hop, so a registered path and a fresh install can only be
+/// compared at that same tip.
+async fn advance_visibility_intent_to_shipped(pool: &PgPool) -> Result<()> {
+    use ironrag_backend::services::maintenance::baseline_delta;
+
+    apply_visibility_recognition_hops(pool).await?;
+    apply_visibility_billing_hops(pool).await?;
+    apply_visibility_publication_hops(pool).await?;
+    assert_eq!(
+        hex::encode(baseline_checksum(pool).await?),
+        baseline_delta::BASELINE_REVISION_TEXT_PUBLICATION_SHA384,
+        "the registered path must end at the text-publication revision",
+    );
+    Ok(())
+}
+
+/// The recognition hops that precede native billing.
+async fn apply_visibility_recognition_hops(pool: &PgPool) -> Result<()> {
+    use ironrag_backend::services::maintenance::{
+        vision_recognition_schema, xberg_recognition_schema,
+    };
+
+    let xberg = xberg_recognition_schema::migrate_xberg_recognition_schema(pool, true).await?;
+    assert!(xberg.schema_applied && !xberg.already_current, "the Xberg hop must apply");
+    let vision = vision_recognition_schema::migrate_vision_recognition_schema(pool, true).await?;
+    assert!(vision.schema_applied && !vision.already_current, "the Vision hop must apply");
+    Ok(())
+}
+
+/// The native billing and provider-fence hops.
+async fn apply_visibility_billing_hops(pool: &PgPool) -> Result<()> {
+    use ironrag_backend::services::maintenance::{
+        billing_document_read_schema, billing_knowledge_search_schema,
+        provider_source_generation_fence_schema,
+    };
+
+    let document_read =
+        billing_document_read_schema::migrate_billing_document_read_schema(pool, true).await?;
+    assert!(
+        document_read.schema_applied && !document_read.already_current,
+        "the native document-read billing hop must apply",
+    );
+    let knowledge_search =
+        billing_knowledge_search_schema::migrate_billing_knowledge_search_schema(pool, true)
+            .await?;
+    assert!(
+        knowledge_search.schema_applied && !knowledge_search.already_current,
+        "the knowledge-search billing hop must apply",
+    );
+    let fence = provider_source_generation_fence_schema::migrate_provider_source_generation_fence(
+        pool, true,
+    )
+    .await?;
+    assert!(fence.schema_applied && !fence.already_current, "the provider fence hop must apply");
+    Ok(())
+}
+
+/// The account telemetry and text-publication hops that end at the shipped
+/// baseline.
+async fn apply_visibility_publication_hops(pool: &PgPool) -> Result<()> {
+    use ironrag_backend::services::maintenance::{text_publication_schema, user_preference_schema};
+
+    let preference = user_preference_schema::migrate_user_preference_schema(pool, true).await?;
+    assert!(
+        preference.schema_applied && !preference.already_current,
+        "the account telemetry preference hop must apply",
+    );
+    let publication = text_publication_schema::migrate_text_publication_schema(pool, true).await?;
+    assert!(
+        publication.schema_applied && !publication.already_current,
+        "the text-publication hop must apply",
+    );
+    Ok(())
+}
+
 /// The additive live path is one ordered chain: IRG-75 → integration
 /// provisioning → IRG-112 indexes → IRG-173 `failure_disposition` → the
 /// `query_rerank` purpose → the decision catalog (`graph_entity_type` and
-/// `typesafe_system_one`), the shipped baseline. Each delta accepts only its own
-/// predecessor revision and validates only the object groups that revision
-/// declares, so the documented order is executable without a delta demanding a
-/// future object.
+/// `typesafe_system_one`) → the admission visibility policy and the canonical
+/// visibility intent → Xberg and singleton Vision recognition → native billing
+/// → the provider source-generation fence → account telemetry preference → the
+/// text-readable publication view, the shipped baseline. Each delta accepts only
+/// its own predecessor revision and validates only the object groups that
+/// revision declares, so the documented order is executable without a delta
+/// demanding a future object.
 #[tokio::test]
 #[ignore = "requires local postgres service"]
 async fn additive_baseline_chain_advances_irg75_to_shipped_revision() -> Result<()> {
@@ -3075,7 +3162,21 @@ async fn additive_baseline_chain_advances_irg75_to_shipped_revision() -> Result<
         assert!(fence.schema_applied && !fence.already_current);
         let preference = ironrag_backend::services::maintenance::user_preference_schema::migrate_user_preference_schema(&pool, true).await?;
         assert!(preference.schema_applied && !preference.already_current);
-        assert_eq!(baseline_checksum(&pool).await?, shipped_checksum);
+        assert_eq!(baseline_checksum(&pool).await?, hex::decode(ironrag_backend::services::maintenance::baseline_delta::BASELINE_REVISION_USER_PREFERENCE_SHA384)?);
+
+        // T7: the text-publication delta accepts the user-preference revision,
+        // replaces the current-view definition with the text-readable one, and
+        // stamps the shipped baseline; a re-run is a no-op.
+        let publication = ironrag_backend::services::maintenance::text_publication_schema::migrate_text_publication_schema(&pool, true).await?;
+        assert!(publication.schema_applied && !publication.already_current);
+        assert_eq!(baseline_checksum(&pool).await?, hex::decode(ironrag_backend::services::maintenance::baseline_delta::BASELINE_REVISION_TEXT_PUBLICATION_SHA384)?);
+        assert_eq!(
+            baseline_checksum(&pool).await?,
+            shipped_checksum,
+            "the additive chain must end at the tree's shipped baseline file",
+        );
+        let idempotent = ironrag_backend::services::maintenance::text_publication_schema::migrate_text_publication_schema(&pool, true).await?;
+        assert!(idempotent.already_current && !idempotent.schema_applied);
         let fence = ironrag_backend::services::maintenance::provider_source_generation_fence_schema::migrate_provider_source_generation_fence(&pool, true).await?;
         assert!(fence.already_current && !fence.schema_applied);
         let preference = ironrag_backend::services::maintenance::user_preference_schema::migrate_user_preference_schema(&pool, true).await?;

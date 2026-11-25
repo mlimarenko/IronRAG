@@ -26,6 +26,10 @@ struct ContentIdentity {
     target: TargetIdentity,
     revision: Option<RevisionIdentity>,
     replacement: Option<ReplacementIdentity>,
+    /// Present only when the request asked for a bounded plan, so a request
+    /// without it keeps its exact previous identity bytes and fingerprint.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    enrichment_scope: Option<crate::domains::content::EnrichmentScope>,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -113,6 +117,7 @@ pub(super) fn content_request_identity(request: &ContentAdmissionRequest) -> Val
             base_revision_id: revision.base_revision_id,
         }),
         replacement: request.revision.as_ref().map(|revision| revision.replacement.clone()),
+        enrichment_scope: request.enrichment_scope,
     })
 }
 
@@ -431,5 +436,69 @@ mod tests {
         assert_ne!(fingerprint(&changed).unwrap(), expected);
         changed["operationKind"] = Value::String("invented".into());
         assert!(fingerprint(&changed).is_err());
+    }
+}
+
+#[cfg(test)]
+mod enrichment_scope_identity_tests {
+    use super::*;
+    use crate::domains::content::EnrichmentScope;
+
+    fn request(scope: Option<EnrichmentScope>) -> ContentAdmissionRequest {
+        ContentAdmissionRequest {
+            workspace_id: Uuid::from_u128(1),
+            library_id: Uuid::from_u128(2),
+            operation_kind: "replace".to_owned(),
+            requested_by_principal_id: Some(Uuid::from_u128(3)),
+            request_surface: "rest".to_owned(),
+            idempotency_key: None,
+            source_identity: None,
+            target: ContentAdmissionTarget::Existing { document_id: Uuid::from_u128(4) },
+            revision: None,
+            parent_async_operation_id: None,
+            priority: 100,
+            enrichment_scope: scope,
+        }
+    }
+
+    #[test]
+    fn an_absent_scope_keeps_the_previous_identity_bytes() {
+        let legacy = content_request_identity(&request(None));
+        assert!(
+            legacy.get("enrichmentScope").is_none(),
+            "a request that never asked for a scope must not gain a key",
+        );
+    }
+
+    #[test]
+    fn a_create_with_a_bounded_plan_records_it_in_the_identity() {
+        let mut request = request(Some(EnrichmentScope::TextAndEmbedding));
+        request.operation_kind = "upload".to_owned();
+        request.target = ContentAdmissionTarget::New {
+            external_key: Some("corpus-note".to_owned()),
+            file_name: Some("note.md".to_owned()),
+            parent_external_key: None,
+        };
+        let identity = content_request_identity(&request);
+        assert_eq!(identity["enrichmentScope"], serde_json::json!("text_and_embedding"));
+        assert_eq!(identity["target"]["kind"], serde_json::json!("new"));
+
+        let mut plain = request.clone();
+        plain.enrichment_scope = None;
+        assert!(
+            content_request_identity(&plain).get("enrichmentScope").is_none(),
+            "a create without the field keeps its previous identity bytes",
+        );
+    }
+
+    #[test]
+    fn a_bounded_plan_changes_the_request_identity() {
+        let legacy = content_request_identity(&request(None));
+        let bounded = content_request_identity(&request(Some(EnrichmentScope::TextAndEmbedding)));
+        assert_ne!(
+            legacy, bounded,
+            "the requested plan is part of the identity the fingerprint is taken from",
+        );
+        assert_eq!(bounded["enrichmentScope"], serde_json::json!("text_and_embedding"));
     }
 }

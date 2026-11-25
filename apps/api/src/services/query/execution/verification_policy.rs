@@ -1,10 +1,26 @@
 use std::borrow::Cow;
 
+use super::answer_pipeline::{
+    ANSWER_REPRODUCED_EVIDENCE, EXACT_WORDING_OMITTED, evidence_reproduction_warning,
+};
+use super::types::RuntimeAnswerVerification;
 use crate::domains::{
     query::{QueryAnswerDisposition, QueryVerificationState, QueryVerificationWarning},
     query_ir::{QueryLanguage, VerificationLevel},
 };
 use crate::services::query::i18n::deterministic_query_messages;
+
+pub(crate) fn append_evidence_reproduction_warning<'a>(
+    answer: &str,
+    evidence: impl IntoIterator<Item = &'a str>,
+    verification: &mut RuntimeAnswerVerification,
+) {
+    if !verification.warnings.iter().any(|warning| warning.code == ANSWER_REPRODUCED_EVIDENCE)
+        && let Some(warning) = evidence_reproduction_warning(answer, evidence, verification.state)
+    {
+        verification.warnings.push(warning);
+    }
+}
 
 /// Apply the public-answer visibility contract after the final verification pass.
 ///
@@ -73,6 +89,18 @@ pub(crate) fn finalize_answer_visibility<'answer>(
             candidate_present,
             QueryAnswerDisposition::Clarification,
         );
+    }
+    if warnings.iter().any(|warning| warning.code == ANSWER_REPRODUCED_EVIDENCE) {
+        // The body is the retrieved evidence, not an answer to the question. No
+        // verification level may publish it: the product states the bounded
+        // refusal itself, and the persisted evidence warnings/references keep
+        // what was read and why nothing could be answered from it.
+        return FinalizedAnswerVisibility {
+            visible_answer: Cow::Borrowed(
+                deterministic_query_messages(language).evidence_reproduction_refusal,
+            ),
+            disposition: QueryAnswerDisposition::SafeFallback,
+        };
     }
 
     let visible_answer = enforce_answer_visibility(level, state, language, answer);
@@ -154,6 +182,8 @@ pub(crate) fn verification_warning_blocks_factual_readiness(code: &str) -> bool 
             | "intent_mismatch"
             | "variant_coverage_incomplete"
             | "empty_answer"
+            | EXACT_WORDING_OMITTED
+            | ANSWER_REPRODUCED_EVIDENCE
     )
 }
 
@@ -179,6 +209,38 @@ mod tests {
             related_segment_id: None,
             related_fact_id: None,
         }
+    }
+
+    #[test]
+    fn semantic_not_run_blocks_factual_but_not_system_statement() {
+        let warnings = [warning("semantic_not_run")];
+        let factual = finalize_answer_visibility(
+            VerificationLevel::Moderate,
+            QueryVerificationState::NotRun,
+            &warnings,
+            QueryLanguage::En,
+            "Candidate answer.",
+            AnswerVisibilityKind::FactualCandidate,
+        );
+        assert_eq!(factual.disposition, QueryAnswerDisposition::NonTerminal);
+        let system = finalize_answer_visibility(
+            VerificationLevel::Moderate,
+            QueryVerificationState::NotRun,
+            &warnings,
+            QueryLanguage::En,
+            "Evidence is insufficient.",
+            AnswerVisibilityKind::DeterministicStatement,
+        );
+        assert_eq!(system.disposition, QueryAnswerDisposition::SafeFallback);
+        let literal_not_applicable = finalize_answer_visibility(
+            VerificationLevel::Moderate,
+            QueryVerificationState::NotRun,
+            &[],
+            QueryLanguage::En,
+            "Semantically assessed answer.",
+            AnswerVisibilityKind::FactualCandidate,
+        );
+        assert_eq!(literal_not_applicable.disposition, QueryAnswerDisposition::FactualReady);
     }
 
     #[test]

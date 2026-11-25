@@ -6,11 +6,14 @@ use crate::{
     interfaces::http::router_support::ApiError,
     services::{
         ai_catalog_service::ResolvedRuntimeBinding,
-        ops::billing::ReserveExecutionProviderCallCommand,
+        ops::billing::{EMBED_CHUNK_CALL_KIND, ReserveExecutionProviderCallCommand},
     },
 };
 
 use crate::services::query::provider_billing::QueryProviderExecutionContext;
+use crate::shared::provider_send::{
+    ProviderSendAttribution, ProviderSendScope, with_provider_send,
+};
 
 /// A durable provider-call reservation that must be completed with the exact
 /// response usage before the caller may expose the response.
@@ -21,7 +24,9 @@ use crate::services::query::provider_billing::QueryProviderExecutionContext;
 /// never downgraded to a no-usage failure.
 pub(crate) struct ProviderCallReservation {
     state: AppState,
-    provider_call_id: Uuid,
+    /// The ambient scope of this logical call: attribution for every physical
+    /// send and the row of the reply the caller is about to settle.
+    scope: ProviderSendScope,
     recovery: Option<ProviderCallRecovery>,
 }
 
@@ -139,6 +144,32 @@ fn spawn_known_usage_completion_reconciliation(
             );
         }
     });
+}
+
+/// Exact `call_kind` of a Vision extraction bought by an ingest attempt. The
+/// document-accounting stage map reads this value, so it stays one literal.
+const INGEST_VISION_CALL_KIND: &str = "vision_extract";
+
+/// The closed ingest provider call a resolved binding purpose buys.
+///
+/// An ingest attempt pays for chunk embedding and visual extraction only; every
+/// other purpose has no ingest owner kind and is refused before a reservation
+/// row exists. Deriving the kind here keeps one ingest reservation constructor
+/// instead of a parallel implementation per purpose.
+fn ingest_call_kind(
+    binding: &ResolvedRuntimeBinding,
+) -> Result<(AiBindingPurpose, &'static str), ApiError> {
+    match binding.binding_purpose {
+        AiBindingPurpose::EmbedChunk => Ok((AiBindingPurpose::EmbedChunk, EMBED_CHUNK_CALL_KIND)),
+        AiBindingPurpose::ExtractText => {
+            Ok((AiBindingPurpose::ExtractText, INGEST_VISION_CALL_KIND))
+        }
+        other => Err(ApiError::Conflict(format!(
+            "provider binding {} has purpose {}, which owns no ingest provider call",
+            binding.binding_id,
+            other.as_str(),
+        ))),
+    }
 }
 
 impl ProviderCallReservation {
@@ -277,27 +308,108 @@ impl ProviderCallReservation {
         .await
     }
 
-    async fn reserve_command(
+    /// Reserves one paid provider call of an ingest attempt before the request
+    /// leaves: chunk embedding for an `EmbedChunk` binding and visual extraction
+    /// for an `ExtractText` binding.
+    ///
+    /// The binding must be the active binding for the exact workspace/library,
+    /// and the attempt must be a real ingest attempt of that library: the ledger
+    /// validates both through the existing execution-scope resolution, so a
+    /// synthetic attempt id fails closed. A purpose that owns no ingest provider
+    /// call is refused before any row exists. The returned guard must be
+    /// completed with the exact response usage, or failed when no response was
+    /// observed.
+    pub(crate) async fn reserve_ingest_attempt(
+        state: &AppState,
+        attempt_id: Uuid,
+        workspace_id: Uuid,
+        library_id: Uuid,
+        binding: &ResolvedRuntimeBinding,
+    ) -> Result<Self, ApiError> {
+        let (expected_binding_purpose, call_kind) = ingest_call_kind(binding)?;
+        Self::validate_binding(binding, expected_binding_purpose, workspace_id, library_id)?;
+        // An unknown attempt must be refused before any dispatch, as the
+        // reservation insert used to prove. The admission owner would otherwise
+        // report an attribution refusal instead of the native not-found.
+        let attempt = crate::infra::repositories::ingest_repository::get_ingest_attempt_by_id(
+            &state.persistence.postgres,
+            attempt_id,
+        )
+        .await
+        .map_err(|error| ApiError::internal_with_log(error, "internal"))?;
+        if attempt.is_none() {
+            return Err(ApiError::resource_not_found("ingest_attempt", attempt_id));
+        }
+        Self::reserve_command(
+            state,
+            ReserveExecutionProviderCallCommand {
+                workspace_id,
+                library_id,
+                owning_execution_kind: "ingest_attempt".to_string(),
+                owning_execution_id: attempt_id,
+                runtime_execution_id: None,
+                runtime_task_kind: None,
+                binding_id: Some(binding.binding_id),
+                provider_catalog_id: binding.provider_catalog_id,
+                model_catalog_id: binding.model_catalog_id,
+                call_kind: call_kind.to_string(),
+            },
+        )
+        .await
+    }
+
+    /// Binds one logical call to its attribution and logical id.
+    ///
+    /// No row and no counter move here: both belong to the physical send and
+    /// commit together in admission. A cancellation before the first send
+    /// therefore writes nothing and leaves nothing to reconcile.
+    pub(crate) async fn reserve_command(
         state: &AppState,
         command: ReserveExecutionProviderCallCommand,
     ) -> Result<Self, ApiError> {
-        let provider_call_id = Uuid::now_v7();
-        state
-            .application_services
-            .billing
-            .reserve_execution_provider_call_with_id(state, provider_call_id, command)
-            .await?;
+        // No row is written here: the durable row belongs to the physical send
+        // and is created by the admission owner together with its counter debit.
+        // The guard carries only the attribution and the id the first send
+        // reuses, so a cancellation at this point writes nothing.
+        let attribution = ProviderSendAttribution {
+            workspace_id: command.workspace_id,
+            library_id: command.library_id,
+            owning_execution_kind: command.owning_execution_kind,
+            owning_execution_id: command.owning_execution_id,
+            call_kind: command.call_kind,
+            binding_id: command.binding_id,
+            provider_catalog_id: command.provider_catalog_id,
+            model_catalog_id: command.model_catalog_id,
+            runtime_execution_id: command.runtime_execution_id,
+            runtime_task_kind: command.runtime_task_kind.map(RuntimeTaskKind::as_str),
+        };
 
         Ok(Self {
             state: state.clone(),
-            provider_call_id,
+            scope: ProviderSendScope::new(attribution, Uuid::now_v7()),
             recovery: Some(ProviderCallRecovery::PreResponse { terminal_state: "canceled" }),
         })
     }
 
+    /// The id that labels this logical call. The first physical send reuses it
+    /// as its own row id; a retry claims a new row.
     #[must_use]
-    pub(crate) const fn provider_call_id(&self) -> Uuid {
-        self.provider_call_id
+    pub(crate) fn provider_call_id(&self) -> Uuid {
+        self.scope.logical_id()
+    }
+
+    /// The ambient scope to install around the gateway call.
+    #[must_use]
+    pub(crate) fn send_scope(&self) -> ProviderSendScope {
+        self.scope.clone()
+    }
+
+    /// Runs one gateway call with this logical call's scope installed.
+    pub(crate) async fn scoped<F, T>(&self, future: F) -> T
+    where
+        F: std::future::Future<Output = T>,
+    {
+        with_provider_send(self.scope.clone(), future).await
     }
 
     /// Persist exact usage and the completed state before any caller may
@@ -307,14 +419,18 @@ impl ProviderCallReservation {
         &mut self,
         usage_json: &serde_json::Value,
     ) -> Result<(), ApiError> {
+        let Some(provider_call_id) = self.scope.current_send_id() else {
+            // No physical send was admitted, so there is no row to settle.
+            self.recovery = None;
+            return Ok(());
+        };
         let capture_usage = match self.recovery.as_ref() {
             None => return Ok(()),
             Some(ProviderCallRecovery::ResponseObserved { usage_json: observed_usage })
                 if observed_usage != usage_json =>
             {
                 return Err(ApiError::Conflict(format!(
-                    "provider call {} cannot be completed with two different usage payloads",
-                    self.provider_call_id
+                    "provider call {provider_call_id} cannot be completed with two different usage payloads"
                 )));
             }
             Some(ProviderCallRecovery::PreResponse { .. }) => true,
@@ -333,7 +449,7 @@ impl ProviderCallReservation {
             .billing
             .complete_reserved_provider_call_deferred_rollup_with_retry(
                 &self.state,
-                self.provider_call_id,
+                provider_call_id,
                 usage_json,
             )
             .await?;
@@ -345,12 +461,15 @@ impl ProviderCallReservation {
     /// awaited on ordinary error paths; the drop fallback retries after an
     /// interrupted or ambiguous database operation.
     pub(crate) async fn fail(&mut self) -> Result<(), ApiError> {
+        let Some(provider_call_id) = self.scope.current_send_id() else {
+            self.recovery = None;
+            return Ok(());
+        };
         match self.recovery.as_mut() {
             None => return Ok(()),
             Some(ProviderCallRecovery::ResponseObserved { .. }) => {
                 return Err(ApiError::Conflict(format!(
-                    "provider call {} already observed a response and must retain its usage",
-                    self.provider_call_id
+                    "provider call {provider_call_id} already observed a response and must retain its usage"
                 )));
             }
             Some(ProviderCallRecovery::PreResponse { terminal_state }) => {
@@ -360,11 +479,7 @@ impl ProviderCallReservation {
         self.state
             .application_services
             .billing
-            .finish_reserved_provider_call_without_usage(
-                &self.state,
-                self.provider_call_id,
-                "failed",
-            )
+            .finish_reserved_provider_call_without_usage(&self.state, provider_call_id, "failed")
             .await?;
         self.recovery = None;
         Ok(())
@@ -376,11 +491,16 @@ impl Drop for ProviderCallReservation {
         let Some(recovery) = self.recovery.take() else {
             return;
         };
+        // A logical call that never admitted a send owns no row: nothing was
+        // debited and nothing must be terminalized.
+        let Some(provider_call_id) = self.scope.current_send_id() else {
+            return;
+        };
         let terminal_state = match recovery {
             ProviderCallRecovery::ResponseObserved { usage_json } => {
                 spawn_known_usage_completion_reconciliation(
                     &self.state,
-                    self.provider_call_id,
+                    provider_call_id,
                     None,
                     usage_json,
                 );
@@ -390,13 +510,12 @@ impl Drop for ProviderCallReservation {
         };
         let Ok(runtime) = tokio::runtime::Handle::try_current() else {
             tracing::error!(
-                provider_call_id = %self.provider_call_id,
+                %provider_call_id,
                 "pre-response provider-call reservation dropped without a reconciliation runtime"
             );
             return;
         };
         let state = self.state.clone();
-        let provider_call_id = self.provider_call_id;
         runtime.spawn(async move {
             if let Err(error) = state
                 .application_services
@@ -416,5 +535,60 @@ impl Drop for ProviderCallReservation {
                 );
             }
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn binding(binding_purpose: AiBindingPurpose) -> ResolvedRuntimeBinding {
+        ResolvedRuntimeBinding {
+            admission: std::sync::Arc::new(
+                crate::integrations::provider_admission::UnqualifiedTestAdmission,
+            ),
+            binding_id: Uuid::now_v7(),
+            workspace_id: Uuid::now_v7(),
+            library_id: Uuid::now_v7(),
+            binding_purpose,
+            provider_catalog_id: Uuid::now_v7(),
+            provider_kind: "openai".to_string(),
+            provider_base_url: None,
+            provider_api_style: "openai_compatible".to_string(),
+            account_id: Uuid::now_v7(),
+            api_key: None,
+            model_catalog_id: Uuid::now_v7(),
+            model_name: "gpt-vision".to_string(),
+            effective_embedding_dimensions: None,
+            system_prompt: None,
+            temperature: None,
+            top_p: None,
+            max_output_tokens_override: None,
+            extra_parameters_json: serde_json::json!({}),
+        }
+    }
+
+    #[test]
+    fn ingest_provider_call_kind_is_closed_to_embedding_and_vision() {
+        let (purpose, call_kind) = ingest_call_kind(&binding(AiBindingPurpose::EmbedChunk))
+            .expect("embedding ingest call");
+        assert_eq!(purpose, AiBindingPurpose::EmbedChunk);
+        assert_eq!(call_kind, EMBED_CHUNK_CALL_KIND);
+
+        let (purpose, call_kind) =
+            ingest_call_kind(&binding(AiBindingPurpose::ExtractText)).expect("vision ingest call");
+        assert_eq!(purpose, AiBindingPurpose::ExtractText);
+        assert_eq!(call_kind, "vision_extract");
+
+        for unsupported in AiBindingPurpose::ALL {
+            if matches!(unsupported, AiBindingPurpose::EmbedChunk | AiBindingPurpose::ExtractText) {
+                continue;
+            }
+            assert!(
+                matches!(ingest_call_kind(&binding(unsupported)), Err(ApiError::Conflict(_))),
+                "{} must own no ingest provider call",
+                unsupported.as_str(),
+            );
+        }
     }
 }

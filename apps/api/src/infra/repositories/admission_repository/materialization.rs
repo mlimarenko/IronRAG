@@ -194,6 +194,7 @@ pub async fn admit_web_capture_materialization_with_failpoint(
         }),
         parent_async_operation_id: Some(parent_operation_id),
         priority: request.priority,
+        enrichment_scope: None,
     };
     let outcome =
         super::content::admit_content_in_transaction(&mut transaction, &content_request, failpoint)

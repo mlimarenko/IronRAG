@@ -14,7 +14,12 @@ fn literal_inventory_coverage_targets_missing_identifier_literals() {
     };
     let answer = "Configure `endpointUrl`, `partnerId`, `secretKey`, and `sendDetails`.";
 
-    let targets = literal_inventory_coverage_revision_targets(answer, &history, &grounding);
+    let targets = literal_inventory_coverage_revision_targets(
+        answer,
+        &history,
+        &AgentEvidenceManifest::default(),
+        &grounding,
+    );
 
     assert_eq!(targets, vec!["alphaPackage".to_string(), "retryTimeout".to_string()]);
 }
@@ -36,6 +41,7 @@ fn literal_inventory_coverage_waits_until_answer_enumerates_inventory() {
         literal_inventory_coverage_revision_targets(
             "Use `endpointUrl` for this one setting.",
             &history,
+            &AgentEvidenceManifest::default(),
             &grounding,
         )
         .is_empty()
@@ -44,24 +50,54 @@ fn literal_inventory_coverage_waits_until_answer_enumerates_inventory() {
 
 #[test]
 fn literal_inventory_coverage_requires_current_grounding() {
+    use crate::interfaces::http::mcp::{
+        McpToolResult, tools::source_evidence::admitted_source_texts,
+    };
+    use crate::services::query::assistant_grounding::AdmittedAgentSource;
     let history = vec![ExternalConversationTurn {
         turn_kind: QueryTurnKind::Assistant,
         content_text:
-            "ir.memory.literals.v1: `alphaPackage`, `endpointUrl`, `secretKey`, `/opt/alpha.conf`, `retryTimeout`"
+            "ir.memory.literals.v1: `alphaPackage`, `endpointUrl`, `secretKey`, `searchMode`, `retryTimeout`, `draftKey`"
                 .to_string(),
     }];
-    let grounding = AssistantGroundingEvidence {
-        verification_corpus: vec![
-            "Current evidence supports `alphaPackage`, `endpointUrl`, and `retryTimeout`."
-                .to_string(),
-        ],
-        document_references: Vec::new(),
+    let search = McpToolResult {
+        content: vec![],
+        is_error: false,
+        structured_content: serde_json::json!({
+            "query": "alphaPackage endpointUrl secretKey", "limit": 1, "libraries": ["w/l"],
+            "hits": [{"documentId": Uuid::from_u128(4), "libraryId": Uuid::from_u128(5),
+                "workspaceId": Uuid::from_u128(6), "documentTitle": "secretKey", "score": 1.0,
+                "readabilityState": "readable", "readinessKind": "ready", "graphCoverageKind": "complete",
+                "excerpt": "The `alphaPackage` accepts `endpointUrl` and `searchMode`."}]
+        }),
+    };
+    let mut grounding = AssistantGroundingEvidence {
+        verification_corpus: admitted_source_texts("search_documents", &search),
+        ..Default::default()
+    };
+    grounding.verification_corpus.push(
+        "[MCP tool result: grounded_answer]\n`alphaPackage`, `endpointUrl`, and `draftKey`.".into(),
+    );
+    let manifest = AgentEvidenceManifest {
+        sources: vec![AdmittedAgentSource {
+            chunk_id: Uuid::from_u128(1),
+            document_id: Uuid::from_u128(2),
+            document_revision_id: Uuid::from_u128(3),
+            text: "Set `retryTimeout` alongside `alphaPackage` and `endpointUrl`.".into(),
+        }],
+        ..Default::default()
     };
     let answer = "Configure `endpointUrl` and `alphaPackage`.";
 
-    let targets = literal_inventory_coverage_revision_targets(answer, &history, &grounding);
+    let targets =
+        literal_inventory_coverage_revision_targets(answer, &history, &manifest, &grounding);
 
-    assert_eq!(targets, vec!["retryTimeout".to_string()]);
+    assert_eq!(targets, ["searchMode", "retryTimeout"]);
+    let context = manifest.source_context(&grounding);
+    assert!(context.contains("Set `retryTimeout` alongside"));
+    assert!(context.contains("`endpointUrl` and `searchMode`"));
+    assert!(!context.contains("secretKey"));
+    assert!(!context.contains("draftKey"));
 }
 
 #[test]

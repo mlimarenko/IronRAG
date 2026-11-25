@@ -14,6 +14,8 @@ const DOCUMENT_STATUS_VALUES: readonly DocumentListStatusFilter[] = [
   'ready',
   'processing',
   'queued',
+  'paused',
+  'pending_materialization',
   'failed',
   'canceled',
   'empty',

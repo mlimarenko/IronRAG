@@ -108,7 +108,6 @@ fn title_only_search_result_is_not_authoritative_verifier_evidence() {
         intent_profile: &QueryIntentProfile::default(),
         evidence: &empty_authoritative_evidence(),
         chunks: &[],
-        prompt_context: answer,
         assistant_grounding: &AssistantGroundingEvidence {
             verification_corpus: vec![
                 "[MCP tool result: search_documents]\nstructuredContent:\n{\"hits\":[{\"documentTitle\":\"Alpha Guide\"}]}"
@@ -161,7 +160,6 @@ fn verbatim_supported_description_does_not_verify_a_procedure_request() {
         },
         evidence: &empty_authoritative_evidence(),
         chunks: &[runtime_chunk(answer)],
-        prompt_context: answer,
         assistant_grounding: &AssistantGroundingEvidence::default(),
     });
 

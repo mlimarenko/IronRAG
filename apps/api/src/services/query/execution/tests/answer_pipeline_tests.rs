@@ -166,11 +166,10 @@ fn assemble_bounded_context_interleaves_graph_and_document_support() {
     assert!(context.starts_with("Context\n"));
     assert!(context.contains("[document] spec.md: IronRAG stores graph knowledge."));
     assert!(context.contains("[graph-node] IronRAG (entity)"));
-    assert!(
-        context.contains(
-            "[graph-edge evidence] evidence: IronRAG stores graph triples in PostgreSQL. | relation_hint: IronRAG --uses--> PostgreSQL | support_count: 2"
-        )
-    );
+    assert!(context.contains(&format!(
+        "[graph-edge evidence] evidence: IronRAG stores graph triples in PostgreSQL. | {} | relation_hint: IronRAG --uses--> PostgreSQL | support_count: 2",
+        RuntimeMatchedRelationship::EXACT_WORDING_FIELD
+    )));
     let document_index = context.find("[document]").unwrap_or_default();
     let graph_node_index = context.find("[graph-node]").unwrap_or_default();
     let graph_edge_index = context.find("[graph-edge").unwrap_or_default();

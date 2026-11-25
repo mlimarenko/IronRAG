@@ -53,4 +53,27 @@ describe('telemetry redaction', () => {
     expect(sanitizeAttributeValue('x'.repeat(500))?.toString().length).toBeLessThanOrEqual(257)
     expect(sanitizeAttributeValue(Number.NaN)).toBeUndefined()
   })
+
+  it('redacts non-ASCII addresses and Windows paths', () => {
+    expect(redactText('пишите на иван@почта.рф')).toBe('пишите на [redacted-email]')
+    expect(redactText('open C:\\Users\\alice\\secret.txt')).toBe('open [local-file]')
+  })
+
+  it('leaves an address-shaped token without a domain dot alone', () => {
+    expect(redactText('a@bc')).toBe('a@bc')
+    expect(redactText('foo@bar')).toBe('foo@bar')
+    expect(redactText('alice@example.com')).toBe('[redacted-email]')
+    expect(redactText('иван@почта.рф')).toBe('[redacted-email]')
+  })
+
+  it('gives non-primitive inputs no text instead of "[object Object]"', () => {
+    expect(redactText({ token: 'secret' })).toBe('')
+    expect(redactText(['secret'])).toBe('')
+    expect(redactText(42)).toBe('42')
+  })
+
+  it('rejects a long non-address run without super-linear backtracking', () => {
+    const hostile = 'a'.repeat(100_000)
+    expect(redactText(hostile, 16)).toBe(`${hostile.slice(0, 16)}…`)
+  })
 })

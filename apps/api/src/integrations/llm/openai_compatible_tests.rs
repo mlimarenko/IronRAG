@@ -287,3 +287,137 @@ fn keeps_reasoning_effort_extra_parameter_on_the_provider_body() {
         serde_json::from_slice(&body).expect("serialized body should stay valid json");
     assert_eq!(value.get("reasoning_effort").and_then(serde_json::Value::as_str), Some("none"));
 }
+
+/// The OpenAI-compatible Vision profile an `ExtractText` binding resolves.
+fn vision_provider_parameters() -> serde_json::Value {
+    serde_json::json!({
+        "_providerProfile": {
+            "runtime": {
+                "kind": "openai_compatible",
+                "authScheme": "bearer",
+                "tokenLimitParameter": "max_completion_tokens",
+                "structuredOutput": "json_schema",
+                "chatPath": "/chat/completions",
+                "embeddingsPath": null,
+                "modelsPath": "/models"
+            },
+            "baseUrl": {
+                "allowOverride": true,
+                "requireHttps": false,
+                "allowPrivateNetwork": true,
+                "trimSuffixes": []
+            },
+            "credentials": {
+                "apiKeyRequired": false,
+                "baseUrlRequired": true,
+                "baseUrlMode": "required",
+                "validationMode": "model_list"
+            }
+        }
+    })
+}
+
+/// One bounded inline PNG data URL and its decoded length, the media a Vision
+/// attempt actually sends.
+fn bounded_png_data_url() -> (String, u64) {
+    use base64::Engine as _;
+    let image = image::RgbImage::from_pixel(8, 8, image::Rgb([0, 0, 0]));
+    let mut cursor = std::io::Cursor::new(Vec::new());
+    image.write_to(&mut cursor, image::ImageFormat::Png).expect("encode the Vision image fixture");
+    let bytes = cursor.into_inner();
+    let decoded_len = bytes.len() as u64;
+    let url = format!(
+        "data:image/png;base64,{}",
+        base64::engine::general_purpose::STANDARD.encode(bytes)
+    );
+    (url, decoded_len)
+}
+
+/// The body the production OpenAI-compatible Vision path sends, built by the
+/// attested resolver and the request owner instead of a hand-written payload.
+fn openai_vision_body(data_url: &str, max_output_tokens: Option<i32>) -> serde_json::Value {
+    use super::{
+        openai_compatible::{
+            OpenAiCompatibleContentPart, OpenAiCompatibleImageUrl, OpenAiCompatibleMessage,
+            OpenAiCompatibleMessageContent,
+        },
+        request::{OpenAiCompatibleRequestOptions, openai_compatible_request},
+    };
+
+    let parameters = vision_provider_parameters();
+    let resolved = UnifiedGateway::resolve_provider(
+        "openai",
+        Some("fixture-key"),
+        Some("https://api.openai.com/v1"),
+        "gpt-5.4-mini",
+        &parameters,
+    )
+    .expect("resolve the OpenAI-compatible Vision runtime");
+    let upstream_extra =
+        UnifiedGateway::upstream_extra_parameters(&parameters, resolved.reasoning_wire);
+    let (temperature, top_p) = resolved.request_policy.sampling_params(None, None);
+    let body = openai_compatible_request(
+        "openai",
+        "gpt-5.4-mini",
+        vec![OpenAiCompatibleMessage {
+            role: "user".to_string(),
+            content: OpenAiCompatibleMessageContent::Parts(vec![
+                OpenAiCompatibleContentPart::Text {
+                    text: "Transcribe every visible word verbatim.".to_string(),
+                },
+                OpenAiCompatibleContentPart::ImageUrl {
+                    image_url: OpenAiCompatibleImageUrl { url: data_url.to_string() },
+                },
+            ]),
+        }],
+        &resolved,
+        OpenAiCompatibleRequestOptions {
+            system_prompt: None,
+            temperature,
+            top_p,
+            max_output_tokens,
+            response_format: None,
+            extra_parameters_json: &upstream_extra,
+            stream: false,
+        },
+    )
+    .body()
+    .expect("serialize the production Vision request body");
+    serde_json::from_slice(&body).expect("the production Vision body is JSON")
+}
+
+#[test]
+fn actual_openai_vision_body_is_admitted_by_the_financial_chat_envelope() {
+    use crate::infra::repositories::ai_repository::{
+        FinancialChatMediaAdmission, FinancialRequestEnvelope, pricing::envelope_admits_body,
+    };
+
+    let (data_url, image_bytes) = bounded_png_data_url();
+    let envelope = FinancialRequestEnvelope::Chat {
+        allowed_service_tiers: vec!["default".to_owned(), "flex".to_owned()],
+        max_input_bytes: 16_384,
+        max_output_tokens: 128_000,
+        max_input_tokens: 922_000,
+        media: Some(FinancialChatMediaAdmission {
+            max_images: 1,
+            max_image_bytes_each: image_bytes,
+            max_image_bytes_total: image_bytes,
+            max_image_dimension_px: 8,
+            max_image_pixels_total: 64,
+        }),
+    };
+
+    let admitted = openai_vision_body(&data_url, Some(128_000));
+    assert_eq!(admitted["service_tier"], serde_json::json!("default"));
+    assert_eq!(admitted["n"], serde_json::json!(1));
+    assert_eq!(admitted["max_completion_tokens"], serde_json::json!(128_000));
+    assert_eq!(admitted["messages"][0]["content"][1]["type"], serde_json::json!("image_url"));
+    assert!(envelope_admits_body(&envelope, "gpt-5.4-mini", &admitted));
+
+    // Without the binding's explicit output limit the same production body
+    // carries no `max_completion_tokens`, so the envelope must refuse it rather
+    // than silently repair a request whose maximum is unbounded.
+    let unbounded = openai_vision_body(&data_url, None);
+    assert!(unbounded.get("max_completion_tokens").is_none());
+    assert!(!envelope_admits_body(&envelope, "gpt-5.4-mini", &unbounded));
+}

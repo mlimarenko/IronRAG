@@ -432,18 +432,23 @@ fn prior_grounded_answer_context_messages_preserve_chunk_evidence() {
         &["Setup", "Package"],
     );
 
-    let replay = build_prior_grounded_answer_context_messages(
+    let mut budget =
+        crate::services::query::execution::semantic_verification::EvidenceBudget::new();
+    let replay = build_prior_grounded_answer_context(
         library_id,
         execution_id,
         "How is Connector Alpha configured?",
         &[reference, higher_rank_reference],
         &[chunk, higher_rank_chunk],
-        4_000,
+        &mut budget,
     )
     .expect("prior grounded answer replay");
 
     assert_eq!(replay.messages.len(), 1);
-    assert_eq!(replay.chunk_ids, vec![higher_rank_chunk_id, chunk_id]);
+    assert_eq!(
+        replay.manifest.sources.iter().map(|source| source.chunk_id).collect::<Vec<_>>(),
+        vec![higher_rank_chunk_id, chunk_id]
+    );
     let message = &replay.messages[0];
     assert_eq!(message.role, "system");
     assert!(message.tool_calls.is_empty());
@@ -485,21 +490,153 @@ fn prior_grounded_answer_context_messages_filter_foreign_library_chunks() {
         ),
     ];
 
-    let replay = build_prior_grounded_answer_context_messages(
+    let mut budget =
+        crate::services::query::execution::semantic_verification::EvidenceBudget::new();
+    let replay = build_prior_grounded_answer_context(
         library_id,
         execution_id,
         "How is Connector Beta configured?",
         &references,
         &chunks,
-        4_000,
+        &mut budget,
     )
     .expect("filtered prior grounded answer replay");
 
-    assert_eq!(replay.chunk_ids, vec![kept_chunk_id]);
+    assert_eq!(
+        replay.manifest.sources.iter().map(|source| source.chunk_id).collect::<Vec<_>>(),
+        vec![kept_chunk_id]
+    );
     let content = replay.messages[0].content.as_deref().expect("context content");
     assert!(content.contains("betaWindow"));
     assert!(!content.contains("Foreign connector"));
     assert!(!content.contains(&foreign_chunk_id.to_string()));
+}
+
+#[test]
+fn prior_grounded_answer_replay_and_new_reads_share_one_budget() {
+    let library_id = Uuid::now_v7();
+    let execution_id = Uuid::now_v7();
+    let replay_chunk_id = Uuid::now_v7();
+    let new_read_chunk_id = Uuid::now_v7();
+    let mut budget =
+        crate::services::query::execution::semantic_verification::EvidenceBudget::new();
+    let replay = build_prior_grounded_answer_context(
+        library_id,
+        execution_id,
+        "How is the bounded replay configured?",
+        &[test_chunk_reference(replay_chunk_id, 1, 0.9)],
+        &[test_chunk_row(library_id, replay_chunk_id, &"я".repeat(12_000), &["Setup"])],
+        &mut budget,
+    )
+    .expect("large replay chunk is still admitted within its own bound");
+    assert_eq!(replay.manifest.sources.len(), 1);
+    assert!(budget.measurement().evidence_utf8_bytes <= 22_000);
+
+    // A later read must charge the same budget, not a fresh one.
+    assert_eq!(
+        budget.try_admit_chunk(new_read_chunk_id, 8_000),
+        crate::services::query::execution::semantic_verification::EvidenceAdmission::OverBudget
+    );
+}
+
+#[test]
+fn prior_grounded_answer_replay_omits_over_budget_source_before_model_context() {
+    let library_id = Uuid::now_v7();
+    let execution_id = Uuid::now_v7();
+    let first_chunk_id = Uuid::now_v7();
+    let second_chunk_id = Uuid::now_v7();
+    let first_text = "я".repeat(12_000);
+    let second_text = format!("second-source-only-marker {}", "я".repeat(4_000));
+    let mut budget =
+        crate::services::query::execution::semantic_verification::EvidenceBudget::new();
+    let replay = build_prior_grounded_answer_context(
+        library_id,
+        execution_id,
+        "What fits in the bounded replay?",
+        &[
+            test_chunk_reference(first_chunk_id, 1, 0.9),
+            test_chunk_reference(second_chunk_id, 2, 0.8),
+        ],
+        &[
+            test_chunk_row(library_id, first_chunk_id, &first_text, &["Setup"]),
+            test_chunk_row(library_id, second_chunk_id, &second_text, &["Setup"]),
+        ],
+        &mut budget,
+    )
+    .expect("first replay chunk is admitted");
+    assert!(replay.manifest.selection_bounded);
+    assert_eq!(
+        replay.manifest.sources.iter().map(|source| source.chunk_id).collect::<Vec<_>>(),
+        vec![first_chunk_id]
+    );
+    let content = replay.messages[0].content.as_deref().expect("context content");
+    assert!(content.contains("chunkId"));
+    assert!(!content.contains(&second_chunk_id.to_string()));
+    assert!(!content.contains("second-source-only-marker"));
+}
+
+#[test]
+fn later_replay_omission_preserves_prior_manifest_and_bounded_state() {
+    let library_id = Uuid::now_v7();
+    let first_id = Uuid::now_v7();
+    let second_id = Uuid::now_v7();
+    let mut budget =
+        crate::services::query::execution::semantic_verification::EvidenceBudget::new();
+    let first = build_prior_grounded_answer_context(
+        library_id,
+        Uuid::now_v7(),
+        "First replay fills most of the budget.",
+        &[test_chunk_reference(first_id, 1, 0.9)],
+        &[test_chunk_row(library_id, first_id, &"я".repeat(12_000), &["Setup"])],
+        &mut budget,
+    )
+    .expect("first replay admits its source");
+    assert_eq!(
+        first.manifest.sources.iter().map(|source| source.chunk_id).collect::<Vec<_>>(),
+        vec![first_id]
+    );
+    assert!(!first.manifest.selection_bounded);
+    assert_eq!(first.messages.len(), 1);
+
+    let second = build_prior_grounded_answer_context(
+        library_id,
+        Uuid::now_v7(),
+        "Second replay no longer fits.",
+        &[test_chunk_reference(second_id, 1, 0.9)],
+        &[test_chunk_row(
+            library_id,
+            second_id,
+            &format!("second-source-only-marker {}", "я".repeat(4_000)),
+            &["Setup"],
+        )],
+        &mut budget,
+    )
+    .expect("budget omission must stay typed");
+    assert!(second.messages.is_empty());
+    assert!(second.manifest.sources.is_empty());
+    assert!(second.manifest.selection_bounded);
+
+    let mut merged = first.manifest;
+    merged.selection_bounded |= second.manifest.selection_bounded;
+    for source in second.manifest.sources {
+        merged.push_source(source);
+    }
+    assert_eq!(
+        merged.sources.iter().map(|source| source.chunk_id).collect::<Vec<_>>(),
+        vec![first_id]
+    );
+    assert!(merged.selection_bounded);
+}
+
+#[test]
+fn replay_candidate_cap_marks_dropped_eligible_references() {
+    let references = (0..5)
+        .map(|index| test_chunk_reference(Uuid::from_u128(index + 1), index as i32 + 1, 0.9))
+        .collect::<Vec<_>>();
+    let (candidates, cap_dropped) =
+        prior_replay_candidate_refs(&references, &std::collections::HashSet::new());
+    assert_eq!(candidates.len(), 4);
+    assert!(cap_dropped);
 }
 
 #[test]

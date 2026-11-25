@@ -1,5 +1,3 @@
-use std::collections::BTreeMap;
-
 use chrono::Utc;
 use ironrag_contracts::documents::DocumentReadiness;
 use uuid::Uuid;
@@ -12,8 +10,8 @@ use crate::{
     },
     domains::{
         content::{
-            ContentDocumentPipelineJob, ContentDocumentSummary, ContentMutation,
-            DocumentReadinessSummary, LibraryKnowledgeCoverage, revision_text_state_is_readable,
+            ContentDocumentPipelineJob, ContentMutation, DocumentReadinessSummary,
+            revision_text_state_is_readable,
         },
         knowledge::{KnowledgeLibraryGeneration, StructuredDocumentRevision},
     },
@@ -102,8 +100,7 @@ pub struct DocumentReadinessInputs<'a> {
 }
 
 /// Counters that decide a library's degraded/rebuilding/processing state.
-/// `vector_inventory_mismatch_count` and `graph_sparse_document_count` are
-/// permanent plane holes (degradation); the queue counters are live work.
+/// Coverage gaps indicate degradation; the queue counters are live work.
 #[derive(Debug, Clone, Copy, Default)]
 struct LibraryActivitySignals {
     queue_depth: i64,
@@ -111,7 +108,7 @@ struct LibraryActivitySignals {
     failed_document_count: usize,
     in_flight_document_count: usize,
     vector_inventory_mismatch_count: usize,
-    graph_sparse_document_count: usize,
+    missing_graph_coverage_count: usize,
     has_failed_attempts: bool,
     has_bundle_failures: bool,
 }
@@ -133,54 +130,93 @@ pub(crate) struct DocumentKnowledgeSignals<'a> {
     pub processing_active: bool,
     pub hard_failure: bool,
     pub canceled_terminal: bool,
+    /// The exact current revision publishes readable text. This is the one fact
+    /// that makes content usable; structured preparation alone never does.
     pub revision_text_ready: bool,
+    /// Enrichment capability of that same revision. Optional: a revision whose
+    /// vectors or graph are still pending is readable, not failed.
+    pub revision_vector_ready: bool,
     pub revision_graph_ready: bool,
+    pub revision_graph_degraded: bool,
+    pub graph_failed: bool,
     pub preparation_ready: bool,
     pub preparation_failed: bool,
-    pub graph_failed: bool,
     pub observed_preparation_state: Option<&'a str>,
     pub block_count: Option<i32>,
     pub typed_fact_count: Option<i32>,
 }
 
-fn document_readiness_kind(
-    signals: DocumentKnowledgeSignals<'_>,
-    failed: bool,
-    readable: bool,
+/// What the exact current revision can serve right now. One derivation shared by
+/// the document-list row and the per-document/MCP readiness summary, so a
+/// descriptor and a document payload cannot disagree about capability.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct CurrentRevisionCapability {
+    /// Readable text exists in the current revision: the base capability.
+    pub readable: bool,
+    /// Vectors are ready, so vector lanes can serve this revision.
+    pub vector_ready: bool,
+    /// Vectors and graph are ready.
+    pub graph_ready: bool,
+    /// Vectors are ready and graph extraction is degraded: graph lanes can
+    /// serve partial evidence, which is not the same as a missing graph.
+    pub graph_sparse: bool,
+}
+
+/// Derives capability from the current revision's channel states. Readable text
+/// gates everything: without it the revision serves nothing, so pending or
+/// failed enrichment can never be reported as a capability. Enrichment that is
+/// merely pending (or failed) yields readable-only capability, never a failure.
+#[must_use]
+pub(crate) fn current_revision_capability(
+    text_ready: bool,
+    vector_ready: bool,
     graph_ready: bool,
-    graph_sparse: bool,
+    graph_degraded: bool,
+) -> CurrentRevisionCapability {
+    let vector_ready = text_ready && vector_ready;
+    CurrentRevisionCapability {
+        readable: text_ready,
+        vector_ready,
+        graph_ready: vector_ready && graph_ready,
+        graph_sparse: vector_ready && graph_degraded && !graph_ready,
+    }
+}
+
+/// Readiness is the *highest capability the current revision serves right now*;
+/// in-flight work is an operational fact that never lowers it. A queued or
+/// running newer job over current full-graph text still reports `graph_ready`;
+/// `processing` is reserved for the case with no readable content and confirmed
+/// active work (IRG-109), and `empty` for no work and no capability.
+fn document_readiness_kind(
+    processing_active: bool,
+    failed: bool,
+    capability: CurrentRevisionCapability,
 ) -> DocumentReadiness {
     if failed {
         DocumentReadiness::Failed
-    } else if signals.processing_active && readable {
-        DocumentReadiness::Readable
-    } else if signals.processing_active {
-        DocumentReadiness::Processing
-    } else if graph_ready {
+    } else if capability.graph_ready {
         DocumentReadiness::GraphReady
-    } else if graph_sparse {
+    } else if capability.graph_sparse {
         DocumentReadiness::GraphSparse
-    } else if readable {
+    } else if capability.readable {
         DocumentReadiness::Readable
+    } else if processing_active {
+        DocumentReadiness::Processing
     } else {
-        // No failed state, no work in flight, no graph coverage, no readable
-        // revision: the document has no recorded work and none will start
-        // without a new mutation. "Processing" would be a lie here (IRG-109).
         DocumentReadiness::Empty
     }
 }
 
 fn graph_coverage_kind(
     failed: bool,
-    graph_ready: bool,
-    graph_sparse: bool,
+    capability: CurrentRevisionCapability,
     processing_active: bool,
 ) -> &'static str {
     if failed {
         "failed"
-    } else if graph_ready {
+    } else if capability.graph_ready {
         "graph_ready"
-    } else if graph_sparse {
+    } else if capability.graph_sparse {
         "graph_sparse"
     } else if processing_active {
         "processing"
@@ -222,31 +258,26 @@ fn typed_fact_coverage(block_count: Option<i32>, typed_fact_count: Option<i32>) 
 pub(crate) fn classify_document_knowledge_signals(
     signals: DocumentKnowledgeSignals<'_>,
 ) -> DocumentKnowledgeCoverageState {
-    let readable = signals.preparation_ready || signals.revision_text_ready;
-    let graph_ready = signals.preparation_ready && signals.revision_graph_ready;
-    let graph_sparse =
-        readable && !graph_ready && (signals.preparation_ready || signals.revision_graph_ready);
+    let capability = current_revision_capability(
+        signals.revision_text_ready,
+        signals.revision_vector_ready,
+        signals.revision_graph_ready,
+        signals.revision_graph_degraded,
+    );
     let failed = (signals.hard_failure || signals.canceled_terminal || signals.preparation_failed)
-        && !readable;
+        && !capability.readable;
     let graph_coverage_failed = failed || signals.graph_failed || signals.preparation_failed;
 
     DocumentKnowledgeCoverageState {
         processing_active: signals.processing_active,
         failed,
-        readable,
-        graph_ready,
-        readiness_kind: document_readiness_kind(
-            signals,
-            failed,
-            readable,
-            graph_ready,
-            graph_sparse,
-        ),
+        readable: capability.readable,
+        graph_ready: capability.graph_ready,
+        readiness_kind: document_readiness_kind(signals.processing_active, failed, capability),
         preparation_state: preparation_state(signals, failed),
         graph_coverage_kind: graph_coverage_kind(
             graph_coverage_failed,
-            graph_ready,
-            graph_sparse,
+            capability,
             signals.processing_active,
         )
         .to_string(),
@@ -600,9 +631,18 @@ impl OpsService {
         let revision_text_ready = effective_readiness_row
             .as_ref()
             .is_some_and(|revision| revision_text_state_is_readable(&revision.text_state));
+        // The caller fences this row to the exact current revision, so its
+        // channel states are the only evidence used for capability. Prepared
+        // metadata is a separate fact and never establishes readability.
+        let revision_vector_ready = effective_readiness_row
+            .as_ref()
+            .is_some_and(|revision| revision.vector_state == "ready");
         let revision_graph_ready = effective_readiness_row
             .as_ref()
             .is_some_and(|revision| revision.graph_state == "ready");
+        let revision_graph_degraded = effective_readiness_row
+            .as_ref()
+            .is_some_and(|revision| revision.graph_state == "graph_degraded");
         let graph_failed = effective_readiness_row
             .as_ref()
             .is_some_and(|revision| revision.graph_state == "failed");
@@ -614,7 +654,9 @@ impl OpsService {
             hard_failure,
             canceled_terminal,
             revision_text_ready,
+            revision_vector_ready,
             revision_graph_ready,
+            revision_graph_degraded,
             preparation_ready,
             preparation_failed: prepared_revision
                 .as_ref()
@@ -683,59 +725,6 @@ impl OpsService {
             typed_fact_coverage: classification.typed_fact_coverage,
             last_mutation_id: inputs.latest_mutation.map(|mutation| mutation.id),
             last_job_stage: inputs.latest_job.and_then(|job| job.current_stage.clone()),
-            updated_at,
-        }
-    }
-
-    #[must_use]
-    pub fn derive_library_knowledge_coverage(
-        &self,
-        library_id: Uuid,
-        summaries: &[ContentDocumentSummary],
-        last_generation_id: Option<Uuid>,
-    ) -> LibraryKnowledgeCoverage {
-        let mut document_counts_by_readiness = BTreeMap::<String, i64>::new();
-        let mut graph_ready_document_count = 0_i64;
-        let mut graph_sparse_document_count = 0_i64;
-        let mut typed_fact_document_count = 0_i64;
-        let mut updated_at = summaries
-            .iter()
-            .filter_map(|summary| summary.readiness_summary.as_ref().map(|item| item.updated_at))
-            .max()
-            .unwrap_or_else(Utc::now);
-
-        for summary in
-            summaries.iter().filter(|summary| summary.document.document_state != "deleted")
-        {
-            let Some(readiness) = summary.readiness_summary.as_ref() else {
-                continue;
-            };
-            *document_counts_by_readiness
-                .entry(readiness.readiness_kind.as_str().to_string())
-                .or_default() += 1;
-            match readiness.graph_coverage_kind.as_str() {
-                "graph_ready" => graph_ready_document_count += 1,
-                "graph_sparse" => graph_sparse_document_count += 1,
-                _ => {}
-            }
-            if readiness.typed_fact_coverage.unwrap_or_default() > 0.0
-                || summary
-                    .prepared_revision
-                    .as_ref()
-                    .is_some_and(|revision| revision.typed_fact_count > 0)
-            {
-                typed_fact_document_count += 1;
-            }
-            updated_at = updated_at.max(readiness.updated_at);
-        }
-
-        LibraryKnowledgeCoverage {
-            library_id,
-            document_counts_by_readiness,
-            graph_ready_document_count,
-            graph_sparse_document_count,
-            typed_fact_document_count,
-            last_generation_id,
             updated_at,
         }
     }
@@ -822,7 +811,7 @@ fn map_library_facts_from_aggregate(
     has_bundle_failures: bool,
 ) -> OpsLibraryState {
     let latest_knowledge_generation = knowledge_generations.first();
-    let readable_document_count = coverage.metrics.ready;
+    let readable_document_count = coverage.metrics.readable;
     let failed_document_count = coverage.metrics.failed;
     // Documents whose latest mutation is still in flight. The status aggregate
     // counts both `processing` (running attempt) and `queued` (enqueued, not
@@ -846,7 +835,7 @@ fn map_library_facts_from_aggregate(
                 coverage.vector_inventory_mismatch_count,
             )
             .unwrap_or(usize::MAX),
-            graph_sparse_document_count: usize::try_from(coverage.metrics.graph_sparse)
+            missing_graph_coverage_count: usize::try_from(missing_graph_coverage(coverage))
                 .unwrap_or(usize::MAX),
             has_failed_attempts,
             has_bundle_failures,
@@ -856,6 +845,10 @@ fn map_library_facts_from_aggregate(
             .map(|generation| generation.generation_state.clone()),
         last_recomputed_at: row.last_recomputed_at,
     }
+}
+
+fn missing_graph_coverage(coverage: &LibraryCoverageFast) -> i64 {
+    coverage.metrics.ready.saturating_sub(coverage.metrics.graph_ready).max(0)
 }
 
 fn build_library_warnings_from_aggregate(
@@ -887,12 +880,9 @@ fn build_library_warnings_from_aggregate(
         warnings.push(derived_warning(library_id, "vector_index_gap", "error", Utc::now()));
     }
 
-    // Ready documents whose graph extraction failed. `graph_state='failed'`
-    // ready docs fold into the O(1) `graph_sparse` counter, so this gap does not
-    // close on its own either: nothing is in flight that will catch it up and
-    // the operator has to reprocess the affected documents. Same rationale as
-    // `vector_index_gap`, but a warning because the text is still readable.
-    if coverage.metrics.graph_sparse > 0 {
+    // Ready documents not covered by the graph include text-only and partially
+    // enriched publications as well as graph-capable documents without coverage.
+    if missing_graph_coverage(coverage) > 0 {
         warnings.push(derived_warning(library_id, "graph_coverage_gap", "warning", Utc::now()));
     }
 
@@ -993,15 +983,14 @@ pub(crate) fn map_async_operation_row(
 /// on it, so it is degradation, not progress. Summing it into the rebuild
 /// signal is what made an idle library report "rebuilding" for good.
 ///
-/// `graph_sparse_document_count` is the same kind of hole in the graph plane:
-/// ready documents whose graph extraction failed (`graph_state='failed'` folds
-/// into the sparse counter). No worker closes it, so it is degradation too.
+/// `missing_graph_coverage_count` measures ready publications without graph
+/// coverage, independently of the graph-sparse capability metric.
 fn derive_degraded_state(signals: LibraryActivitySignals) -> String {
     if signals.failed_document_count > 0
         || signals.has_failed_attempts
         || signals.has_bundle_failures
         || signals.vector_inventory_mismatch_count > 0
-        || signals.graph_sparse_document_count > 0
+        || signals.missing_graph_coverage_count > 0
     {
         "degraded".to_string()
     } else if signals.in_flight_document_count > 0 {
@@ -1061,11 +1050,14 @@ mod tests {
                 ready: 0,
                 processing: processing_count,
                 queued: 0,
+                paused: 0,
                 failed: 0,
                 canceled: 0,
+                pending_materialization: 0,
                 empty: 0,
                 graph_ready: 0,
                 graph_sparse: 0,
+                readable: 0,
                 recomputed_at: Utc::now(),
             },
             graph_snapshot: None,
@@ -1083,11 +1075,14 @@ mod tests {
                 ready: 0,
                 processing: 0,
                 queued: 0,
+                paused: 0,
                 failed: 0,
                 canceled: 2,
+                pending_materialization: 0,
                 empty: 0,
                 graph_ready: 0,
                 graph_sparse: 0,
+                readable: 0,
                 recomputed_at: Utc::now(),
             },
             graph_snapshot: None,
@@ -1107,6 +1102,52 @@ mod tests {
 
         assert_eq!(state.failed_document_count, 0);
         assert_eq!(state.degraded_state, "healthy");
+    }
+
+    #[test]
+    fn library_state_counts_readable_documents_independently_of_in_flight_status() {
+        let mut coverage = coverage_with_processing(2);
+        coverage.metrics.readable = 2;
+        let row = ops_repository::OpsLibraryFactsRow {
+            library_id: Uuid::now_v7(),
+            queue_depth: 1,
+            running_attempts: 1,
+            degraded_state: "ready".to_string(),
+            last_recomputed_at: Utc::now(),
+        };
+        let state = map_library_facts_from_aggregate(&row, &coverage, &[], false, false);
+        assert_eq!(state.readable_document_count, 2);
+        assert_eq!(state.degraded_state, "rebuilding");
+        assert!(
+            build_library_warnings_from_aggregate(row.library_id, &coverage, &[], &[]).is_empty()
+        );
+        coverage.metrics.total = 3;
+        coverage.metrics.failed = 1;
+        coverage.metrics.readable = 3;
+        let failed_state = map_library_facts_from_aggregate(&row, &coverage, &[], false, false);
+        assert_eq!(failed_state.readable_document_count, 3);
+        assert_eq!(failed_state.failed_document_count, 1);
+        assert_eq!(failed_state.degraded_state, "degraded");
+    }
+
+    #[test]
+    fn text_only_ready_publication_reports_missing_graph_coverage() {
+        let mut coverage = coverage_with_processing(0);
+        coverage.metrics.ready = 1;
+        coverage.metrics.readable = 1;
+        let row = ops_repository::OpsLibraryFactsRow {
+            library_id: Uuid::now_v7(),
+            queue_depth: 0,
+            running_attempts: 0,
+            degraded_state: "ready".to_string(),
+            last_recomputed_at: Utc::now(),
+        };
+        let state = map_library_facts_from_aggregate(&row, &coverage, &[], false, false);
+        assert_eq!(state.readable_document_count, 1);
+        assert_eq!(state.degraded_state, "degraded");
+        let warnings = build_library_warnings_from_aggregate(row.library_id, &coverage, &[], &[]);
+        assert!(warnings.iter().any(|warning| warning.warning_kind == "graph_coverage_gap"));
+        assert_eq!(coverage.metrics.graph_sparse, 0);
     }
 
     #[test]
@@ -1172,6 +1213,94 @@ mod tests {
         assert!(!state.failed);
         assert!(state.readable);
         assert_eq!(state.readiness_kind, DocumentReadiness::Readable);
+    }
+
+    #[test]
+    fn classifier_reports_capability_from_current_revision_channels() {
+        // Vectors still pending: readable text is the base capability, not a
+        // failure, and there is no graph capability yet.
+        let pending = classify_document_knowledge_signals(DocumentKnowledgeSignals {
+            revision_text_ready: true,
+            ..Default::default()
+        });
+        assert!(pending.readable);
+        assert!(!pending.graph_ready);
+        assert_eq!(pending.readiness_kind, DocumentReadiness::Readable);
+
+        // Vectors ready with degraded graph: partial graph capability.
+        let degraded = classify_document_knowledge_signals(DocumentKnowledgeSignals {
+            revision_text_ready: true,
+            revision_vector_ready: true,
+            revision_graph_degraded: true,
+            ..Default::default()
+        });
+        assert!(!degraded.graph_ready);
+        assert_eq!(degraded.readiness_kind, DocumentReadiness::GraphSparse);
+        assert_eq!(degraded.graph_coverage_kind, "graph_sparse");
+
+        // Vectors and graph ready: full capability.
+        let full = classify_document_knowledge_signals(DocumentKnowledgeSignals {
+            revision_text_ready: true,
+            revision_vector_ready: true,
+            revision_graph_ready: true,
+            ..Default::default()
+        });
+        assert!(full.graph_ready);
+        assert_eq!(full.readiness_kind, DocumentReadiness::GraphReady);
+
+        // Structured preparation is metadata: on its own it proves no readable
+        // content and no graph capability.
+        let prepared_only = classify_document_knowledge_signals(DocumentKnowledgeSignals {
+            preparation_ready: true,
+            ..Default::default()
+        });
+        assert!(!prepared_only.readable);
+        assert!(!prepared_only.graph_ready);
+        assert_eq!(prepared_only.readiness_kind, DocumentReadiness::Empty);
+        assert_eq!(prepared_only.preparation_state, "prepared");
+    }
+
+    /// The regression that matters for MCP: a newer queued/running job must not
+    /// downgrade the readiness of a current revision that still serves full
+    /// capability. Readiness is capability; `processing` needs no readable
+    /// content plus confirmed work.
+    #[test]
+    fn classifier_reports_capability_above_operational_work() {
+        let full_with_work = classify_document_knowledge_signals(DocumentKnowledgeSignals {
+            processing_active: true,
+            revision_text_ready: true,
+            revision_vector_ready: true,
+            revision_graph_ready: true,
+            ..Default::default()
+        });
+        assert!(full_with_work.processing_active);
+        assert_eq!(full_with_work.readiness_kind, DocumentReadiness::GraphReady);
+
+        let sparse_with_work = classify_document_knowledge_signals(DocumentKnowledgeSignals {
+            processing_active: true,
+            revision_text_ready: true,
+            revision_vector_ready: true,
+            revision_graph_degraded: true,
+            ..Default::default()
+        });
+        assert_eq!(sparse_with_work.readiness_kind, DocumentReadiness::GraphSparse);
+
+        let readable_with_work = classify_document_knowledge_signals(DocumentKnowledgeSignals {
+            processing_active: true,
+            revision_text_ready: true,
+            ..Default::default()
+        });
+        assert_eq!(readable_with_work.readiness_kind, DocumentReadiness::Readable);
+
+        let working_without_content =
+            classify_document_knowledge_signals(DocumentKnowledgeSignals {
+                processing_active: true,
+                ..Default::default()
+            });
+        assert_eq!(working_without_content.readiness_kind, DocumentReadiness::Processing);
+
+        let idle = classify_document_knowledge_signals(DocumentKnowledgeSignals::default());
+        assert_eq!(idle.readiness_kind, DocumentReadiness::Empty);
     }
 
     #[test]
@@ -1287,7 +1416,7 @@ mod tests {
     #[test]
     fn derive_degraded_state_treats_a_graph_coverage_gap_as_degradation() {
         let degraded_state = derive_degraded_state(LibraryActivitySignals {
-            graph_sparse_document_count: 3,
+            missing_graph_coverage_count: 3,
             ..LibraryActivitySignals::default()
         });
 
@@ -1300,9 +1429,8 @@ mod tests {
     #[test]
     fn build_library_warnings_reports_failed_graphs_as_a_coverage_gap() {
         let mut coverage = coverage_with_processing(0);
-        // `graph_state='failed'` ready documents fold into the O(1) sparse
-        // counter rather than a separate field.
-        coverage.metrics.graph_sparse = 3;
+        coverage.metrics.ready = 3;
+        coverage.metrics.readable = 3;
         let warnings = build_library_warnings_from_aggregate(Uuid::now_v7(), &coverage, &[], &[]);
 
         let gap = warnings

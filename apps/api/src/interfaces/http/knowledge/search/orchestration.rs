@@ -528,18 +528,15 @@ async fn resolve_hybrid_search_context(
         &binding,
     ).await?;
     let embedding = match crate::integrations::retry::with_single_provider_attempt(
-        crate::observability::with_provider_call_id(
-            provider_call.provider_call_id(),
-            state.llm_gateway.embed(EmbeddingRequest {
-                provider_kind: binding.provider_kind.clone(),
-                model_name: binding.model_name.clone(),
-                input: query_text.to_string(),
-                api_key_override: binding.api_key.clone(),
-                base_url_override: binding.provider_base_url.clone(),
-                extra_parameters_json: binding.extra_parameters_json.clone(),
-                dispatch: Some(binding.dispatch_authority()),
-            }),
-        ),
+        provider_call.scoped(state.llm_gateway.embed(EmbeddingRequest {
+            provider_kind: binding.provider_kind.clone(),
+            model_name: binding.model_name.clone(),
+            input: query_text.to_string(),
+            api_key_override: binding.api_key.clone(),
+            base_url_override: binding.provider_base_url.clone(),
+            extra_parameters_json: binding.extra_parameters_json.clone(),
+            dispatch: Some(binding.dispatch_authority()),
+        })),
     )
     .await
     {

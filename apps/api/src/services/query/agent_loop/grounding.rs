@@ -2,20 +2,52 @@ use super::*;
 
 pub(super) fn retain_document_read_reference(
     grounding: &mut AssistantGroundingEvidence,
+    budget: &mut crate::services::query::execution::semantic_verification::EvidenceBudget,
     reference: Option<&super::super::assistant_grounding::AssistantGroundingDocumentReference>,
-) {
-    let Some(reference) = reference else { return };
-    if grounding.document_references.iter().any(|prior| {
-        prior.document_id == reference.document_id
-            && prior.revision_id == reference.revision_id
-            && prior.slice_start_offset == reference.slice_start_offset
-            && prior.slice_end_offset == reference.slice_end_offset
-    }) {
-        return;
+) -> bool {
+    use crate::services::query::execution::semantic_verification::EvidenceAdmission;
+    let Some(reference) = reference else { return false };
+    match budget.try_admit_document_reference(reference) {
+        EvidenceAdmission::Duplicate => return true,
+        EvidenceAdmission::OverBudget => return false,
+        EvidenceAdmission::Retained => {}
     }
     let mut reference = reference.clone();
     reference.rank = i32::try_from(grounding.document_references.len() + 1).unwrap_or(i32::MAX);
     grounding.document_references.push(reference);
+    true
+}
+
+pub(super) fn admit_tool_grounding(
+    grounding: &mut AssistantGroundingEvidence,
+    budget: &mut crate::services::query::execution::semantic_verification::EvidenceBudget,
+    tool_name: &str,
+    outcome: &ToolExecutionOutcome,
+) -> bool {
+    if tool_name == READ_DOCUMENT_TOOL_NAME {
+        return !outcome.is_error
+            && retain_document_read_reference(
+                grounding,
+                budget,
+                outcome.document_reference.as_deref(),
+            );
+    }
+    // Child evidence arrives through its rechecked manifest, not from the outcome body.
+    if !outcome.is_error && tool_name != GROUNDED_ANSWER_TOOL_NAME {
+        for text in &outcome.source_texts {
+            push_tool_source_text(grounding, text);
+        }
+    }
+    true
+}
+
+pub(super) fn admitted_tool_message(outcome: &ToolExecutionOutcome, admitted: bool) -> String {
+    if admitted {
+        outcome.message_content.clone()
+    } else {
+        "[tool result omitted: source identity was invalid or the evidence budget was exhausted]"
+            .to_string()
+    }
 }
 
 pub(super) fn agent_tool_limit_cap(tool_name: &str) -> Option<usize> {
@@ -27,13 +59,10 @@ pub(super) fn agent_tool_limit_cap(tool_name: &str) -> Option<usize> {
     }
 }
 
-pub(super) fn push_tool_grounding_fragment(
-    grounding: &mut AssistantGroundingEvidence,
-    tool_name: &str,
-    message_content: &str,
-) {
-    let trimmed = message_content.trim();
-    if trimmed.is_empty() {
+pub(super) fn push_tool_source_text(grounding: &mut AssistantGroundingEvidence, source_text: &str) {
+    let excerpt: String =
+        source_text.trim().chars().take(TOOL_GROUNDING_FRAGMENT_CHAR_LIMIT).collect();
+    if excerpt.is_empty() || grounding.verification_corpus.contains(&excerpt) {
         return;
     }
     let existing_chars = grounding
@@ -45,9 +74,7 @@ pub(super) fn push_tool_grounding_fragment(
         return;
     }
     let remaining = TOOL_GROUNDING_TOTAL_CHAR_LIMIT - existing_chars;
-    let fragment_limit = TOOL_GROUNDING_FRAGMENT_CHAR_LIMIT.min(remaining);
-    let fragment = trimmed.chars().take(fragment_limit).collect::<String>();
-    grounding.verification_corpus.push(format!("[MCP tool result: {tool_name}]\n{fragment}"));
+    grounding.verification_corpus.push(excerpt.chars().take(remaining).collect());
 }
 
 pub(super) fn compact_ledger_text(value: &str) -> String {
@@ -300,7 +327,7 @@ fn tool_execution_error_with_kind(
             .and_then(Value::as_str)
             .map(ToString::to_string),
         result_json: Some(result_json),
-        grounding_text: None,
+        source_texts: Vec::new(),
         document_reference: None,
         grounded_answer_body: None,
         grounded_answer_outcome: None,

@@ -449,6 +449,10 @@ pub struct RevisionGraphReconcileOutcome {
     pub graph_contribution_count: usize,
     pub graph_ready: bool,
     pub pending_summary_refresh: Option<PendingGraphSummaryRefresh>,
+    /// Chunks whose stored graph candidates were withheld because their text is
+    /// low-confidence and therefore not reliable relation evidence. Reported in
+    /// the graph stage details; `graph_ready` keeps its layer-completion meaning.
+    pub text_ineligible_chunk_count: usize,
 }
 
 pub(crate) async fn reconcile_revision_graph_authorized(
@@ -628,6 +632,7 @@ pub(crate) async fn reconcile_revision_graph_authorized(
         &targeted_edge_ids,
     );
     let pending_summary_refresh = pending_summary_refresh_for_plan(plan, &merge_summary);
+    let text_ineligible_chunk_count = merge_summary.text_ineligible_chunk_count;
     let projection = execute_authorized_revision_projection(
         connection,
         &projection_scope,
@@ -647,10 +652,21 @@ pub(crate) async fn reconcile_revision_graph_authorized(
         authority.library_id,
         snapshot.as_ref(),
         projection,
-        graph_contribution_count,
-        pending_summary_refresh,
+        RevisionGraphAccounting {
+            graph_contribution_count,
+            text_ineligible_chunk_count,
+            pending_summary_refresh,
+        },
     )
     .await
+}
+
+/// Per-revision accounting the reconcile finalizer reports alongside the
+/// projection.
+struct RevisionGraphAccounting {
+    graph_contribution_count: usize,
+    text_ineligible_chunk_count: usize,
+    pending_summary_refresh: PendingGraphSummaryRefresh,
 }
 
 /// Per-revision results remain ready while library-wide topology is stale, but
@@ -660,9 +676,13 @@ async fn finish_revision_graph_reconcile(
     library_id: Uuid,
     snapshot: Option<&RuntimeGraphSnapshotRow>,
     mut projection: GraphProjectionOutcome,
-    graph_contribution_count: usize,
-    pending_summary_refresh: PendingGraphSummaryRefresh,
+    accounting: RevisionGraphAccounting,
 ) -> Result<RevisionGraphReconcileOutcome, GraphServiceError> {
+    let RevisionGraphAccounting {
+        graph_contribution_count,
+        text_ineligible_chunk_count,
+        pending_summary_refresh,
+    } = accounting;
     if snapshot.is_some_and(|snapshot| snapshot.graph_status == "stale") {
         // A targeted refresh cannot reconstruct aggregates shared with sources
         // removed by GC. Only a complete retained-input rebuild clears stale.
@@ -676,6 +696,7 @@ async fn finish_revision_graph_reconcile(
         pending_summary_refresh: (projection.graph_status == GRAPH_STATUS_READY)
             .then_some(pending_summary_refresh),
         projection,
+        text_ineligible_chunk_count,
     })
 }
 
@@ -783,6 +804,7 @@ async fn preserve_deleted_document_graph_snapshot(
         graph_contribution_count: 0,
         pending_summary_refresh: None,
         projection,
+        text_ineligible_chunk_count: 0,
     })
 }
 

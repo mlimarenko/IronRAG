@@ -317,7 +317,8 @@ fn terminal_malformed_graph_failure(
     let provider_attempt_count = session.trace.provider_attempt_count;
     let recovery_summary = terminal_recovery_summary(context.extraction_recovery, session, false);
     GraphExtractionFailureOutcome {
-        request_shape_key: raw.request_shape_key.clone(),
+        provider_call_id: None,
+        request_shape_key: raw.request_shape_key.as_str().into(),
         request_size_bytes: raw.request_size_bytes,
         error_message: format!(
             "failed to normalize graph extraction output after {provider_attempt_count} provider attempt(s): {parse_error}",

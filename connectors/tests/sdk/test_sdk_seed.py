@@ -9,6 +9,7 @@ from pytest_httpx import HTTPXMock
 from ironrag_connector.config import BaseConnectorSettings
 from ironrag_connector.ironrag import IronRagError
 from ironrag_connector.seed import _seed_async
+from ironrag_connector.state import StateStore
 
 WS = UUID("00000000-0000-0000-0000-000000000099")
 LIB = UUID("00000000-0000-0000-0000-000000000000")
@@ -186,3 +187,76 @@ async def test_seed_fails_instead_of_looping_on_repeated_document_cursor(
     adapter = SeedAdapter()
     with pytest.raises(IronRagError, match="repeated pagination cursor"):
         await _seed_async(settings, adapter)  # type: ignore[arg-type]
+
+
+def _document(external_key: str) -> dict[str, str]:
+    return {
+        "id": "00000000-0000-0000-0000-000000000001",
+        "libraryId": str(LIB),
+        "externalKey": external_key,
+        "status": "ready",
+    }
+
+
+@pytest.mark.asyncio
+async def test_seed_skips_a_document_the_adapter_cannot_parse(
+    tmp_path: Path,
+    httpx_mock: HTTPXMock,
+) -> None:
+    """A library may hold another connector's documents; seeding owns only its own."""
+
+    settings = _settings(tmp_path)
+    _mock_library(httpx_mock, [_document("other-connector:page:1")])
+
+    counts = await _seed_async(settings, SeedAdapter())  # type: ignore[arg-type]
+
+    assert counts == {"libraries": 1, "docs_scanned": 1, "rows_inserted": 0}
+
+
+class UnbuildableKeyAdapter(SeedAdapter):
+    def parse_external_key(self, external_key: str) -> tuple[str, str] | None:
+        return ("page", "1")
+
+    def external_key(self, kind: str, item_id: str) -> str:
+        raise ValueError(f"unbuildable identity for {kind}:{item_id}")
+
+
+@pytest.mark.asyncio
+async def test_seed_skips_a_document_whose_identity_cannot_be_rebuilt(
+    tmp_path: Path,
+    httpx_mock: HTTPXMock,
+) -> None:
+    settings = _settings(tmp_path)
+    _mock_library(httpx_mock, [_document("seed-test:page:1")])
+
+    counts = await _seed_async(settings, UnbuildableKeyAdapter())  # type: ignore[arg-type]
+
+    assert counts == {"libraries": 1, "docs_scanned": 1, "rows_inserted": 0}
+
+
+@pytest.mark.asyncio
+async def test_seed_registers_a_fully_owned_document_with_no_change_token(
+    tmp_path: Path,
+    httpx_mock: HTTPXMock,
+) -> None:
+    """The cursor starts undated: the next sweep picks the live source token."""
+
+    settings = _settings(tmp_path)
+    _mock_library(httpx_mock, [_document("seed-test:page:1")])
+
+    counts = await _seed_async(settings, ParsedSeedAdapter(("page", "1")))  # type: ignore[arg-type]
+
+    assert counts == {"libraries": 1, "docs_scanned": 1, "rows_inserted": 1}
+    state = StateStore(settings.state_db_path)
+    try:
+        row = state.get("page", "1")
+        assert row is not None
+        assert row.external_key == "seed-test:page:1"
+        assert row.change_token is None
+        assert row.current_library_id == str(LIB)
+        locations = state.locations_for("page", "1")
+        assert [location.ironrag_document_id for location in locations] == [
+            "00000000-0000-0000-0000-000000000001"
+        ]
+    finally:
+        state.close()

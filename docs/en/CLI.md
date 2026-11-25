@@ -373,6 +373,38 @@ Reruns at the current revision validate the objects and return `alreadyCurrent`.
 Never reset data or edit the SQLx ledger to bypass refusal. Command availability
 does not authorize a live transition.
 
+### `migrate text-publication-schema`
+
+Allows an admitted current revision to become readable when its text is ready,
+before optional vector and graph enrichment finishes. The view retains the
+document, scope, current-head, visibility-intent and replacement-identity checks.
+Vector and graph consumers independently require their channel to be ready.
+
+The exact predecessor is the user-preference baseline
+`e6749be6a755648961fd13e26a9090c9df0f087d1860ab10a7d40cec71ffc439eb77122dca45c1c25f94998a7a4e65af`.
+Complete earlier applicable guarded hops first.
+
+```bash
+ironrag-maintenance migrate text-publication-schema --json
+# After reviewing the dry run, backup safeguards and runtime cutover:
+ironrag-maintenance migrate text-publication-schema --apply --json
+```
+
+Stop and drain API, workers and maintenance writers before applying the change.
+Use the new backend image for the command and for the replacement runtime; an old
+binary does not accept the new baseline checksum. Keep PostgreSQL, vector storage,
+content files and credential keys intact. The transition replaces only the view
+and validates its exact definition and retained admission guards before the
+checksum compare-and-set. It does not promote historical heads, re-ingest content
+or change financial allowances.
+
+Dry-run writes nothing. An unknown checksum, changed predecessor, pre-applied
+view or failed target certificate refuses without a stamp. A repeated command
+validates the recorded revision and returns `alreadyCurrent`; it does not restore
+an earlier view. Keep the schema-rollout fence in place until the target schema
+and exact replacement artifact are accepted. Never bypass refusal by editing
+the migration ledger.
+
 ## `audit` — read-only inspection
 
 The audit family answers "what is going on" without changing anything.
@@ -552,16 +584,12 @@ the ingest pipeline produces on success.
 
 ### `repair null-heads`
 
-**What it does.** For every document with `readable_revision_id IS
-NULL AND active_revision_id IS NULL` that has at least one revision
-with persisted chunks, promote the most recent chunk-bearing
-revision to the head. Uses the same `promote_document_head` code
-path the ingest pipeline uses on success, so the outcome is
-indistinguishable from a fresh successful ingest. Idempotent.
-
-**When to run.** One-shot, single-pass recovery after a known
-incident. Best when you want the operation to attack every eligible
-document immediately without any rate limiting.
+**What it does.** Scans eligible null-head documents with persisted
+chunks and rechecks eligibility under lifecycle locks. The repair
+operation does not promote a revision, even when eligible: a historical
+revision has no current publication owner. Publication belongs to the
+normal source materialization and ingest lifecycle. `promoted` remains
+zero; a successful command does not mean documents became readable.
 
 **Example.**
 
@@ -571,25 +599,23 @@ ironrag-maintenance repair null-heads --library <uuid> --json
 
 ### `repair null-heads-auto`
 
-**What it does.** Same recovery action as `repair null-heads`, but
-the per-document outcome is recorded on `content_document_head`
-so a flaky upstream cannot burn the recovery budget on a single
-document:
+**What it does.** Scans candidates with cooldown and dead-letter
+filters and calls the same no-op repair. An eligible no-op does not
+record success or failure and does not promote a revision. Actual
+errors use the recovery counters on `content_document_head`:
 
 * A document touched in the last hour is skipped (cooldown).
-* On success, `recovery_attempts_count` is reset and
-  `last_recovery_attempt_at = now()`.
-* On failure, `recovery_attempts_count` is incremented if the new
+* An eligible no-op leaves `recovery_attempts_count` and
+  `last_recovery_attempt_at` unchanged; there is no promotion to record.
+* On an actual error, `recovery_attempts_count` is incremented if the new
   error matches `last_recovery_error_code`; otherwise the counter
   resets to 1.
 * Three consecutive same-error failures stamp `dead_letter_at` and
   the document is excluded from future auto runs until an operator
   clears the mark.
 
-**When to run.** Re-driving recovery against the same library in
-loops or under cron. Anywhere a flaky external dependency could
-flip the same document into "failed" repeatedly — the rate-limit
-turns that into a manageable backlog instead of a tight retry storm.
+Do not use this command to republish historical content. Restore current
+content through its authorized source and publication lifecycle.
 
 **Example.**
 
@@ -597,9 +623,8 @@ turns that into a manageable backlog instead of a tight retry storm.
 ironrag-maintenance repair null-heads-auto --library <uuid> --json
 ```
 
-Sample output: `"promoted": 24, "failed": 0, "dead_lettered": 0,
-"cooldown_skipped": 0` means 24 docs were recovered cleanly on this
-pass; subsequent passes within the next hour will skip those 24.
+`promoted: 0` does not distinguish eligible no-ops from a scan with no
+candidates.
 
 ### `repair clear-recovery-dead-letter`
 

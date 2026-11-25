@@ -24,6 +24,8 @@ fn pre_verification_transcript_has_no_final_body_and_final_snapshot_retains_all_
         usage_json: serde_json::json!({}),
         provider_calls: Vec::new(),
         assistant_grounding: AssistantGroundingEvidence::default(),
+        evidence_manifest: AgentEvidenceManifest::default(),
+        evidence_selection_bounded: None,
         child_query_execution_ids: Vec::new(),
         debug_iterations: vec![iteration(1)],
         agent_loop: None,

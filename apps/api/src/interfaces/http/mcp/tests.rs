@@ -710,6 +710,54 @@ async fn mutating_bounded_dispatch_outlives_deadline_and_holds_admission_until_c
     assert_eq!(registry.len(), 0, "the admission is released once the mutation completes");
 }
 
+/// A registered dispatch is spawned, so its in-task scope starts empty. The
+/// chokepoint must reinstate the caller it captured at registration; otherwise
+/// an admitted paid call attests as `Unattributed`. Both branches are driven
+/// through the production chokepoint, not a hand-rolled spawn.
+#[tokio::test(start_paused = true)]
+async fn registered_dispatch_reinstates_the_captured_caller_in_both_branches() {
+    use crate::shared::provider_http::{DispatchCaller, with_dispatch_caller};
+
+    let admitted = DispatchCaller::IamSession(Uuid::from_u128(0x5e5510));
+    for (index, mutating) in [(120u64, false), (121u64, true)] {
+        let registry = Arc::new(McpInFlightToolCallRegistry::new(4, 2));
+        let response_id = json!(index);
+        let (observed_tx, observed_rx) = tokio::sync::oneshot::channel::<DispatchCaller>();
+        let observed_tx = Arc::new(tokio::sync::Mutex::new(Some(observed_tx)));
+        let observed_in_tool = Arc::clone(&observed_tx);
+        // The dispatch must start inside the caller scope, and the receiver it
+        // returns is itself a future: pass it out of the block unconsumed.
+        let (receiver,) = with_dispatch_caller(admitted, async move {
+            (start_bounded_mcp_tool_call_with_mutation(
+                Arc::clone(&registry),
+                in_flight_key(45, 46, &format!("session-caller-{index}"), &response_id),
+                response_id.clone(),
+                async move {
+                    if let Some(sender) = observed_in_tool.lock().await.take() {
+                        let _ =
+                            sender.send(crate::shared::provider_http::current_dispatch_caller());
+                    }
+                    success_response(Some(response_id), json!({ "status": "done" }))
+                },
+                Duration::from_secs(30),
+                mutating,
+            ),)
+        })
+        .await;
+        let response = tokio::time::timeout(Duration::from_secs(60), receiver)
+            .await
+            .expect("dispatch must answer")
+            .expect("dispatch must answer");
+        let payload = serde_json::to_value(response).expect("serialize response");
+        assert!(payload.get("error").is_none(), "an admitted dispatch must succeed: {payload}");
+        assert_eq!(
+            observed_rx.await.expect("the tool future must report its caller"),
+            admitted,
+            "mutating={mutating}: the captured caller must reach the dispatched work",
+        );
+    }
+}
+
 /// The contrast: a non-mutating bounded dispatch stays inline, so the deadline
 /// drops (cancels) it and releases its admission immediately. This pins the
 /// mutating/non-mutating split the test above depends on.

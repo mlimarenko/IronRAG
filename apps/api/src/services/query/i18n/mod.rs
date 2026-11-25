@@ -23,6 +23,10 @@ pub(crate) struct DeterministicQueryMessageSet {
     pub(crate) options_heading: &'static str,
     pub(crate) clarify_source: &'static str,
     pub(crate) strict_verification_failure: &'static str,
+    /// Typed refusal for a candidate body that reproduced its retrieved
+    /// evidence instead of answering from it. It names the bound, never the
+    /// copied text.
+    pub(crate) evidence_reproduction_refusal: &'static str,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -95,6 +99,7 @@ pub(crate) const EN_DETERMINISTIC_QUERY_MESSAGES: DeterministicQueryMessageSet =
         options_heading: "Options:",
         clarify_source: "Please choose one of the available sources.",
         strict_verification_failure: "I couldn't produce an answer fully supported by the selected sources.",
+        evidence_reproduction_refusal: "I couldn't produce an answer from the selected sources: the retrieved fragments cannot be presented as an answer. This reply is limited to the sources selected for this question.",
     };
 
 pub(crate) const RU_DETERMINISTIC_QUERY_MESSAGES: DeterministicQueryMessageSet =
@@ -102,6 +107,7 @@ pub(crate) const RU_DETERMINISTIC_QUERY_MESSAGES: DeterministicQueryMessageSet =
         options_heading: "Варианты:",
         clarify_source: "Выберите один из доступных источников.",
         strict_verification_failure: "Не удалось сформировать ответ, полностью подтверждённый выбранными источниками.",
+        evidence_reproduction_refusal: "Не удалось сформировать ответ по выбранным источникам: полученные фрагменты нельзя выдать за ответ. Этот ответ ограничен источниками, выбранными для этого вопроса.",
     };
 
 pub(crate) const EN_GROUNDED_REPAIR_MESSAGES: GroundedRepairMessageSet = GroundedRepairMessageSet {

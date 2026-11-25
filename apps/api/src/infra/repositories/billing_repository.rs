@@ -37,6 +37,21 @@ pub(crate) async fn get_knowledge_search(
     .await
 }
 
+/// Test-support owner of the fixture knowledge-search execution row.
+///
+/// Production code writes this row through the crate-private repository
+/// function; the integration tests that need a real owning execution call this
+/// wrapper instead of widening the production surface or issuing raw SQL.
+#[cfg(feature = "test-support")]
+pub async fn create_test_knowledge_search_execution(
+    pool: &PgPool,
+    id: Uuid,
+    workspace_id: Uuid,
+    library_id: Uuid,
+) -> Result<(), sqlx::Error> {
+    create_knowledge_search(pool, &BillingKnowledgeSearchRow { id, workspace_id, library_id }).await
+}
+
 #[derive(Debug, Clone, FromRow)]
 pub(crate) struct BillingDocumentReadRow {
     pub id: Uuid,
@@ -208,7 +223,9 @@ pub struct BillingExecutionCostReadSnapshot {
     pub rollup_state_present: bool,
     pub rollup_dirty: bool,
     pub terminal_error_code: Option<String>,
-    pub grounded_answer_provider_call_count: i64,
+    /// Provider calls whose call state is `completed`. A completed call may
+    /// still report no usage or no price.
+    pub settled_provider_call_count: i64,
     pub execution_cost: Option<BillingExecutionCostRow>,
 }
 
@@ -229,7 +246,7 @@ struct BillingExecutionCostReadSnapshotRow {
     rollup_state_present: bool,
     rollup_dirty: bool,
     terminal_error_code: Option<String>,
-    grounded_answer_provider_call_count: i64,
+    settled_provider_call_count: i64,
     id: Option<Uuid>,
     owning_execution_kind: Option<String>,
     owning_execution_id: Option<Uuid>,
@@ -381,9 +398,13 @@ fn required_snapshot_field<T>(value: Option<T>, field: &str) -> Result<T, sqlx::
 mod aggregate_costs;
 mod execution_costs;
 mod provider_calls;
+mod scope;
+mod send_admission;
 mod usage_charges;
 
 pub use aggregate_costs::*;
 pub use execution_costs::*;
 pub use provider_calls::*;
+pub use scope::*;
+pub use send_admission::*;
 pub use usage_charges::*;

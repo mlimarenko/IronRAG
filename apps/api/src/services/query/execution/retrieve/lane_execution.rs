@@ -82,6 +82,7 @@ pub(super) struct RetrievalExecutionRequest<'a> {
     pub(super) runtime_plan: &'a RuntimeQueryPlan,
     pub(super) limit: usize,
     pub(super) question_embedding: &'a [f32],
+    pub(super) vector_readiness: super::super::types::QueryVectorReadiness,
     pub(super) vector_search_context: Option<&'a RuntimeVectorSearchContext>,
     pub(super) document_index: &'a HashMap<Uuid, KnowledgeDocumentRow>,
     pub(super) query_ir: Option<&'a QueryIR>,
@@ -175,9 +176,15 @@ pub(crate) struct DocumentChunkRetrievalRequest<'a> {
     pub(crate) plan: &'a RuntimeQueryPlan,
     pub(crate) limit: usize,
     pub(crate) question_embedding: &'a [f32],
+    pub(crate) vector_readiness: super::super::types::QueryVectorReadiness,
     pub(crate) vector_search_context: Option<&'a RuntimeVectorSearchContext>,
     pub(crate) document_index: &'a HashMap<Uuid, KnowledgeDocumentRow>,
     pub(crate) query_ir: Option<&'a QueryIR>,
+}
+
+pub(crate) struct DocumentChunkRetrievalOutcome {
+    pub(crate) chunks: Vec<RuntimeMatchedChunk>,
+    pub(crate) degradations: Vec<super::super::types::RetrievalDegradation>,
 }
 
 pub(super) enum PlannedLaneRun<T> {
@@ -231,7 +238,7 @@ pub(super) fn resolve_planned_chunk_lane(
 
 pub(crate) async fn retrieve_document_chunks(
     request: DocumentChunkRetrievalRequest<'_>,
-) -> anyhow::Result<Vec<RuntimeMatchedChunk>> {
+) -> anyhow::Result<DocumentChunkRetrievalOutcome> {
     let DocumentChunkRetrievalRequest {
         state,
         library_id,
@@ -240,6 +247,7 @@ pub(crate) async fn retrieve_document_chunks(
         plan,
         limit,
         question_embedding,
+        vector_readiness,
         vector_search_context,
         document_index,
         query_ir,
@@ -284,6 +292,7 @@ pub(crate) async fn retrieve_document_chunks(
         runtime_plan: plan,
         limit,
         question_embedding,
+        vector_readiness,
         vector_search_context,
         document_index,
         query_ir,

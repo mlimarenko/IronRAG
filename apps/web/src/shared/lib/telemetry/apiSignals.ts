@@ -95,6 +95,18 @@ const durationMs = (span: ReadableSpan): number => {
   return Math.round(seconds * 1000 + nanos / 1_000_000)
 }
 
+/** Metric dimension for a failed request: transport failure or the 4xx/5xx class. */
+const failureType = (status: number | null): string => {
+  if (status === null) return 'network'
+  return status >= 500 ? 'http_5xx' : 'http_4xx'
+}
+
+/** Product-event dimension: only a failed request carries a cause. */
+const eventErrorType = (failed: boolean, status: number | null): string => {
+  if (!failed) return 'none'
+  return status === null ? 'network' : 'http_error'
+}
+
 /**
  * Derives client-observed API failures and product events from the HTTP spans
  * created by the fetch instrumentation, so feature code does not have to call
@@ -117,12 +129,11 @@ export function createProductSignalsSpanProcessor({ meter }: { meter: MeterLike 
       const status = statusCode(span)
       const failed = status === null || status >= 400
       if (failed) {
-        const errorType = status === null ? 'network' : status >= 500 ? 'http_5xx' : 'http_4xx'
         apiFailures.add(1, {
           'http.request.method': method,
           'http.route': normalizeRoute(path),
           'http.response.status_code': status ?? 'none',
-          'error.type': errorType,
+          'error.type': failureType(status),
         })
       }
 
@@ -135,7 +146,7 @@ export function createProductSignalsSpanProcessor({ meter }: { meter: MeterLike 
         feature: 'api',
         'http.route': productRoute.route,
         'http.response.status_code': status ?? 'none',
-        'error.type': failed ? (status === null ? 'network' : 'http_error') : 'none',
+        'error.type': eventErrorType(failed, status),
         duration_ms: durationMs(span),
       })
     },

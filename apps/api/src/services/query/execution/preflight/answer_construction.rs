@@ -21,6 +21,7 @@ use super::{
     current_question_segment, has_question_intent, label_terms, select_document_balanced_chunks,
     structured_current_question_segment, technical_literal_candidate_limit,
 };
+use crate::services::query::execution::SelectedGraphContextLine;
 use crate::services::query::execution::source_context::SOURCE_UNIT_CHUNK_KIND;
 
 pub(super) fn broad_procedure_preflight_requires_synthesis(
@@ -219,9 +220,9 @@ fn scoped_setup_literal_inventory_requires_synthesis(question: &str, query_ir: &
 }
 
 pub(in super::super) fn build_preflight_graph_evidence_context_lines(
-    graph_evidence_context_lines: &[String],
+    graph_evidence_context_lines: &[SelectedGraphContextLine],
 ) -> Vec<String> {
-    graph_evidence_context_lines.to_vec()
+    graph_evidence_context_lines.iter().map(|line| line.rendered().to_string()).collect()
 }
 
 #[cfg(test)]

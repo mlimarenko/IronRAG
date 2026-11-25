@@ -213,18 +213,21 @@ impl LlmGateway for UnifiedGateway {
                 let dispatch = resolved.dispatch.as_ref().ok_or_else(|| {
                     ProviderCallError::protocol("provider dispatch authority is missing")
                 })?;
-                let response = self
+                let send = self
                     .send_provider_request(
                         request_builder.body(request_body.clone()),
                         dispatch,
                         "tool-use",
                     )
                     .await?;
+                let (response, mut permit) = send.into_parts();
 
                 let (status, headers, body_bytes) =
                     read_provider_response_body(response, &request.provider_kind, "tool-use")
                         .await?;
                 if !status.is_success() {
+                    // A retryable reply terminalizes its own row first.
+                    permit.fail_send();
                     return Err(provider_status_error_from_read(
                         &request.provider_kind,
                         status,
@@ -232,6 +235,7 @@ impl LlmGateway for UnifiedGateway {
                         body_bytes,
                     ));
                 }
+                permit.complete_send();
                 let body_bytes = body_bytes.unwrap_or_default();
 
                 let body =
@@ -280,7 +284,7 @@ impl LlmGateway for UnifiedGateway {
         // `chat`, so the chat span opens around the retry loop and the delta
         // drain.
         let span = chat_span(&request.provider_kind, &request.model_name);
-        let (response, _provider_guard) = with_retry(
+        let (response, _provider_guard, mut permit) = with_retry(
             || async {
                 let provider_guard =
                     self.begin_provider_attempt(&request.provider_kind, &resolved.base_url).await?;
@@ -295,19 +299,22 @@ impl LlmGateway for UnifiedGateway {
                 let dispatch = resolved.dispatch.as_ref().ok_or_else(|| {
                     ProviderCallError::protocol("provider dispatch authority is missing")
                 })?;
-                let response = self
+                let send = self
                     .send_provider_request(
                         request_builder.body(request_body.clone()),
                         dispatch,
                         "tool-use-stream",
                     )
                     .await?;
+                let (response, mut permit) = send.into_parts();
 
                 let status = response.status();
                 if status.is_success() {
-                    return Ok((response, provider_guard));
+                    return Ok((response, provider_guard, permit));
                 }
 
+                // The frame is retryable: terminalize this row before retrying.
+                permit.fail_send();
                 Err(provider_http_error_from_response(response, &request.provider_kind).await)
             },
             self.retry_policy,
@@ -315,7 +322,13 @@ impl LlmGateway for UnifiedGateway {
         .instrument(span.clone())
         .await?;
 
-        let stream_state = drain_tool_use_stream(response, on_text_delta).instrument(span).await?;
+        let drained = drain_tool_use_stream(response, on_text_delta).instrument(span).await;
+        if drained.is_ok() {
+            permit.complete_send();
+        } else {
+            permit.fail_send();
+        }
+        let stream_state = drained?;
         let (output_text, finish_reason, usage_json, tool_calls) = stream_state.finalize();
         Ok(ToolUseResponse {
             provider_kind: std::mem::take(&mut request.provider_kind),

@@ -11,7 +11,10 @@ use crate::{
         execution::{
             embed::QuestionEmbeddingResult,
             technical_literals::TechnicalLiteralIntent,
-            types::{QueryGraphIndex, RuntimeVectorSearchContext, StructuredQueryPlanningStage},
+            types::{
+                QueryGraphIndex, QueryVectorReadiness, RuntimeVectorSearchContext,
+                StructuredQueryPlanningStage,
+            },
         },
         planner::{QueryPlanTaskInput, build_task_query_plan},
         support::{IntentResolutionRequest, derive_query_planning_metadata},
@@ -19,12 +22,71 @@ use crate::{
 };
 
 use super::planning::{
-    CompiledIrPlanRefresh, build_compiled_ir_query_plan,
+    CompiledIrPlanRefresh, build_compiled_ir_query_plan, graph_projection_store_unavailable,
     refresh_query_plan_for_compiled_ir_with_hyde, validate_prepared_query_embedding,
 };
 
+#[test]
+fn graph_planning_only_degrades_explicit_projection_store_failures() {
+    use crate::services::knowledge::{
+        error::KnowledgeServiceError, runtime_read::RuntimeGraphStoreUnavailable,
+    };
+    let unavailable =
+        anyhow::Error::new(KnowledgeServiceError::Internal(RuntimeGraphStoreUnavailable.into()));
+    assert!(graph_projection_store_unavailable(&unavailable));
+    for error in [
+        KnowledgeServiceError::GraphNotReady { message: "stale".into() },
+        KnowledgeServiceError::GraphIntegrity { message: "corrupt".into() },
+        KnowledgeServiceError::Repository(sqlx::Error::PoolTimedOut),
+    ] {
+        assert!(!graph_projection_store_unavailable(&anyhow::Error::new(error)));
+    }
+}
+
 fn sample_embedding_result(profile_key: &str, embedding: Vec<f32>) -> QuestionEmbeddingResult {
     QuestionEmbeddingResult { embedding, embedding_profile_key: profile_key.to_string() }
+}
+
+#[tokio::test]
+async fn compiled_ir_refresh_does_not_retry_hyde_when_embedding_provider_is_unavailable() {
+    let question = "compare Alpha Node and Gamma Node";
+    let query_ir = multi_document_hyde_query_ir(question);
+    let mut planning = provider_free_planning_stage(question, Vec::new(), None, "profile");
+    planning.vector_readiness = QueryVectorReadiness::ProviderUnavailable;
+    let calls = std::cell::Cell::new(0);
+    refresh_query_plan_for_compiled_ir_with_hyde(
+        compiled_ir_refresh(&mut planning, question, &query_ir),
+        || {
+            calls.set(calls.get() + 1);
+            std::future::ready(Ok(vec![0.1, 0.2, 0.3]))
+        },
+    )
+    .await
+    .expect("refresh retains the degraded vector state");
+    assert_eq!(calls.get(), 0);
+    assert_eq!(planning.vector_readiness, QueryVectorReadiness::ProviderUnavailable);
+    assert!(planning.hyde_embedding.is_none());
+}
+
+#[tokio::test]
+async fn compiled_ir_hyde_refresh_propagates_dispatch_admission_refusal() {
+    use crate::integrations::{provider_budget::ProviderBudgetError, retry::ProviderCallError};
+    let question = "compare Alpha Node and Gamma Node";
+    let query_ir = multi_document_hyde_query_ir(question);
+    let mut planning = provider_free_planning_stage(question, vec![0.1, 0.2, 0.3], None, "profile");
+    planning.plan.hyde_recommended = false;
+    let result = refresh_query_plan_for_compiled_ir_with_hyde(
+        compiled_ir_refresh(&mut planning, question, &query_ir),
+        || {
+            std::future::ready(Err(anyhow::Error::new(ProviderCallError::admission(
+                ProviderBudgetError::Dispatch(
+                    crate::shared::provider_http::ProviderDispatchRefusal::Authority,
+                ),
+            ))))
+        },
+    )
+    .await;
+    assert!(result.is_err());
 }
 
 /// The hybrid refresh shape every compiled-IR HyDE test shares.
@@ -92,6 +154,7 @@ fn provider_free_planning_stage(
         plan,
         technical_literal_intent: TechnicalLiteralIntent::default(),
         question_embedding,
+        vector_readiness: QueryVectorReadiness::Ready,
         hyde_embedding,
         vector_search_context: Some(RuntimeVectorSearchContext {
             embedding_profile_key: embedding_profile_key.to_string(),
@@ -100,6 +163,7 @@ fn provider_free_planning_stage(
             source_truth_version: 1,
         }),
         graph_index: QueryGraphIndex::empty(),
+        graph_store_unavailable: false,
         document_index: HashMap::new(),
         candidate_limit: 1,
     }

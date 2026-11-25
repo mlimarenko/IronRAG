@@ -57,6 +57,9 @@ pub(super) const SOURCE_CONTEXT_SLICE_BONUS: f32 = 3.0;
 pub(super) const SOURCE_CONTEXT_EXCERPT_CHARS: usize = 720;
 pub(super) const SOURCE_CONTEXT_GRAPH_EVIDENCE_BONUS: f32 = 0.75;
 pub(super) const SOURCE_CONTEXT_DOCUMENT_HEAD_CHUNK_INDEX: i32 = 0;
+/// A multi-section opening (a definition followed by acceptance criteria) stays
+/// rendered only when two distinct opening passages are reserved, not one.
+pub(super) const SOURCE_CONTEXT_OVERVIEW_OPENING_LIMIT: usize = 2;
 pub(super) const FOCUSED_DECLARATION_CHUNK_KIND: &str = "focused_declaration";
 
 pub(crate) fn source_anchor_window(anchor: i32, backward: i32, forward: i32) -> (i32, i32) {

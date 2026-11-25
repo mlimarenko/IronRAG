@@ -89,6 +89,7 @@ export class GraphRuntime {
   private labelCandidates: LabelCandidate[] = []
   private labelsRefreshedAt = 0
   private labelsDirty = true
+  private labelFontRequested = false
 
   private layoutStream: LayoutStream | null = null
   private layoutGeneration = 0
@@ -138,7 +139,16 @@ export class GraphRuntime {
     this.attachPointerHandlers()
     this.attachWindowHandlers()
     document.fonts?.addEventListener('loadingdone', this.handleFontsLoaded)
-    // Canvas text does not itself initiate font loading.
+  }
+
+  /**
+   * Canvas text does not itself initiate font loading. The request waits for
+   * the first real measurement, so a runtime constructed for a hidden container
+   * does not load fonts until the canvas is on screen.
+   */
+  private requestLabelFont(): void {
+    if (this.labelFontRequested) return
+    this.labelFontRequested = true
     void document.fonts?.load(this.labelFont()).then(this.handleFontsLoaded, this.handleFontsLoaded)
   }
 
@@ -146,6 +156,7 @@ export class GraphRuntime {
 
   resize(width: number, height: number, devicePixelRatio: number): void {
     if (width <= 0 || height <= 0) return
+    this.requestLabelFont()
     const wasDefaultViewport = this.viewport.width <= 1
     this.viewport = { width, height }
     this.devicePixelRatio = devicePixelRatio

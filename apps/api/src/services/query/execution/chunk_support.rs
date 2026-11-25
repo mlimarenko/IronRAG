@@ -19,6 +19,32 @@ use super::types::{RuntimeChunkScoreKind, RuntimeMatchedChunk};
 const CONFIG_PATH_EXTENSIONS: [&str; 8] =
     [".conf", ".ini", ".cfg", ".properties", ".yaml", ".yml", ".toml", ".json"];
 
+/// Largest single evidence source handed to generation or verification.
+///
+/// The unit is UTF-8 bytes on purpose. The verifier aggregates evidence in
+/// bytes (`MAX_EVIDENCE_UTF8_BYTES`), so a character cap here let one Cyrillic
+/// chunk exceed the whole verifier budget on its own.
+pub(crate) const MAX_EVIDENCE_SOURCE_UTF8_BYTES: usize = 16_000;
+
+/// Longest prefix of `text` that fits `max_bytes` without splitting a code
+/// point. Callers that need a closing marker add it themselves.
+pub(crate) fn bounded_utf8_prefix(text: &str, max_bytes: usize) -> &str {
+    if text.len() <= max_bytes {
+        return text;
+    }
+    let mut end = max_bytes;
+    while end > 0 && !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    &text[..end]
+}
+
+/// Canonical bounded evidence text for one selected source. Generation and the
+/// semantic verifier both read exactly this value.
+pub(crate) fn bounded_evidence_text(text: &str) -> String {
+    bounded_utf8_prefix(text.trim(), MAX_EVIDENCE_SOURCE_UTF8_BYTES).trim_end().to_string()
+}
+
 /// Maps a stored knowledge chunk into answer evidence.
 pub(crate) fn map_chunk_hit(
     chunk: KnowledgeChunkRow,
@@ -67,75 +93,47 @@ pub(super) fn document_has_exact_readable_revision(
     document.is_query_readable() && document.readable_revision_id == Some(revision_id)
 }
 
+/// The chunk's own text, shared by both answer generation and semantic
+/// verification so the generator never cites neighboring `window_text` that
+/// the verifier cannot attribute to this chunk id.
+pub(super) fn chunk_own_source_text(chunk: &KnowledgeChunkRow) -> String {
+    chunk_answer_source_text(chunk)
+}
+
 pub(super) fn chunk_answer_source_text(chunk: &KnowledgeChunkRow) -> String {
     if chunk.chunk_kind.as_deref() == Some("table_row") {
-        return repair_technical_layout_noise(&chunk.normalized_text);
+        return bounded_evidence_text(&repair_technical_layout_noise(&chunk.normalized_text));
     }
     if chunk.chunk_kind.as_deref() == Some("source_unit") {
         if !chunk.content_text.trim().is_empty() {
-            return repair_technical_layout_noise(&chunk.content_text);
+            return bounded_evidence_text(&repair_technical_layout_noise(&chunk.content_text));
         }
         if !chunk.normalized_text.trim().is_empty() {
-            return repair_technical_layout_noise(&chunk.normalized_text);
+            return bounded_evidence_text(&repair_technical_layout_noise(&chunk.normalized_text));
         }
     }
     let content_text = (!chunk.content_text.trim().is_empty())
         .then(|| repair_technical_layout_noise(&chunk.content_text));
-    let window_text = chunk
-        .window_text
-        .as_deref()
-        .filter(|window| !window.trim().is_empty())
-        .map(repair_technical_layout_noise);
     let normalized_text = (!chunk.normalized_text.trim().is_empty())
         .then(|| repair_technical_layout_noise(&chunk.normalized_text));
-    let fallback = if content_text.is_some() {
-        merge_chunk_source_text_variants([content_text.as_deref(), window_text.as_deref()])
-    } else {
-        merge_chunk_source_text_variants([window_text.as_deref(), normalized_text.as_deref()])
-    };
-    chunk_literal_preserving_source_text(chunk, &fallback).unwrap_or(fallback)
-}
-
-fn merge_chunk_source_text_variants<const N: usize>(values: [Option<&str>; N]) -> String {
-    const MAX_MERGED_CHUNK_SOURCE_CHARS: usize = 16_000;
-
-    let mut parts = Vec::<(String, String)>::new();
-    for value in values.into_iter().flatten() {
-        let trimmed = value.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        // Compare only retained text: an oversized window must not evict core
-        // content that appears beyond its bounded prefix.
-        let bounded = excerpt_for(trimmed, MAX_MERGED_CHUNK_SOURCE_CHARS);
-        let normalized = bounded.split_whitespace().collect::<Vec<_>>().join(" ");
-        if parts.iter().any(|(seen, _)| seen.contains(&normalized)) {
-            continue;
-        }
-        let insertion_index =
-            parts.iter().position(|(seen, _)| normalized.contains(seen)).unwrap_or(parts.len());
-        parts.retain(|(seen, _)| !normalized.contains(seen));
-        parts.insert(insertion_index, (normalized, bounded));
-    }
-    let merged = parts.into_iter().map(|(_, text)| text).collect::<Vec<_>>().join("\n");
-    excerpt_for(&merged, MAX_MERGED_CHUNK_SOURCE_CHARS)
+    let fallback = content_text
+        .or(normalized_text)
+        .or_else(|| chunk.window_text.as_deref().map(repair_technical_layout_noise))
+        .unwrap_or_default();
+    bounded_evidence_text(
+        &chunk_literal_preserving_source_text(chunk, &fallback).unwrap_or(fallback),
+    )
 }
 
 fn chunk_literal_preserving_source_text(
     chunk: &KnowledgeChunkRow,
     fallback: &str,
 ) -> Option<String> {
-    const MAX_LITERAL_PRESERVING_SOURCE_CHARS: usize = 16_000;
-
     let mut parts = Vec::new();
     let mut seen = HashSet::new();
-    for value in [
-        chunk.window_text.as_deref(),
-        Some(chunk.content_text.as_str()),
-        Some(chunk.normalized_text.as_str()),
-    ]
-    .into_iter()
-    .flatten()
+    for value in [Some(chunk.content_text.as_str()), Some(chunk.normalized_text.as_str())]
+        .into_iter()
+        .flatten()
     {
         let repaired = repair_technical_layout_noise(value);
         let trimmed = repaired.trim();
@@ -161,10 +159,10 @@ fn chunk_literal_preserving_source_text(
     {
         return None;
     }
-    if candidate.chars().count() <= MAX_LITERAL_PRESERVING_SOURCE_CHARS {
+    if candidate.len() <= MAX_EVIDENCE_SOURCE_UTF8_BYTES {
         return Some(candidate);
     }
-    Some(excerpt_for(&candidate, MAX_LITERAL_PRESERVING_SOURCE_CHARS))
+    Some(bounded_utf8_prefix(&candidate, MAX_EVIDENCE_SOURCE_UTF8_BYTES).to_string())
 }
 
 fn chunk_structured_literal_text_score(text: &str) -> usize {
@@ -249,14 +247,31 @@ pub(crate) fn chunk_is_setup_focus_command_path_anchor(chunk: &RuntimeMatchedChu
         })
 }
 
-/// Returns a bounded, trimmed excerpt.
-pub(crate) fn excerpt_for(content: &str, max_chars: usize) -> String {
-    let trimmed = content.trim();
-    if trimmed.chars().count() <= max_chars {
-        return trimmed.to_string();
+/// The omitted-text marker belongs to the display, not to the source passage.
+pub(super) struct ContextExcerpt<'a> {
+    pub(super) source: &'a str,
+    truncated: bool,
+}
+
+impl<'a> ContextExcerpt<'a> {
+    pub(super) fn new(content: &'a str, max_chars: usize) -> Self {
+        let text = content.trim();
+        match text.char_indices().nth(max_chars) {
+            Some((end, _)) => Self { source: &text[..end], truncated: true },
+            None => Self { source: text, truncated: false },
+        }
     }
-    let excerpt = trimmed.chars().take(max_chars).collect::<String>();
-    format!("{excerpt}...")
+}
+
+impl std::fmt::Display for ContextExcerpt<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.source)?;
+        if self.truncated { f.write_str("...") } else { Ok(()) }
+    }
+}
+
+pub(crate) fn excerpt_for(content: &str, max_chars: usize) -> String {
+    ContextExcerpt::new(content, max_chars).to_string()
 }
 
 /// Selects a bounded line window centered on the strongest keyword match.
@@ -347,4 +362,88 @@ pub(crate) fn command_dense_excerpt_for(content: &str, max_chars: usize) -> Opti
     let repaired = repair_technical_layout_noise(content);
     let excerpt = excerpt_for(&repaired, max_chars);
     (!excerpt.trim().is_empty()).then_some(excerpt)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn chunk_row(kind: &str, content: &str, normalized: &str) -> KnowledgeChunkRow {
+        KnowledgeChunkRow {
+            chunk_id: Uuid::from_u128(1),
+            workspace_id: Uuid::from_u128(2),
+            library_id: Uuid::from_u128(3),
+            document_id: Uuid::from_u128(4),
+            revision_id: Uuid::from_u128(5),
+            chunk_index: 0,
+            chunk_kind: Some(kind.to_string()),
+            content_text: content.to_string(),
+            normalized_text: normalized.to_string(),
+            span_start: None,
+            span_end: None,
+            token_count: None,
+            support_block_ids: Vec::new(),
+            section_path: Vec::new(),
+            heading_trail: Vec::new(),
+            literal_digest: None,
+            chunk_state: "ready".to_string(),
+            text_generation: Some(1),
+            vector_generation: Some(1),
+            quality_score: Some(1.0),
+            window_text: None,
+            occurred_at: None,
+            occurred_until: None,
+        }
+    }
+
+    fn assert_within_bound(text: &str) {
+        assert!(
+            text.len() <= MAX_EVIDENCE_SOURCE_UTF8_BYTES,
+            "evidence text must stay within the UTF-8 byte bound"
+        );
+        assert!(text.is_char_boundary(text.len()));
+        assert!(std::str::from_utf8(text.as_bytes()).is_ok());
+    }
+
+    #[test]
+    fn long_russian_source_is_bounded_by_utf8_bytes_not_characters() {
+        let russian = "Привет, мир! Это длинный русский источник. ".repeat(800);
+        assert!(russian.len() > MAX_EVIDENCE_SOURCE_UTF8_BYTES * 2);
+        let text = chunk_answer_source_text(&chunk_row("paragraph", &russian, &russian));
+        assert_within_bound(&text);
+        assert!(!text.is_empty());
+        // A character cap would leave 16,000 chars = 32,000 bytes here.
+        assert!(text.chars().count() < MAX_EVIDENCE_SOURCE_UTF8_BYTES);
+    }
+
+    #[test]
+    fn long_ascii_source_is_bounded_by_utf8_bytes() {
+        let ascii = "a".repeat(MAX_EVIDENCE_SOURCE_UTF8_BYTES * 2);
+        let text = chunk_answer_source_text(&chunk_row("paragraph", &ascii, &ascii));
+        assert_within_bound(&text);
+        assert_eq!(text.len(), MAX_EVIDENCE_SOURCE_UTF8_BYTES);
+    }
+
+    #[test]
+    fn source_unit_and_table_row_cannot_bypass_the_evidence_bound() {
+        let russian = "Строка таблицы: значение параметра. ".repeat(1_000);
+        for kind in ["source_unit", "table_row"] {
+            let text = chunk_answer_source_text(&chunk_row(kind, &russian, &russian));
+            assert_within_bound(&text);
+            assert!(!text.is_empty(), "{kind} source must not be dropped by the bound");
+        }
+        // The table_row path reads normalized_text even when content is empty.
+        let table = chunk_answer_source_text(&chunk_row("table_row", "", &russian));
+        assert_within_bound(&table);
+        assert!(!table.is_empty());
+    }
+
+    #[test]
+    fn bounded_prefix_never_splits_a_code_point() {
+        let text = "ё".repeat(10_000);
+        let prefix = bounded_utf8_prefix(&text, MAX_EVIDENCE_SOURCE_UTF8_BYTES);
+        assert!(prefix.len() <= MAX_EVIDENCE_SOURCE_UTF8_BYTES);
+        assert!(text.is_char_boundary(prefix.len()));
+        assert_eq!(prefix.len() % 2, 0);
+    }
 }

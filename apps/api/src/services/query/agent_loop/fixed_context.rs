@@ -73,6 +73,22 @@ pub(crate) enum LiteralRevisionRequest<'a> {
         required_literals: &'a [String],
         revision_context: &'a str,
     },
+    PreservedStatements {
+        library_id: Uuid,
+        user_question: &'a str,
+        conversation_history: &'a [ChatMessage],
+        original_answer: &'a str,
+        required_statements: &'a [String],
+        revision_context: &'a str,
+    },
+    UnsupportedClaims {
+        library_id: Uuid,
+        user_question: &'a str,
+        conversation_history: &'a [ChatMessage],
+        original_answer: &'a str,
+        unsupported_claims: &'a [String],
+        revision_context: &'a str,
+    },
 }
 
 pub(crate) async fn run_literal_revision_turn(
@@ -130,6 +146,46 @@ pub(crate) async fn run_literal_revision_turn(
             ),
             "literal-inventory coverage revision LLM call failed",
         ),
+        LiteralRevisionRequest::PreservedStatements {
+            library_id,
+            user_question,
+            conversation_history,
+            original_answer,
+            required_statements,
+            revision_context,
+        } => (
+            library_id,
+            user_question,
+            conversation_history,
+            revision_context,
+            QueryProviderCallKind::QueryAnswerLiteralRevision,
+            super::super::assistant_prompt::render_preserved_statements_revision(
+                original_answer,
+                required_statements,
+                "Provided in the `ironrag_literal_revision_context` runtime tool result.",
+            ),
+            "preserved-statements revision LLM call failed",
+        ),
+        LiteralRevisionRequest::UnsupportedClaims {
+            library_id,
+            user_question,
+            conversation_history,
+            original_answer,
+            unsupported_claims,
+            revision_context,
+        } => (
+            library_id,
+            user_question,
+            conversation_history,
+            revision_context,
+            QueryProviderCallKind::QueryAnswerLiteralRevision,
+            super::super::assistant_prompt::render_unsupported_claims_revision(
+                original_answer,
+                unsupported_claims,
+                "Provided in the `ironrag_literal_revision_context` runtime tool result.",
+            ),
+            "unsupported-claims revision LLM call failed",
+        ),
     };
 
     run_fixed_context_turn(
@@ -182,11 +238,9 @@ pub(super) async fn run_fixed_context_turn(
     let tool_use_request = fixed_context_tool_request(&binding, messages.clone());
 
     let llm_call_started = std::time::Instant::now();
-    let response = match crate::observability::with_provider_call_id(
-        provider_call_reservation.provider_call_id(),
-        state.llm_gateway.generate_with_tools(tool_use_request),
-    )
-    .await
+    let response = match provider_call_reservation
+        .scoped(state.llm_gateway.generate_with_tools(tool_use_request))
+        .await
     {
         Ok(response) => response,
         Err(error) => {
@@ -223,6 +277,8 @@ pub(super) async fn run_fixed_context_turn(
         usage_json: response.usage_json,
         provider_calls,
         assistant_grounding: AssistantGroundingEvidence::default(),
+        evidence_manifest: AgentEvidenceManifest::default(),
+        evidence_selection_bounded: None,
         child_query_execution_ids: Vec::new(),
         debug_iterations: vec![debug_iteration],
         agent_loop: None,

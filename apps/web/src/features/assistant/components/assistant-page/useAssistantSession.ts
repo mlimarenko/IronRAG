@@ -23,6 +23,7 @@ import {
   applyTurnResultToMessages,
   createPendingAssistantMessage,
   createUserMessage,
+  finalizedUserMessageFromResult,
   EMPTY_MESSAGES,
   isInProgressAssistantTurn,
   latestEvidenceFromMessages,
@@ -44,7 +45,6 @@ type SendQuestionVariables = {
   optimisticSessionId: string | null
   pendingMessage: AssistantMessage
   questionText: string
-  recoveryMessageStartIndex: number
   requestScope: string
   sessionsQueryKey: QueryKey
   userMessage: AssistantMessage
@@ -69,9 +69,10 @@ type RenameSessionVariables = {
 }
 
 type LocalPendingTurn = {
+  executionId: string | null
   optimisticSessionId: string | null
   pendingMessage: AssistantMessage
-  questionText: string
+  requestTurnId: string | null
   requestScope: string
   sessionId: string | null
   userMessage: AssistantMessage
@@ -233,13 +234,33 @@ function appendPendingActivity(
   }
 }
 
+/// The live turn keeps the local optimistic id until a history refresh confirms
+/// the accepted execution and swaps in the server message; activity frames then
+/// have to follow the same server-owned execution id, never message text.
+function isPendingAssistantMessage(
+  message: AssistantMessage,
+  pendingMessageId: string,
+  confirmedExecutionId: string | null,
+): boolean {
+  if (message.role !== 'assistant') return false
+  if (message.id === pendingMessageId) return true
+  return (
+    confirmedExecutionId !== null &&
+    !message.content &&
+    message.executionId === confirmedExecutionId
+  )
+}
+
 function appendActivityToPendingMessage(
   messages: AssistantMessage[],
   pendingMessageId: string,
+  confirmedExecutionId: string | null,
   event: AssistantAgentActivityEvent,
 ): AssistantMessage[] {
   return messages.map((message) =>
-    message.id === pendingMessageId ? appendPendingActivity(message, event) : message,
+    isPendingAssistantMessage(message, pendingMessageId, confirmedExecutionId)
+      ? appendPendingActivity(message, event)
+      : message,
   )
 }
 
@@ -271,29 +292,26 @@ function mergeHydratedMessagesWithLocalPendingTurn(
     return messages
   }
 
-  const pendingQuestion = pendingTurn.questionText.trim()
-  let matchingUserIndex = -1
-  for (let index = messages.length - 1; index >= 0; index -= 1) {
-    const message = messages[index]
-    if (message?.role === 'user' && message.content.trim() === pendingQuestion) {
-      matchingUserIndex = index
-      break
-    }
+  const hasRequest =
+    pendingTurn.requestTurnId !== null &&
+    messages.some((message) => message.role === 'user' && message.id === pendingTurn.requestTurnId)
+  const hasResponse =
+    pendingTurn.executionId !== null &&
+    messages.some(
+      (message) => message.role === 'assistant' && message.executionId === pendingTurn.executionId,
+    )
+  if (hasResponse) {
+    if (isInProgressAssistantTurn(pendingTurn.pendingMessage)) return messages
+    return messages.map((message) =>
+      message.role === 'assistant' &&
+      message.executionId === pendingTurn.executionId &&
+      message.id === pendingTurn.executionId &&
+      message.content === ''
+        ? pendingTurn.pendingMessage
+        : message,
+    )
   }
-
-  if (matchingUserIndex >= 0) {
-    const assistantAlreadyExists = messages
-      .slice(matchingUserIndex + 1)
-      .some((message) => message.role === 'assistant')
-    if (assistantAlreadyExists) return messages
-    return [
-      ...messages.slice(0, matchingUserIndex + 1),
-      pendingTurn.pendingMessage,
-      ...messages.slice(matchingUserIndex + 1),
-    ]
-  }
-
-  return [...messages, pendingTurn.userMessage, pendingTurn.pendingMessage]
+  return [...messages, ...(hasRequest ? [] : [pendingTurn.userMessage]), pendingTurn.pendingMessage]
 }
 
 function finalizedAssistantMessageFromResult(
@@ -615,10 +633,10 @@ export function useAssistantSession({ workspaceId, libraryId, t }: UseAssistantS
         )
       }
 
+      let confirmedExecutionId: string | null = null
       const result = await queryApi.createTurnStream(
         sessionId,
         variables.questionText,
-        variables.recoveryMessageStartIndex,
         (event) => {
           if (
             libraryScopeRef.current !== variables.requestScope ||
@@ -627,7 +645,21 @@ export function useAssistantSession({ workspaceId, libraryId, t }: UseAssistantS
             return
           }
           setMessages((current) =>
-            appendActivityToPendingMessage(current, variables.pendingMessage.id, event),
+            appendActivityToPendingMessage(
+              current,
+              variables.pendingMessage.id,
+              confirmedExecutionId,
+              event,
+            ),
+          )
+        },
+        (executionId) => {
+          confirmedExecutionId = executionId
+          if (libraryScopeRef.current !== variables.requestScope) return
+          setLocalPendingTurn((current) =>
+            current?.pendingMessage.id === variables.pendingMessage.id
+              ? { ...current, executionId }
+              : current,
           )
         },
       )
@@ -678,9 +710,10 @@ export function useAssistantSession({ workspaceId, libraryId, t }: UseAssistantS
 
       setMessages((current) => [...current, variables.userMessage, variables.pendingMessage])
       setLocalPendingTurn({
+        executionId: null,
         optimisticSessionId: variables.optimisticSessionId,
         pendingMessage: variables.pendingMessage,
-        questionText: variables.questionText,
+        requestTurnId: null,
         requestScope: variables.requestScope,
         sessionId: variables.existingSessionId ?? variables.optimisticSessionId,
         userMessage: variables.userMessage,
@@ -706,6 +739,7 @@ export function useAssistantSession({ workspaceId, libraryId, t }: UseAssistantS
           applyTurnResultToMessages(
             current,
             pendingMessageId,
+            variables.userMessage.id,
             result,
             t('assistant.noResponseGenerated'),
           ),
@@ -714,6 +748,9 @@ export function useAssistantSession({ workspaceId, libraryId, t }: UseAssistantS
           current?.pendingMessage.id === pendingMessageId
             ? {
                 ...current,
+                executionId: result.execution.id,
+                requestTurnId: result.execution.requestTurnId ?? null,
+                userMessage: finalizedUserMessageFromResult(current.userMessage, result),
                 pendingMessage: finalizedAssistantMessageFromResult(
                   current.pendingMessage,
                   result,
@@ -740,13 +777,24 @@ export function useAssistantSession({ workspaceId, libraryId, t }: UseAssistantS
             activeSessionRef.current = context.previousActiveSession
             setActiveSession(context.previousActiveSession)
           }
+          const confirmedExecutionId =
+            localPendingTurn?.pendingMessage.id === variables.pendingMessage.id
+              ? localPendingTurn.executionId
+              : null
+          const confirmedReply = messages.find((message) =>
+            isPendingAssistantMessage(message, variables.pendingMessage.id, confirmedExecutionId),
+          )
           setMessages((current) => {
-            const hasPendingMessage = current.some(
-              (message) => message.id === variables.pendingMessage.id,
+            const hasPendingMessage = current.some((message) =>
+              isPendingAssistantMessage(message, variables.pendingMessage.id, confirmedExecutionId),
             )
-            if (!hasPendingMessage) return context.previousMessages
+            if (!hasPendingMessage) {
+              // A turn the server never accepted rolls back; an accepted turn
+              // keeps the confirmed history, including messages from other tabs.
+              return confirmedExecutionId !== null ? current : context.previousMessages
+            }
             return current.map((message) =>
-              message.id === variables.pendingMessage.id
+              isPendingAssistantMessage(message, variables.pendingMessage.id, confirmedExecutionId)
                 ? {
                     ...message,
                     content: inlineError,
@@ -764,10 +812,12 @@ export function useAssistantSession({ workspaceId, libraryId, t }: UseAssistantS
             current?.pendingMessage.id === variables.pendingMessage.id
               ? {
                   ...current,
-                  pendingMessage: {
-                    ...current.pendingMessage,
-                    content: inlineError,
-                  },
+                  pendingMessage: confirmedReply
+                    ? { ...confirmedReply, content: inlineError }
+                    : {
+                        ...current.pendingMessage,
+                        content: inlineError,
+                      },
                 }
               : current,
           )
@@ -904,7 +954,6 @@ export function useAssistantSession({ workspaceId, libraryId, t }: UseAssistantS
         optimisticSessionId: existingSessionId ? null : `optimistic-session-${now}`,
         pendingMessage,
         questionText,
-        recoveryMessageStartIndex: messages.length,
         requestScope,
         sessionsQueryKey: sessionsQueryOptions.queryKey,
         userMessage: createUserMessage(questionText, now),
@@ -917,7 +966,6 @@ export function useAssistantSession({ workspaceId, libraryId, t }: UseAssistantS
       isScopeExecuting,
       libraryId,
       libraryScopeKey,
-      messages.length,
       mutateSendQuestion,
       sessionHasPendingAssistantTurn,
       sessions,

@@ -1,4 +1,5 @@
 use super::*;
+use crate::infra::repositories::ai_repository;
 
 /// Validates the terminal state an operator or reconciliation path may write
 /// for a reservation that produced no usage.
@@ -50,123 +51,6 @@ fn warn_if_cached_input_clamped(
 }
 
 impl BillingService {
-    /// Creates a durable `started` provider-call row before a paid request is
-    /// issued. Callers must complete or fail the returned reservation.
-    ///
-    /// # Errors
-    /// Returns an [`ApiError`] when attribution is invalid or the reservation
-    /// cannot be persisted. A caller must not issue the provider request after
-    /// an error.
-    pub async fn reserve_execution_provider_call(
-        &self,
-        state: &AppState,
-        command: ReserveExecutionProviderCallCommand,
-    ) -> Result<Uuid, ApiError> {
-        self.reserve_execution_provider_call_with_id(state, Uuid::now_v7(), command).await
-    }
-
-    /// Persists a reservation using a caller-known ID. Optional latency-bound
-    /// stages use this form so an ambiguous timeout can always be reconciled
-    /// without losing ownership of a committed `started` row.
-    pub async fn reserve_execution_provider_call_with_id(
-        &self,
-        state: &AppState,
-        provider_call_id: Uuid,
-        command: ReserveExecutionProviderCallCommand,
-    ) -> Result<Uuid, ApiError> {
-        let owning_execution_kind = parse_execution_owner_kind(&command.owning_execution_kind)
-            .ok_or_else(|| invalid_execution_owner_kind(&command.owning_execution_kind))?;
-        self.validate_runtime_attribution(
-            state,
-            owning_execution_kind,
-            command.owning_execution_id,
-            command.runtime_execution_id,
-            command.runtime_task_kind,
-        )
-        .await?;
-        let execution_scope = self
-            .resolve_execution_scope(state, owning_execution_kind, command.owning_execution_id)
-            .await?;
-        if execution_scope.workspace_id != command.workspace_id
-            || execution_scope.library_id != command.library_id
-        {
-            return Err(ApiError::Conflict(format!(
-                "provider call attribution does not match execution {} scope",
-                command.owning_execution_id
-            )));
-        }
-
-        let new_provider_call = billing_repository::NewBillingProviderCall {
-            id: provider_call_id,
-            workspace_id: command.workspace_id,
-            library_id: command.library_id,
-            binding_id: command.binding_id,
-            owning_execution_kind: execution_owner_kind_key(owning_execution_kind),
-            owning_execution_id: command.owning_execution_id,
-            runtime_execution_id: command.runtime_execution_id,
-            runtime_task_kind: command.runtime_task_kind.map(RuntimeTaskKind::as_str),
-            provider_catalog_id: command.provider_catalog_id,
-            model_catalog_id: command.model_catalog_id,
-            call_kind: &command.call_kind,
-            call_state: "started",
-            completed_at: None,
-        };
-        let provider_call = match billing_repository::create_provider_call(
-            &state.persistence.postgres,
-            &new_provider_call,
-        )
-        .await
-        {
-            Ok(provider_call) => provider_call,
-            Err(error) if database_error_is_unique_violation(&error) => {
-                let existing = billing_repository::get_provider_call_by_id(
-                    &state.persistence.postgres,
-                    provider_call_id,
-                )
-                .await
-                .map_err(|e| ApiError::internal_with_log(e, "internal"))?
-                .ok_or_else(|| {
-                    ApiError::Conflict(format!(
-                        "provider call {provider_call_id} reservation conflict disappeared"
-                    ))
-                })?;
-                if !provider_call_matches_reservation(&existing, &new_provider_call)
-                    || existing.call_state != "started"
-                {
-                    return Err(ApiError::Conflict(format!(
-                        "provider call {provider_call_id} already belongs to a different or terminal event"
-                    )));
-                }
-                existing
-            }
-            Err(error) => return Err(ApiError::internal_with_log(error, "internal")),
-        };
-        Ok(provider_call.id)
-    }
-
-    /// Cancels a known reservation when it exists, and is a no-op when an
-    /// interrupted INSERT never committed. This is intended for asynchronous
-    /// reconciliation after a deadline or task cancellation.
-    pub async fn cancel_reserved_provider_call_if_present(
-        &self,
-        state: &AppState,
-        provider_call_id: Uuid,
-    ) -> Result<bool, ApiError> {
-        let exists = billing_repository::get_provider_call_by_id(
-            &state.persistence.postgres,
-            provider_call_id,
-        )
-        .await
-        .map_err(|e| ApiError::internal_with_log(e, "internal"))?
-        .is_some();
-        if !exists {
-            return Ok(false);
-        }
-        self.finish_reserved_provider_call_without_usage(state, provider_call_id, "canceled")
-            .await?;
-        Ok(true)
-    }
-
     /// Atomically attaches provider-reported usage and charges to a durable
     /// reservation and marks it completed. Any pre-commit error or cancellation
     /// rolls the whole transaction back to a clean, retryable `started` row.
@@ -443,6 +327,7 @@ impl BillingService {
     ///
     /// Returns an [`ApiError`] when attribution fails, repository writes fail, or required billing
     /// metadata cannot be resolved.
+    #[cfg(feature = "test-support")]
     pub async fn capture_execution_provider_call(
         &self,
         state: &AppState,
@@ -480,7 +365,17 @@ impl BillingService {
         .await
         .map_err(|e| ApiError::internal_with_log(e, "internal"))?
         else {
-            return Ok(None);
+            // A captured call without a catalog provider cannot be priced, and
+            // dropping it silently would report the execution as if no call had
+            // happened. Fail with the attribution that broke so the caller can
+            // log or defer it instead of losing the observation.
+            return Err(ApiError::Conflict(format!(
+                "provider '{}' is not in the provider catalog; {} provider call for {} {} was not recorded",
+                command.provider_kind,
+                command.call_kind,
+                command.owning_execution_kind,
+                command.owning_execution_id
+            )));
         };
         let Some(model_catalog) = ai_repository::get_model_catalog_by_provider_and_name(
             &state.persistence.postgres,
@@ -490,7 +385,14 @@ impl BillingService {
         .await
         .map_err(|e| ApiError::internal_with_log(e, "internal"))?
         else {
-            return Ok(None);
+            return Err(ApiError::Conflict(format!(
+                "model '{}' of provider '{}' is not in the model catalog; {} provider call for {} {} was not recorded",
+                command.model_name,
+                command.provider_kind,
+                command.call_kind,
+                command.owning_execution_kind,
+                command.owning_execution_id
+            )));
         };
 
         let mut transaction = state
@@ -665,7 +567,11 @@ impl BillingService {
         )
         .await
         .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
-        let provider_call_count = billing_repository::count_provider_calls_by_execution(
+        // The rollup records settled (completed) observations. A reservation
+        // that never completed proves neither a dispatch nor a free attempt, so
+        // it stays out of this count and remains visible through the unpriced
+        // count as unknown liability.
+        let provider_call_count = billing_repository::count_settled_provider_calls_by_execution(
             &mut *transaction,
             execution_kind_key,
             execution_id,

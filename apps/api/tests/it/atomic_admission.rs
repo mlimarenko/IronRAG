@@ -111,6 +111,7 @@ async fn orphan_create_refuses_owned_or_ambiguous_state_without_writes() -> Resu
             let before_head:serde_json::Value=sqlx::query_scalar("select to_jsonb(h) from content_document_head h where document_id=$1").bind(document_id).fetch_one(pool).await?;
             let before_revisions:serde_json::Value=sqlx::query_scalar("select jsonb_agg(to_jsonb(r) order by revision_number) from content_revision r where document_id=$1").bind(document_id).fetch_one(pool).await?;
             let error=fixture.state.application_services.content.upload_inline_document(&fixture.state,UploadInlineDocumentCommand {
+                enrichment_scope: None,
                 workspace_id:fixture.workspace_id,library_id:fixture.library_id,external_key:Some(key.clone()),
                 idempotency_key:Some(key),requested_by_principal_id:None,request_surface:"rest".to_owned(),source_identity:None,
                 title:None,document_hint:None,file_name:"safe.txt".to_owned(),mime_type:Some("text/plain".to_owned()),
@@ -217,6 +218,7 @@ async fn orphan_create_http_completes_without_replacing_history() -> Result<()> 
         let caller=tokio::spawn({
             let state=fixture.state.clone();
             let command=ironrag_backend::services::content::service::UploadInlineDocumentCommand {
+                enrichment_scope: None,
                 workspace_id:fixture.workspace_id,library_id:fixture.library_id,
                 external_key:Some("orphan-neutral".to_owned()),idempotency_key:Some("aborted-orphan".to_owned()),
                 requested_by_principal_id:None,request_surface:"rest".to_owned(),source_identity:None,
@@ -463,6 +465,7 @@ fn content_request(fixture: &ContentLifecycleFixture, key: &str) -> ContentAdmis
         }),
         parent_async_operation_id: None,
         priority: 100,
+        enrichment_scope: None,
     }
 }
 
@@ -483,6 +486,7 @@ fn delete_mutation_command(
         source_identity: None,
         revision: None,
         parent_async_operation_id: None,
+        enrichment_scope: None,
     }
 }
 
@@ -1050,6 +1054,7 @@ async fn visibility_contract_actorless_upload_replay_reaches_atomic_identity_gua
     let fixture = ContentLifecycleFixture::create().await?;
     let result = Box::pin(async {
         let command = UploadInlineDocumentCommand {
+            enrichment_scope: None,
             workspace_id: fixture.workspace_id,
             library_id: fixture.library_id,
             external_key: Some("actorless-upload".to_owned()),
@@ -1501,6 +1506,7 @@ async fn repeated_delete_repairs_stale_metadata_for_the_exact_target() -> Result
             operation_kind: "delete".to_owned(), idempotency_key: Some("stale-delete-replay".to_owned()),
             requested_by_principal_id: None, request_surface: "rest".to_owned(), source_identity: None,
             revision: None, parent_async_operation_id: None,
+            enrichment_scope: None,
         }).await?;
         let operation_id = accepted.async_operation_id.context("delete operation")?;
         let stale_delete = accepted.mutation;
@@ -1547,6 +1553,7 @@ async fn repeated_delete_repairs_stale_metadata_for_the_exact_target() -> Result
                     source_identity: None,
                     revision: None,
                     parent_async_operation_id: None,
+                    enrichment_scope: None,
                 },
             )
             .await
@@ -1964,6 +1971,7 @@ async fn delete_idempotency_key_cannot_move_a_mutation_item_to_another_document(
                     source_identity: None,
                     revision: None,
                     parent_async_operation_id: None,
+                    enrichment_scope: None,
                 },
             )
             .await?;
@@ -1987,6 +1995,7 @@ async fn delete_idempotency_key_cannot_move_a_mutation_item_to_another_document(
                     source_identity: None,
                     revision: None,
                     parent_async_operation_id: None,
+                    enrichment_scope: None,
                 },
             )
             .await
@@ -2967,4 +2976,101 @@ async fn manual_repair_rechecks_suppression_after_candidate_read() -> Result<()>
     }.await;
     fixture.cleanup().await?;
     result
+}
+
+/// The multipart create must persist the requested bounded plan and its real
+/// admitted job; absence keeps the ordinary identity and an unknown literal is
+/// refused before any admission row exists.
+#[tokio::test]
+#[ignore = "native DB-backed integration case; CI owns execution"]
+async fn multipart_create_persists_the_requested_enrichment_plan() -> Result<()> {
+    use axum::{
+        body::Body,
+        http::{Request, StatusCode},
+    };
+    use tower::ServiceExt;
+
+    let fixture = ContentLifecycleFixture::create().await?;
+    let pool = &fixture.state.persistence.postgres;
+    let token = crate::iam_token_support::mint_api_token(
+        pool,
+        Some(fixture.workspace_id),
+        "workspace",
+        "multipart-plan",
+        &["documents:write", "projects:write"],
+    )
+    .await?;
+    let router =
+        ironrag_backend::interfaces::http::content::router().with_state(fixture.state.clone());
+    let path = format!("/content/libraries/{}/documents", fixture.library_id);
+    let request = |body: String| {
+        Request::post(&path)
+            .header("content-type", "multipart/form-data; boundary=boundary")
+            .header("authorization", format!("Bearer {}", token.plaintext))
+            .body(Body::from(body))
+            .expect("request")
+    };
+    let multipart = |key: &str, plan: Option<&str>| {
+        let plan_part = plan.map_or_else(String::new, |value| {
+            format!(
+                "--boundary\r\nContent-Disposition: form-data; name=\"enrichment_scope\"\r\n\r\n{value}\r\n"
+            )
+        });
+        format!(
+            "--boundary\r\nContent-Disposition: form-data; name=\"external_key\"\r\n\r\n{key}\r\n{plan_part}--boundary\r\nContent-Disposition: form-data; name=\"file\"; filename=\"{key}.txt\"\r\nContent-Type: text/plain\r\n\r\nplan source {key}\r\n--boundary--\r\n"
+        )
+    };
+
+    let bounded = router
+        .clone()
+        .oneshot(request(multipart("plan-bounded", Some("text_and_embedding"))))
+        .await?;
+    let bounded_status = bounded.status();
+    let body: serde_json::Value =
+        serde_json::from_slice(&axum::body::to_bytes(bounded.into_body(), 256 * 1024).await?)?;
+    assert_eq!(bounded_status, StatusCode::CREATED, "create response: {body}");
+    let admission = &body["mutation"];
+    let mutation_id =
+        Uuid::parse_str(admission["mutation"]["id"].as_str().context("mutation id")?)?;
+    let job_id = Uuid::parse_str(admission["jobId"].as_str().context("admission-level job id")?)?;
+    let persisted: Option<String> = sqlx::query_scalar(
+        "select request_identity->>'enrichmentScope' from content_mutation where id=$1",
+    )
+    .bind(mutation_id)
+    .fetch_one(pool)
+    .await?;
+    assert_eq!(persisted.as_deref(), Some("text_and_embedding"));
+    let admitted_job: Option<Uuid> =
+        sqlx::query_scalar("select id from ingest_job where mutation_id=$1")
+            .bind(mutation_id)
+            .fetch_optional(pool)
+            .await?;
+    assert_eq!(admitted_job, Some(job_id));
+
+    let plain = router.clone().oneshot(request(multipart("plan-ordinary", None))).await?;
+    let plain_status = plain.status();
+    let plain_body: serde_json::Value =
+        serde_json::from_slice(&axum::body::to_bytes(plain.into_body(), 256 * 1024).await?)?;
+    assert_eq!(plain_status, StatusCode::CREATED, "ordinary create response: {plain_body}");
+    let plain_id = Uuid::parse_str(
+        plain_body["mutation"]["mutation"]["id"].as_str().context("plain mutation id")?,
+    )?;
+    let ordinary: Option<serde_json::Value> =
+        sqlx::query_scalar("select request_identity from content_mutation where id=$1")
+            .bind(plain_id)
+            .fetch_one(pool)
+            .await?;
+    assert!(
+        ordinary.as_ref().and_then(|identity| identity.get("enrichmentScope")).is_none(),
+        "an absent plan must keep the legacy identity bytes"
+    );
+
+    let before: i64 =
+        sqlx::query_scalar("select count(*) from content_mutation").fetch_one(pool).await?;
+    let refused = router.oneshot(request(multipart("plan-unknown", Some("video")))).await?;
+    assert_eq!(refused.status(), StatusCode::BAD_REQUEST);
+    let after: i64 =
+        sqlx::query_scalar("select count(*) from content_mutation").fetch_one(pool).await?;
+    assert_eq!(before, after, "unknown plan must refuse before admission");
+    Ok(())
 }

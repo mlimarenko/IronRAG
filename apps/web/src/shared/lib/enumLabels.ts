@@ -25,6 +25,8 @@ function translate(t: TFunction, key: string, raw: string): string {
 const DOCUMENT_STATUS_KEYS: Record<string, string> = {
   queued: 'documents.statusQueued',
   processing: 'documents.statusProcessing',
+  paused: 'documents.statusPaused',
+  pending_materialization: 'documents.statusPendingMaterialization',
   ready: 'documents.statusReady',
   failed: 'documents.statusFailed',
   canceled: 'documents.statusCanceled',

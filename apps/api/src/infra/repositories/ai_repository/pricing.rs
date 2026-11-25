@@ -1,11 +1,16 @@
+use base64::Engine as _;
+use image::ImageReader;
 use rust_decimal::Decimal;
 use sqlx::{Executor, FromRow, PgPool, Postgres};
 use uuid::Uuid;
 
 use crate::domains::ai::{ModelLongContextPricing, ModelPricing};
 pub use crate::domains::provider_profiles::{
-    FinancialAdmission, FinancialAdmissionState, FinancialModelAllowance, FinancialRequestEnvelope,
+    AdmittedCaller, CALLER_BINDING_FORMAT_VERSION, CallerBinding, FinancialAdmission,
+    FinancialAdmissionState, FinancialChatMediaAdmission, FinancialModelAllowance,
+    FinancialRequestEnvelope,
 };
+use crate::shared::provider_http::DispatchCaller;
 
 /// Must come from required deployment configuration, never from the provider request.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -21,6 +26,10 @@ pub enum FinancialAdmissionError {
     InvalidScope,
     #[error("financial scope is not active or has expired")]
     NotActive,
+    /// The attempt's authenticated caller is not admitted by the grant's
+    /// current caller binding. The variant carries nothing about the binding.
+    #[error("financial scope does not admit this caller")]
+    Caller,
     #[error("financial allowance exhausted")]
     Exhausted,
     #[error("financial request is outside the admitted envelope")]
@@ -90,6 +99,146 @@ pub async fn validate_financial_configuration(
     validate_financial_rows(rows, required)
 }
 
+/// Message keys a chat request may carry. Media never travels as a message
+/// field: it can only appear as a `content` part, which the closed reader below
+/// either refuses or admits within the envelope's media policy.
+const CHAT_MESSAGE_FIELDS: [&str; 6] =
+    ["role", "content", "name", "tool_call_id", "tool_calls", "refusal"];
+
+/// Closed reading of a chat `messages` value under one optional media policy.
+///
+/// The top-level `audio`/`modalities` guards cannot see a media part nested in
+/// `messages[].content`, so the same predicate must read the nested layer.
+/// Every message is an object with known fields, and its `content` is either a
+/// string or a non-empty array of parts:
+///
+/// - with no media policy the request is text-only and every part must be the
+///   exact `{"type":"text","text":<string>}` shape;
+/// - with a policy an `image_url` part is read as one bounded inline image and
+///   every other part type stays refused.
+fn chat_messages_admit(
+    messages: Option<&serde_json::Value>,
+    media: Option<&FinancialChatMediaAdmission>,
+) -> bool {
+    let Some(messages) = messages.and_then(serde_json::Value::as_array) else {
+        return false;
+    };
+    if messages.is_empty() {
+        return false;
+    }
+    let mut images = 0u32;
+    let mut image_bytes_total = 0u64;
+    let mut image_pixels_total = 0u64;
+    for message in messages {
+        let Some(message) = message.as_object() else { return false };
+        if message.keys().any(|field| !CHAT_MESSAGE_FIELDS.contains(&field.as_str()))
+            || !message.get("role").is_some_and(serde_json::Value::is_string)
+        {
+            return false;
+        }
+        match message.get("content") {
+            Some(serde_json::Value::String(_)) => {}
+            Some(serde_json::Value::Array(parts)) if !parts.is_empty() => {
+                for part in parts {
+                    let Some(part) = part.as_object() else { return false };
+                    match part.get("type").and_then(serde_json::Value::as_str) {
+                        Some("text")
+                            if part.len() == 2
+                                && part.get("text").is_some_and(serde_json::Value::is_string) => {}
+                        Some("image_url") => {
+                            let Some(policy) = media else { return false };
+                            if !chat_image_part_admits(
+                                part,
+                                policy,
+                                &mut images,
+                                &mut image_bytes_total,
+                                &mut image_pixels_total,
+                            ) {
+                                return false;
+                            }
+                        }
+                        _ => return false,
+                    }
+                }
+            }
+            _ => return false,
+        }
+    }
+    true
+}
+
+/// Admit one bounded inline image and fold it into the running totals.
+///
+/// Count, decoded bytes, dimensions and pixels are independent ceilings: each
+/// one is enforced on its own, and every accumulation uses checked arithmetic
+/// so an overflowing request is refused instead of saturating.
+fn chat_image_part_admits(
+    part: &serde_json::Map<String, serde_json::Value>,
+    policy: &FinancialChatMediaAdmission,
+    images: &mut u32,
+    image_bytes_total: &mut u64,
+    image_pixels_total: &mut u64,
+) -> bool {
+    let Some(bytes) = inline_image_bytes(part) else { return false };
+    let Some(next_images) = images.checked_add(1) else { return false };
+    if next_images > policy.max_images {
+        return false;
+    }
+    let bytes_len = bytes.len() as u64;
+    if bytes_len > policy.max_image_bytes_each {
+        return false;
+    }
+    let Some(next_bytes) = image_bytes_total.checked_add(bytes_len) else { return false };
+    if next_bytes > policy.max_image_bytes_total {
+        return false;
+    }
+    let Some((width, height)) = image_dimensions(&bytes) else { return false };
+    if width > policy.max_image_dimension_px || height > policy.max_image_dimension_px {
+        return false;
+    }
+    let Some(pixels) = width.checked_mul(height) else { return false };
+    let Some(next_pixels) = image_pixels_total.checked_add(u64::from(pixels)) else {
+        return false;
+    };
+    if next_pixels > policy.max_image_pixels_total {
+        return false;
+    }
+    *images = next_images;
+    *image_bytes_total = next_bytes;
+    *image_pixels_total = next_pixels;
+    true
+}
+
+/// The exact inline transport one image part may carry: a `data:` URL whose
+/// MIME is PNG or JPEG, whose payload is standard base64, and whose decoded
+/// bytes carry that same image signature. Everything else is refused.
+fn inline_image_bytes(part: &serde_json::Map<String, serde_json::Value>) -> Option<Vec<u8>> {
+    if part.len() != 2 {
+        return None;
+    }
+    let image = part.get("image_url")?.as_object()?;
+    if image.len() != 1 {
+        return None;
+    }
+    let url = image.get("url")?.as_str()?;
+    let (mime, payload) = url.strip_prefix("data:")?.split_once(";base64,")?;
+    let format = match mime {
+        "image/png" => image::ImageFormat::Png,
+        "image/jpeg" => image::ImageFormat::Jpeg,
+        _ => return None,
+    };
+    let bytes = base64::engine::general_purpose::STANDARD.decode(payload).ok()?;
+    if image::guess_format(&bytes).ok()? != format {
+        return None;
+    }
+    Some(bytes)
+}
+
+/// Header-only dimensions; no full pixel decode is performed during admission.
+fn image_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
+    ImageReader::new(std::io::Cursor::new(bytes)).with_guessed_format().ok()?.into_dimensions().ok()
+}
+
 /// Qualify the actual built JSON body against one typed envelope.
 ///
 /// Everything here is a validity or resource guard, evaluated on the exact
@@ -97,14 +246,15 @@ pub async fn validate_financial_configuration(
 ///
 /// - the model named in the body must equal the allowance's model;
 /// - the chat envelope requires an allowed explicit `service_tier`, `n == 1`,
-///   an explicit bounded `max_completion_tokens`, no media, and no paid
-///   built-in tools;
+///   an explicit bounded `max_completion_tokens`, no paid built-in tools, and
+///   no media beyond the envelope's optional inline-image policy (absent policy
+///   means text-only);
 /// - byte ceilings bound memory and obviously unacceptable payloads.
 ///
 /// None of this is a token-count proof or a billing bound: the financial unit
 /// is the full documented maximum reserved per physical attempt before send and
 /// it is never reduced by the measured body size.
-fn envelope_admits_body(
+pub(crate) fn envelope_admits_body(
     envelope: &FinancialRequestEnvelope,
     model: &str,
     body: &serde_json::Value,
@@ -122,13 +272,14 @@ fn envelope_admits_body(
             max_input_bytes,
             max_output_tokens,
             max_input_tokens: _,
+            media,
         } => {
             if serialized_bytes as u64 > *max_input_bytes
-                || !object.contains_key("messages")
                 || object.contains_key("tools")
                 || object.contains_key("functions")
                 || object.contains_key("audio")
                 || object.contains_key("modalities")
+                || !chat_messages_admit(object.get("messages"), media.as_ref())
             {
                 return false;
             }
@@ -196,22 +347,57 @@ fn envelope_admits_body(
     }
 }
 
-/// Reserve one complete physical attempt before permitting any send.
+/// Test-fixture helper: evaluates and commits one counter-only attempt.
 ///
-/// The provider row is locked for the whole read-validate-increment-commit
-/// sequence, so concurrent API and worker registries cannot exceed either the
-/// model or the global allowance. Nothing is refunded on any later outcome.
+/// Production admissions never use this path. The canonical admission owner
+/// (`billing_repository::admit_provider_send`) debits the counter and writes the
+/// physical send row in one transaction, so no production caller can commit the
+/// counter alone. This wrapper exists only for fixtures that exercise the
+/// financial policy in isolation and is compiled only with `test-support`.
+#[cfg(feature = "test-support")]
 pub async fn consume_financial_attempt(
     postgres: &PgPool,
     scope: &RequiredFinancialScope,
+    caller: &DispatchCaller,
     model: &str,
     endpoint: &str,
     body: &serde_json::Value,
 ) -> Result<FinancialPermit, FinancialAdmissionError> {
     let mut transaction = postgres.begin().await?;
+    let permit =
+        evaluate_financial_attempt(&mut transaction, scope, caller, model, endpoint, body).await?;
+    transaction.commit().await?;
+    Ok(permit)
+}
+
+/// Reserve one complete physical attempt inside a caller-owned transaction.
+///
+/// This is the single transaction primitive for the financial counter. The
+/// provider row is locked for the whole read-validate-increment sequence, so
+/// concurrent API and worker registries cannot exceed either the model or the
+/// global allowance, and nothing is refunded on any later outcome.
+///
+/// The same lock orders the caller decision against a binding rotation: the
+/// admitted caller list is read from the locked row on every attempt, so an
+/// attempt either commits before the rotation update takes the lock or observes
+/// the new list and is refused. A caller outside that list, and a grant with no
+/// binding at all, consume nothing.
+///
+/// The caller must hold the transaction until its own durable work commits. The
+/// canonical admission owner commits the counter debit together with the
+/// `billing_provider_call` row, so the debit and the recorded send share one
+/// atomic outcome and no production path commits the counter alone.
+pub async fn evaluate_financial_attempt(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    scope: &RequiredFinancialScope,
+    caller: &DispatchCaller,
+    model: &str,
+    endpoint: &str,
+    body: &serde_json::Value,
+) -> Result<FinancialPermit, FinancialAdmissionError> {
     let value: Option<serde_json::Value> = sqlx::query_scalar(
         "select capability_flags_json -> 'financialAdmission' from ai_provider_catalog where id = $1 for update",
-    ).bind(scope.provider_id).fetch_optional(&mut *transaction).await?.flatten();
+    ).bind(scope.provider_id).fetch_optional(&mut **transaction).await?.flatten();
     let mut state: FinancialAdmission =
         serde_json::from_value(value.ok_or(FinancialAdmissionError::InvalidScope)?)
             .map_err(|_| FinancialAdmissionError::InvalidScope)?;
@@ -220,6 +406,11 @@ pub async fn consume_financial_attempt(
     }
     if state.state != FinancialAdmissionState::Active || state.cutoff <= chrono::Utc::now() {
         return Err(FinancialAdmissionError::NotActive);
+    }
+    // Before any counter moves: this attempt is only for a caller the grant
+    // admits. Absence of a binding is a refusal, never a wildcard.
+    if !state.caller_binding.as_ref().is_some_and(|binding| binding.admits(caller)) {
+        return Err(FinancialAdmissionError::Caller);
     }
     if state.global_consumed >= state.global_limit {
         return Err(FinancialAdmissionError::Exhausted);
@@ -238,8 +429,7 @@ pub async fn consume_financial_attempt(
     state.validate().map_err(|_| FinancialAdmissionError::InvalidScope)?;
     let value = serde_json::to_value(&state).map_err(|_| FinancialAdmissionError::InvalidScope)?;
     sqlx::query("update ai_provider_catalog set capability_flags_json = jsonb_set(capability_flags_json, '{financialAdmission}', $2::jsonb, false) where id = $1")
-        .bind(scope.provider_id).bind(value).execute(&mut *transaction).await?;
-    transaction.commit().await?;
+        .bind(scope.provider_id).bind(value).execute(&mut **transaction).await?;
     Ok(FinancialPermit { scope_id: state.scope_id, global_consumed: state.global_consumed })
 }
 
@@ -363,6 +553,14 @@ mod financial_configuration_tests {
                 },
             )]),
             history: Vec::new(),
+            caller_binding: Some(CallerBinding {
+                format_version: CALLER_BINDING_FORMAT_VERSION,
+                generation: 1,
+                callers: vec![AdmittedCaller::MutationOrigin {
+                    mutation_id: Uuid::from_u128(3),
+                    principal_id: Uuid::from_u128(4),
+                }],
+            }),
         };
         admission.policy_fingerprint = admission.immutable_fingerprint().expect("fingerprint");
         admission
@@ -451,7 +649,77 @@ mod financial_envelope_tests {
             max_input_bytes: 4096,
             max_output_tokens: 128_000,
             max_input_tokens: 922_000,
+            media: None,
         }
+    }
+
+    fn chat_media(
+        max_images: u32,
+        max_image_bytes_each: u64,
+        max_image_bytes_total: u64,
+        max_image_dimension_px: u32,
+        max_image_pixels_total: u64,
+    ) -> FinancialChatMediaAdmission {
+        FinancialChatMediaAdmission {
+            max_images,
+            max_image_bytes_each,
+            max_image_bytes_total,
+            max_image_dimension_px,
+            max_image_pixels_total,
+        }
+    }
+
+    fn vision_envelope(media: FinancialChatMediaAdmission) -> FinancialRequestEnvelope {
+        FinancialRequestEnvelope::Chat {
+            allowed_service_tiers: vec!["default".to_owned(), "flex".to_owned()],
+            max_input_bytes: 16_384,
+            max_output_tokens: 128_000,
+            max_input_tokens: 922_000,
+            media: Some(media),
+        }
+    }
+
+    fn vision_body(content: serde_json::Value) -> serde_json::Value {
+        serde_json::json!({
+            "model": "gpt-6-luna",
+            "messages": [{"role": "user", "content": content}],
+            "service_tier": "flex",
+            "n": 1,
+            "max_completion_tokens": 1024,
+        })
+    }
+
+    fn admits_vision(media: FinancialChatMediaAdmission, content: serde_json::Value) -> bool {
+        envelope_admits_body(&vision_envelope(media), "gpt-6-luna", &vision_body(content))
+    }
+
+    fn image_fixture(
+        width: u32,
+        height: u32,
+        format: image::ImageFormat,
+        mime: &str,
+    ) -> (String, u64) {
+        let image = image::RgbImage::from_pixel(width, height, image::Rgb([0, 0, 0]));
+        let mut cursor = std::io::Cursor::new(Vec::new());
+        image.write_to(&mut cursor, format).expect("encode image fixture");
+        let bytes = cursor.into_inner();
+        let decoded_len = bytes.len() as u64;
+        (
+            format!(
+                "data:{mime};base64,{}",
+                base64::engine::general_purpose::STANDARD.encode(bytes)
+            ),
+            decoded_len,
+        )
+    }
+
+    fn png_data_url(width: u32, height: u32) -> String {
+        image_fixture(width, height, image::ImageFormat::Png, "image/png").0
+    }
+
+    fn image_part(url: impl Into<String>) -> serde_json::Value {
+        let url: String = url.into();
+        serde_json::json!({"type": "image_url", "image_url": {"url": url}})
     }
 
     fn embedding_envelope() -> FinancialRequestEnvelope {
@@ -528,6 +796,263 @@ mod financial_envelope_tests {
                 "{field} must be refused"
             );
         }
+    }
+
+    #[test]
+    fn chat_envelope_admits_multipart_text_content() {
+        assert!(admits_chat(|body| {
+            body["messages"] = serde_json::json!([{
+                "role": "user",
+                "content": [{"type": "text", "text": "hello"}],
+            }]);
+        }));
+    }
+
+    #[test]
+    fn chat_envelope_refuses_image_parts_nested_in_message_content() {
+        for part in [
+            serde_json::json!({
+                "type": "image_url",
+                "image_url": {"url": "data:image/png;base64,AAAA"},
+            }),
+            serde_json::json!({
+                "type": "input_image",
+                "input_image": {"url": "data:image/png;base64,AAAA"},
+            }),
+            serde_json::json!({"type": "audio", "audio": {"data": "AAAA"}}),
+            serde_json::json!({"type": "file", "file": {"file_id": "file-1"}}),
+            serde_json::json!({
+                "type": "text",
+                "text": "hello",
+                "image_url": {"url": "data:image/png;base64,AAAA"},
+            }),
+        ] {
+            assert!(
+                !admits_chat(|body| {
+                    body["messages"] = serde_json::json!([{
+                        "role": "user",
+                        "content": [{"type": "text", "text": "describe"}, part],
+                    }]);
+                }),
+                "a nested media part must be refused"
+            );
+        }
+    }
+
+    #[test]
+    fn chat_envelope_refuses_media_outside_complete_text_parts() {
+        assert!(!admits_chat(|body| {
+            body["messages"] = serde_json::json!([{
+                "role": "user",
+                "content": "hello",
+                "image_url": {"url": "data:image/png;base64,AAAA"},
+            }]);
+        }));
+        assert!(!admits_chat(|body| {
+            body["messages"] = serde_json::json!([{
+                "role": "user",
+                "content": {
+                    "type": "image_url",
+                    "image_url": {"url": "data:image/png;base64,AAAA"},
+                },
+            }]);
+        }));
+        assert!(!admits_chat(|body| {
+            body["messages"] = serde_json::json!([{
+                "role": "user",
+                "content": [{"type": "text"}],
+            }]);
+        }));
+        assert!(!admits_chat(|body| {
+            body["messages"] = serde_json::json!([{"role": "user", "content": []}]);
+        }));
+        assert!(!admits_chat(|body| body["messages"] = serde_json::json!([])));
+        assert!(!admits_chat(|body| body["messages"] = serde_json::json!(["hello"])));
+        assert!(!admits_chat(|body| body["messages"] = serde_json::json!("hello")));
+        assert!(!admits_chat(|body| {
+            body.as_object_mut().expect("object").remove("messages");
+        }));
+    }
+
+    #[test]
+    fn media_policy_admits_a_bounded_inline_png_and_plain_text() {
+        let media = chat_media(2, 1_024, 1_536, 32, 1_024);
+        assert!(admits_vision(
+            media.clone(),
+            serde_json::json!([
+                {"type": "text", "text": "transcribe"},
+                image_part(png_data_url(8, 8)),
+            ]),
+        ));
+        assert!(admits_vision(media, serde_json::json!("plain text")));
+    }
+
+    #[test]
+    fn media_policy_admits_a_bounded_inline_jpeg() {
+        let (url, decoded_len) = image_fixture(8, 8, image::ImageFormat::Jpeg, "image/jpeg");
+        assert!(admits_vision(
+            chat_media(1, decoded_len, decoded_len, 8, 64),
+            serde_json::json!([
+                {"type": "text", "text": "transcribe"},
+                image_part(url),
+            ]),
+        ));
+    }
+
+    #[test]
+    fn media_policy_refuses_cross_message_aggregate_bytes() {
+        let (url, decoded_len) = image_fixture(8, 8, image::ImageFormat::Png, "image/png");
+        // Each image alone fits both byte ceilings; only their sum does not.
+        let body = serde_json::json!({
+            "model": "gpt-6-luna",
+            "messages": [
+                {"role": "user", "content": [image_part(url.clone())]},
+                {"role": "user", "content": [image_part(url)]},
+            ],
+            "service_tier": "flex",
+            "n": 1,
+            "max_completion_tokens": 1024,
+        });
+        assert!(!envelope_admits_body(
+            &vision_envelope(chat_media(2, decoded_len, decoded_len * 2 - 1, 8, 128)),
+            "gpt-6-luna",
+            &body,
+        ));
+    }
+
+    #[test]
+    fn media_policy_refuses_cross_message_aggregate_pixels() {
+        let (url, decoded_len) = image_fixture(8, 8, image::ImageFormat::Png, "image/png");
+        // Byte ceilings fit the pair; only the summed pixel ceiling does not.
+        let body = serde_json::json!({
+            "model": "gpt-6-luna",
+            "messages": [
+                {"role": "user", "content": [image_part(url.clone())]},
+                {"role": "user", "content": [image_part(url)]},
+            ],
+            "service_tier": "flex",
+            "n": 1,
+            "max_completion_tokens": 1024,
+        });
+        assert!(!envelope_admits_body(
+            &vision_envelope(chat_media(2, decoded_len, decoded_len * 2, 8, 127)),
+            "gpt-6-luna",
+            &body,
+        ));
+    }
+
+    #[test]
+    fn media_policy_refuses_accumulator_overflow_instead_of_saturating() {
+        let part = image_part(png_data_url(4, 4));
+        let part = part.as_object().expect("image part object");
+        let policy = chat_media(1, 1_024, u64::MAX, 8, u64::MAX);
+
+        let mut images = 0u32;
+        let mut bytes_total = u64::MAX - 1;
+        let mut pixels_total = 0u64;
+        assert!(!chat_image_part_admits(
+            part,
+            &policy,
+            &mut images,
+            &mut bytes_total,
+            &mut pixels_total,
+        ));
+        assert_eq!(images, 0);
+        assert_eq!(bytes_total, u64::MAX - 1);
+
+        let mut images = 0u32;
+        let mut bytes_total = 0u64;
+        let mut pixels_total = u64::MAX - 1;
+        assert!(!chat_image_part_admits(
+            part,
+            &policy,
+            &mut images,
+            &mut bytes_total,
+            &mut pixels_total,
+        ));
+        assert_eq!(pixels_total, u64::MAX - 1);
+    }
+
+    #[test]
+    fn media_policy_refuses_unbounded_transport_and_format_shapes() {
+        let media = chat_media(2, 1_024, 1_536, 32, 1_024);
+        let png = png_data_url(8, 8);
+        let mismatched_mime = png.replacen("data:image/png;base64,", "data:image/jpeg;base64,", 1);
+        for url in [
+            "https://example.test/image.png".to_owned(),
+            "data:image/webp;base64,AAAA".to_owned(),
+            "data:image/PNG;base64,AAAA".to_owned(),
+            "data:image/png;base64,not-base64!!".to_owned(),
+            mismatched_mime,
+        ] {
+            assert!(
+                !admits_vision(
+                    media.clone(),
+                    serde_json::json!([
+                        {"type": "text", "text": "transcribe"},
+                        image_part(url),
+                    ]),
+                ),
+                "an unsupported transport or format must be refused"
+            );
+        }
+        let mut part = image_part(png.clone());
+        part["detail"] = serde_json::json!("high");
+        assert!(!admits_vision(media.clone(), serde_json::json!([part])));
+        assert!(!admits_vision(
+            media,
+            serde_json::json!([
+                {"type": "image_url", "image_url": {"url": png, "detail": "high"}},
+            ]),
+        ));
+    }
+
+    #[test]
+    fn media_policy_enforces_each_bound_independently() {
+        let image = || {
+            serde_json::json!([
+                {"type": "text", "text": "transcribe"},
+                image_part(png_data_url(8, 8)),
+            ])
+        };
+        assert!(admits_vision(chat_media(1, 1_024, 1_024, 8, 64), image()));
+        assert!(!admits_vision(chat_media(0, 1_024, 1_024, 8, 64), image()));
+        assert!(!admits_vision(chat_media(1, 32, 1_024, 8, 64), image()));
+        assert!(!admits_vision(chat_media(1, 1_024, 32, 8, 64), image()));
+        assert!(!admits_vision(chat_media(1, 1_024, 1_024, 4, 64), image()));
+        assert!(!admits_vision(chat_media(1, 1_024, 1_024, 8, 63), image()));
+        let two_images =
+            || serde_json::json!([image_part(png_data_url(4, 4)), image_part(png_data_url(4, 4)),]);
+        assert!(!admits_vision(chat_media(1, 1_024, 1_024, 8, 64), two_images()));
+    }
+
+    #[test]
+    fn media_policy_still_refuses_tools_and_unknown_media_parts() {
+        let media = chat_media(1, 1_024, 1_024, 8, 64);
+        assert!(!admits_vision(
+            media.clone(),
+            serde_json::json!([{"type": "audio", "audio": {"data": "AAAA"}}]),
+        ));
+        assert!(!admits_vision(
+            media.clone(),
+            serde_json::json!([
+                {"type": "input_image", "input_image": {"url": png_data_url(4, 4)}},
+            ]),
+        ));
+        let mut body = vision_body(serde_json::json!([image_part(png_data_url(4, 4))]));
+        body["tools"] = serde_json::json!([{}]);
+        assert!(!envelope_admits_body(&vision_envelope(media), "gpt-6-luna", &body));
+    }
+
+    #[test]
+    fn media_policy_keeps_the_full_request_bytes_guard() {
+        let mut envelope = vision_envelope(chat_media(1, 1_024, 1_024, 8, 64));
+        let FinancialRequestEnvelope::Chat { max_input_bytes, .. } = &mut envelope else {
+            panic!("fixture must be a chat envelope");
+        };
+        *max_input_bytes = 64;
+        let body = vision_body(serde_json::json!([image_part(png_data_url(4, 4))]));
+        assert!(!envelope_admits_body(&envelope, "gpt-6-luna", &body));
     }
 
     #[test]

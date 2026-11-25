@@ -4,8 +4,8 @@ use super::{
     GRAPH_EVIDENCE_CONTEXT_LINE_CHARS, GRAPH_EVIDENCE_CONTEXT_SCORE_TOKEN_MIN_CHARS,
     GRAPH_EVIDENCE_CONTEXT_SOURCE_FIELD_WEIGHT, GRAPH_EVIDENCE_CONTEXT_TARGET_FIELD_WEIGHT,
     GRAPH_EVIDENCE_TARGET_CAP, GraphTargetEntityCoverageField, GraphTargetEntityCoverageFieldKind,
-    GraphTargetEntityProfile, HashMap, HashSet, QueryGraphIndex, QueryIR, RuntimeMatchedChunk,
-    RuntimeMatchedEntity, RuntimeMatchedRelationship, RuntimeQueryPlan, Uuid,
+    GraphTargetEntityProfile, HashMap, HashSet, QueryGraphIndex, QueryIR, RuntimeMatchedEntity,
+    RuntimeMatchedRelationship, RuntimeQueryPlan, SelectedGraphContextLine, Uuid,
     associative_edges_for_entities, excerpt_for, focused_excerpt_for,
     graph_target_entity_coverage_score, normalized_alnum_token_sequence, normalized_alnum_tokens,
     query_relevant_graph_evidence_target_hits, repair_technical_layout_noise, repositories,
@@ -362,7 +362,7 @@ pub(crate) fn graph_evidence_context_line(
     graph_index: &QueryGraphIndex,
     source_labels_by_document_id: &HashMap<Uuid, String>,
     focus_keywords: &[String],
-) -> Option<String> {
+) -> Option<SelectedGraphContextLine> {
     let evidence_text = graph_evidence_text_for_context(&row.evidence_text);
     if evidence_text.is_empty() {
         return None;
@@ -395,7 +395,7 @@ pub(crate) fn graph_evidence_context_line(
     } else {
         format!("[graph-evidence {attr_text}]")
     };
-    Some(format!("{header}\n{evidence_text}"))
+    Some(SelectedGraphContextLine::passage(format!("{header}\n{evidence_text}"), evidence_text))
 }
 
 pub(super) fn graph_evidence_context_source_label(
@@ -477,53 +477,6 @@ pub(super) fn graph_evidence_target_label(
 
 pub(super) fn context_attribute_value(value: &str) -> String {
     value.replace('\\', "\\\\").replace('"', "\\\"")
-}
-
-pub(crate) fn apply_graph_evidence_texts_to_chunks(
-    chunks: &mut [RuntimeMatchedChunk],
-    evidence_texts_by_chunk: &HashMap<Uuid, Vec<String>>,
-    plan_keywords: &[String],
-    focus_keywords: &[String],
-) {
-    for chunk in chunks {
-        let Some(evidence_texts) = evidence_texts_by_chunk.get(&chunk.chunk_id) else {
-            continue;
-        };
-        let evidence_source_text =
-            graph_evidence_source_text(&chunk.source_text, evidence_texts, focus_keywords);
-        if evidence_source_text.trim().is_empty() {
-            continue;
-        }
-        chunk.source_text = evidence_source_text;
-        chunk.excerpt = focused_excerpt_for(&chunk.source_text, plan_keywords, 280);
-    }
-}
-
-pub(super) fn graph_evidence_source_text(
-    chunk_source_text: &str,
-    evidence_texts: &[String],
-    focus_keywords: &[String],
-) -> String {
-    let mut parts = Vec::new();
-    let mut seen = BTreeSet::new();
-    for text in evidence_texts {
-        let normalized = graph_evidence_text_for_context(text);
-        if normalized.is_empty() || !seen.insert(normalized.to_lowercase()) {
-            continue;
-        }
-        parts.push(focused_graph_evidence_context_text(&normalized, focus_keywords));
-    }
-    if parts.is_empty() {
-        return chunk_source_text.trim().to_string();
-    }
-
-    let evidence_text = parts.join("\n\n");
-    let chunk_text = chunk_source_text.trim();
-    if chunk_text.is_empty() || chunk_text.contains(&evidence_text) {
-        evidence_text
-    } else {
-        format!("{evidence_text}\n\nSource chunk:\n{chunk_text}")
-    }
 }
 
 pub(super) fn graph_evidence_text_for_context(value: &str) -> String {

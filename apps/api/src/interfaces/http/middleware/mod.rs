@@ -73,6 +73,7 @@ mod tests {
                 MCP_PROTOCOL_HEADER, MCP_PUBLIC_DIAGNOSTICS_JSONRPC_ROUTE,
                 MCP_PUBLIC_JSONRPC_ROUTE, MCP_SESSION_HEADER,
             },
+            query::QUERY_EXECUTION_ID_HEADER,
             router_support::REQUEST_ID_HEADER,
         },
     };
@@ -82,6 +83,13 @@ mod tests {
     const CONFIGURED_BROWSER_ORIGIN: &str = "https://console.example";
     const GENERAL_ROUTE: &str = "/v1/health";
     const SYNTHETIC_SESSION_ID: &str = "browser-session-contract";
+
+    /// Response headers the browser transport declares readable by a configured
+    /// browser. `x-ironrag-query-execution-id` belongs here because the console
+    /// reads it from an accepted streaming submit; declaring it does not add the
+    /// header to responses that never carry one.
+    const DECLARED_EXPOSED_RESPONSE_HEADERS: [&str; 3] =
+        [MCP_SESSION_HEADER, QUERY_EXECUTION_ID_HEADER, TRACE_ID_HEADER];
 
     fn public_origins() -> PublicOriginSettings {
         PublicOriginSettings {
@@ -193,13 +201,24 @@ mod tests {
                 .expect("browser initialize request must complete");
 
             assert_eq!(response.status(), StatusCode::OK);
+            // Declared CORS contract: the browser may read exactly these
+            // response headers on every browser-transport response.
+            assert_eq!(
+                response_header_tokens(&response, header::ACCESS_CONTROL_EXPOSE_HEADERS),
+                DECLARED_EXPOSED_RESPONSE_HEADERS
+                    .map(str::to_string)
+                    .into_iter()
+                    .collect::<BTreeSet<String>>()
+            );
+            // Actual headers of this route: an MCP initialize response returns
+            // its session id and never the streaming query execution handle.
             assert_eq!(
                 response.headers().get(MCP_SESSION_HEADER),
                 Some(&HeaderValue::from_static(SYNTHETIC_SESSION_ID))
             );
-            assert_eq!(
-                response_header_tokens(&response, header::ACCESS_CONTROL_EXPOSE_HEADERS),
-                BTreeSet::from([MCP_SESSION_HEADER.to_string(), TRACE_ID_HEADER.to_string(),])
+            assert!(
+                response.headers().get(QUERY_EXECUTION_ID_HEADER).is_none(),
+                "MCP initialize must not return the streaming execution handle"
             );
         }
     }

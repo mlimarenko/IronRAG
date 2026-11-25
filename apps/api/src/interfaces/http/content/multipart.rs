@@ -7,6 +7,7 @@ use uuid::Uuid;
 
 use crate::{
     app::state::AppState,
+    domains::content::EnrichmentScope,
     interfaces::http::{
         content::types::{normalize_optional_document_hint, normalize_optional_text},
         router_support::ApiError,
@@ -23,6 +24,7 @@ pub struct ParsedUploadMultipart {
     pub idempotency_key: Option<String>,
     pub title: Option<String>,
     pub document_hint: Option<String>,
+    pub enrichment_scope: Option<EnrichmentScope>,
     pub file_name: String,
     pub mime_type: Option<String>,
     pub file_bytes: Vec<u8>,
@@ -36,6 +38,7 @@ pub struct ParsedReplaceMultipart {
     pub language_code: Option<String>,
     pub source_uri: Option<String>,
     pub visibility_intent_id: Option<Uuid>,
+    pub enrichment_scope: Option<EnrichmentScope>,
     pub file_name: String,
     pub mime_type: Option<String>,
     pub file_bytes: Vec<u8>,
@@ -60,6 +63,7 @@ struct RawMultipartFields {
     source_uri: Option<String>,
     visibility_intent_id: Option<String>,
     document_hint: Option<String>,
+    enrichment_scope: Option<String>,
     file: Option<ParsedMultipartFile>,
 }
 
@@ -104,6 +108,9 @@ async fn read_multipart_fields(
             "document_hint" => {
                 fields.document_hint = Some(read_text_field(field, "document_hint").await?);
             }
+            "enrichment_scope" => {
+                fields.enrichment_scope = Some(read_text_field(field, "enrichment_scope").await?);
+            }
             "file" => fields.file = Some(read_multipart_file_field(state, field).await?),
             _ => {}
         }
@@ -125,6 +132,7 @@ pub(super) async fn parse_upload_multipart(
         idempotency_key: fields.idempotency_key.and_then(normalize_optional_text),
         title: fields.title.and_then(normalize_optional_text),
         document_hint: normalize_optional_document_hint(fields.document_hint)?,
+        enrichment_scope: parse_enrichment_scope(fields.enrichment_scope)?,
         file_name: file.file_name,
         mime_type: file.mime_type,
         file_bytes: file.file_bytes,
@@ -153,6 +161,7 @@ pub(super) async fn parse_replace_multipart(
                     .map_err(|_| ApiError::BadRequest("invalid visibility_intent_id".to_owned()))
             })
             .transpose()?,
+        enrichment_scope: parse_enrichment_scope(fields.enrichment_scope)?,
         file_name: file.file_name,
         mime_type: file.mime_type,
         file_bytes: file.file_bytes,
@@ -167,6 +176,7 @@ fn is_allowed_upload_field(field_name: &str) -> bool {
             | "idempotency_key"
             | "title"
             | "document_hint"
+            | "enrichment_scope"
             | "file"
     )
 }
@@ -180,8 +190,47 @@ fn is_allowed_replace_field(field_name: &str) -> bool {
             | "language_code"
             | "source_uri"
             | "visibility_intent_id"
+            | "enrichment_scope"
             | "file"
     )
+}
+
+/// Parses the documented multipart plan literal; any other value is refused.
+fn parse_enrichment_scope(raw: Option<String>) -> Result<Option<EnrichmentScope>, ApiError> {
+    raw.map(|value| match value.trim() {
+        "full" => Ok(EnrichmentScope::Full),
+        "text_and_embedding" => Ok(EnrichmentScope::TextAndEmbedding),
+        _ => Err(ApiError::BadRequest("invalid enrichment_scope".to_owned())),
+    })
+    .transpose()
+}
+
+#[cfg(test)]
+mod enrichment_scope_literal_tests {
+    use super::parse_enrichment_scope;
+    use crate::domains::content::EnrichmentScope;
+
+    #[test]
+    fn absent_scope_is_none_and_preserves_the_legacy_identity() {
+        assert_eq!(parse_enrichment_scope(None).unwrap(), None);
+    }
+
+    #[test]
+    fn explicit_scope_literals_are_typed() {
+        assert_eq!(
+            parse_enrichment_scope(Some("text_and_embedding".to_owned())).unwrap(),
+            Some(EnrichmentScope::TextAndEmbedding)
+        );
+        assert_eq!(
+            parse_enrichment_scope(Some("full".to_owned())).unwrap(),
+            Some(EnrichmentScope::Full)
+        );
+    }
+
+    #[test]
+    fn unknown_scope_is_refused() {
+        assert!(parse_enrichment_scope(Some("video".to_owned())).is_err());
+    }
 }
 
 /// Reads one scalar text part, naming it in the rejection.

@@ -282,12 +282,19 @@ fn preflight_context_keeps_graph_evidence_alongside_literal_document_scope() {
         preflight_exact_literal_document_scope(question, &ir, &profile, &literal_chunks)
             .expect("exact-literal preflight scope");
     assert_eq!(scoped_documents, HashSet::from([scoped_document_id]));
-    let graph_lines = build_preflight_graph_evidence_context_lines(&[format!(
-        "[graph-evidence target=\"Rare calibration service\" kind=\"configuration\"]\n\
-         Source document: rare_calibration_setup.md\n\
+    let evidence = format!(
+        "Source document: rare_calibration_setup.md\n\
          Evidence: Rare calibration service listens on port `3201` from `calibration.ini`.\n\
          document_id={rare_document_id}"
-    )]);
+    );
+    let graph_lines =
+        build_preflight_graph_evidence_context_lines(&[SelectedGraphContextLine::passage(
+            format!(
+                "[graph-evidence target=\"Rare calibration service\" kind=\"configuration\"]\n\
+                 {evidence}"
+            ),
+            evidence,
+        )]);
     let context = build_authoritative_answer_context(
         question,
         &ir,

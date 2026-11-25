@@ -133,7 +133,8 @@ impl From<QueryServiceError> for GraphServiceError {
             QueryServiceError::BindingNotConfigured { message }
             | QueryServiceError::StateConflict { message }
             | QueryServiceError::CacheUnavailable { message } => Self::StateConflict { message },
-            QueryServiceError::Provider(failure) => {
+            QueryServiceError::Provider(failure)
+            | QueryServiceError::EmbeddingProvider { failure, .. } => {
                 Self::ProviderUnavailable { message: failure.message().to_string() }
             }
             QueryServiceError::Cancelled => Self::Cancelled,

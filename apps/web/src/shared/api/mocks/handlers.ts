@@ -139,6 +139,7 @@ export const handlers = [
   http.get("/v1/openapi/ironrag.openapi.yaml", () => HttpResponse.json({}, { status: 200 })), // getOpenApiContract
   http.post("/v1/ops/ingest-queue/bulk", () => HttpResponse.json({}, { status: 200 })), // bulkIngestQueueAction
   http.post("/v1/ops/ingest-queue/jobs/:jobId/cancel", () => HttpResponse.json({}, { status: 200 })), // cancelIngestQueueJob
+  http.post("/v1/ops/ingest-queue/jobs/:jobId/execute", () => HttpResponse.json({}, { status: 200 })), // executeIngestQueueJob
   http.post("/v1/ops/ingest-queue/jobs/:jobId/move", () => HttpResponse.json({}, { status: 200 })), // moveIngestQueueJob
   http.post("/v1/ops/ingest-queue/jobs/:jobId/pause", () => HttpResponse.json({}, { status: 200 })), // pauseIngestQueueJob
   http.post("/v1/ops/ingest-queue/jobs/:jobId/resume", () => HttpResponse.json({}, { status: 200 })), // resumeIngestQueueJob

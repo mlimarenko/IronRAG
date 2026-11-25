@@ -76,6 +76,7 @@ pub(crate) fn graph_extract_success_stage_details(
         "projectionVersion": outcome.projection.projection_version,
         "graphStatus": outcome.projection.graph_status,
         "graphContributionCount": outcome.graph_contribution_count,
+        "graphTextIneligibleChunks": outcome.text_ineligible_chunk_count,
         "graphReady": graph_ready,
         "providerKind": materialization.provider_kind,
         "modelName": materialization.model_name,
@@ -146,6 +147,7 @@ mod tests {
             graph_contribution_count: 1,
             graph_ready: true,
             pending_summary_refresh: None,
+            text_ineligible_chunk_count: 2,
         };
 
         let details = graph_extract_success_stage_details(&materialization, &outcome, true);
@@ -158,6 +160,12 @@ mod tests {
             details.get("extractionContractVersion"),
             Some(&serde_json::json!(GRAPH_EXTRACTION_CONTRACT_VERSION))
         );
+        assert_eq!(
+            details.get("graphTextIneligibleChunks"),
+            Some(&serde_json::json!(2)),
+            "low-confidence chunks withheld from the graph stay visible without changing graphReady"
+        );
+        assert_eq!(details.get("graphReady"), Some(&serde_json::json!(true)));
         assert!(details.get("extraction_version").is_none());
     }
 

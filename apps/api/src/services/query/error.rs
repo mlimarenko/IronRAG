@@ -24,6 +24,8 @@ pub enum QueryServiceError {
     StateConflict { message: String },
     #[error("query provider {}: {}", .0.kind_label(), .0)]
     Provider(ProviderFailure),
+    #[error("query provider {}: {}", .failure.kind_label(), .failure)]
+    EmbeddingProvider { provider_call_id: Uuid, failure: ProviderFailure },
     #[error("query cache unavailable: {message}")]
     CacheUnavailable { message: String },
     #[error("query operation cancelled")]
@@ -82,11 +84,19 @@ impl QueryServiceError {
             Self::NotFound { .. } => "QueryServiceError::NotFound",
             Self::BindingNotConfigured { .. } => "QueryServiceError::BindingNotConfigured",
             Self::StateConflict { .. } => "QueryServiceError::StateConflict",
-            Self::Provider(failure) => match failure.kind() {
+            Self::Provider(failure) | Self::EmbeddingProvider { failure, .. } => match failure
+                .kind()
+            {
                 ProviderFailureKind::Unavailable => "QueryServiceError::ProviderUnavailable",
                 ProviderFailureKind::QuotaExhausted => "QueryServiceError::ProviderQuotaExhausted",
                 ProviderFailureKind::RequestRejected => {
                     "QueryServiceError::ProviderRequestRejected"
+                }
+                ProviderFailureKind::AdmissionRefused => {
+                    "QueryServiceError::ProviderAdmissionRefused"
+                }
+                ProviderFailureKind::AllowanceExhausted => {
+                    "QueryServiceError::ProviderAllowanceExhausted"
                 }
             },
             Self::CacheUnavailable { .. } => "QueryServiceError::CacheUnavailable",
@@ -106,7 +116,23 @@ impl QueryServiceError {
     /// failures must wipe partial state because reuse may be unsafe.
     #[must_use]
     pub const fn preserves_partial_vectors(&self) -> bool {
-        matches!(self, Self::Provider(_))
+        matches!(self, Self::Provider(_) | Self::EmbeddingProvider { .. })
+    }
+
+    #[must_use]
+    pub const fn provider_call_id(&self) -> Option<Uuid> {
+        match self {
+            Self::EmbeddingProvider { provider_call_id, .. } => Some(*provider_call_id),
+            _ => None,
+        }
+    }
+
+    #[must_use]
+    pub const fn provider_failure(&self) -> Option<&ProviderFailure> {
+        match self {
+            Self::Provider(failure) | Self::EmbeddingProvider { failure, .. } => Some(failure),
+            _ => None,
+        }
     }
 }
 

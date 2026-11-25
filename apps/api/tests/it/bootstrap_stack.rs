@@ -315,6 +315,7 @@ async fn financial_admission_charges_every_attempt_and_never_refunds() -> Result
             max_input_bytes: 65_536,
             max_output_tokens: 128_000,
             max_input_tokens: 922_000,
+            media: None,
         };
         let mut admission = FinancialAdmission {
             version: 1,
@@ -326,6 +327,7 @@ async fn financial_admission_charges_every_attempt_and_never_refunds() -> Result
             grant_microusd: 10_000,
             global_limit: 10,
             global_consumed: 0,
+            caller_binding: Some(fence_binding(1)),
             history: Vec::new(),
             models: std::collections::BTreeMap::from([(
                 "gpt-6-luna".to_string(),
@@ -382,8 +384,10 @@ async fn financial_admission_charges_every_attempt_and_never_refunds() -> Result
         let endpoint = "https://api.openai.com/v1/chat/completions";
 
         // One admitted attempt, then an application retry: two units.
-        consume_financial_attempt(postgres, &scope, "gpt-6-luna", endpoint, &body).await?;
-        consume_financial_attempt(postgres, &scope, "gpt-6-luna", endpoint, &body).await?;
+        consume_financial_attempt(postgres, &scope, &fence_caller(), "gpt-6-luna", endpoint, &body)
+            .await?;
+        consume_financial_attempt(postgres, &scope, &fence_caller(), "gpt-6-luna", endpoint, &body)
+            .await?;
 
         let row = get_provider_catalog_by_id(postgres, provider_id).await?.expect("provider row");
         let stored = serde_json::from_value::<FinancialAdmission>(
@@ -433,6 +437,7 @@ async fn financial_admission_denials_consume_no_attempt() -> Result<()> {
             max_input_bytes: 65_536,
             max_output_tokens: 128_000,
             max_input_tokens: 922_000,
+            media: None,
         };
         let base = FinancialAdmission {
             version: 1,
@@ -444,6 +449,7 @@ async fn financial_admission_denials_consume_no_attempt() -> Result<()> {
             grant_microusd: 5_000,
             global_limit: 5,
             global_consumed: 0,
+            caller_binding: Some(fence_binding(1)),
             history: Vec::new(),
             models: std::collections::BTreeMap::from([(
                 "gpt-6-luna".to_string(),
@@ -497,7 +503,7 @@ async fn financial_admission_denials_consume_no_attempt() -> Result<()> {
                     }
                 }
                 let outcome =
-                    consume_financial_attempt(postgres, &scope, "gpt-6-luna", endpoint, &body)
+                    consume_financial_attempt(postgres, &scope, &fence_caller(), "gpt-6-luna", endpoint, &body)
                         .await;
                 assert!(outcome.is_err(), "the attempt must be refused");
                 let row = get_provider_catalog_by_id(postgres, provider_id)
@@ -529,7 +535,7 @@ async fn financial_admission_denials_consume_no_attempt() -> Result<()> {
         .execute(postgres)
         .await?;
         let outcome =
-            consume_financial_attempt(postgres, &scope, "gpt-6-luna", endpoint, &body).await;
+            consume_financial_attempt(postgres, &scope, &fence_caller(), "gpt-6-luna", endpoint, &body).await;
         assert!(outcome.is_err());
 
         // Mismatched fingerprint.
@@ -571,14 +577,14 @@ async fn financial_admission_denials_consume_no_attempt() -> Result<()> {
         };
         deny(Some(&model_full), &model_scope).await?;
         let outcome =
-            consume_financial_attempt(postgres, &model_scope, "gpt-6-luna", endpoint, &body).await;
+            consume_financial_attempt(postgres, &model_scope, &fence_caller(), "gpt-6-luna", endpoint, &body).await;
         assert!(matches!(outcome, Err(FinancialAdmissionError::Exhausted)));
         let mut global_full = base.clone();
         global_full.models.get_mut("gpt-6-luna").expect("model").consumed = 5;
         global_full.global_consumed = 5;
         deny(Some(&global_full), &scope).await?;
         let outcome =
-            consume_financial_attempt(postgres, &scope, "gpt-6-luna", endpoint, &body).await;
+            consume_financial_attempt(postgres, &scope, &fence_caller(), "gpt-6-luna", endpoint, &body).await;
         assert!(matches!(outcome, Err(FinancialAdmissionError::Exhausted)));
 
         Ok(())
@@ -612,6 +618,7 @@ async fn successor_admission_activates_through_catalog_write() -> Result<()> {
             max_input_bytes: 65_536,
             max_output_tokens: 128_000,
             max_input_tokens: 922_000,
+            media: None,
         };
         let mut predecessor = FinancialAdmission {
             version: 1,
@@ -623,6 +630,7 @@ async fn successor_admission_activates_through_catalog_write() -> Result<()> {
             grant_microusd: 10_000,
             global_limit: 10,
             global_consumed: 1,
+            caller_binding: Some(fence_binding(1)),
             history: Vec::new(),
             models: std::collections::BTreeMap::from([(
                 "gpt-6-luna".to_string(),
@@ -678,6 +686,51 @@ async fn successor_admission_activates_through_catalog_write() -> Result<()> {
         assert_eq!(prepared.history[0].state, FinancialAdmissionState::Closed);
         assert_eq!(prepared.history[0].global_consumed, 1);
 
+        // Refusals must leave the complete profile, including counters and history, unchanged.
+        let mut bad_fingerprint = successor.clone();
+        bad_fingerprint.grant_microusd += 1;
+        let mut immutable_delta = successor.clone();
+        immutable_delta.grant_microusd += 1;
+        immutable_delta.policy_fingerprint = immutable_delta.immutable_fingerprint()?;
+        let mut close_with_rotated_binding = successor.clone();
+        close_with_rotated_binding.state = FinancialAdmissionState::Closed;
+        close_with_rotated_binding.caller_binding = Some(fence_binding(2));
+        for desired in [bad_fingerprint, immutable_delta, close_with_rotated_binding] {
+            let mut attempted_profile = stored.capability_flags_json.clone();
+            attempted_profile["financialAdmission"] = serde_json::to_value(&desired)?;
+            let attempted_scope = RequiredFinancialScope {
+                provider_id,
+                scope_id: desired.scope_id,
+                policy_fingerprint: desired.policy_fingerprint.clone(),
+            };
+            let outcome = update_provider_catalog_with_scope(
+                postgres,
+                UpdateProviderCatalog {
+                    provider_id,
+                    provider_kind: &before.provider_kind,
+                    display_name: &before.display_name,
+                    api_style: &before.api_style,
+                    lifecycle_state: &before.lifecycle_state,
+                    default_base_url: before.default_base_url.as_deref(),
+                    capability_flags_json: Some(attempted_profile),
+                },
+                Some(&attempted_scope),
+            )
+            .await;
+            assert!(matches!(
+                outcome,
+                Err(ironrag_backend::infra::repositories::ai_repository::ProviderCatalogUpdateError::Refused)
+            ));
+            let after =
+                get_provider_catalog_by_id(postgres, provider_id).await?.expect("provider row");
+            assert_eq!(after.capability_flags_json, stored.capability_flags_json);
+            assert_eq!(after.provider_kind, stored.provider_kind);
+            assert_eq!(after.display_name, stored.display_name);
+            assert_eq!(after.api_style, stored.api_style);
+            assert_eq!(after.lifecycle_state, stored.lifecycle_state);
+            assert_eq!(after.default_base_url, stored.default_base_url);
+        }
+
         // The API response does not expose financialAdmission, so activation
         // must work without echoing the server-owned history.
         let mut active = successor.clone();
@@ -725,6 +778,123 @@ async fn write_financial_admission(
     .execute(postgres)
     .await?;
     Ok(())
+}
+
+/// The MCP session digest the financial-fence fixtures admit. It is a fixed
+/// non-secret value, not a live session: these tests exercise the reservation
+/// itself, never a provider.
+const FENCE_SESSION_FINGERPRINT: &str =
+    "8c86e7520093f230c257b2d46bee6a6384bb8536aeefef90581dab2a7d0a5e3a";
+
+fn fence_binding(
+    generation: u64,
+) -> ironrag_backend::infra::repositories::ai_repository::CallerBinding {
+    use ironrag_backend::infra::repositories::ai_repository::{
+        AdmittedCaller, CALLER_BINDING_FORMAT_VERSION, CallerBinding,
+    };
+    CallerBinding {
+        format_version: CALLER_BINDING_FORMAT_VERSION,
+        generation,
+        callers: vec![AdmittedCaller::McpSession {
+            fingerprint_hex: FENCE_SESSION_FINGERPRINT.to_owned(),
+        }],
+    }
+}
+
+/// The caller admitted by [`fence_binding`].
+fn fence_caller() -> ironrag_backend::shared::provider_http::DispatchCaller {
+    use ironrag_backend::shared::provider_http::DispatchCaller;
+    let digest: [u8; 32] = hex::decode(FENCE_SESSION_FINGERPRINT)
+        .expect("fixture fingerprint is hex")
+        .try_into()
+        .expect("fixture fingerprint is 32 bytes");
+    DispatchCaller::McpSession(digest)
+}
+
+/// The single-job executor must refuse before it moves the queue: a job with no
+/// recorded mutation origin is not admitted, and its row keeps its state, its
+/// lease and its place in the queue.
+#[tokio::test]
+#[ignore = "requires local postgres and redis services"]
+async fn single_job_execute_refuses_a_job_without_admitted_origin() -> Result<()> {
+    use ironrag_backend::services::ingest::service::AdmitIngestJobCommand;
+
+    let fixture = BootstrapStackFixture::create().await?;
+    let result = async {
+        let state = &fixture.state;
+        let postgres = &state.persistence.postgres;
+        // A fresh bootstrap database has no library of its own: the exact-job
+        // test seeds the one it admits into instead of assuming catalog rows.
+        let workspace = catalog_repository::create_workspace(
+            postgres,
+            "single-job-execute",
+            "Single Job Execute",
+            None,
+        )
+        .await?;
+        let library = catalog_repository::create_library(
+            postgres,
+            workspace.id,
+            "single-job-execute",
+            "Single Job Execute",
+            None,
+            None,
+        )
+        .await?;
+        let (workspace_id, library_id): (Uuid, Uuid) = (workspace.id, library.id);
+        let job = state
+            .application_services
+            .ingest
+            .admit_job(
+                state,
+                AdmitIngestJobCommand {
+                    workspace_id,
+                    library_id,
+                    mutation_id: None,
+                    mutation_item_id: None,
+                    connector_id: None,
+                    async_operation_id: None,
+                    knowledge_document_id: None,
+                    knowledge_revision_id: None,
+                    job_kind: "content_mutation".to_string(),
+                    priority: 100,
+                    dedupe_key: None,
+                    available_at: None,
+                },
+            )
+            .await?;
+        assert_eq!(job.queue_state, "queued", "admission must not dispatch");
+
+        let refusal = state
+            .application_services
+            .ingest
+            .execute_job(state, job.id, "ops-execute")
+            .await
+            .expect_err("a job with no mutation origin must be refused");
+        assert!(matches!(
+            refusal,
+            ironrag_backend::interfaces::http::router_support::ApiError::Conflict(_)
+        ));
+
+        let row = state.application_services.ingest.get_job(state, job.id).await?;
+        assert_eq!(row.queue_state, "queued", "a refusal must not lease the job");
+        let lease_owner: Option<String> =
+            sqlx::query_scalar("select queue_lease_owner from ingest_job where id = $1")
+                .bind(job.id)
+                .fetch_one(postgres)
+                .await?;
+        assert!(lease_owner.is_none(), "a refusal must not take a lease");
+        let attempts: i64 =
+            sqlx::query_scalar("select count(*) from ingest_attempt where job_id = $1")
+                .bind(job.id)
+                .fetch_one(postgres)
+                .await?;
+        assert_eq!(attempts, 0, "a refusal must not create an attempt");
+        Ok(())
+    }
+    .await;
+    fixture.cleanup().await?;
+    result
 }
 
 #[tokio::test]

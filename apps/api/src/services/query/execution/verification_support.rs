@@ -39,7 +39,7 @@ pub(super) fn has_authoritative_grounding_evidence(
         || !evidence.structured_blocks.is_empty()
         || !evidence.technical_facts.is_empty()
         || !chunks.is_empty()
-        || assistant_grounding.has_verifier_grade_evidence()
+        || assistant_grounding.source_texts().next().is_some()
 }
 
 pub(super) fn build_verification_corpus(
@@ -91,11 +91,8 @@ pub(super) fn build_exact_relationship_verification_corpus(
         push_exact_relationship_records(&mut corpus, &chunk.source_text);
         push_exact_relationship_records(&mut corpus, &chunk.excerpt);
     }
-    for fragment in assistant_grounding.verifier_grade_corpus() {
-        push_exact_relationship_records(&mut corpus, fragment);
-    }
-    for reference in assistant_grounding.verifier_grade_document_references() {
-        push_exact_relationship_records(&mut corpus, &reference.excerpt);
+    for text in assistant_grounding.source_texts() {
+        push_exact_relationship_records(&mut corpus, text);
     }
     corpus.sort();
     corpus.dedup();
@@ -172,20 +169,13 @@ fn build_verification_corpus_with(
         corpus.push(normalize(&chunk.source_text));
         corpus.push(normalize(&chunk.excerpt));
     }
-    for fragment in assistant_grounding.verifier_grade_corpus() {
-        corpus.push(normalize(fragment));
-    }
-    for reference in assistant_grounding.verifier_grade_document_references() {
-        corpus.push(normalize(&reference.document_title));
-        corpus.push(normalize(&reference.excerpt));
-    }
+    corpus.extend(assistant_grounding.source_texts().map(normalize));
     corpus.retain(|value| !value.is_empty());
     corpus
 }
 
 pub(super) fn literal_is_supported_by_evidence_corpus(
     literal: &str,
-    corpus: &[String],
     boundary_corpus: &[String],
     grounding_corpus: &[String],
     exact_relationship_corpus: &[String],
@@ -208,7 +198,7 @@ pub(super) fn literal_is_supported_by_evidence_corpus(
             .iter()
             .any(|candidate| contains_verbatim_answer(candidate, &identifier));
     }
-    if corpus.iter().any(|candidate| candidate.contains(&normalized_literal)) {
+    if grounding_corpus.iter().any(|candidate| candidate.contains(&normalized_literal)) {
         return true;
     }
     if decorated_version_literal_is_supported_by_corpus(literal, grounding_corpus) {

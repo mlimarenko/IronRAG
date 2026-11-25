@@ -69,7 +69,6 @@ fn verify_broad_procedure(
         },
         evidence: &empty_authoritative_evidence(),
         chunks,
-        prompt_context: answer,
         assistant_grounding: &AssistantGroundingEvidence::default(),
     })
 }

@@ -286,7 +286,7 @@ x-ironrag-resources-s4core: &ironrag-resources-s4core
 
 services:
   postgres:
-    image: ${IRONRAG_POSTGRES_IMAGE:-pgvector/pgvector:pg18}
+    image: ${IRONRAG_POSTGRES_IMAGE:-pgvector/pgvector:0.8.7-pg19-bookworm}
     restart: unless-stopped
     # Postgres parallel-query gathers allocate dynamic-shared-memory segments
     # in /dev/shm. The stock container mounts /dev/shm as a 64 MiB tmpfs, which

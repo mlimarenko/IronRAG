@@ -205,16 +205,14 @@ impl QueryCompilerService {
         )
         .await?;
 
-        let response = match crate::observability::with_provider_call_id(
-            provider_call.provider_call_id(),
-            self.request_compile_response(
+        let response = match provider_call
+            .scoped(self.request_compile_response(
                 state.llm_gateway.as_ref(),
                 binding,
                 &command.question,
                 &command.history,
-            ),
-        )
-        .await
+            ))
+            .await
         {
             Ok(response) => response,
             Err(error) => {
